@@ -62,6 +62,14 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - **Stripe is injected**, not imported globally: `buildApp({ ..., stripe, storeBaseUrl })`. `src/server.js` builds the real client from `STRIPE_SECRET_KEY` (optional env — checkout returns **503** when unset, so the rest of the API boots without it). Tests pass a stub whose `checkout.sessions.create` records params — no SDK/network. Secret comes from env only; `test/checkout.test.js` greps `src/` for an `sk_(live|test)_` literal and asserts none (the pattern is built from fragments so it never self-matches).
 - Errors are thrown as `Object.assign(new Error(msg), { statusCode })`; Fastify serializes `{ statusCode, error, message }`, so handlers stay thin.
 
+## Webhooks (Stripe)
+
+- `POST /webhooks/stripe` (`src/routes/webhooks.js` + `src/webhooks/stripe-webhook.js`) — records completed payments as paid orders (FR-4). Verifies the signature with `stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET)`; invalid signature → **400**. On `checkout.session.completed`: inserts an order (`kind='checkout'`, `status='paid'`) with lines and decrements `inventory.qty_available`. Other event types are recorded but create no order. Returns `{ received: true, duplicate }`.
+- **Raw body**: signature verification needs the exact bytes, so the webhook plugin registers its own `addContentTypeParser('application/json', { parseAs: 'buffer' }, …)`. Content-type parsers are **encapsulated** — this only affects the webhook plugin; every other route keeps normal JSON parsing. `request.body` is a Buffer here.
+- **Idempotency**: the `webhook_events` table (migration `1784606400000`, PK `event_id`) is the ledger. `processStripeEvent` opens one transaction, claims the event with `INSERT … ON CONFLICT (event_id) DO NOTHING`; `rowCount === 0` → replay → rollback and return `{ duplicate: true }` (creates nothing). Order creation + inventory decrement + ledger claim all commit together.
+- **Money is re-resolved server-side**, never read from the payload: the cart (`[{ sku, qty }]`) lives in `session.metadata.cart`, zone in `metadata.zone`, shipping in `metadata.shipping_cents` (all stashed by US-010 checkout). Line prices come from a fresh DB lookup by SKU (`retail_price_cents`). `order_number = WEB-${session.id}` (stable per session). `user_id` from `client_reference_id` (int), else `guest_email` from `customer_details.email`/`customer_email`.
+- **Config**: `STRIPE_WEBHOOK_SECRET` (optional env → `config.stripeWebhookSecret`) injected as `buildApp({ ..., stripeWebhookSecret })`. Webhook returns **503** when stripe or the secret is unset. Tests inject a stub whose `webhooks.constructEvent` re-parses the raw body into an event when the signature header matches a sentinel, else throws — no SDK/network.
+
 ## Commands
 
 - `npm run migrate` — node-pg-migrate up (reads `DATABASE_URL` from `.env` via dotenv auto-load)

@@ -6,11 +6,13 @@ import { authRoutes } from './routes/auth.js'
 import { catalogueRoutes } from './routes/catalogue.js'
 import { shippingRoutes } from './routes/shipping.js'
 import { checkoutRoutes } from './routes/checkout.js'
+import { webhookRoutes } from './routes/webhooks.js'
 
 export const buildApp = ({
   pool,
   cookieSecret,
   stripe = null,
+  stripeWebhookSecret = null,
   storeBaseUrl = 'http://localhost:4321',
   logLevel = 'info',
   logger = true,
@@ -38,6 +40,7 @@ export const buildApp = ({
   app.register(catalogueRoutes, { pool })
   app.register(shippingRoutes, { pool })
   app.register(checkoutRoutes, { pool, stripe, storeBaseUrl })
+  app.register(webhookRoutes, { pool, stripe, stripeWebhookSecret })
 
   app.get('/health', async (request, reply) => {
     try {

@@ -22,6 +22,7 @@ const start = async () => {
     pool,
     cookieSecret: config.cookieSecret,
     stripe,
+    stripeWebhookSecret: config.stripeWebhookSecret,
     storeBaseUrl: config.storeBaseUrl,
     logLevel: config.logLevel,
   })

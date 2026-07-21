@@ -32,6 +32,9 @@ export const loadConfig = (env = process.env) => {
     // Optional: card checkout is disabled until STRIPE_SECRET_KEY is set. The
     // secret comes from the environment only — never a literal in the repo.
     stripeSecretKey: env.STRIPE_SECRET_KEY ?? null,
+    // Optional: the Stripe webhook returns 503 until this is set. Used to verify
+    // the signature on POST /webhooks/stripe; from the environment only.
+    stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET ?? null,
     storeBaseUrl: env.STORE_BASE_URL ?? DEFAULT_STORE_BASE_URL,
     port: Number(env.PORT ?? DEFAULT_PORT),
     host: env.HOST ?? DEFAULT_HOST,

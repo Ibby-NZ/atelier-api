@@ -12,6 +12,7 @@ import {
   shipOrder,
   declineOrder,
 } from '../orders/admin-orders.js'
+import { notifyOrderTransition } from '../email/notifications.js'
 
 const listQuerySchema = {
   type: 'object',
@@ -61,7 +62,7 @@ const confirmBodySchema = {
   },
 }
 
-export const adminOrderRoutes = async (app, { pool }) => {
+export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
   app.get(
@@ -111,6 +112,7 @@ export const adminOrderRoutes = async (app, { pool }) => {
         request.params.id,
         request.body.xero_invoice_ref
       )
+      await notifyOrderTransition(mailer, pool, order)
       return { order }
     }
   )
@@ -120,6 +122,7 @@ export const adminOrderRoutes = async (app, { pool }) => {
     { preHandler: backoffice, schema: { params: idParamsSchema } },
     async (request) => {
       const order = await markOrderPaid(pool, request.params.id)
+      await notifyOrderTransition(mailer, pool, order)
       return { order }
     }
   )
@@ -129,6 +132,7 @@ export const adminOrderRoutes = async (app, { pool }) => {
     { preHandler: backoffice, schema: { params: idParamsSchema } },
     async (request) => {
       const order = await shipOrder(pool, request.params.id)
+      await notifyOrderTransition(mailer, pool, order)
       return { order }
     }
   )

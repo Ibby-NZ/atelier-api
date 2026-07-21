@@ -2,6 +2,8 @@ import Stripe from 'stripe'
 import { loadConfig } from './config.js'
 import { createPool } from './db.js'
 import { buildApp } from './app.js'
+import { createMailTransport } from './email/transport.js'
+import { createMailer } from './email/mailer.js'
 
 const start = async () => {
   let config
@@ -18,12 +20,20 @@ const start = async () => {
   if (!stripe) {
     console.warn('STRIPE_SECRET_KEY unset — card checkout disabled.')
   }
+  // Email: real SMTP when SMTP_HOST is set, otherwise a capturing jsonTransport.
+  const mailer = createMailer({
+    transport: createMailTransport(config),
+    from: config.emailFrom,
+    backofficeEmail: config.backofficeEmail,
+  })
+
   const app = buildApp({
     pool,
     cookieSecret: config.cookieSecret,
     stripe,
     stripeWebhookSecret: config.stripeWebhookSecret,
     storeBaseUrl: config.storeBaseUrl,
+    mailer,
     logLevel: config.logLevel,
   })
 

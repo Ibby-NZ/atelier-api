@@ -16,6 +16,7 @@ export const buildApp = ({
   stripe = null,
   stripeWebhookSecret = null,
   storeBaseUrl = 'http://localhost:4321',
+  mailer = null,
   logLevel = 'info',
   logger = true,
 } = {}) => {
@@ -42,9 +43,9 @@ export const buildApp = ({
   app.register(catalogueRoutes, { pool })
   app.register(shippingRoutes, { pool })
   app.register(checkoutRoutes, { pool, stripe, storeBaseUrl })
-  app.register(orderRoutes, { pool })
-  app.register(adminOrderRoutes, { pool })
-  app.register(webhookRoutes, { pool, stripe, stripeWebhookSecret })
+  app.register(orderRoutes, { pool, mailer })
+  app.register(adminOrderRoutes, { pool, mailer })
+  app.register(webhookRoutes, { pool, stripe, stripeWebhookSecret, mailer })
 
   app.get('/health', async (request, reply) => {
     try {

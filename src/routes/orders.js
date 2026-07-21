@@ -3,6 +3,7 @@ import {
   createOrderRequest,
 } from '../orders/order-request.js'
 import { listUserOrders, lookupOrder } from '../orders/order-history.js'
+import { notifyRequestReceived } from '../email/notifications.js'
 
 // Guest lookup requires both the order number and the matching email. Schema is
 // structural only (both required, non-empty); a mismatch is a 404, not a 400.
@@ -50,7 +51,7 @@ const orderRequestBodySchema = {
   },
 }
 
-export const orderRoutes = async (app, { pool }) => {
+export const orderRoutes = async (app, { pool, mailer = null }) => {
   // Public: guests may request an order. When logged in, the request is tied to
   // the user and their email is used when no contact email is supplied.
   app.post(
@@ -73,6 +74,11 @@ export const orderRoutes = async (app, { pool }) => {
         acceptedLeadTime: request.body.accepted_lead_time ?? false,
         user,
       })
+
+      // Acknowledge to the customer and alert the back office. Never fails the
+      // request — the mailer swallows delivery errors.
+      const customerEmail = user?.email ?? request.body.contact?.email ?? null
+      await notifyRequestReceived(mailer, { order, customerEmail })
 
       reply.code(201)
       return { order }

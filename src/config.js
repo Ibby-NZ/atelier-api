@@ -4,6 +4,9 @@ const DEFAULT_PORT = 3001
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_LOG_LEVEL = 'info'
 const DEFAULT_STORE_BASE_URL = 'http://localhost:4321'
+const DEFAULT_SMTP_PORT = 587
+const DEFAULT_EMAIL_FROM = 'Atelier Textiles <no-reply@ateliertextiles.example>'
+const DEFAULT_BACKOFFICE_EMAIL = 'orders@ateliertextiles.example'
 const MIN_COOKIE_SECRET_LENGTH = 32
 
 export const loadConfig = (env = process.env) => {
@@ -36,6 +39,15 @@ export const loadConfig = (env = process.env) => {
     // the signature on POST /webhooks/stripe; from the environment only.
     stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET ?? null,
     storeBaseUrl: env.STORE_BASE_URL ?? DEFAULT_STORE_BASE_URL,
+    // Email (US-015). With no SMTP_HOST the transport captures mail instead of
+    // sending it (dev/test). from/backoffice have sensible non-secret defaults.
+    smtpHost: env.SMTP_HOST ?? null,
+    smtpPort: Number(env.SMTP_PORT ?? DEFAULT_SMTP_PORT),
+    smtpSecure: env.SMTP_SECURE === 'true',
+    smtpUser: env.SMTP_USER ?? null,
+    smtpPass: env.SMTP_PASS ?? null,
+    emailFrom: env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM,
+    backofficeEmail: env.BACKOFFICE_EMAIL ?? DEFAULT_BACKOFFICE_EMAIL,
     port: Number(env.PORT ?? DEFAULT_PORT),
     host: env.HOST ?? DEFAULT_HOST,
     logLevel: env.LOG_LEVEL ?? DEFAULT_LOG_LEVEL,

@@ -1,9 +1,13 @@
 import { processStripeEvent } from '../webhooks/stripe-webhook.js'
+import { notifyCheckoutReceipt } from '../email/notifications.js'
 
 // Stripe webhook endpoint. Signature verification needs the exact raw request
 // bytes, so this encapsulated plugin parses application/json as a Buffer (the
 // root instance keeps normal JSON parsing for every other route).
-export const webhookRoutes = async (app, { pool, stripe, stripeWebhookSecret }) => {
+export const webhookRoutes = async (
+  app,
+  { pool, stripe, stripeWebhookSecret, mailer = null }
+) => {
   app.addContentTypeParser(
     'application/json',
     { parseAs: 'buffer' },
@@ -34,6 +38,10 @@ export const webhookRoutes = async (app, { pool, stripe, stripeWebhookSecret }) 
     }
 
     const result = await processStripeEvent(pool, event)
+    // Send the receipt only for a freshly-created paid order (not on replays).
+    if (result.order) {
+      await notifyCheckoutReceipt(mailer, pool, result.order)
+    }
     return { received: true, duplicate: result.duplicate }
   })
 }

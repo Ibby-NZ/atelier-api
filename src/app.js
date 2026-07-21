@@ -7,6 +7,7 @@ import { catalogueRoutes } from './routes/catalogue.js'
 import { shippingRoutes } from './routes/shipping.js'
 import { checkoutRoutes } from './routes/checkout.js'
 import { orderRoutes } from './routes/orders.js'
+import { adminOrderRoutes } from './routes/admin-orders.js'
 import { webhookRoutes } from './routes/webhooks.js'
 
 export const buildApp = ({
@@ -42,6 +43,7 @@ export const buildApp = ({
   app.register(shippingRoutes, { pool })
   app.register(checkoutRoutes, { pool, stripe, storeBaseUrl })
   app.register(orderRoutes, { pool })
+  app.register(adminOrderRoutes, { pool })
   app.register(webhookRoutes, { pool, stripe, stripeWebhookSecret })
 
   app.get('/health', async (request, reply) => {

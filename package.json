@@ -10,6 +10,7 @@
     "migrate": "node-pg-migrate --migrations-dir migrations --migration-file-language js up",
     "migrate:down": "node-pg-migrate --migrations-dir migrations --migration-file-language js down",
     "migrate:create": "node-pg-migrate --migrations-dir migrations --migration-file-language js create",
+    "seed": "node src/seed/run.js",
     "lint": "eslint .",
     "test": "vitest run"
   },

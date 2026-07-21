@@ -13,6 +13,7 @@ import {
 } from '../../../atelier-app/src/data/realCatalogue.js'
 import { designs } from '../../../atelier-app/src/data/atelier.js'
 import { suppliers } from '../../../atelier-app/src/data/suppliers.js'
+import { tradeUnit } from '../../../atelier-app/src/data/pricing.js'
 import { slugify } from './slugify.js'
 
 const HOUSE_BRAND = 'Atelier Textiles NZ'
@@ -43,6 +44,11 @@ const HOUSE_RETAIL_PRICE_CENTS = Object.freeze({
 // ("26 m required, 12 m on hand" for Larsen Wright Clay).
 const STOCK_BY_STATUS = Object.freeze({ 'In stock': 60, 'Low stock': 12 })
 const FINISHED_GOOD_STOCK_UNITS = 10
+
+// Approved-trade $/m for a fabric design, precomputed from the platform pricing
+// waterfall (pricing.js) and stored as integer NZD cents. Only fabrics carry a
+// trade price; finished goods stay null (no trade markup in the waterfall).
+const tradePriceCentsFor = (design) => Math.round(tradeUnit(design) * 100)
 
 const supplierFor = (brandName) =>
   suppliers.find((supplier) => supplier.brands.some((brand) => brand.name === brandName)) ?? null
@@ -103,6 +109,7 @@ const finishedGoodRows = () =>
       price_band: null,
       lead_time: null,
       retail_price_cents: HOUSE_RETAIL_PRICE_CENTS[product.sku] ?? null,
+      trade_price_cents: null,
       currency: toBrandRow(brandName).currency,
       show_on_website: true,
       hi_res_asset_url: product.src ?? null,
@@ -133,6 +140,7 @@ const fabricRows = () =>
       price_band: design.priceBand ?? null,
       lead_time: null,
       retail_price_cents: null,
+      trade_price_cents: tradePriceCentsFor(design.design),
       currency: design.currency,
       show_on_website: true,
       hi_res_asset_url: design.src ?? null,

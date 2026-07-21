@@ -85,9 +85,10 @@ const upsertProducts = async (client, rows, brandIds) => {
     const { rows: result } = await client.query(
       `INSERT INTO products (
          brand_id, name, slug, product_type, composition, width, application, rubs,
-         price_band, lead_time, retail_price_cents, currency, show_on_website, hi_res_asset_url
+         price_band, lead_time, retail_price_cents, trade_price_cents, currency,
+         show_on_website, hi_res_asset_url
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        ON CONFLICT (slug) DO UPDATE SET
          brand_id = EXCLUDED.brand_id,
          name = EXCLUDED.name,
@@ -99,6 +100,7 @@ const upsertProducts = async (client, rows, brandIds) => {
          price_band = EXCLUDED.price_band,
          lead_time = EXCLUDED.lead_time,
          retail_price_cents = EXCLUDED.retail_price_cents,
+         trade_price_cents = EXCLUDED.trade_price_cents,
          currency = EXCLUDED.currency,
          show_on_website = EXCLUDED.show_on_website,
          hi_res_asset_url = EXCLUDED.hi_res_asset_url
@@ -115,6 +117,7 @@ const upsertProducts = async (client, rows, brandIds) => {
         row.price_band,
         row.lead_time,
         row.retail_price_cents,
+        row.trade_price_cents,
         row.currency,
         row.show_on_website,
         row.hi_res_asset_url,

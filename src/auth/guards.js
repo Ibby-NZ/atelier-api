@@ -54,5 +54,9 @@ export const createGuards = (pool) => {
     }
   }
 
-  return Object.freeze({ requireAuth, requireRole })
+  // For public routes that reveal extra fields to logged-in users (e.g. trade
+  // pricing on product detail): returns the user or null, never blocks.
+  const loadOptionalUser = (request) => loadSessionUser(request)
+
+  return Object.freeze({ requireAuth, requireRole, loadOptionalUser })
 }

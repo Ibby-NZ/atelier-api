@@ -50,6 +50,11 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - Optional-auth pattern for public routes that show extra fields to logged-in users: `app.guards.loadOptionalUser(request)` returns the user or null and never blocks (unlike `requireAuth`). Route derives `includeTrade` from it and passes it into the read model; the read model is the single gate that adds the field.
 - `GET /catalogue/brands` → `{ brands: [{ slug, name, country, currency, is_international, story }] }` (all brands, alpha). `GET /catalogue/brands/:slug` → `{ brand: { ...brand, collections: [{ slug, name }] } }`, 404 if unknown (`src/catalogue/brands.js`).
 
+## Shipping
+
+- `GET /shipping/quote?zone=&qty=` (`src/routes/shipping.js` + `src/shipping/rates.js`) — public flat-rate quote. `getShippingQuote` picks the highest tier whose `threshold_qty` floor is `<= qty` for the zone. Response `{ zone, qty, threshold_qty, rate_cents }`. Unknown zone (no rows) → 400 with a clear message; missing/invalid `zone`/`qty` → 400 by schema (Fastify coerces the querystring `qty` to a number). Boundary rule: at `qty == threshold` the higher tier applies (`<=`).
+- `PUT /admin/shipping-rates` (backoffice) — body `{ rates: [{ zone, threshold_qty, rate_cents }] }`; `upsertShippingRates` upserts on `(zone, threshold_qty)` in one transaction (edit rate or add a tier without redeploy) and returns the full `{ rates }` list. Note: seed inserts rates `DO NOTHING`, so admin edits here are the mutation path and survive reseeds.
+
 ## Commands
 
 - `npm run migrate` — node-pg-migrate up (reads `DATABASE_URL` from `.env` via dotenv auto-load)

@@ -16,7 +16,11 @@ describe('GET /health', () => {
   beforeAll(async () => {
     const config = loadConfig()
     pool = createPool(config.databaseUrl)
-    app = buildApp({ pool, logger: false })
+    app = buildApp({
+      pool,
+      cookieSecret: 'test-cookie-secret-0123456789abcdef0123456789abcdef',
+      logger: false,
+    })
     await app.ready()
   })
 

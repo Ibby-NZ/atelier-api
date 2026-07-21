@@ -27,6 +27,16 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - `hex_tones` jsonb: pass `JSON.stringify(array)` as the query param — pg maps raw JS arrays to Postgres arrays, not jsonb.
 - Shipping tiers: `threshold_qty` is the tier floor (0 and 20 per zone); a quote picks the highest threshold <= qty.
 
+## Auth
+
+- Sessions are **stateless signed cookies**: cookie `atelier_session` holds the user id, signed by `@fastify/cookie` with `COOKIE_SECRET` (required env var, 32+ chars; `buildApp({ pool, cookieSecret })` throws without it). No sessions table — logout only clears the client cookie.
+- `src/auth/session.js` — `setSessionCookie(reply, userId)` / `clearSessionCookie(reply)` / `readSessionUserId(request)` (returns user id or null; use this for US-006 middleware). Cookie flags: HttpOnly, Secure, SameSite=Lax, path=/, 30-day maxAge.
+- `src/auth/passwords.js` — argon2id via `hashPassword`/`verifyPassword` (never throws on malformed hash, returns false). `getDummyHash()` is verified against for unknown emails so login timing doesn't enumerate accounts.
+- Rate limiting: `@fastify/rate-limit` registered `global: false`; routes opt in via `config: { rateLimit: { max, timeWindow } }`. Login AND register share 10 per 15 min per IP (register is limited because each attempt runs a memory-hard argon2 hash and 409s enumerate emails). The limiter store is per app instance and per route — tests that spend attempts need their own `buildApp()`.
+- Fastify's bundled Ajv has **no `format: 'email'`** — body schemas use `EMAIL_PATTERN` regex instead. Schema violations return 400 (Fastify default), not 422.
+- Responses use snake_case fields matching DB columns; `password_hash` is never selected into a response (routes use the `PUBLIC_USER_COLUMNS` list).
+- Deployment note (from security review, deferred): set Fastify `trustProxy` when behind a proxy or per-IP rate limiting collapses; consider @fastify/helmet and account-keyed login backoff.
+
 ## Commands
 
 - `npm run migrate` — node-pg-migrate up (reads `DATABASE_URL` from `.env` via dotenv auto-load)
@@ -37,6 +47,6 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 
 ## Environment
 
-- Requires `atelier-api/.env` with `DATABASE_URL=postgresql://localhost:5432/atelier_dev` (gitignored; see `.env.example`).
+- Requires `atelier-api/.env` with `DATABASE_URL=postgresql://localhost:5432/atelier_dev` and `COOKIE_SECRET` (32+ chars, `openssl rand -hex 32`) — gitignored; see `.env.example`.
 - Postgres 14 via Homebrew, database `atelier_dev` already exists.
 - Tests fail without a running Postgres — that is expected, not a mock gap.

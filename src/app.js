@@ -1,13 +1,24 @@
 import Fastify from 'fastify'
+import fastifyCookie from '@fastify/cookie'
+import fastifyRateLimit from '@fastify/rate-limit'
+import { authRoutes } from './routes/auth.js'
 
-export const buildApp = ({ pool, logLevel = 'info', logger = true } = {}) => {
+export const buildApp = ({ pool, cookieSecret, logLevel = 'info', logger = true } = {}) => {
   if (!pool) {
     throw new Error('buildApp requires a pg pool')
+  }
+  if (!cookieSecret) {
+    throw new Error('buildApp requires a cookieSecret (COOKIE_SECRET env var)')
   }
 
   const app = Fastify({
     logger: logger ? { level: logLevel } : false,
   })
+
+  app.register(fastifyCookie, { secret: cookieSecret })
+  // global: false — only routes that opt in via config.rateLimit are limited.
+  app.register(fastifyRateLimit, { global: false })
+  app.register(authRoutes, { pool })
 
   app.get('/health', async (request, reply) => {
     try {

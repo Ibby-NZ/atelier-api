@@ -12,7 +12,11 @@ const start = async () => {
   }
 
   const pool = createPool(config.databaseUrl)
-  const app = buildApp({ pool, logLevel: config.logLevel })
+  const app = buildApp({
+    pool,
+    cookieSecret: config.cookieSecret,
+    logLevel: config.logLevel,
+  })
 
   const shutdown = async (signal) => {
     app.log.info({ signal }, 'shutting down')

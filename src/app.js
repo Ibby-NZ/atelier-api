@@ -3,6 +3,7 @@ import fastifyCookie from '@fastify/cookie'
 import fastifyRateLimit from '@fastify/rate-limit'
 import { createGuards } from './auth/guards.js'
 import { authRoutes } from './routes/auth.js'
+import { catalogueRoutes } from './routes/catalogue.js'
 
 export const buildApp = ({ pool, cookieSecret, logLevel = 'info', logger = true } = {}) => {
   if (!pool) {
@@ -25,6 +26,7 @@ export const buildApp = ({ pool, cookieSecret, logLevel = 'info', logger = true 
   app.decorate('guards', createGuards(pool))
 
   app.register(authRoutes, { pool })
+  app.register(catalogueRoutes, { pool })
 
   app.get('/health', async (request, reply) => {
     try {

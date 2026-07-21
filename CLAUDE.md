@@ -39,6 +39,13 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - `POST /auth/trade-application` = register with `role='trade'` (`trade_approved` stays false via DB default); same rate limit bucket rules as register. No endpoint sets `trade_approved=true` yet — back-office approval endpoint comes later; tests flip it with direct SQL.
 - Deployment note (from security review, deferred): set Fastify `trustProxy` when behind a proxy or per-IP rate limiting collapses; consider @fastify/helmet and account-keyed login backoff.
 
+## Catalogue (public)
+
+- `GET /catalogue/products` (`src/routes/catalogue.js` + `src/catalogue/products.js`) — anonymous product list, `show_on_website = true` only, paginated (`page`, `limit`; defaults 1/20, max 100). Response: `{ products: [...], meta: { total, page, limit } }`.
+- Filters are exact-match strings whitelisted in `FILTER_COLUMNS` (`application`, `composition`, `width`, `price_band`, `lead_time`, `product_type`) plus `brand` (matches `brands.slug`). Filter *names* map to trusted columns; filter *values* always go through parameterized placeholders — never interpolate a value into SQL. Unknown query params are simply ignored (the whitelist controls what filters), not rejected.
+- Pricing (FR-3), enforced in `toPublicProduct`: international brands (`is_international = true`) get `price_hidden: true` and **no** `retail_price_cents` field; domestic brands get `retail_price_cents` only when non-null, `price_hidden: false`. No trade-price field exists on this endpoint — trade pricing is US-008 (product detail), gated on approved-trade.
+- Fastify querystring validation with `additionalProperties: false` does NOT reject unknown params here (extra keys pass through), but `enum`/type constraints (e.g. `product_type`) DO 400. Rely on the code whitelist for filter safety, not on schema strictness for unknown keys.
+
 ## Commands
 
 - `npm run migrate` — node-pg-migrate up (reads `DATABASE_URL` from `.env` via dotenv auto-load)

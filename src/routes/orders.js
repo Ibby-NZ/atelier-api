@@ -2,6 +2,18 @@ import {
   validateOrderRequestInput,
   createOrderRequest,
 } from '../orders/order-request.js'
+import { listUserOrders, lookupOrder } from '../orders/order-history.js'
+
+// Guest lookup requires both the order number and the matching email. Schema is
+// structural only (both required, non-empty); a mismatch is a 404, not a 400.
+const orderLookupQuerySchema = {
+  type: 'object',
+  required: ['order_number', 'email'],
+  properties: {
+    order_number: { type: 'string', minLength: 1, maxLength: 100 },
+    email: { type: 'string', minLength: 1, maxLength: 254 },
+  },
+}
 
 // Structural schema only (400 on gross violations). qty > 0 and email validity
 // are checked in the handler so they can return 422 with field-level messages.
@@ -63,6 +75,35 @@ export const orderRoutes = async (app, { pool }) => {
       })
 
       reply.code(201)
+      return { order }
+    }
+  )
+
+  // Auth: the logged-in user's own orders, newest first. Ownership is enforced
+  // in SQL (WHERE user_id = ...), so no order of another user can be returned.
+  app.get(
+    '/orders/mine',
+    { preHandler: app.guards.requireAuth },
+    async (request) => {
+      const orders = await listUserOrders(pool, request.user.id)
+      return { orders }
+    }
+  )
+
+  // Public guest lookup: a single order matched by order number AND email.
+  // 404 when either half is wrong — never reveal an order without both keys.
+  app.get(
+    '/orders/lookup',
+    { schema: { querystring: orderLookupQuerySchema } },
+    async (request, reply) => {
+      const order = await lookupOrder(pool, {
+        orderNumber: request.query.order_number,
+        email: request.query.email,
+      })
+      if (!order) {
+        reply.code(404)
+        return { error: 'Not Found', message: 'No matching order found.' }
+      }
       return { order }
     }
   )

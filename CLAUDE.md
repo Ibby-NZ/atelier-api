@@ -78,6 +78,12 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - **Reservation**: in one transaction each line increments `inventory.qty_reserved` by `qty_metres` (backorder lines reserve too — committed demand). The colourway row is locked `FOR UPDATE OF c` — the inventory row is the nullable side of the LEFT JOIN and **can't** be locked directly ("FOR UPDATE cannot be applied to the nullable side of an outer join"), so locking the colourway serialises concurrent same-SKU requests. Unknown/hidden SKU → **422**.
 - Pricing is deliberately **0** on request lines (`unit_price_cents = 0`); the invoice amount is set manually by the back office at confirmation (US-014), not by the client. `contact` name/phone are stored in `orders.notes`.
 
+## Order history + guest lookup
+
+- `GET /orders/mine` (`src/routes/orders.js` + `src/orders/order-history.js`) — auth (`requireAuth`), returns `{ orders: [...] }` newest first, each with `lines`. Ownership is enforced in SQL (`WHERE user_id = request.user.id`), never in the handler, so one user can never read another's orders.
+- `GET /orders/lookup?order_number=&email=` — public guest lookup. Returns `{ order }` only when order number AND email match; email matches either `guest_email` or the placing user's `users.email` (case-insensitive `lower()`). No match → **404** (never a 400/enumeration signal). Both query params required by schema (missing → 400).
+- Order shape (`toOrder`): `id, order_number, kind, status, subtotal_cents, shipping_cents, total_cents, shipping_zone, xero_invoice_ref, created_at, lines`. Lines carry `sku, product_name, qty, unit_price_cents, cut_requirements`. Internal columns (`stripe_session_id`, `guest_email`) are not exposed. Lines are batch-loaded for all order ids in one query (`ol.order_id = ANY($1::int[])`) then grouped — no N+1.
+
 ## Commands
 
 - `npm run migrate` — node-pg-migrate up (reads `DATABASE_URL` from `.env` via dotenv auto-load)

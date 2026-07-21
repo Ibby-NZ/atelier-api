@@ -1,6 +1,7 @@
 import Fastify from 'fastify'
 import fastifyCookie from '@fastify/cookie'
 import fastifyRateLimit from '@fastify/rate-limit'
+import { createGuards } from './auth/guards.js'
 import { authRoutes } from './routes/auth.js'
 
 export const buildApp = ({ pool, cookieSecret, logLevel = 'info', logger = true } = {}) => {
@@ -18,6 +19,11 @@ export const buildApp = ({ pool, cookieSecret, logLevel = 'info', logger = true 
   app.register(fastifyCookie, { secret: cookieSecret })
   // global: false — only routes that opt in via config.rateLimit are limited.
   app.register(fastifyRateLimit, { global: false })
+
+  // request.user is set by guards.requireAuth / guards.requireRole preHandlers.
+  app.decorateRequest('user', null)
+  app.decorate('guards', createGuards(pool))
+
   app.register(authRoutes, { pool })
 
   app.get('/health', async (request, reply) => {

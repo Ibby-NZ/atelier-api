@@ -4,6 +4,7 @@ import {
   clearSessionCookie,
   readSessionUserId,
 } from '../auth/session.js'
+import { PUBLIC_USER_COLUMNS } from '../auth/user-columns.js'
 
 const LOGIN_RATE_LIMIT_MAX = 10
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
@@ -19,8 +20,6 @@ const AUTH_RATE_LIMIT = Object.freeze({
 // Fastify's bundled Ajv has no email format, so a pattern stands in.
 const EMAIL_PATTERN = '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$'
 const MIN_PASSWORD_LENGTH = 8
-
-const PUBLIC_USER_COLUMNS = 'id, email, name, role, trade_approved'
 
 const registerBodySchema = {
   type: 'object',
@@ -45,6 +44,33 @@ const loginBodySchema = {
 
 const INVALID_CREDENTIALS = 'Invalid email or password.'
 
+// Shared by register (role=customer) and trade-application (role=trade,
+// trade_approved defaults false in the schema). Sets the session cookie so
+// the new account is immediately logged in.
+const createAccount = async ({ pool, reply, body, role }) => {
+  const { email, password, name } = body
+  const passwordHash = await hashPassword(password)
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO users (email, password_hash, name, role)
+       VALUES ($1, $2, $3, $4)
+       RETURNING ${PUBLIC_USER_COLUMNS}`,
+      [email.toLowerCase(), passwordHash, name ?? null, role]
+    )
+    const user = rows[0]
+    setSessionCookie(reply, user.id)
+    reply.code(201)
+    return { user }
+  } catch (error) {
+    if (error.code === PG_UNIQUE_VIOLATION) {
+      reply.code(409)
+      return { error: 'An account with that email already exists.' }
+    }
+    throw error
+  }
+}
+
 export const authRoutes = async (app, { pool }) => {
   app.post(
     '/auth/register',
@@ -52,29 +78,20 @@ export const authRoutes = async (app, { pool }) => {
       schema: { body: registerBodySchema },
       config: { rateLimit: AUTH_RATE_LIMIT },
     },
-    async (request, reply) => {
-      const { email, password, name } = request.body
-      const passwordHash = await hashPassword(password)
+    async (request, reply) =>
+      createAccount({ pool, reply, body: request.body, role: 'customer' })
+  )
 
-      try {
-        const { rows } = await pool.query(
-          `INSERT INTO users (email, password_hash, name, role)
-           VALUES ($1, $2, $3, 'customer')
-           RETURNING ${PUBLIC_USER_COLUMNS}`,
-          [email.toLowerCase(), passwordHash, name ?? null]
-        )
-        const user = rows[0]
-        setSessionCookie(reply, user.id)
-        reply.code(201)
-        return { user }
-      } catch (error) {
-        if (error.code === PG_UNIQUE_VIOLATION) {
-          reply.code(409)
-          return { error: 'An account with that email already exists.' }
-        }
-        throw error
-      }
-    }
+  // Trade accounts start unapproved: guards treat them as customers until the
+  // back office flips trade_approved (US-006 gate).
+  app.post(
+    '/auth/trade-application',
+    {
+      schema: { body: registerBodySchema },
+      config: { rateLimit: AUTH_RATE_LIMIT },
+    },
+    async (request, reply) =>
+      createAccount({ pool, reply, body: request.body, role: 'trade' })
   )
 
   app.post(

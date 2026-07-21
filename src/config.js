@@ -3,6 +3,7 @@ import 'dotenv/config'
 const DEFAULT_PORT = 3001
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_LOG_LEVEL = 'info'
+const DEFAULT_STORE_BASE_URL = 'http://localhost:4321'
 const MIN_COOKIE_SECRET_LENGTH = 32
 
 export const loadConfig = (env = process.env) => {
@@ -28,6 +29,10 @@ export const loadConfig = (env = process.env) => {
   return Object.freeze({
     databaseUrl,
     cookieSecret,
+    // Optional: card checkout is disabled until STRIPE_SECRET_KEY is set. The
+    // secret comes from the environment only — never a literal in the repo.
+    stripeSecretKey: env.STRIPE_SECRET_KEY ?? null,
+    storeBaseUrl: env.STORE_BASE_URL ?? DEFAULT_STORE_BASE_URL,
     port: Number(env.PORT ?? DEFAULT_PORT),
     host: env.HOST ?? DEFAULT_HOST,
     logLevel: env.LOG_LEVEL ?? DEFAULT_LOG_LEVEL,

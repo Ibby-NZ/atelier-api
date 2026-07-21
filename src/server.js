@@ -1,3 +1,4 @@
+import Stripe from 'stripe'
 import { loadConfig } from './config.js'
 import { createPool } from './db.js'
 import { buildApp } from './app.js'
@@ -12,9 +13,16 @@ const start = async () => {
   }
 
   const pool = createPool(config.databaseUrl)
+  // Card checkout stays disabled (POST /checkout/session → 503) until the key is set.
+  const stripe = config.stripeSecretKey ? new Stripe(config.stripeSecretKey) : null
+  if (!stripe) {
+    console.warn('STRIPE_SECRET_KEY unset — card checkout disabled.')
+  }
   const app = buildApp({
     pool,
     cookieSecret: config.cookieSecret,
+    stripe,
+    storeBaseUrl: config.storeBaseUrl,
     logLevel: config.logLevel,
   })
 

@@ -1,0 +1,28 @@
+{
+  "name": "atelier-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Atelier platform API — Fastify + Postgres backend for the storefront and back office.",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "migrate": "node-pg-migrate --migrations-dir migrations --migration-file-language js up",
+    "migrate:down": "node-pg-migrate --migrations-dir migrations --migration-file-language js down",
+    "migrate:create": "node-pg-migrate --migrations-dir migrations --migration-file-language js create",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "fastify": "^5.2.1",
+    "node-pg-migrate": "^7.9.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "eslint": "^9.17.0",
+    "globals": "^15.14.0",
+    "vitest": "^2.1.9"
+  }
+}

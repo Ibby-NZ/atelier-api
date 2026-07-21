@@ -135,3 +135,37 @@ export const createCheckoutSession = async (
 
   return { url: session.url, session_id: session.id }
 }
+
+/**
+ * Verify a Checkout Session with Stripe and return the customer-facing summary
+ * used by the store success page (US-019). The order itself is created
+ * asynchronously by the webhook (US-011), but `order_number` is deterministic
+ * (`WEB-<session id>`), so the success page can show it without waiting.
+ *
+ * @param {{ stripe: import('stripe').Stripe }} deps
+ * @param {string} sessionId
+ * @returns {Promise<{ order_number: string, paid: boolean, amount_total_cents: number|null, currency: string|null, email: string|null }>}
+ */
+export const retrieveCheckoutSession = async ({ stripe }, sessionId) => {
+  if (!stripe) {
+    throw httpError(503, 'Card checkout is not configured (STRIPE_SECRET_KEY unset).')
+  }
+
+  let session
+  try {
+    session = await stripe.checkout.sessions.retrieve(sessionId)
+  } catch {
+    throw httpError(404, 'Checkout session not found.')
+  }
+  if (!session || !session.id) {
+    throw httpError(404, 'Checkout session not found.')
+  }
+
+  return {
+    order_number: `WEB-${session.id}`,
+    paid: session.payment_status === 'paid',
+    amount_total_cents: session.amount_total ?? null,
+    currency: session.currency ? session.currency.toUpperCase() : null,
+    email: session.customer_details?.email || session.customer_email || null,
+  }
+}

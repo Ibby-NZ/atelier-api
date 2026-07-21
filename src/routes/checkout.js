@@ -1,4 +1,7 @@
-import { createCheckoutSession } from '../checkout/checkout.js'
+import {
+  createCheckoutSession,
+  retrieveCheckoutSession,
+} from '../checkout/checkout.js'
 
 // Body: a non-empty cart of { sku, qty } plus the shipping zone. Prices are
 // never accepted from the client — the server resolves them from the DB.
@@ -39,5 +42,21 @@ export const checkoutRoutes = async (app, { pool, stripe, storeBaseUrl }) => {
       )
       return { url, session_id }
     }
+  )
+
+  // Public: the success page verifies the completed session and shows the order
+  // number. Only non-sensitive fields are returned (no line items / prices).
+  app.get(
+    '/checkout/session/:id',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', minLength: 1, maxLength: 200 } },
+        },
+      },
+    },
+    async (request) => retrieveCheckoutSession({ stripe }, request.params.id)
   )
 }

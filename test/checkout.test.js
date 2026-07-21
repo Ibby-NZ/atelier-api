@@ -33,6 +33,18 @@ const makeStripeStub = () => {
             url: 'https://checkout.stripe.test/pay/cs_test_abc123',
           }
         },
+        retrieve: async (id) => {
+          if (id === 'cs_missing') {
+            throw new Error('No such checkout.session')
+          }
+          return {
+            id,
+            payment_status: 'paid',
+            amount_total: 5700,
+            currency: 'nzd',
+            customer_details: { email: 'buyer@example.test' },
+          }
+        },
       },
     },
   }
@@ -235,6 +247,67 @@ describe('POST /checkout/session', () => {
       method: 'POST',
       url: '/checkout/session',
       payload: { lines: [{ sku: SKU.good, qty: 1 }], zone: ZONE },
+    })
+    expect(response.statusCode).toBe(503)
+    await noStripe.close()
+  })
+})
+
+describe('GET /checkout/session/:id', () => {
+  let pool
+  let app
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    pool = createPool(config.databaseUrl)
+    app = buildApp({
+      pool,
+      cookieSecret: TEST_COOKIE_SECRET,
+      stripe: makeStripeStub(),
+      storeBaseUrl: STORE_BASE_URL,
+      logger: false,
+    })
+    await app.ready()
+  })
+
+  afterAll(async () => {
+    await app.close()
+    await pool.end()
+  })
+
+  it('verifies a paid session and returns the deterministic order number', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/checkout/session/cs_test_abc123',
+    })
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body.order_number).toBe('WEB-cs_test_abc123')
+    expect(body.paid).toBe(true)
+    expect(body.amount_total_cents).toBe(5700)
+    expect(body.currency).toBe('NZD')
+    expect(body.email).toBe('buyer@example.test')
+  })
+
+  it('returns 404 for an unknown session', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/checkout/session/cs_missing',
+    })
+    expect(response.statusCode).toBe(404)
+  })
+
+  it('returns 503 when Stripe is not configured', async () => {
+    const noStripe = buildApp({
+      pool,
+      cookieSecret: TEST_COOKIE_SECRET,
+      storeBaseUrl: STORE_BASE_URL,
+      logger: false,
+    })
+    await noStripe.ready()
+    const response = await noStripe.inject({
+      method: 'GET',
+      url: '/checkout/session/cs_test_abc123',
     })
     expect(response.statusCode).toBe(503)
     await noStripe.close()

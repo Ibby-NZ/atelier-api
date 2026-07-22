@@ -6,7 +6,7 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 
 - `src/config.js` — `loadConfig(env)` validates env vars, throws with clear message; server exits 1 on failure. Add new env vars here + `.env.example`.
 - `src/db.js` — `createPool(databaseUrl)` returns pg Pool. Inject the pool into `buildApp({ pool })`; never import a global pool (keeps tests isolated).
-- `src/app.js` — `buildApp()` builds the Fastify instance without listening. Tests use `app.inject()` (no port binding needed).
+- `src/app.js` — `buildApp()` builds the Fastify instance without listening. Tests use `app.inject()` (no port binding needed). Registers `@fastify/cors` with `origin: storeBaseUrl, credentials: true` — REQUIRED: storefront islands fetch cross-origin (browser :4321 → api :3001) with the session cookie; without it every client-side call is blocked and the store silently shows empty grids. Guarded by `test/cors.test.js`.
 - `src/server.js` — only entry point that listens/exits.
 - Config objects frozen (`Object.freeze`); immutable updates house style.
 

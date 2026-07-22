@@ -1,5 +1,6 @@
 import Fastify from 'fastify'
 import fastifyCookie from '@fastify/cookie'
+import fastifyCors from '@fastify/cors'
 import fastifyRateLimit from '@fastify/rate-limit'
 import { createGuards } from './auth/guards.js'
 import { authRoutes } from './routes/auth.js'
@@ -30,6 +31,11 @@ export const buildApp = ({
   const app = Fastify({
     logger: logger ? { level: logLevel } : false,
   })
+
+  // Storefront islands fetch cross-origin (browser :4321 → api :3001) with the
+  // session cookie, so allow that exact origin and credentials. Same-site across
+  // ports means the SameSite=Lax session cookie still flows.
+  app.register(fastifyCors, { origin: storeBaseUrl, credentials: true })
 
   app.register(fastifyCookie, { secret: cookieSecret })
   // global: false — only routes that opt in via config.rateLimit are limited.

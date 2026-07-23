@@ -9,6 +9,16 @@ const DEFAULT_EMAIL_FROM = 'Atelier Textiles <no-reply@ateliertextiles.example>'
 const DEFAULT_BACKOFFICE_EMAIL = 'orders@ateliertextiles.example'
 const MIN_COOKIE_SECRET_LENGTH = 32
 
+// TRUST_PROXY accepts anything Fastify's trustProxy does: 'true', a hop count,
+// or an address/keyword list ('127.0.0.1', 'loopback'). Prefer the address form
+// in production — 'true' trusts client-supplied X-Forwarded-For wholesale.
+const parseTrustProxy = (value) => {
+  if (value === undefined || value === '' || value === 'false') return false
+  if (value === 'true') return true
+  const hops = Number(value)
+  return Number.isInteger(hops) && hops > 0 ? hops : value
+}
+
 export const loadConfig = (env = process.env) => {
   const databaseUrl = env.DATABASE_URL
   if (!databaseUrl) {
@@ -51,5 +61,9 @@ export const loadConfig = (env = process.env) => {
     port: Number(env.PORT ?? DEFAULT_PORT),
     host: env.HOST ?? DEFAULT_HOST,
     logLevel: env.LOG_LEVEL ?? DEFAULT_LOG_LEVEL,
+    // Behind a reverse proxy request.ip is the proxy, so the per-IP login rate
+    // limit collapses to one shared bucket. Set TRUST_PROXY (e.g. '127.0.0.1'
+    // for same-host nginx) so Fastify reads the real client from X-Forwarded-For.
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
   })
 }

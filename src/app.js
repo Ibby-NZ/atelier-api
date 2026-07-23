@@ -20,6 +20,7 @@ export const buildApp = ({
   mailer = null,
   logLevel = 'info',
   logger = true,
+  trustProxy = false,
 } = {}) => {
   if (!pool) {
     throw new Error('buildApp requires a pg pool')
@@ -30,6 +31,7 @@ export const buildApp = ({
 
   const app = Fastify({
     logger: logger ? { level: logLevel } : false,
+    trustProxy,
   })
 
   // Storefront islands fetch cross-origin (browser :4321 → api :3001) with the

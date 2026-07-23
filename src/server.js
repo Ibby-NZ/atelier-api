@@ -35,6 +35,7 @@ const start = async () => {
     storeBaseUrl: config.storeBaseUrl,
     mailer,
     logLevel: config.logLevel,
+    trustProxy: config.trustProxy,
   })
 
   const shutdown = async (signal) => {

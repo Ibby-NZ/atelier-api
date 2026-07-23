@@ -1,6 +1,7 @@
 /**
  * Pure transform layer: maps atelier-app demo data onto seed row objects.
- * Sources (read-only, per PRD seed mapping):
+ * Sources (read-only, per PRD seed mapping; ./data/ holds vendored snapshots
+ * of the CRM repo's atelier-app/src/data — re-copy when the catalogue changes):
  *  - realCatalogue.js — brands, collections, finished-good products
  *  - atelier.js designs[] — fabric designs + colourways (SKUs, specs, price bands)
  *  - suppliers.js — currency + international flag resolution
@@ -10,10 +11,10 @@ import {
   brands as realBrands,
   collections as realCollections,
   products as realProducts,
-} from '../../../atelier-app/src/data/realCatalogue.js'
-import { designs } from '../../../atelier-app/src/data/atelier.js'
-import { suppliers } from '../../../atelier-app/src/data/suppliers.js'
-import { tradeUnit } from '../../../atelier-app/src/data/pricing.js'
+} from './data/realCatalogue.js'
+import { designs } from './data/atelier.js'
+import { suppliers } from './data/suppliers.js'
+import { tradeUnit } from './data/pricing.js'
 import { slugify } from './slugify.js'
 
 const HOUSE_BRAND = 'Atelier Textiles NZ'

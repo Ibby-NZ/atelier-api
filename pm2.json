@@ -1,0 +1,21 @@
+{
+  "apps": [
+    {
+      "name": "atelier-api",
+      "script": "npm",
+      "args": "start",
+      "env": {
+        "NODE_ENV": "development"
+      },
+      "env_staging": {
+        "NODE_ENV": "staging",
+        "NO_COLOR": "enable"
+      },
+      "env_production": {
+        "PORT": 3042,
+        "NODE_ENV": "production",
+        "NO_COLOR": "enable"
+      }
+    }
+  ]
+}

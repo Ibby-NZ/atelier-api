@@ -11,6 +11,8 @@
     "migrate:down": "node-pg-migrate --migrations-dir migrations --migration-file-language js down",
     "migrate:create": "node-pg-migrate --migrations-dir migrations --migration-file-language js create",
     "seed": "node src/seed/run.js",
+    "convert:pricing": "python3 scripts/convert-price-lists.py",
+    "import:pricing": "node src/seed/import-price-lists.js",
     "lint": "eslint .",
     "test": "vitest run"
   },

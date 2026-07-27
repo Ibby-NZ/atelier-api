@@ -20,6 +20,7 @@ export default [
     },
   },
   {
-    ignores: ['node_modules/'],
+    // src/seed/data/ is vendored (CRM copies) + generated (price-lists.json) — not house code.
+    ignores: ['node_modules/', 'src/seed/data/'],
   },
 ]

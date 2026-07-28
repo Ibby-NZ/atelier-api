@@ -62,6 +62,8 @@ const ORDER_COLUMNS = `o.id,
         o.total_cents,
         o.shipping_zone,
         o.xero_invoice_ref,
+        o.shipping_address,
+        o.contact_phone,
         o.notes,
         o.created_at`
 
@@ -132,6 +134,10 @@ const toOrder = (row, lineRows) => {
     total_cents: row.total_cents,
     shipping_zone: row.shipping_zone,
     xero_invoice_ref: row.xero_invoice_ref,
+    // Card checkouts carry the delivery details Stripe collected; request-kind
+    // orders have none until the back office adds them.
+    shipping_address: row.shipping_address ?? null,
+    contact_phone: row.contact_phone ?? null,
     notes: row.notes,
     created_at: row.created_at,
     reservation_state: state,

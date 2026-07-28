@@ -39,9 +39,20 @@ export const loadConfig = (env = process.env) => {
     )
   }
 
+  const adminSessionSecret = env.ADMIN_SESSION_SECRET ?? null
+  if (adminSessionSecret && adminSessionSecret.length < MIN_COOKIE_SECRET_LENGTH) {
+    throw new Error(
+      `ADMIN_SESSION_SECRET must be at least ${MIN_COOKIE_SECRET_LENGTH} characters. Generate one with \`openssl rand -hex 32\`.`
+    )
+  }
+
   return Object.freeze({
     databaseUrl,
     cookieSecret,
+    // Optional: signs the AdminJS panel session. Unset, a distinct key is
+    // derived from COOKIE_SECRET so the panel and the customer session cookie
+    // never share a signing key. Set it to rotate the panel on its own.
+    adminSessionSecret,
     // Optional: card checkout is disabled until STRIPE_SECRET_KEY is set. The
     // secret comes from the environment only — never a literal in the repo.
     stripeSecretKey: env.STRIPE_SECRET_KEY ?? null,

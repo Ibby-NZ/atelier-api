@@ -221,6 +221,17 @@ describe('POST /checkout/session', () => {
     expect(response.statusCode).toBe(422)
   })
 
+  it('asks Stripe to collect a NZ delivery address and a phone number', async () => {
+    await post({ lines: [{ sku: SKU.good, qty: 1 }], zone: ZONE })
+    const params = stripe.lastCreateParams
+    // Physical goods have to be dispatched somewhere, and the shipping tiers
+    // only price the three NZ zones — so no other country may be offered.
+    expect(params.shipping_address_collection).toEqual({ allowed_countries: ['NZ'] })
+    expect(params.phone_number_collection).toEqual({ enabled: true })
+    // Our own zone tiers price the freight; Stripe must not add its own.
+    expect(params.shipping_options).toBeUndefined()
+  })
+
   it('rejects an unknown shipping zone with 400', async () => {
     const response = await post({
       lines: [{ sku: SKU.good, qty: 1 }],

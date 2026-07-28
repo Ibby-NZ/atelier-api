@@ -17,9 +17,14 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@adminjs/fastify": "^4.2.0",
+    "@adminjs/sql": "^2.2.6",
     "@fastify/cookie": "^11.1.2",
     "@fastify/cors": "^11.3.0",
+    "@fastify/formbody": "^8.0.2",
     "@fastify/rate-limit": "^11.1.0",
+    "@fastify/session": "^11.1.2",
+    "adminjs": "^7.8.17",
     "argon2": "^0.45.0",
     "dotenv": "^16.4.5",
     "fastify": "^5.2.1",

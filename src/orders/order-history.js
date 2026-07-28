@@ -21,6 +21,7 @@ const ORDER_COLUMNS = `o.id,
         o.total_cents,
         o.shipping_zone,
         o.xero_invoice_ref,
+        o.shipping_address,
         o.guest_email,
         o.created_at`
 
@@ -73,6 +74,9 @@ const toOrder = (row, linesByOrderId) => ({
   total_cents: row.total_cents,
   shipping_zone: row.shipping_zone,
   xero_invoice_ref: row.xero_invoice_ref,
+  // Where a card checkout is being delivered. Null for request-kind orders and
+  // for checkouts placed before delivery details were collected.
+  shipping_address: row.shipping_address ?? null,
   created_at: row.created_at,
   lines: linesByOrderId.get(row.id) ?? [],
 })

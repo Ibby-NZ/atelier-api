@@ -36,6 +36,10 @@ const start = async () => {
     mailer,
     logLevel: config.logLevel,
     trustProxy: config.trustProxy,
+    adminPanel: {
+      databaseUrl: config.databaseUrl,
+      sessionSecret: config.adminSessionSecret,
+    },
   })
 
   const shutdown = async (signal) => {

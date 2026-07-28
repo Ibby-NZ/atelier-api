@@ -13,6 +13,19 @@ import { getShippingQuote } from '../shipping/rates.js'
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
 
+// The shipping-rate tiers are the three NZ zones, so the delivery address Stripe
+// collects has to be a New Zealand one — offering more countries would take
+// money for a parcel we have no rate for.
+export const SHIPPING_COUNTRIES = Object.freeze(['NZ'])
+
+// Shown to shoppers when STRIPE_SECRET_KEY is unset. Deliberately says nothing
+// about environment variables: the API boots fine without Stripe (so the rest of
+// the store works), but a customer hitting "Pay by card" must get a message that
+// makes sense to them, not our config naming. The operator sees the real cause
+// in the startup log and in .env.example.
+const CARD_PAYMENT_UNAVAILABLE =
+  'Card payment is unavailable right now. Please get in touch and we will complete your order.'
+
 // Resolves each requested { sku, qty } against the catalogue, enforcing that the
 // product is a purchasable finished good with a retail price and enough stock.
 // Returns priced lines; throws a 422 on the first line that fails a rule.
@@ -52,7 +65,13 @@ export const validateCheckoutLines = async (pool, lines) => {
     // pg returns numeric columns as strings; a missing inventory row reads as 0.
     const available = Number(row.qty_available ?? 0) - Number(row.qty_reserved ?? 0)
     if (!Number.isFinite(available) || available < qty) {
-      throw httpError(422, `Insufficient stock for SKU "${sku}".`)
+      // The remaining count is part of the message so the store can tell the
+      // shopper what to change instead of just refusing the cart.
+      const remaining = Number.isFinite(available) && available > 0 ? available : 0
+      throw httpError(
+        422,
+        `Insufficient stock for SKU "${sku}" — ${remaining} available.`
+      )
     }
 
     validated.push({
@@ -98,11 +117,22 @@ export const createCheckoutSession = async (
   { lines, zone, user = null }
 ) => {
   if (!stripe) {
-    throw httpError(503, 'Card checkout is not configured (STRIPE_SECRET_KEY unset).')
+    throw httpError(503, CARD_PAYMENT_UNAVAILABLE)
   }
 
   const validated = await validateCheckoutLines(pool, lines)
-  const currency = validated[0].currency
+
+  // One Stripe session charges in one currency, and the shipping line is priced
+  // in it too — so a mixed-currency cart would silently mis-charge. Refuse it
+  // rather than pick a winner.
+  const currencies = [...new Set(validated.map((line) => line.currency))]
+  if (currencies.length > 1) {
+    throw httpError(
+      422,
+      `A single order cannot mix currencies (${currencies.join(', ')}). Please check out separately.`
+    )
+  }
+  const currency = currencies[0]
   const totalQty = validated.reduce((sum, line) => sum + line.qty, 0)
 
   const quote = await getShippingQuote(pool, { zone, qty: totalQty })
@@ -124,6 +154,12 @@ export const createCheckoutSession = async (
     line_items: lineItems,
     success_url: `${storeBaseUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${storeBaseUrl}/cart`,
+    // Physical goods: Stripe collects the delivery address and a contact phone
+    // so the back office can actually dispatch the parcel. Shipping is priced
+    // by our own zone tiers above, so no Stripe shipping_options are offered.
+    shipping_address_collection: { allowed_countries: SHIPPING_COUNTRIES },
+    billing_address_collection: 'auto',
+    phone_number_collection: { enabled: true },
     client_reference_id: user ? String(user.id) : undefined,
     customer_email: user ? user.email : undefined,
     metadata: {
@@ -148,7 +184,7 @@ export const createCheckoutSession = async (
  */
 export const retrieveCheckoutSession = async ({ stripe }, sessionId) => {
   if (!stripe) {
-    throw httpError(503, 'Card checkout is not configured (STRIPE_SECRET_KEY unset).')
+    throw httpError(503, CARD_PAYMENT_UNAVAILABLE)
   }
 
   let session

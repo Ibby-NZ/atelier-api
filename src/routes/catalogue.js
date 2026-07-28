@@ -1,10 +1,18 @@
-import { listProducts, DEFAULT_PAGE, DEFAULT_LIMIT, MAX_LIMIT } from '../catalogue/products.js'
+import {
+  listProducts,
+  DEFAULT_PAGE,
+  DEFAULT_LIMIT,
+  DEFAULT_SORT,
+  MAX_LIMIT,
+  SORT_KEYS,
+} from '../catalogue/products.js'
 import { getProductDetail } from '../catalogue/product-detail.js'
 import { listBrands, getBrandBySlug } from '../catalogue/brands.js'
 import { effectiveRole } from '../auth/guards.js'
 
-// Querystring filters are all optional exact-match strings, plus pagination.
-// product_type is constrained; unknown query params are rejected by Ajv.
+// Querystring filters are all optional exact-match strings, plus free-text
+// search, sort and pagination. product_type and sort are constrained by enum;
+// unknown query params are ignored (the read model's whitelist is the gate).
 const listQuerySchema = {
   type: 'object',
   additionalProperties: false,
@@ -16,6 +24,8 @@ const listQuerySchema = {
     price_band: { type: 'string', maxLength: 200 },
     lead_time: { type: 'string', maxLength: 200 },
     product_type: { type: 'string', enum: ['fabric', 'finished_good'] },
+    q: { type: 'string', maxLength: 200 },
+    sort: { type: 'string', enum: SORT_KEYS, default: DEFAULT_SORT },
     page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
     limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
   },
@@ -31,15 +41,24 @@ const slugParamsSchema = {
 }
 
 export const catalogueRoutes = async (app, { pool }) => {
+  // The listing is public. Like the detail endpoint it is optional-auth: an
+  // anonymous request still succeeds, it just never carries trade_price_cents.
   app.get(
     '/catalogue/products',
     { schema: { querystring: listQuerySchema } },
     async (request) => {
-      const { page, limit, ...filters } = request.query
-      const result = await listProducts(pool, { filters, page, limit })
+      const { page, limit, sort, ...filters } = request.query
+      const user = await app.guards.loadOptionalUser(request)
+      const includeTrade = !!user && effectiveRole(user) === 'trade'
+      const result = await listProducts(pool, { filters, page, limit, sort, includeTrade })
       return {
         products: result.products,
-        meta: { total: result.total, page: result.page, limit: result.limit },
+        meta: {
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          sort: result.sort,
+        },
       }
     }
   )

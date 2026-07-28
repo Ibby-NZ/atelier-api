@@ -186,6 +186,79 @@ describe('POST /webhooks/stripe', () => {
     expect(await availabilityBySku(SKU.other)).toBe(9)
   })
 
+  it('stores the delivery address and phone Stripe collected', async () => {
+    const event = completedEvent(
+      `evt_${PREFIX}_addr`,
+      `cs_${PREFIX}_addr`,
+      [{ sku: SKU.good, qty: 1 }],
+      {
+        customer_details: { email: 'buyer@example.test', phone: '+6421555000' },
+        collected_information: {
+          shipping_details: {
+            name: 'Olivia Marlow',
+            address: {
+              line1: '12 Parnell Road',
+              line2: 'Level 2',
+              city: 'Auckland',
+              state: 'Auckland',
+              postal_code: '1052',
+              country: 'NZ',
+            },
+          },
+        },
+      }
+    )
+    expect((await post(event)).statusCode).toBe(200)
+
+    const [order] = await orderBySession(`cs_${PREFIX}_addr`)
+    expect(order.contact_phone).toBe('+6421555000')
+    expect(order.shipping_address).toEqual({
+      name: 'Olivia Marlow',
+      line1: '12 Parnell Road',
+      line2: 'Level 2',
+      city: 'Auckland',
+      state: 'Auckland',
+      postal_code: '1052',
+      country: 'NZ',
+    })
+  })
+
+  it('reads a top-level shipping_details, as older Stripe API versions send it', async () => {
+    const event = completedEvent(
+      `evt_${PREFIX}_addr_legacy`,
+      `cs_${PREFIX}_addr_legacy`,
+      [{ sku: SKU.good, qty: 1 }],
+      {
+        shipping_details: {
+          name: 'Legacy Buyer',
+          address: { line1: '1 Old Road', city: 'Wellington', country: 'NZ' },
+        },
+      }
+    )
+    expect((await post(event)).statusCode).toBe(200)
+
+    const [order] = await orderBySession(`cs_${PREFIX}_addr_legacy`)
+    expect(order.shipping_address).toMatchObject({
+      name: 'Legacy Buyer',
+      line1: '1 Old Road',
+      city: 'Wellington',
+      country: 'NZ',
+    })
+    // Absent sub-fields are recorded as null, never dropped or undefined.
+    expect(order.shipping_address.postal_code).toBeNull()
+  })
+
+  it('records nulls when no delivery details were collected', async () => {
+    const event = completedEvent(`evt_${PREFIX}_noaddr`, `cs_${PREFIX}_noaddr`, [
+      { sku: SKU.good, qty: 1 },
+    ])
+    expect((await post(event)).statusCode).toBe(200)
+
+    const [order] = await orderBySession(`cs_${PREFIX}_noaddr`)
+    expect(order.shipping_address).toBeNull()
+    expect(order.contact_phone).toBeNull()
+  })
+
   it('is idempotent: a replayed event creates nothing', async () => {
     const event = completedEvent(`evt_${PREFIX}_2`, `cs_${PREFIX}_2`, [
       { sku: SKU.good, qty: 3 },

@@ -31,6 +31,33 @@ const resolveCartLines = async (client, cart) => {
   return lines
 }
 
+// The delivery details Stripe collected during the hosted checkout. Newer
+// Stripe API versions move these under `collected_information`; older ones put
+// `shipping_details` at the top level. Read both so an API-version bump does not
+// silently start dropping addresses. Returns nulls when nothing was collected
+// (a session created before shipping collection was switched on, or a replay of
+// an old event).
+const deliveryDetails = (session) => {
+  const shipping =
+    session.collected_information?.shipping_details ?? session.shipping_details ?? null
+  const address = shipping?.address ?? null
+
+  return {
+    shippingAddress: address
+      ? {
+          name: shipping.name ?? session.customer_details?.name ?? null,
+          line1: address.line1 ?? null,
+          line2: address.line2 ?? null,
+          city: address.city ?? null,
+          state: address.state ?? null,
+          postal_code: address.postal_code ?? null,
+          country: address.country ?? null,
+        }
+      : null,
+    contactPhone: session.customer_details?.phone ?? null,
+  }
+}
+
 // Build the paid order + lines and decrement inventory. Runs inside the caller's
 // transaction so a failure rolls back the ledger claim too.
 const createPaidOrder = async (client, session) => {
@@ -58,11 +85,14 @@ const createPaidOrder = async (client, session) => {
   // stable even if this handler is retried before the ledger claim commits.
   const orderNumber = `WEB-${session.id}`
 
+  const { shippingAddress, contactPhone } = deliveryDetails(session)
+
   const { rows } = await client.query(
     `INSERT INTO orders
        (user_id, guest_email, order_number, kind, status,
-        subtotal_cents, shipping_cents, total_cents, shipping_zone, stripe_session_id)
-     VALUES ($1, $2, $3, 'checkout', 'paid', $4, $5, $6, $7, $8)
+        subtotal_cents, shipping_cents, total_cents, shipping_zone, stripe_session_id,
+        shipping_address, contact_phone)
+     VALUES ($1, $2, $3, 'checkout', 'paid', $4, $5, $6, $7, $8, $9, $10)
      RETURNING id, order_number, user_id, guest_email, total_cents`,
     [
       userId,
@@ -73,6 +103,8 @@ const createPaidOrder = async (client, session) => {
       totalCents,
       zone,
       session.id,
+      shippingAddress ? JSON.stringify(shippingAddress) : null,
+      contactPhone,
     ]
   )
   const order = rows[0]

@@ -392,4 +392,36 @@ describe('admin panel', () => {
       await bare.close()
     }
   })
+
+  // A back-office CRUD screen must never be able to take the shop down. The
+  // panel has boot-time failure modes the JSON API does not share (missing
+  // adminjs dependencies, an unwritable cwd during component bundling, a table
+  // with no primary key); unguarded, each one exited the process and every
+  // storefront request 502'd.
+  it('still serves the API when the panel fails to start', async () => {
+    const broken = buildApp({
+      pool,
+      cookieSecret: TEST_COOKIE_SECRET,
+      logger: false,
+      // A database URL @adminjs/sql cannot introspect: registration throws.
+      adminPanel: {
+        databaseUrl: 'postgresql://nobody:nobody@127.0.0.1:1/does-not-exist',
+        sessionSecret: null,
+      },
+    })
+    await broken.ready()
+    try {
+      const health = await broken.inject({ method: 'GET', url: '/health' })
+      expect(health.statusCode).toBe(200)
+
+      const catalogue = await broken.inject({ method: 'GET', url: '/catalogue/brands' })
+      expect(catalogue.statusCode).toBe(200)
+
+      // The panel itself is simply absent, not half-mounted.
+      const panel = await broken.inject({ method: 'GET', url: '/panel' })
+      expect(panel.statusCode).toBe(404)
+    } finally {
+      await broken.close()
+    }
+  })
 })

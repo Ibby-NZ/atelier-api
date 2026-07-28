@@ -97,13 +97,32 @@ export const buildApp = ({
   // session/form parsers away from the JSON API.
   if (adminPanel) {
     app.register(async (instance) => {
-      const { adminPanelPlugin } = await import('./admin/panel.js')
-      await adminPanelPlugin(instance, {
-        pool,
-        cookieSecret,
-        adminSessionSecret: adminPanel.sessionSecret ?? null,
-        databaseUrl: adminPanel.databaseUrl,
-      })
+      // The panel must never be able to take the API down. It has boot-time
+      // failure modes the JSON API does not share: a missing adminjs dependency
+      // (five heavy packages — a deploy that skips `npm ci` has none of them),
+      // AdminJS bundling user components into `.adminjs/` in an unwritable cwd
+      // under NODE_ENV=production, and @adminjs/sql's introspection, which
+      // throws if ANY table in the database lacks a primary key. Unguarded,
+      // each of those rejected during registration, `start()` threw, the
+      // process exited, and every storefront request 502'd — a back-office CRUD
+      // screen took down the shop. Log loudly and keep serving.
+      try {
+        const { adminPanelPlugin } = await import('./admin/panel.js')
+        await adminPanelPlugin(instance, {
+          pool,
+          cookieSecret,
+          adminSessionSecret: adminPanel.sessionSecret ?? null,
+          databaseUrl: adminPanel.databaseUrl,
+        })
+      } catch (error) {
+        instance.log.error(
+          { err: error },
+          'AdminJS panel failed to start — /panel is unavailable, the rest of the API is unaffected. ' +
+            'Common causes: dependencies not installed (run `npm ci`), an unwritable working ' +
+            'directory during component bundling (set ADMIN_JS_SKIP_BUNDLE=true), or a table with ' +
+            'no primary key.'
+        )
+      }
     })
   }
 

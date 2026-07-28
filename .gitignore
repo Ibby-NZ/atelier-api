@@ -1,4 +1,10 @@
 node_modules/
+
+# AdminJS writes bundled user components here at boot under NODE_ENV=production.
+# Build artefact, regenerated every start — and the reason the panel needs a
+# writable working directory (or ADMIN_JS_SKIP_BUNDLE=true).
+.adminjs/
+
 .env
 .env.*
 !.env.example

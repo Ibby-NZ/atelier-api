@@ -21,6 +21,9 @@ export default [
   },
   {
     // src/seed/data/ is vendored (CRM copies) + generated (price-lists.json) — not house code.
-    ignores: ['node_modules/', 'src/seed/data/'],
+    // .adminjs/ is written by AdminJS at boot under NODE_ENV=production; linting
+    // that generated entry file fails on its own globals and breaks `npm run lint`
+    // on any machine that has started the server in production mode.
+    ignores: ['node_modules/', 'src/seed/data/', '.adminjs/'],
   },
 ]

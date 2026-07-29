@@ -30,7 +30,9 @@ const toCollection = (row) => Object.freeze({ slug: row.slug, name: row.name })
  */
 export const listBrands = async (pool) => {
   const { rows } = await pool.query(
-    `SELECT ${BRAND_COLUMNS} FROM brands ORDER BY name ASC, id ASC`
+    `SELECT ${BRAND_COLUMNS} FROM brands
+      WHERE archived_at IS NULL
+      ORDER BY name ASC, id ASC`
   )
   return rows.map(toBrand)
 }
@@ -43,7 +45,7 @@ export const listBrands = async (pool) => {
  */
 export const getBrandBySlug = async (pool, slug) => {
   const { rows } = await pool.query(
-    `SELECT ${BRAND_COLUMNS}, id FROM brands WHERE slug = $1`,
+    `SELECT ${BRAND_COLUMNS}, id FROM brands WHERE slug = $1 AND archived_at IS NULL`,
     [slug]
   )
   const brandRow = rows[0]
@@ -53,7 +55,7 @@ export const getBrandBySlug = async (pool, slug) => {
 
   const { rows: collections } = await pool.query(
     `SELECT slug, name FROM collections
-     WHERE brand_id = $1
+     WHERE brand_id = $1 AND archived_at IS NULL
      ORDER BY name ASC, id ASC`,
     [brandRow.id]
   )

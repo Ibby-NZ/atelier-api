@@ -91,6 +91,38 @@ const TEMPLATES = Object.freeze({
       `— ${BRAND}`,
     ].join('\n'),
   }),
+
+  // Acknowledgement to whoever submitted the storefront contact form.
+  contact_received: ({ name }) => ({
+    subject: `${BRAND}: thank you for your enquiry`,
+    text: [
+      `Hello${name ? ` ${name}` : ''},`,
+      '',
+      'Thank you for contacting us. A member of our team will respond within',
+      'one business day.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // Alert to the back office that a new enquiry has landed, with the details
+  // inline so staff can triage without opening the inbox.
+  backoffice_new_contact: ({ name, email, phone, subject, message }) => ({
+    subject: `New enquiry from ${name}${subject ? `: ${subject}` : ''}`,
+    text: [
+      'A new contact enquiry has been submitted.',
+      '',
+      `Name: ${name}`,
+      `Email: ${email}`,
+      `Phone: ${phone ?? '—'}`,
+      `Subject: ${subject ?? '—'}`,
+      '',
+      'Message:',
+      message,
+      '',
+      'View it in the back-office enquiries inbox.',
+    ].join('\n'),
+  }),
 })
 
 export const TEMPLATE_NAMES = Object.freeze(Object.keys(TEMPLATES))

@@ -11,6 +11,11 @@ import { checkoutRoutes } from './routes/checkout.js'
 import { orderRoutes } from './routes/orders.js'
 import { adminOrderRoutes } from './routes/admin-orders.js'
 import { adminCatalogueRoutes } from './routes/admin-catalogue.js'
+import { adminUsersRoutes } from './routes/admin-users.js'
+import { adminInventoryRoutes } from './routes/admin-inventory.js'
+import { adminPriceListRoutes } from './routes/admin-price-lists.js'
+import { adminLegacyRoutes } from './routes/admin-legacy.js'
+import { contactRoutes } from './routes/contact.js'
 import { webhookRoutes } from './routes/webhooks.js'
 
 export const buildApp = ({
@@ -76,6 +81,18 @@ export const buildApp = ({
     // /admin/brands|collections|products|colourways — catalogue CRUD for the
     // storefront admin islands. Same CORS allowance, same backoffice guard.
     api.register(adminCatalogueRoutes, { pool })
+    // /admin/users — client/user management; /admin/inventory — stock edits;
+    // /admin/price-list-items — supplier pricing. All storefront admin islands,
+    // same CORS + backoffice guard.
+    api.register(adminUsersRoutes, { pool })
+    api.register(adminInventoryRoutes, { pool })
+    api.register(adminPriceListRoutes, { pool })
+    // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
+    // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
+    api.register(adminLegacyRoutes, { pool })
+    // POST /contact (public) + /admin/contact-enquiries (backoffice) — the
+    // storefront contact form posts here; both need the storefront CORS scope.
+    api.register(contactRoutes, { pool, mailer })
 
     api.get('/health', async (request, reply) => {
       try {

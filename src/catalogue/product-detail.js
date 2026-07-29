@@ -88,7 +88,8 @@ export const getProductDetail = async (pool, slug, { includeTrade = false } = {}
     `SELECT ${PRODUCT_COLUMNS}
      FROM products p
      JOIN brands b ON b.id = p.brand_id
-     WHERE p.slug = $1 AND p.show_on_website = true`,
+     WHERE p.slug = $1 AND p.show_on_website = true
+       AND p.archived_at IS NULL AND b.archived_at IS NULL`,
     [slug]
   )
   const productRow = rows[0]
@@ -102,7 +103,7 @@ export const getProductDetail = async (pool, slug, { includeTrade = false } = {}
      FROM colourways c
      JOIN products p ON p.id = c.product_id
      LEFT JOIN inventory i ON i.colourway_id = c.id
-     WHERE p.slug = $1
+     WHERE p.slug = $1 AND c.archived_at IS NULL
      ORDER BY c.name ASC, c.id ASC`,
     [slug]
   )

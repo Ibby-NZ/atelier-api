@@ -88,7 +88,7 @@ export const buildUpdate = (input, columns) => {
   return { sets, params }
 }
 
-const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, created_at`
+const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, archived_at, created_at`
 
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
@@ -107,6 +107,7 @@ const toBrand = (row) =>
     country: row.country,
     currency: row.currency,
     is_international: row.is_international,
+    archived_at: row.archived_at ?? null,
     created_at: row.created_at,
   })
 
@@ -117,6 +118,7 @@ const toCollection = (row) =>
     brand_name: row.brand_name,
     name: row.name,
     slug: row.slug,
+    archived_at: row.archived_at ?? null,
   })
 
 /**
@@ -126,9 +128,10 @@ const toCollection = (row) =>
  * @param {import('pg').Pool} pool
  * @returns {Promise<object[]>}
  */
-export const listAdminBrands = async (pool) => {
+export const listAdminBrands = async (pool, { includeArchived = false } = {}) => {
+  const where = includeArchived ? '' : 'WHERE archived_at IS NULL'
   const { rows } = await pool.query(
-    `SELECT ${BRAND_COLUMNS} FROM brands ORDER BY name ASC, id ASC`
+    `SELECT ${BRAND_COLUMNS} FROM brands ${where} ORDER BY name ASC, id ASC`
   )
   return rows.map(toBrand)
 }
@@ -192,7 +195,7 @@ export const updateBrand = async (pool, id, input) => {
   }
 }
 
-const COLLECTION_SELECT = `SELECT c.id, c.brand_id, c.name, c.slug, b.name AS brand_name
+const COLLECTION_SELECT = `SELECT c.id, c.brand_id, c.name, c.slug, c.archived_at, b.name AS brand_name
        FROM collections c
        JOIN brands b ON b.id = c.brand_id`
 
@@ -203,9 +206,20 @@ const COLLECTION_SELECT = `SELECT c.id, c.brand_id, c.name, c.slug, b.name AS br
  * @param {{ brandId?: number }} [filter]
  * @returns {Promise<object[]>}
  */
-export const listAdminCollections = async (pool, { brandId } = {}) => {
-  const params = brandId ? [brandId] : []
-  const where = brandId ? 'WHERE c.brand_id = $1' : ''
+export const listAdminCollections = async (
+  pool,
+  { brandId, includeArchived = false } = {}
+) => {
+  const clauses = []
+  const params = []
+  if (brandId) {
+    params.push(brandId)
+    clauses.push(`c.brand_id = $${params.length}`)
+  }
+  if (!includeArchived) {
+    clauses.push('c.archived_at IS NULL')
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   const { rows } = await pool.query(
     `${COLLECTION_SELECT} ${where} ORDER BY b.name ASC, c.name ASC, c.id ASC`,
     params
@@ -260,6 +274,52 @@ export const updateCollection = async (pool, id, input) => {
       WHERE c.id = $2 AND b.id = c.brand_id
       RETURNING c.id, c.brand_id, c.name, c.slug, b.name AS brand_name`,
     [input.name.trim(), id]
+  )
+  if (rows.length === 0) {
+    throw httpError(404, `Collection ${id} not found.`)
+  }
+  return toCollection(rows[0])
+}
+
+/**
+ * Archive (soft-delete) or restore a brand. Archiving hides it and all of its
+ * products from the public catalogue and the default admin lists; the rows and
+ * every commerce reference stay intact, so it is fully reversible.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {boolean} archived
+ * @returns {Promise<object>}
+ */
+export const setBrandArchived = async (pool, id, archived) => {
+  const { rows } = await pool.query(
+    `UPDATE brands SET archived_at = ${archived ? 'now()' : 'NULL'}
+      WHERE id = $1
+      RETURNING ${BRAND_COLUMNS}`,
+    [id]
+  )
+  if (rows.length === 0) {
+    throw httpError(404, `Brand ${id} not found.`)
+  }
+  return toBrand(rows[0])
+}
+
+/**
+ * Archive or restore a collection. Products keep their collection_id; an
+ * archived collection simply drops out of the public and default admin lists.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {boolean} archived
+ * @returns {Promise<object>}
+ */
+export const setCollectionArchived = async (pool, id, archived) => {
+  const { rows } = await pool.query(
+    `UPDATE collections c SET archived_at = ${archived ? 'now()' : 'NULL'}
+       FROM brands b
+      WHERE c.id = $1 AND b.id = c.brand_id
+      RETURNING c.id, c.brand_id, c.name, c.slug, c.archived_at, b.name AS brand_name`,
+    [id]
   )
   if (rows.length === 0) {
     throw httpError(404, `Collection ${id} not found.`)

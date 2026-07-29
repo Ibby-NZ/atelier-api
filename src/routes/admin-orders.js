@@ -11,6 +11,7 @@ import {
   markOrderPaid,
   shipOrder,
   declineOrder,
+  setOrderArchived,
 } from '../orders/admin-orders.js'
 import { notifyOrderTransition } from '../email/notifications.js'
 
@@ -19,6 +20,7 @@ const listQuerySchema = {
   additionalProperties: false,
   properties: {
     status: { type: 'string', enum: ORDER_STATUSES },
+    include_archived: { type: 'boolean', default: false },
   },
 }
 
@@ -69,7 +71,10 @@ export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
     '/admin/orders',
     { preHandler: backoffice, schema: { querystring: listQuerySchema } },
     async (request) => {
-      const orders = await listAdminOrders(pool, { status: request.query.status })
+      const orders = await listAdminOrders(pool, {
+        status: request.query.status,
+        includeArchived: request.query.include_archived,
+      })
       return { orders }
     }
   )
@@ -144,5 +149,19 @@ export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
       const order = await declineOrder(pool, request.params.id)
       return { order }
     }
+  )
+
+  // Archive / restore. Archiving tidies a finished order out of the queue; it is
+  // a soft delete (sets archived_at) and reversible. A reserving order must be
+  // shipped or declined first (else 409) so no live reservation is stranded.
+  app.post(
+    '/admin/orders/:id/archive',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({ order: await setOrderArchived(pool, request.params.id, true) })
+  )
+  app.post(
+    '/admin/orders/:id/restore',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({ order: await setOrderArchived(pool, request.params.id, false) })
   )
 }

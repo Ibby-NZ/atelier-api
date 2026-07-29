@@ -16,17 +16,21 @@ import {
   listAdminBrands,
   createBrand,
   updateBrand,
+  setBrandArchived,
   listAdminCollections,
   createCollection,
   updateCollection,
+  setCollectionArchived,
 } from '../catalogue/admin-brands.js'
 import {
   listAdminProducts,
   getAdminProduct,
   createProduct,
   updateProduct,
+  setProductArchived,
   createColourway,
   updateColourway,
+  setColourwayArchived,
 } from '../catalogue/admin-products.js'
 
 // Shared property shapes. Nullable variants let a PATCH clear an optional field
@@ -73,6 +77,16 @@ const brandQuerySchema = {
   additionalProperties: false,
   properties: {
     brand_id: { type: 'integer', minimum: 1 },
+    include_archived: { type: 'boolean', default: false },
+  },
+}
+
+// For the top-level brand list, which takes no brand_id.
+const archivedQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    include_archived: { type: 'boolean', default: false },
   },
 }
 
@@ -168,9 +182,15 @@ const colourwayPatchSchema = {
 export const adminCatalogueRoutes = async (app, { pool }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
-  app.get('/admin/brands', { preHandler: backoffice }, async () => ({
-    brands: await listAdminBrands(pool),
-  }))
+  app.get(
+    '/admin/brands',
+    { preHandler: backoffice, schema: { querystring: archivedQuerySchema } },
+    async (request) => ({
+      brands: await listAdminBrands(pool, {
+        includeArchived: request.query.include_archived,
+      }),
+    })
+  )
 
   app.post(
     '/admin/brands',
@@ -196,6 +216,7 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
     async (request) => ({
       collections: await listAdminCollections(pool, {
         brandId: request.query.brand_id,
+        includeArchived: request.query.include_archived,
       }),
     })
   )
@@ -225,7 +246,10 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
     '/admin/products',
     { preHandler: backoffice, schema: { querystring: brandQuerySchema } },
     async (request) => ({
-      products: await listAdminProducts(pool, { brandId: request.query.brand_id }),
+      products: await listAdminProducts(pool, {
+        brandId: request.query.brand_id,
+        includeArchived: request.query.include_archived,
+      }),
     })
   )
 
@@ -286,6 +310,66 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
     },
     async (request) => ({
       colourway: await updateColourway(pool, request.params.id, request.body),
+    })
+  )
+
+  // Archive / restore. Archiving is the storefront admin's "delete": it is a
+  // soft delete (sets archived_at), reversible via restore, and never removes a
+  // row that commerce records may still reference. The module functions throw a
+  // 404 when the id is unknown.
+  app.post(
+    '/admin/brands/:id/archive',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({ brand: await setBrandArchived(pool, request.params.id, true) })
+  )
+  app.post(
+    '/admin/brands/:id/restore',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({ brand: await setBrandArchived(pool, request.params.id, false) })
+  )
+
+  app.post(
+    '/admin/collections/:id/archive',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({
+      collection: await setCollectionArchived(pool, request.params.id, true),
+    })
+  )
+  app.post(
+    '/admin/collections/:id/restore',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({
+      collection: await setCollectionArchived(pool, request.params.id, false),
+    })
+  )
+
+  app.post(
+    '/admin/products/:id/archive',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({
+      product: await setProductArchived(pool, request.params.id, true),
+    })
+  )
+  app.post(
+    '/admin/products/:id/restore',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({
+      product: await setProductArchived(pool, request.params.id, false),
+    })
+  )
+
+  app.post(
+    '/admin/colourways/:id/archive',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({
+      colourway: await setColourwayArchived(pool, request.params.id, true),
+    })
+  )
+  app.post(
+    '/admin/colourways/:id/restore',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({
+      colourway: await setColourwayArchived(pool, request.params.id, false),
     })
   )
 }

@@ -65,6 +65,7 @@ const ORDER_COLUMNS = `o.id,
         o.shipping_address,
         o.contact_phone,
         o.notes,
+        o.archived_at,
         o.created_at`
 
 // Load every line for a set of orders (one query, no N+1) with a snapshot of the
@@ -139,6 +140,7 @@ const toOrder = (row, lineRows) => {
     shipping_address: row.shipping_address ?? null,
     contact_phone: row.contact_phone ?? null,
     notes: row.notes,
+    archived_at: row.archived_at ?? null,
     created_at: row.created_at,
     reservation_state: state,
     lines: (lineRows ?? []).map((line) => toLine(line, state)),
@@ -153,13 +155,20 @@ const toOrder = (row, lineRows) => {
  * @param {{ status?: string }} [filter]
  * @returns {Promise<object[]>}
  */
-export const listAdminOrders = async (pool, { status } = {}) => {
+export const listAdminOrders = async (
+  pool,
+  { status, includeArchived = false } = {}
+) => {
   const params = []
-  let where = ''
+  const clauses = []
   if (status) {
     params.push(status)
-    where = `WHERE o.status = $${params.length}`
+    clauses.push(`o.status = $${params.length}`)
   }
+  if (!includeArchived) {
+    clauses.push('o.archived_at IS NULL')
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   const { rows } = await pool.query(
     `SELECT ${ORDER_COLUMNS}
        FROM orders o
@@ -318,4 +327,27 @@ export const declineOrder = (pool, id) =>
       )
     }
     await client.query(`UPDATE orders SET status = 'declined' WHERE id = $1`, [id])
+  })
+
+/**
+ * Archive (soft-delete) or restore an order. Archiving only removes it from the
+ * default queue; the record and its lines are kept. A reserving order is only
+ * archivable once it has reached a terminal state (shipped or declined) — while
+ * it is still requested/confirmed/paid it holds a live reservation, and hiding
+ * it would strand that reserved stock forever. Decline (or ship) it first.
+ * Restore has no such rule.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {boolean} archived
+ */
+export const setOrderArchived = (pool, id, archived) =>
+  withOrderTxn(pool, id, async (client, order) => {
+    if (archived && reserves(order.kind)) {
+      requireStatus(order, ['shipped', 'declined'], 'archive')
+    }
+    await client.query(
+      `UPDATE orders SET archived_at = ${archived ? 'now()' : 'NULL'} WHERE id = $1`,
+      [id]
+    )
   })

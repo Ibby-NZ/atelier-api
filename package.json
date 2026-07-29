@@ -11,8 +11,11 @@
     "migrate:down": "node-pg-migrate --migrations-dir migrations --migration-file-language js down",
     "migrate:create": "node-pg-migrate --migrations-dir migrations --migration-file-language js create",
     "seed": "node src/seed/run.js",
+    "seed:staff": "node src/seed/seed-staff.js",
     "convert:pricing": "python3 scripts/convert-price-lists.py",
     "import:pricing": "node src/seed/import-price-lists.js",
+    "convert:legacy": "python3 scripts/convert-d365-exports.py",
+    "import:legacy": "node src/seed/import-legacy.js",
     "lint": "eslint .",
     "test": "vitest run"
   },
@@ -35,6 +38,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
+    "agentation": "^3.0.2",
     "eslint": "^9.17.0",
     "globals": "^15.14.0",
     "vitest": "^2.1.9"

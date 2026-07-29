@@ -87,3 +87,33 @@ export const notifyOrderTransition = async (mailer, db, order) => {
     },
   })
 }
+
+/**
+ * A new storefront contact enquiry: acknowledge to the sender and alert the back
+ * office. No-op when mailer is null; never throws (mailer.send swallows errors),
+ * so a mail problem can't fail the enquiry submission.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ name: string, email: string, phone?: string|null, subject?: string|null, message: string }} enquiry
+ */
+export const notifyContactReceived = async (mailer, enquiry) => {
+  if (!mailer) {
+    return
+  }
+  await mailer.send({
+    template: 'contact_received',
+    to: enquiry.email,
+    data: { name: enquiry.name },
+  })
+  await mailer.send({
+    template: 'backoffice_new_contact',
+    to: mailer.backofficeEmail,
+    data: {
+      name: enquiry.name,
+      email: enquiry.email,
+      phone: enquiry.phone ?? null,
+      subject: enquiry.subject ?? null,
+      message: enquiry.message,
+    },
+  })
+}

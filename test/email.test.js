@@ -34,7 +34,7 @@ const buildMailer = (transport = captureTransport()) => ({
 })
 
 describe('email templates', () => {
-  it('exposes the six lifecycle templates', () => {
+  it('exposes the lifecycle + contact templates', () => {
     expect(TEMPLATE_NAMES).toEqual(
       expect.arrayContaining([
         'request_received',
@@ -43,9 +43,11 @@ describe('email templates', () => {
         'order_confirmed',
         'payment_received',
         'shipped',
+        'contact_received',
+        'backoffice_new_contact',
       ])
     )
-    expect(TEMPLATE_NAMES).toHaveLength(6)
+    expect(TEMPLATE_NAMES).toHaveLength(8)
   })
 
   it('request_received names the order and promises contact within 24 hours', () => {

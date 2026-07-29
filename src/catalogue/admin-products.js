@@ -46,6 +46,7 @@ const PRODUCT_COLUMNS = `p.id,
         p.currency,
         p.show_on_website,
         p.hi_res_asset_url,
+        p.archived_at,
         p.created_at,
         b.name AS brand_name,
         b.slug AS brand_slug,
@@ -101,6 +102,7 @@ const toProduct = (row, extra) =>
     currency: row.currency,
     show_on_website: row.show_on_website,
     hi_res_asset_url: row.hi_res_asset_url,
+    archived_at: row.archived_at ?? null,
     created_at: row.created_at,
     ...extra,
   })
@@ -115,6 +117,7 @@ const toColourway = (row) =>
     sku: row.sku,
     hex_tones: row.hex_tones ?? null,
     image_url: row.image_url ?? null,
+    archived_at: row.archived_at ?? null,
     inventory:
       row.unit === null || row.unit === undefined
         ? null
@@ -126,7 +129,7 @@ const toColourway = (row) =>
   })
 
 const COLOURWAY_SELECT = `SELECT c.id, c.product_id, c.name, c.sku, c.hex_tones, c.image_url,
-              i.qty_available, i.qty_reserved, i.unit
+              c.archived_at, i.qty_available, i.qty_reserved, i.unit
          FROM colourways c
          LEFT JOIN inventory i ON i.colourway_id = c.id`
 
@@ -143,12 +146,24 @@ const serialiseTones = (tones) => (tones ? JSON.stringify(tones) : null)
  * @param {{ brandId?: number }} [filter]
  * @returns {Promise<object[]>}
  */
-export const listAdminProducts = async (pool, { brandId } = {}) => {
-  const params = brandId ? [brandId] : []
-  const where = brandId ? 'WHERE p.brand_id = $1' : ''
+export const listAdminProducts = async (
+  pool,
+  { brandId, includeArchived = false } = {}
+) => {
+  const clauses = []
+  const params = []
+  if (brandId) {
+    params.push(brandId)
+    clauses.push(`p.brand_id = $${params.length}`)
+  }
+  if (!includeArchived) {
+    clauses.push('p.archived_at IS NULL')
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   const { rows } = await pool.query(
     `SELECT ${PRODUCT_COLUMNS},
-            (SELECT COUNT(*) FROM colourways c WHERE c.product_id = p.id)::int
+            (SELECT COUNT(*) FROM colourways c
+              WHERE c.product_id = p.id AND c.archived_at IS NULL)::int
               AS colourway_count
        ${PRODUCT_FROM}
        ${where}
@@ -386,6 +401,54 @@ export const updateColourway = async (pool, id, input) => {
     }
   } catch (error) {
     return rethrowConflict(error)
+  }
+  return getAdminColourway(pool, id)
+}
+
+/**
+ * Archive (soft-delete) or restore a product. Archiving also unpublishes it
+ * (`show_on_website = false`) so it leaves the public catalogue immediately;
+ * restore clears the archive flag but leaves it unpublished, so staff choose
+ * when it goes back on the website. Inventory and any order lines are untouched.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {boolean} archived
+ * @returns {Promise<object>}
+ */
+export const setProductArchived = async (pool, id, archived) => {
+  const extra = archived ? ', show_on_website = false' : ''
+  const { rows } = await pool.query(
+    `UPDATE products SET archived_at = ${archived ? 'now()' : 'NULL'}${extra}
+      WHERE id = $1
+      RETURNING id`,
+    [id]
+  )
+  if (rows.length === 0) {
+    throw httpError(404, `Product ${id} not found.`)
+  }
+  return getAdminProduct(pool, id)
+}
+
+/**
+ * Archive or restore a colourway. An archived colourway drops out of the public
+ * product page and the merchandising rollup; its inventory row and any order
+ * lines survive (order_lines reference colourway_id with ON DELETE RESTRICT).
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {boolean} archived
+ * @returns {Promise<object>}
+ */
+export const setColourwayArchived = async (pool, id, archived) => {
+  const { rows } = await pool.query(
+    `UPDATE colourways SET archived_at = ${archived ? 'now()' : 'NULL'}
+      WHERE id = $1
+      RETURNING id`,
+    [id]
+  )
+  if (rows.length === 0) {
+    throw httpError(404, `Colourway ${id} not found.`)
   }
   return getAdminColourway(pool, id)
 }

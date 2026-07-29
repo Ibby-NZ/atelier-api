@@ -245,9 +245,12 @@ describe('admin panel', () => {
 
   it('never sends password_hash to the panel', async () => {
     const cookie = await authenticated()
+    // perPage large enough that this test's staff row is on the page regardless
+    // of how many other accounts the dev DB holds (e.g. seeded staff) — the
+    // point is to prove the redaction over a real, non-empty list.
     const response = await app.inject({
       method: 'GET',
-      url: '/panel/api/resources/users/actions/list',
+      url: '/panel/api/resources/users/actions/list?perPage=500',
       headers: { cookie },
     })
     expect(response.statusCode).toBe(200)

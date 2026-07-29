@@ -82,7 +82,7 @@ const COLOURWAY_ROLLUP = `
       ) AS swatches
     FROM colourways c
     LEFT JOIN inventory i ON i.colourway_id = c.id
-    WHERE c.product_id = p.id
+    WHERE c.product_id = p.id AND c.archived_at IS NULL
   ) cw ON true
 `
 
@@ -140,7 +140,14 @@ const toPublicProduct = (row, includeTrade) => {
 // `brand` matches on brand slug, `q` is a free-text search across the product,
 // its house and its colourways; every other key maps through FILTER_COLUMNS.
 const buildFilters = (filters) => {
-  const clauses = ['p.show_on_website = true']
+  // Archived products/brands are removed from the public catalogue (a soft
+  // delete unpublishes the product too, but filter both so an archived brand
+  // hides all of its products even if one is still flagged visible).
+  const clauses = [
+    'p.show_on_website = true',
+    'p.archived_at IS NULL',
+    'b.archived_at IS NULL',
+  ]
   const params = []
 
   if (filters.brand) {
@@ -168,6 +175,7 @@ const buildFilters = (filters) => {
       OR EXISTS (
         SELECT 1 FROM colourways c2
         WHERE c2.product_id = p.id
+          AND c2.archived_at IS NULL
           AND (c2.name ILIKE $${i} ESCAPE '\\' OR c2.sku ILIKE $${i} ESCAPE '\\')
       )
     )`)

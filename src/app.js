@@ -24,6 +24,7 @@ export const buildApp = ({
   stripe = null,
   stripeWebhookSecret = null,
   storeBaseUrl = 'http://localhost:4321',
+  crmBaseUrl = 'http://localhost:5273',
   mailer = null,
   logLevel = 'info',
   logger = true,
@@ -50,22 +51,48 @@ export const buildApp = ({
   app.decorateRequest('user', null)
   app.decorate('guards', createGuards(pool))
 
-  // Storefront islands fetch cross-origin (browser :4321 → api :3001) with the
-  // session cookie, so allow that exact origin and credentials. Same-site across
-  // ports means the SameSite=Lax session cookie still flows.
+  // Two browser apps fetch cross-origin with the session cookie: the storefront
+  // islands (:4321 → api :3001) and the back-office CRM (:5273 → api :3001).
+  // Both are separate origins, so both must be allowed by name and with
+  // credentials. Same-site across ports means the SameSite=Lax session cookie
+  // still flows. Omitting the CRM origin does not degrade it gracefully — the
+  // browser blocks every response, so the CRM cannot even sign in.
   //
-  // The AdminJS panel is excluded: it is same-origin by construction, and a
-  // credentialed CORS allowance would let any script on the storefront origin
-  // read and drive it with a logged-in staff cookie. A delegator is required
-  // because @fastify/cors hoists to the root instance (fastify-plugin), so
-  // encapsulating it in a child scope would not keep it off the panel.
+  // The allowance is an exact-match allowlist and the request's own origin is
+  // echoed back only when it is on it. `origin: true` (reflect whatever asked)
+  // plus `credentials: true` would let ANY site drive the API with a logged-in
+  // staff cookie, so the list is closed by construction. A request with no
+  // Origin (curl, same-origin navigation, the webhook) is unaffected.
+  //
+  // The AdminJS panel is excluded entirely: it is same-origin by construction,
+  // and a credentialed CORS allowance would let any script on either app's
+  // origin read and drive it with a logged-in staff cookie. A delegator is
+  // required because @fastify/cors hoists to the root instance (fastify-plugin),
+  // so encapsulating it in a child scope would not keep it off the panel — and
+  // it also covers the CORS-registered wildcard `OPTIONS *` route, which a
+  // route-membership check could not.
+  //
+  // `methods` MUST be spelled out. @fastify/cors defaults to GET,HEAD,POST, so a
+  // PATCH or PUT is refused at the preflight and NEVER REACHES THIS SERVER — the
+  // browser drops it. Every admin edit is a PATCH (products, brands, colourways,
+  // inventory, price-list items, users, order lines) and shipping rates are a
+  // PUT, so omitting them silently breaks every write in both browser apps while
+  // curl and the test suite (which do not preflight) keep passing. Guarded by
+  // test/cors.test.js.
+  const allowedOrigins = [storeBaseUrl, crmBaseUrl].filter(Boolean)
+  const allowedMethods = ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS']
   app.register(fastifyCors, {
     delegator: (request, callback) => {
       if (isAdminPanelPath(request.url)) {
         callback(null, { origin: false })
         return
       }
-      callback(null, { origin: storeBaseUrl, credentials: true })
+      const origin = request.headers.origin
+      callback(null, {
+        origin: origin && allowedOrigins.includes(origin) ? origin : storeBaseUrl,
+        credentials: true,
+        methods: allowedMethods,
+      })
     },
   })
 

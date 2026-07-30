@@ -33,6 +33,7 @@ const start = async () => {
     stripe,
     stripeWebhookSecret: config.stripeWebhookSecret,
     storeBaseUrl: config.storeBaseUrl,
+    crmBaseUrl: config.crmBaseUrl,
     mailer,
     logLevel: config.logLevel,
     trustProxy: config.trustProxy,

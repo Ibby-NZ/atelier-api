@@ -4,6 +4,9 @@ const DEFAULT_PORT = 3001
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_LOG_LEVEL = 'info'
 const DEFAULT_STORE_BASE_URL = 'http://localhost:4321'
+// The CRM is a separate Vite app on its own port, so it is a distinct CORS
+// origin from the storefront. Both must be allowed by name — see app.js.
+const DEFAULT_CRM_BASE_URL = 'http://localhost:5273'
 const DEFAULT_SMTP_PORT = 587
 const DEFAULT_EMAIL_FROM = 'Atelier Textiles <no-reply@ateliertextiles.example>'
 const DEFAULT_BACKOFFICE_EMAIL = 'orders@ateliertextiles.example'
@@ -60,6 +63,10 @@ export const loadConfig = (env = process.env) => {
     // the signature on POST /webhooks/stripe; from the environment only.
     stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET ?? null,
     storeBaseUrl: env.STORE_BASE_URL ?? DEFAULT_STORE_BASE_URL,
+    // The back-office CRM origin. It is a second browser app calling the same
+    // API with the session cookie, so it needs its own CORS allowance; without
+    // it every CRM screen is blocked and the CRM cannot even sign in.
+    crmBaseUrl: env.CRM_BASE_URL ?? DEFAULT_CRM_BASE_URL,
     // Email (US-015). With no SMTP_HOST the transport captures mail instead of
     // sending it (dev/test). from/backoffice have sensible non-secret defaults.
     smtpHost: env.SMTP_HOST ?? null,

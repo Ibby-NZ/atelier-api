@@ -62,6 +62,26 @@ const accountRecord = (overrides = {}) => ({
   ...overrides,
 })
 
+// The reserve entity is the real source of reserved quantity — the `Reserve`
+// column on the stock item is a free-text staff note. `product_code` arrives from a
+// related-entity lookup column whose logical name carries a relationship GUID
+// prefix, so the converter matches it on the suffix.
+const reserveRecord = (overrides = {}) => ({
+  guid: GUID_A,
+  name: 'RS0612',
+  reserve_number: 'RS0612',
+  range_name: 'MADEAUX',
+  customer: 'Legacy Test Account Ltd',
+  product: 'ELLA STRIPE',
+  product_code: 'LEG-TEST-001',
+  quantity: 53.5,
+  reserved_until: '2026-08-15 00:00:00',
+  status_reason: 'Active',
+  source_file: 'Active Reserves TEST.xlsx',
+  raw: { fulmar_quantity: '53.5' },
+  ...overrides,
+})
+
 const cleanup = async (pool) => {
   for (const { table } of Object.values(LEGACY_TABLES)) {
     await pool.query(`DELETE FROM ${table} WHERE guid = ANY($1::uuid[])`, [FIXTURE_GUIDS])
@@ -153,6 +173,41 @@ describe('legacy D365 staging import', () => {
       /invalid guid/
     )
     expect(() => validateLegacyRecords('nope', [])).toThrow(/unknown legacy entity/)
+  })
+
+  it('stores reserved quantity as a number, unlike the stock-item Reserve note', async () => {
+    await importLegacyEntity(pool, 'reserves', [reserveRecord()])
+    const { rows } = await pool.query(
+      'SELECT quantity, reserved_until, product_code FROM legacy_reserves WHERE guid = $1',
+      [GUID_A]
+    )
+    expect(Number(rows[0].quantity)).toBe(53.5)
+    expect(rows[0].product_code).toBe('LEG-TEST-001')
+    expect(rows[0].reserved_until).toBeInstanceOf(Date)
+  })
+
+  it('links a sales invoice to both its sales order and its Xero invoice', async () => {
+    await importLegacyEntity(pool, 'sales_invoices', [
+      {
+        guid: GUID_B,
+        number: 'INV-TEST-1',
+        customer: 'Legacy Test Account Ltd',
+        sales_order: 'SO-07947',
+        xero_invoice_id: 'xero-abc-123',
+        pricing_type: 'Trade',
+        sales_invoice_discount_pct: 8,
+        total_ex_gst: 1000,
+        source_file: 'Active Sales Invoices TEST.xlsx',
+        raw: { fulmxero_title: 'INV-TEST-1' },
+      },
+    ])
+    const { rows } = await pool.query(
+      'SELECT sales_order, xero_invoice_id, sales_invoice_discount_pct FROM legacy_sales_invoices WHERE guid = $1',
+      [GUID_B]
+    )
+    expect(rows[0].sales_order).toBe('SO-07947')
+    expect(rows[0].xero_invoice_id).toBe('xero-abc-123')
+    expect(Number(rows[0].sales_invoice_discount_pct)).toBe(8)
   })
 
   it('leaves the live commerce and catalogue tables untouched', async () => {

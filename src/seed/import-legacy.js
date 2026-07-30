@@ -16,9 +16,21 @@ import { LEGACY_TABLES, importLegacyEntity } from './legacy-import.js'
 
 const DEFAULT_DIR = fileURLToPath(new URL('../../incoming/data-exports/normalized/', import.meta.url))
 
-// Product prices and stock items are the catalogue spine; accounts and orders
-// reference them conceptually, so import in a stable, dependency-ish order.
-const ORDER = ['product_prices', 'stock_items', 'accounts', 'sales_orders']
+// Product prices and stock items are the catalogue spine; everything else
+// references them conceptually, so import in a stable, dependency-ish order.
+const ORDER = [
+  'product_prices',
+  'stock_items',
+  'item_locations',
+  'accounts',
+  'contacts',
+  'sales_orders',
+  'sales_invoices',
+  'purchase_orders',
+  'purchase_invoices',
+  'reserves',
+  'cuttings',
+]
 
 const main = async () => {
   let config

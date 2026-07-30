@@ -42,15 +42,31 @@ IGNORED = {
     'checksumLogicalName', 'createdonbehalfby', 'modifiedonbehalfby',
     'owningbusinessunit', 'overriddencreatedon',
 }
-# Supplier bank details. Dropped here so they never reach the database, the
-# normalised JSON, or a backup of either.
-SENSITIVE_PREFIXES = ('fulmxero_bankaccount',)
+# Dropped here so they never reach the database, the normalised JSON, or a backup
+# of either: supplier bank details, and the D365 portal identity columns on
+# `contact` (which include adx_identity_passwordhash and the security stamp).
+SENSITIVE_PREFIXES = ('fulmxero_bankaccount', 'adx_identity_')
 
 TEXT, NUM, DATE, DATETIME, BOOL = 'text', 'num', 'date', 'datetime', 'bool'
 
 
 def col(name, kind=TEXT):
     return (name, kind)
+
+
+# Columns pulled from a RELATED entity export as `<relationship-guid>.<logical>`,
+# e.g. "5c5e1693-….atelier_code" for "Code (Product) (Product Prices)". The GUID is
+# the relationship id and would change if the view were rebuilt, so these are
+# matched on the suffix instead: a mapping key of "*.atelier_code" matches any
+# prefix. Bare logical names always win over a wildcard.
+WILDCARD = '*.'
+
+
+def resolve(logical, mapping):
+    if logical in mapping:
+        return mapping[logical]
+    _prefix, dot, suffix = logical.partition('.')
+    return mapping.get(WILDCARD + suffix) if dot else None
 
 
 # entity logical name -> (output name, {d365 logical name: (staging column, kind)})
@@ -274,6 +290,247 @@ ENTITIES = {
         'modifiedby': col('modified_by'),
         'modifiedon': col('modified_on', DATETIME),
     }),
+    # ---- 30 Jul pull ------------------------------------------------------
+    'contact': ('contacts', {
+        'contactid': col('guid'),
+        'fullname': col('full_name'),
+        'firstname': col('first_name'),
+        'lastname': col('last_name'),
+        'middlename': col('middle_name'),
+        'salutation': col('salutation'),
+        'suffix': col('suffix'),
+        'nickname': col('nickname'),
+        'jobtitle': col('job_title'),
+        'department': col('department'),
+        'parentcustomerid': col('company_name'),
+        'accountrolecode': col('role'),
+        'customertypecode': col('relationship_type'),
+        'territorycode': col('territory'),
+        'emailaddress1': col('email'),
+        'emailaddress2': col('email2'),
+        'emailaddress3': col('email3'),
+        'telephone1': col('business_phone'),
+        'business2': col('business_phone2'),
+        'telephone2': col('home_phone'),
+        'telephone3': col('telephone3'),
+        'mobilephone': col('mobile_phone'),
+        'fax': col('fax'),
+        'websiteurl': col('website'),
+        'address1_composite': col('address1_composite'),
+        'address1_line1': col('address1_street1'),
+        'address1_line2': col('address1_street2'),
+        'address1_city': col('address1_city'),
+        'address1_stateorprovince': col('address1_state'),
+        'address1_postalcode': col('address1_postal_code'),
+        'address1_country': col('address1_country'),
+        'address1_telephone1': col('address1_phone'),
+        'address2_composite': col('address2_composite'),
+        'address3_composite': col('address3_composite'),
+        'shippingmethodcode': col('shipping_method'),
+        'paymenttermscode': col('payment_terms'),
+        'defaultpricelevelid': col('price_list'),
+        'transactioncurrencyid': col('currency'),
+        'exchangerate': col('exchange_rate', NUM),
+        'creditlimit': col('credit_limit', NUM),
+        'creditonhold': col('credit_hold', BOOL),
+        'isbackofficecustomer': col('back_office_customer', BOOL),
+        'leadsourcecode': col('lead_source'),
+        'preferredcontactmethodcode': col('preferred_contact_method'),
+        'atelier_primarycontact': col('is_primary_contact', BOOL),
+        'fulmxero_includeinemails': col('include_in_emails', BOOL),
+        'fulmxero_xerocontactnumber': col('xero_contact_number'),
+        'fulmxero_xerocontactpersonid': col('xero_contact_person_id'),
+        'fulmar_oldestsampledueback': col('oldest_sample_due_back', DATETIME),
+        'lastusedincampaign': col('last_date_included_in_campaign', DATETIME),
+        'marketingonly': col('marketing_only', BOOL),
+        'donotsendmm': col('do_not_send_marketing_materials', BOOL),
+        'msdyn_gdproptout': col('gdpr_optout', BOOL),
+        'donotemail': col('do_not_email', BOOL),
+        'donotbulkemail': col('do_not_bulk_email', BOOL),
+        'donotphone': col('do_not_phone', BOOL),
+        'donotfax': col('do_not_fax', BOOL),
+        'donotpostalmail': col('do_not_postal_mail', BOOL),
+        'donotbulkpostalmail': col('do_not_bulk_postal_mail', BOOL),
+        'followemail': col('follow_email_activity', BOOL),
+        'description': col('description'),
+        'ownerid': col('owner'),
+        'statecode': col('status'),
+        'statuscode': col('status_reason'),
+        'createdby': col('created_by'),
+        'createdon': col('created_on', DATETIME),
+        'modifiedby': col('modified_by'),
+        'modifiedon': col('modified_on', DATETIME),
+    }),
+    # The real source of reserved quantity: a first-class entity with a numeric
+    # qty and an expiry, NOT the free-text `Reserve` note on the stock item.
+    'fulmar_reserve': ('reserves', {
+        'fulmar_reserveid': col('guid'),
+        'fulmar_name': col('name'),
+        'fulmar_reservenumber': col('reserve_number'),
+        'fulmar_range': col('range_name'),
+        'fulmar_customer': col('customer'),
+        'fulmar_customercontact': col('customer_contact'),
+        'fulmar_product': col('product'),
+        WILDCARD + 'atelier_code': col('product_code'),
+        WILDCARD + 'ownerid': col('customer_owner'),
+        'fulmar_colourcode': col('colour_code'),
+        'fulmar_supplier': col('supplier'),
+        'fulmar_quantity': col('quantity', NUM),
+        'fulmar_reserveduntil': col('reserved_until', DATETIME),
+        'fulmar_defaultreserveduntildate': col('default_reserved_until', DATETIME),
+        'fulmar_cfa': col('cfa'),
+        'fulmar_comments': col('comments'),
+        'fulmar_orderstockcheckdetails': col('order_stock_check_details'),
+        'ownerid': col('owner'),
+        'statecode': col('status'),
+        'statuscode': col('status_reason'),
+        'createdby': col('created_by'),
+        'createdon': col('created_on', DATETIME),
+        'modifiedby': col('modified_by'),
+        'modifiedon': col('modified_on', DATETIME),
+    }),
+    'fulmar_cutting': ('cuttings', {
+        'fulmar_cuttingid': col('guid'),
+        'fulmar_name': col('name'),
+        'fulmar_range': col('range_name'),
+        'fulmar_customer': col('customer'),
+        'fulmar_customercontact': col('customer_contact'),
+        'fulmar_product': col('product'),
+        WILDCARD + 'atelier_code': col('product_code'),
+        WILDCARD + 'ownerid': col('customer_owner'),
+        'fulmar_colourcode': col('colour_code'),
+        'fulmar_supplier': col('supplier'),
+        'fulmar_quantity': col('quantity', NUM),
+        'fulmar_comments': col('comments'),
+        'fulmar_orderstockcheckdetails': col('order_stock_check_details'),
+        'ownerid': col('owner'),
+        'statecode': col('status'),
+        'statuscode': col('status_reason'),
+        'createdby': col('created_by'),
+        'createdon': col('created_on', DATETIME),
+        'modifiedby': col('modified_by'),
+        'modifiedon': col('modified_on', DATETIME),
+    }),
+    'fulmxero_itemlocation': ('item_locations', {
+        'fulmxero_itemlocationid': col('guid'),
+        'fulmxero_description': col('description'),
+        'fulmxero_itemid': col('item'),
+        'fulmxero_locationid': col('location'),
+        'fulmxero_openingunitsinstock': col('opening_units_in_stock', NUM),
+        'fulmxero_totalstockinhand': col('total_stock_on_hand', NUM),
+        'fulmxero_totalstockavailable': col('total_stock_available', NUM),
+        'fulmxero_totalitemadjustments': col('total_item_adjustments', NUM),
+        'fulmxero_totalpurchaseinvoices': col('total_purchase_invoices', NUM),
+        'fulmxero_totalpurchaseorders': col('total_purchase_orders', NUM),
+        'fulmxero_totalsalesinvoices': col('total_sales_invoices', NUM),
+        'fulmxero_totalsalesorders': col('total_sales_orders', NUM),
+        'ownerid': col('owner'),
+        'statecode': col('status'),
+        'statuscode': col('status_reason'),
+        'createdby': col('created_by'),
+        'createdon': col('created_on', DATETIME),
+        'modifiedby': col('modified_by'),
+        'modifiedon': col('modified_on', DATETIME),
+    }),
+    'fulmxero_purchaseorder': ('purchase_orders', {
+        'fulmxero_purchaseorderid': col('guid'),
+        'fulmxero_title': col('number'),
+        'fulmxero_vendorid': col('vendor'),
+        'fulmxero_vendorcontactid': col('vendor_contact'),
+        'fulmxero_date': col('order_date', DATETIME),
+        'fulmxero_deliverydate': col('pickup_date', DATETIME),
+        'fulmxero_reference': col('reference'),
+        'fulmxero_summary': col('summary'),
+        'fulmxero_attention': col('attention'),
+        'fulmxero_phone': col('phone'),
+        'fulmxero_locationid': col('location'),
+        # A13: the per-supplier default shipping agent, absent on the account.
+        'fulmxero_shippingagentid': col('shipping_agent'),
+        'fulmxero_poshippingcontactid': col('shipping_contact'),
+        'fulmxero_deliveryaddress': col('delivery_address'),
+        'fulmxero_delivryinstructions': col('delivery_instructions'),
+        'transactioncurrencyid': col('currency'),
+        'exchangerate': col('exchange_rate', NUM),
+        'fulmxero_totalexgst': col('total_ex_gst', NUM),
+        'fulmxero_totalgst': col('gst', NUM),
+        'fulmxero_totalinclgst': col('total_incl_gst', NUM),
+        'fulmxero_totalexgst_base': col('total_ex_gst_base', NUM),
+        'fulmxero_totalgst_base': col('gst_base', NUM),
+        'fulmxero_totalinclgst_base': col('total_incl_gst_base', NUM),
+        'fulmxero_lastsent': col('last_sent', DATETIME),
+        'ownerid': col('owner'),
+        'statecode': col('status'),
+        'statuscode': col('status_reason'),
+        'createdby': col('created_by'),
+        'createdon': col('created_on', DATETIME),
+        'modifiedby': col('modified_by'),
+        'modifiedon': col('modified_on', DATETIME),
+    }),
+    'fulmxero_purchaseinvoice': ('purchase_invoices', {
+        'fulmxero_purchaseinvoiceid': col('guid'),
+        'fulmxero_title': col('number'),
+        'fulmxero_vendorid': col('vendor'),
+        'fulmxero_date': col('invoice_date', DATETIME),
+        'fulmxero_duedate': col('due_date', DATETIME),
+        'fulmxero_reference': col('reference'),
+        'fulmxero_summary': col('summary'),
+        'fulmxero_shippingagentsinvoicenumber': col('shipping_agents_invoice_number'),
+        'transactioncurrencyid': col('currency'),
+        'exchangerate': col('exchange_rate', NUM),
+        'fulmxero_totalexgstrollup': col('total_ex_gst', NUM),
+        'fulmxero_totalgstrollup': col('gst', NUM),
+        'fulmxero_totalinclgstrollup': col('total_incl_gst', NUM),
+        'fulmxero_totalexgstrollup_base': col('total_ex_gst_base', NUM),
+        'fulmxero_totalgstrollup_base': col('gst_base', NUM),
+        'fulmxero_totalinclgstrollup_base': col('total_incl_gst_base', NUM),
+        'atelier_tempinvoicedate': col('temp_invoice_date', DATETIME),
+        'atelier_tempinvoiceduedate': col('temp_invoice_due_date', DATETIME),
+        'fulmxero_xeroinvoiceid': col('xero_invoice_id'),
+        'fulmxero_xerointerfaceerror': col('xero_interface_error'),
+        'ownerid': col('owner'),
+        'statecode': col('status'),
+        'statuscode': col('status_reason'),
+        'createdby': col('created_by'),
+        'createdon': col('created_on', DATETIME),
+        'modifiedby': col('modified_by'),
+        'modifiedon': col('modified_on', DATETIME),
+    }),
+    # A2/A4 spine: real invoiced sales history, each row linked to its sales order
+    # AND to the Xero invoice.
+    'fulmxero_salesinvoice': ('sales_invoices', {
+        'fulmxero_salesinvoiceid': col('guid'),
+        'fulmxero_title': col('number'),
+        'fulmxero_invoicesuffix': col('invoice_suffix'),
+        'fulmxero_customerid': col('customer'),
+        'fulmxero_customercontactid': col('customer_contact'),
+        'fulmxero_salesorderid': col('sales_order'),
+        'fulmxero_date': col('invoice_date', DATETIME),
+        'fulmxero_datedue': col('due_date', DATETIME),
+        'fulmxero_reference': col('reference'),
+        'fulmxero_summary': col('summary'),
+        'transactioncurrencyid': col('currency'),
+        'exchangerate': col('exchange_rate', NUM),
+        'fulmxero_totalexgstrollup': col('total_ex_gst', NUM),
+        'fulmxero_gstrollup': col('gst', NUM),
+        'fulmxero_totalinclgstrollup': col('total_incl_gst', NUM),
+        'fulmxero_totalexgstrollup_base': col('total_ex_gst_base', NUM),
+        'fulmxero_gstrollup_base': col('gst_base', NUM),
+        'fulmxero_totalinclgstrollup_base': col('total_incl_gst_base', NUM),
+        'fulmxero_pricingtype': col('pricing_type'),
+        'fulmxero_salesinvoicediscount': col('sales_invoice_discount_pct', NUM),
+        'atelier_tempinvoicedate': col('temp_invoice_date', DATETIME),
+        'atelier_tempinvoiceduedate': col('temp_invoice_due_date', DATETIME),
+        'fulmxero_xeroinvoiceid': col('xero_invoice_id'),
+        'fulmxero_xerointerfaceerror': col('xero_interface_error'),
+        'fulmxero_lastsent': col('last_sent', DATETIME),
+        'ownerid': col('owner'),
+        'statecode': col('status'),
+        'statuscode': col('status_reason'),
+        'createdby': col('created_by'),
+        'createdon': col('created_on', DATETIME),
+        'modifiedby': col('modified_by'),
+        'modifiedon': col('modified_on', DATETIME),
+    }),
 }
 
 # Filenames carry the export timestamp: "Customers 29-07-2026 9-50-28 AM.xlsx".
@@ -389,7 +646,8 @@ def convert_file(path, errors):
         if entity not in ENTITIES:
             raise ValueError(f'unknown D365 entity "{entity}" — add it to ENTITIES')
         out_name, mapping = ENTITIES[entity]
-        missing = [n for n in mapping if n not in logical_names]
+        matched = {key for name in logical_names for key in (name, WILDCARD + name.partition('.')[2])}
+        missing = [n for n in mapping if n not in matched]
         if missing:
             raise ValueError(f'export is missing required column(s): {", ".join(sorted(missing))}')
         stamp = exported_at(path.stem)
@@ -406,7 +664,7 @@ def convert_file(path, errors):
                 if logical in IGNORED or logical.startswith(SENSITIVE_PREFIXES):
                     continue
                 raw[logical] = value
-                target = mapping.get(logical)
+                target = resolve(logical, mapping)
                 if not target:
                     continue
                 column, kind = target

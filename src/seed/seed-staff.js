@@ -16,9 +16,11 @@ import { createPool } from '../db.js'
 import { hashPassword } from '../auth/passwords.js'
 import { PUBLIC_USER_COLUMNS } from '../auth/user-columns.js'
 
-const TEMP_PASSWORD = process.env.STAFF_TEMP_PASSWORD ?? 'AtelierTemp2026!'
+// Exported for the test suite — the roster and password must keep mirroring
+// the CRM's Login screen (atelier-crm src/screens/Login.jsx).
+export const TEMP_PASSWORD = process.env.STAFF_TEMP_PASSWORD ?? 'AtelierTemp2026!'
 
-const STAFF = [
+export const STAFF = [
   { email: 'liz@ateliertextiles.co.nz', name: 'Liz', role: 'director' },
   { email: 'jenette@ateliertextiles.co.nz', name: 'Jenette', role: 'director' },
   { email: 'charlotte@ateliertextiles.co.nz', name: 'Charlotte', role: 'backoffice' },

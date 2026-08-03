@@ -127,7 +127,8 @@ describe('trade applications', () => {
         role: 'trade',
         trade_approved: false,
       })
-      expect(String(response.headers['set-cookie'])).toContain('atelier_session=')
+      // No session: the applicant cannot sign in until the form is approved.
+      expect(String(response.headers['set-cookie'] ?? '')).not.toContain('atelier_session=')
 
       const { rows } = await pool.query(
         'SELECT * FROM trade_applications WHERE user_id = $1',
@@ -144,6 +145,16 @@ describe('trade applications', () => {
         terms_accepted: true,
         signature: 'Alex Designer',
       })
+    })
+
+    it('refuses login with 403 while the application is pending', async () => {
+      const response = await inject('POST', '/auth/login', null, {
+        email: testEmail('applicant'),
+        password: PASSWORD,
+      })
+      expect(response.statusCode).toBe(403)
+      expect(response.json().error).toMatch(/awaiting review/i)
+      expect(String(response.headers['set-cookie'] ?? '')).not.toContain('atelier_session=')
     })
 
     it('rejects a body without the application form with 400', async () => {
@@ -257,6 +268,15 @@ describe('trade applications', () => {
         .json()
         .applications.find((a) => a.user?.email === testEmail('applicant'))
       expect(application.user.trade_approved).toBe(true)
+    })
+
+    it('allows the applicant to sign in once approved', async () => {
+      const response = await inject('POST', '/auth/login', null, {
+        email: testEmail('applicant'),
+        password: PASSWORD,
+      })
+      expect(response.statusCode).toBe(200)
+      expect(String(response.headers['set-cookie'])).toContain('atelier_session=')
     })
   })
 

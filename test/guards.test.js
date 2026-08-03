@@ -45,6 +45,8 @@ describe('role guards and trade application', () => {
   let app
   const cookies = {}
 
+  // Trade applications no longer log the applicant in, so the cookie is only
+  // captured when register/login actually set one.
   const signUp = async (url, local) => {
     const response = await app.inject({
       method: 'POST',
@@ -60,8 +62,20 @@ describe('role guards and trade application', () => {
       },
     })
     expect(response.statusCode).toBe(201)
-    cookies[local] = sessionCookieFrom(response)
+    if (response.headers['set-cookie']) {
+      cookies[local] = sessionCookieFrom(response)
+    }
     return response.json().user
+  }
+
+  const logIn = async (local) => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/auth/login',
+      payload: { email: testEmail(local), password: PASSWORD },
+    })
+    expect(response.statusCode).toBe(200)
+    cookies[local] = sessionCookieFrom(response)
   }
 
   const getWithCookie = (url, local) =>
@@ -107,7 +121,13 @@ describe('role guards and trade application', () => {
     await app.ready()
 
     await signUp('/auth/register', 'customer')
+    // A pending application cannot sign in, so approve the trader before
+    // taking their session; individual tests flip the flag back as needed.
     await signUp('/auth/trade-application', 'trader')
+    await pool.query(`UPDATE users SET trade_approved = true WHERE email = $1`, [
+      testEmail('trader'),
+    ])
+    await logIn('trader')
     const backoffice = await signUp('/auth/register', 'backoffice')
     const director = await signUp('/auth/register', 'director')
     await pool.query(`UPDATE users SET role = 'backoffice' WHERE id = $1`, [
@@ -125,7 +145,7 @@ describe('role guards and trade application', () => {
   })
 
   describe('POST /auth/trade-application', () => {
-    it('creates an unapproved trade user and never returns the hash', async () => {
+    it('creates an unapproved trade user, without a session, and never returns the hash', async () => {
       const response = await app.inject({
         method: 'POST',
         url: '/auth/trade-application',
@@ -143,7 +163,8 @@ describe('role guards and trade application', () => {
         trade_approved: false,
       })
       expect(JSON.stringify(body)).not.toContain('hash')
-      expect(String(response.headers['set-cookie'])).toContain('atelier_session=')
+      // No cookie: the applicant cannot sign in until approved.
+      expect(String(response.headers['set-cookie'] ?? '')).not.toContain('atelier_session=')
     })
 
     it('rejects a duplicate email with 409', async () => {
@@ -220,19 +241,56 @@ describe('role guards and trade application', () => {
       expect(response.statusCode).toBe(403)
     })
 
-    it('blocks an unapproved trade user (no trade capability)', async () => {
-      const response = await getWithCookie('/test/trade-only', 'trader')
-      expect(response.statusCode).toBe(403)
-    })
+    it('kills the session entirely while approval is revoked (401, not customer)', async () => {
+      await pool.query(
+        'UPDATE users SET trade_approved = false WHERE email = $1',
+        [testEmail('trader')]
+      )
+      // Not merely "no trade capability": a pending trade account cannot
+      // authenticate at all, so the held cookie resolves to nobody.
+      expect((await getWithCookie('/test/trade-only', 'trader')).statusCode).toBe(401)
+      expect((await getWithCookie('/test/auth-only', 'trader')).statusCode).toBe(401)
+      expect((await getWithCookie('/test/optional-user', 'trader')).json().role).toBeNull()
 
-    it('passes the same user once trade_approved is set', async () => {
       await pool.query(
         'UPDATE users SET trade_approved = true WHERE email = $1',
         [testEmail('trader')]
       )
+    })
+
+    it('passes an approved trade user', async () => {
       const response = await getWithCookie('/test/trade-only', 'trader')
       expect(response.statusCode).toBe(200)
       expect(response.json().capability).toBe('trade-pricing')
+    })
+
+    it('refuses login while the application is pending, with a clear 403', async () => {
+      await pool.query(
+        'UPDATE users SET trade_approved = false WHERE email = $1',
+        [testEmail('trader')]
+      )
+      const response = await app.inject({
+        method: 'POST',
+        url: '/auth/login',
+        payload: { email: testEmail('trader'), password: PASSWORD },
+      })
+      expect(response.statusCode).toBe(403)
+      expect(response.json().error).toMatch(/awaiting review/i)
+      expect(String(response.headers['set-cookie'] ?? '')).not.toContain('atelier_session=')
+
+      // The wrong password still gets the generic 401, so "pending" is never
+      // an enumeration signal.
+      const wrongPassword = await app.inject({
+        method: 'POST',
+        url: '/auth/login',
+        payload: { email: testEmail('trader'), password: 'not-the-password' },
+      })
+      expect(wrongPassword.statusCode).toBe(401)
+
+      await pool.query(
+        'UPDATE users SET trade_approved = true WHERE email = $1',
+        [testEmail('trader')]
+      )
     })
   })
 

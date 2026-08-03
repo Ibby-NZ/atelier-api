@@ -178,14 +178,36 @@ describe('GET /catalogue/products — merchandising fields', () => {
         },
       })
       expect(response.statusCode).toBe(201)
+      if (response.headers['set-cookie']) {
+        cookies[local] = sessionCookieFrom(response)
+      }
+    }
+    const logIn = async (local) => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/auth/login',
+        payload: { email: testEmail(local), password: PASSWORD },
+      })
+      expect(response.statusCode).toBe(200)
       cookies[local] = sessionCookieFrom(response)
     }
+    const setApproved = (local, approved) =>
+      pool.query('UPDATE users SET trade_approved = $1 WHERE email = $2', [
+        approved,
+        testEmail(local),
+      ])
+
     await signUp('/auth/register', 'customer')
+    // A trade application no longer starts a session and a pending account
+    // cannot log in, so sessions are taken while approved. 'pending' is then
+    // revoked — its held cookie must resolve to nobody (no trade pricing).
     await signUp('/auth/trade-application', 'trader')
+    await setApproved('trader', true)
+    await logIn('trader')
     await signUp('/auth/trade-application', 'pending')
-    await pool.query('UPDATE users SET trade_approved = true WHERE email = $1', [
-      testEmail('trader'),
-    ])
+    await setApproved('pending', true)
+    await logIn('pending')
+    await setApproved('pending', false)
   })
 
   afterAll(async () => {
@@ -372,7 +394,7 @@ describe('GET /catalogue/products — merchandising fields', () => {
       expect(bySlug(body, 'bolt')).not.toHaveProperty('trade_price_cents')
     })
 
-    it('is absent for an unapproved trade applicant', async () => {
+    it('is absent for an unapproved trade applicant (their session is dead)', async () => {
       const body = (await get(app, '/catalogue/products?limit=100', cookies.pending)).json()
       expect(bySlug(body, 'bolt')).not.toHaveProperty('trade_price_cents')
     })

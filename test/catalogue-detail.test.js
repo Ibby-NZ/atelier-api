@@ -103,8 +103,20 @@ describe('product detail and brand endpoints', () => {
       },
     })
     expect(response.statusCode).toBe(201)
-    cookies[local] = sessionCookieFrom(response)
+    if (response.headers['set-cookie']) {
+      cookies[local] = sessionCookieFrom(response)
+    }
     return response.json().user
+  }
+
+  const logIn = async (local) => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/auth/login',
+      payload: { email: testEmail(local), password: PASSWORD },
+    })
+    expect(response.statusCode).toBe(200)
+    cookies[local] = sessionCookieFrom(response)
   }
 
   beforeAll(async () => {
@@ -123,10 +135,13 @@ describe('product detail and brand endpoints', () => {
     await app.ready()
 
     await signUp('/auth/register', 'customer')
+    // A trade application no longer starts a session and a pending account
+    // cannot log in, so approve first, then take the session.
     await signUp('/auth/trade-application', 'trader')
     await pool.query('UPDATE users SET trade_approved = true WHERE email = $1', [
       testEmail('trader'),
     ])
+    await logIn('trader')
   })
 
   afterAll(async () => {
@@ -183,7 +198,8 @@ describe('product detail and brand endpoints', () => {
     })
 
     it('withholds trade_price_cents from an unapproved trade user', async () => {
-      // Same account, approval revoked: collapses to customer, no trade pricing.
+      // Same account, approval revoked: the session resolves to nobody now
+      // (a pending trade account cannot authenticate), so no trade pricing.
       await pool.query('UPDATE users SET trade_approved = false WHERE email = $1', [
         testEmail('trader'),
       ])

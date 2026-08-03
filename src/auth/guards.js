@@ -1,5 +1,5 @@
 import { readSessionUserId } from './session.js'
-import { PUBLIC_USER_COLUMNS, ACTIVE_USER_CONDITION } from './user-columns.js'
+import { PUBLIC_USER_COLUMNS, SESSION_USER_CONDITION } from './user-columns.js'
 
 // Which stored roles satisfy a given requireRole() check. Director is the
 // superset of backoffice; trade is only trade (approval handled separately).
@@ -21,12 +21,13 @@ export const createGuards = (pool) => {
     if (!userId) {
       return null
     }
-    // An archived account is treated exactly like a deleted one: the session
-    // resolves to no user, so requireAuth 401s and loadOptionalUser returns
-    // null (no trade pricing on the public catalogue).
+    // An archived account — or a trade application still pending approval — is
+    // treated exactly like a deleted one: the session resolves to no user, so
+    // requireAuth 401s and loadOptionalUser returns null (no trade pricing on
+    // the public catalogue).
     const { rows } = await pool.query(
       `SELECT ${PUBLIC_USER_COLUMNS} FROM users
-        WHERE id = $1 AND ${ACTIVE_USER_CONDITION}`,
+        WHERE id = $1 AND ${SESSION_USER_CONDITION}`,
       [userId]
     )
     return rows[0] ?? null

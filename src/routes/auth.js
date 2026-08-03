@@ -4,7 +4,7 @@ import {
   clearSessionCookie,
   readSessionUserId,
 } from '../auth/session.js'
-import { PUBLIC_USER_COLUMNS, ACTIVE_USER_CONDITION } from '../auth/user-columns.js'
+import { PUBLIC_USER_COLUMNS, SESSION_USER_CONDITION } from '../auth/user-columns.js'
 import {
   validateTradeApplication,
   submitTradeApplication,
@@ -163,7 +163,8 @@ export const authRoutes = async (app, { pool }) => {
           name,
           application,
         })
-        setSessionCookie(reply, user.id)
+        // Deliberately NO session cookie: the account cannot sign in until the
+        // back office approves the application (login answers 403 "pending").
         reply.code(201)
         return { user }
       } catch (error) {
@@ -205,6 +206,17 @@ export const authRoutes = async (app, { pool }) => {
         return { error: INVALID_CREDENTIALS }
       }
 
+      // A pending trade application cannot sign in at all. Checked only AFTER
+      // the argon2 verify succeeded, so the "pending" answer is never an
+      // enumeration signal — without the right password it's the generic 401.
+      if (row.role === 'trade' && !row.trade_approved) {
+        reply.code(403)
+        return {
+          error:
+            'Your trade application is awaiting review. You will be able to sign in once it has been approved.',
+        }
+      }
+
       const user = {
         id: row.id,
         email: row.email,
@@ -232,10 +244,11 @@ export const authRoutes = async (app, { pool }) => {
 
     const { rows } = await pool.query(
       `SELECT ${PUBLIC_USER_COLUMNS} FROM users
-        WHERE id = $1 AND ${ACTIVE_USER_CONDITION}`,
+        WHERE id = $1 AND ${SESSION_USER_CONDITION}`,
       [userId]
     )
-    // Deleted OR archived: either way the session is dead, so drop the cookie.
+    // Deleted, archived or a pending trade application: either way the session
+    // is dead, so drop the cookie.
     if (!rows[0]) {
       clearSessionCookie(reply)
       reply.code(401)

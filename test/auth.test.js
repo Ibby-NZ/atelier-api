@@ -182,6 +182,64 @@ describe('auth endpoints', () => {
     })
   })
 
+  // Archiving is the back office's "remove this account" action (US-023). It is
+  // a soft delete precisely because commerce records point at the row, so the
+  // row survives — which means access has to be denied explicitly. Without
+  // these, an archived account keeps its live session AND can log back in.
+  describe('archived accounts', () => {
+    it('refuses to log an archived account in, with the generic 401', async () => {
+      await app.inject({
+        method: 'POST',
+        url: '/auth/register',
+        payload: { email: testEmail('archived'), password: 'correct horse battery' },
+      })
+      await pool.query('UPDATE users SET archived_at = now() WHERE email = $1', [
+        testEmail('archived'),
+      ])
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/auth/login',
+        payload: { email: testEmail('archived'), password: 'correct horse battery' },
+      })
+      expect(response.statusCode).toBe(401)
+      // Same message as a wrong password: archiving must not be discoverable.
+      expect(response.json().error).toMatch(/Invalid email or password/)
+      expect(response.headers['set-cookie']).toBeUndefined()
+    })
+
+    it('rejects a session cookie minted before the account was archived', async () => {
+      const login = await app.inject({
+        method: 'POST',
+        url: '/auth/login',
+        payload: { email: testEmail('alice'), password: 'correct horse battery' },
+      })
+      const cookie = sessionCookieFrom(login)
+
+      await pool.query('UPDATE users SET archived_at = now() WHERE email = $1', [
+        testEmail('alice'),
+      ])
+      const me = await app.inject({
+        method: 'GET',
+        url: '/auth/me',
+        headers: { cookie },
+      })
+      expect(me.statusCode).toBe(401)
+      // Same treatment as a deleted user: drop the now-useless cookie.
+      expect(String(me.headers['set-cookie'])).toMatch(/Expires=|Max-Age=0/)
+
+      await pool.query('UPDATE users SET archived_at = NULL WHERE email = $1', [
+        testEmail('alice'),
+      ])
+      const restored = await app.inject({
+        method: 'GET',
+        url: '/auth/me',
+        headers: { cookie },
+      })
+      expect(restored.statusCode).toBe(200)
+    })
+  })
+
   describe('POST /auth/logout', () => {
     it('clears the session cookie', async () => {
       const login = await app.inject({

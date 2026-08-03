@@ -10,15 +10,19 @@ export const createAdminAuthenticate = (pool) => async (email, password) => {
     return null
   }
 
+  // archived_at is selected, not filtered in SQL, for the same timing reason as
+  // /auth/login: an archived account must still pay for a full argon2 verify.
   const { rows } = await pool.query(
-    'SELECT id, email, role, password_hash FROM users WHERE email = $1',
+    'SELECT id, email, role, password_hash, archived_at FROM users WHERE email = $1',
     [email.toLowerCase()]
   )
   const user = rows[0] ?? null
 
   const passwordHash = user ? user.password_hash : await getDummyHash()
   const passwordOk = await verifyPassword(passwordHash, password)
-  if (!passwordOk || !user || !PANEL_ROLES.has(user.role)) {
+  // An archived staff account is no longer staff: archiving from the CRM has to
+  // close the panel too, or "removed" leaves a working back door.
+  if (!passwordOk || !user || user.archived_at || !PANEL_ROLES.has(user.role)) {
     return null
   }
 

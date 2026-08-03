@@ -82,6 +82,12 @@ describe('role guards and trade application', () => {
       { preHandler: app.guards.requireRole('backoffice') },
       async () => ({ ok: true })
     )
+    // Mirrors the optional-auth pattern the public catalogue routes use to
+    // decide whether to include trade pricing.
+    app.get('/test/optional-user', async (request) => {
+      const user = await app.guards.loadOptionalUser(request)
+      return { role: user ? effectiveRole(user) : null }
+    })
     await app.ready()
 
     await signUp('/auth/register', 'customer')
@@ -203,6 +209,38 @@ describe('role guards and trade application', () => {
       const response = await getWithCookie('/test/trade-only', 'trader')
       expect(response.statusCode).toBe(200)
       expect(response.json().capability).toBe('trade-pricing')
+    })
+  })
+
+  // Runs last, and restores the account it archives: the trade suite above
+  // depends on 'trader' still being live.
+  describe('archived accounts lose every capability', () => {
+    const archive = (local, archived) =>
+      pool.query(
+        `UPDATE users SET archived_at = ${archived ? 'now()' : 'NULL'} WHERE email = $1`,
+        [testEmail(local)]
+      )
+
+    it('blocks requireAuth for an archived user holding a valid cookie', async () => {
+      await archive('customer', true)
+      const response = await getWithCookie('/test/auth-only', 'customer')
+      expect(response.statusCode).toBe(401)
+      await archive('customer', false)
+      expect((await getWithCookie('/test/auth-only', 'customer')).statusCode).toBe(200)
+    })
+
+    it('drops an archived approved-trade user back to anonymous on public routes', async () => {
+      const live = await getWithCookie('/test/optional-user', 'trader')
+      expect(live.json().role).toBe('trade')
+
+      await archive('trader', true)
+      const archived = await getWithCookie('/test/optional-user', 'trader')
+      // null, not 'customer': an archived account is nobody, so no trade pricing.
+      expect(archived.json().role).toBeNull()
+      expect((await getWithCookie('/test/trade-only', 'trader')).statusCode).toBe(401)
+
+      await archive('trader', false)
+      expect((await getWithCookie('/test/trade-only', 'trader')).statusCode).toBe(200)
     })
   })
 

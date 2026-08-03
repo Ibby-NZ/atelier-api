@@ -113,6 +113,30 @@ describe('admin panel', () => {
     expect(followUp.statusCode).toBe(302)
   })
 
+  it('rejects archived staff — removing an account removes panel access', async () => {
+    await pool.query('UPDATE users SET archived_at = now() WHERE email = $1', [
+      STAFF_EMAIL,
+    ])
+    let followUp
+    try {
+      const response = await postLogin(STAFF_EMAIL, PASSWORD)
+      const cookie = adminSessionCookieFrom(response)
+      followUp = await app.inject({
+        method: 'GET',
+        url: '/panel',
+        headers: cookie ? { cookie } : {},
+      })
+    } finally {
+      // Restore before asserting: every later test signs this account in, so a
+      // failed assertion here must not cascade into the rest of the file.
+      await pool.query('UPDATE users SET archived_at = NULL WHERE email = $1', [
+        STAFF_EMAIL,
+      ])
+    }
+    expect(followUp.statusCode).toBe(302)
+    expect(followUp.headers.location).toBe('/panel/login')
+  })
+
   it('logs backoffice staff in and serves the dashboard', async () => {
     const response = await postLogin(STAFF_EMAIL, PASSWORD)
     expect(response.statusCode).toBe(302)

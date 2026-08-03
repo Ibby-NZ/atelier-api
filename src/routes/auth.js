@@ -4,7 +4,7 @@ import {
   clearSessionCookie,
   readSessionUserId,
 } from '../auth/session.js'
-import { PUBLIC_USER_COLUMNS } from '../auth/user-columns.js'
+import { PUBLIC_USER_COLUMNS, ACTIVE_USER_CONDITION } from '../auth/user-columns.js'
 
 const LOGIN_RATE_LIMIT_MAX = 10
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
@@ -102,15 +102,22 @@ export const authRoutes = async (app, { pool }) => {
     },
     async (request, reply) => {
       const { email, password } = request.body
+      // archived_at is selected rather than filtered in SQL so an archived
+      // account still costs a full argon2 verify — filtering it out here would
+      // make "archived" measurably faster than "wrong password" and expose the
+      // account state, the same reason getDummyHash() exists for unknown emails.
       const { rows } = await pool.query(
-        `SELECT ${PUBLIC_USER_COLUMNS}, password_hash FROM users WHERE email = $1`,
+        `SELECT ${PUBLIC_USER_COLUMNS}, password_hash, archived_at
+           FROM users WHERE email = $1`,
         [email.toLowerCase()]
       )
       const row = rows[0]
 
       const passwordHash = row ? row.password_hash : await getDummyHash()
       const passwordOk = await verifyPassword(passwordHash, password)
-      if (!row || !passwordOk) {
+      // Archived accounts get the same generic 401: the back office removed
+      // them, and saying so would confirm the address is registered.
+      if (!row || !passwordOk || row.archived_at) {
         reply.code(401)
         return { error: INVALID_CREDENTIALS }
       }
@@ -141,9 +148,11 @@ export const authRoutes = async (app, { pool }) => {
     }
 
     const { rows } = await pool.query(
-      `SELECT ${PUBLIC_USER_COLUMNS} FROM users WHERE id = $1`,
+      `SELECT ${PUBLIC_USER_COLUMNS} FROM users
+        WHERE id = $1 AND ${ACTIVE_USER_CONDITION}`,
       [userId]
     )
+    // Deleted OR archived: either way the session is dead, so drop the cookie.
     if (!rows[0]) {
       clearSessionCookie(reply)
       reply.code(401)

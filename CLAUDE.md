@@ -59,6 +59,17 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - Supplier bank-account columns are dropped at conversion time and never reach the database. Normalised JSON lives under `incoming/` (gitignored), not `src/seed/data/`, because accounts and orders are client PII.
 - Timestamps are `timestamp` (no zone): the export writes Excel serials rendered in the exporting user's local time, so tagging them UTC would shift every date by the NZ offset.
 
+### Getting the exports onto a server (`push:legacy`)
+
+- **A deploy can never carry this data.** `incoming/` is gitignored (client PII), so `npm run import:legacy` on a server finds an empty directory and the CRM's Orders/Clients/Price-lists screens sit at `total: 0` — 200-with-no-rows, which reads as "broken app" rather than "no data". That is exactly what happened on staging: migrations applied, routes deployed, zero rows.
+- `npm run push:legacy` (`src/seed/push-legacy.js`) runs on the workstation that HAS the files and streams them to a remote API: `ATELIER_API_PASSWORD='…' npm run push:legacy -- --api https://api.example.com --email <director>`. Options `--dir`, `--batch` (default 1000), `--only <entity>`, `--dry-run`, `--cookie` (skip sign-in). Password comes from the environment by preference — argv is visible in shell history and `ps`.
+- The receiving end is `POST /admin/legacy/import/:entity` (`src/routes/admin-legacy-import.js`), **director-only** — backoffice may browse the staging tables but not bulk-write them. `:entity` uses the export/table names (`product_prices`, `sales_orders`), NOT the read routes' URL vocabulary (`prices`, `sales-orders`).
+- **Batching is what makes this work without server access.** The corpus is 125 MB of JSON but ~12 MB gzipped; at 1000 records a batch the largest request is **403 KB compressed** (accounts, the fattest rows), under nginx's 1 MB default `client_max_body_size`. So no nginx edit, no SSH, no panel — an HTTPS session cookie is the whole channel. Raising the batch size past ~2000 breaks that guarantee.
+- Body is gzip (`application/gzip`, parsed as a Buffer by a parser **encapsulated in this plugin** — same posture as the Stripe webhook; if it leaked to the root instance every JSON route would start receiving Buffers). A plain JSON array is accepted too, for a hand-made curl. `decodeImportPayload` (`src/legacy/import-payload.js`) caps the DECOMPRESSED size at 32 MB — a gzip bomb is cheap to build, so the compressed body limit alone is not a defence — and rejects batches over 5000 records.
+- Status codes: 400 malformed (bad gzip, not an array, empty, unknown entity), 413 oversized batch, 422 field-level (`validateLegacyRecords`: bad GUID, unknown column, duplicate GUID inside one batch), 403 backoffice, 401 anonymous.
+- Idempotent and resumable: each batch is one transaction upserting on the D365 GUID, so an interrupted push is re-run, not repaired. The client retries transport failures and 5xx three times with backoff and fails fast on 4xx (retrying a rejected batch only burns the rate-limit bucket, 600 / 10 min).
+- `LEGACY_ENTITY_ORDER` (`src/seed/legacy-entities.js`) is shared by the local CLI and the push so both land the catalogue spine (product prices, stock) first. Guarded by `test/legacy-import-api.test.js` (22 tests); verified end to end by pushing all 55,877 records into an empty database over HTTP.
+
 ## Auth
 
 - Sessions are **stateless signed cookies**: cookie `atelier_session` holds the user id, signed by `@fastify/cookie` with `COOKIE_SECRET` (required env var, 32+ chars; `buildApp({ pool, cookieSecret })` throws without it). No sessions table — logout only clears the client cookie.
@@ -193,6 +204,7 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - `npm run migrate` — node-pg-migrate up (reads `DATABASE_URL` from `.env` via dotenv auto-load)
 - `npm run migrate:create <name>` — new migration in `migrations/`, plain JS
 - `npm run seed` — idempotent catalogue + shipping-rate import (needs migrations applied)
+- `npm run push:legacy -- --api <url> --email <director>` — pushes the normalised D365 exports to a REMOTE API over HTTPS (`ATELIER_API_PASSWORD` in the environment). For servers with no shell; the local equivalent is `npm run import:legacy`.
 - `npm run lint` — ESLint 9 flat config (`eslint.config.js`)
 - `npm test` — vitest; tests hit real local Postgres (`atelier_dev`), need `.env` present
 

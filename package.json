@@ -16,6 +16,7 @@
     "import:pricing": "node src/seed/import-price-lists.js",
     "convert:legacy": "python3 scripts/convert-d365-exports.py",
     "import:legacy": "node src/seed/import-legacy.js",
+    "push:legacy": "node src/seed/push-legacy.js",
     "lint": "eslint .",
     "test": "vitest run"
   },

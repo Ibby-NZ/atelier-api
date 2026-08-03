@@ -16,6 +16,7 @@ import { adminTradeApplicationRoutes } from './routes/admin-trade-applications.j
 import { adminInventoryRoutes } from './routes/admin-inventory.js'
 import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
+import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { contactRoutes } from './routes/contact.js'
 import { webhookRoutes } from './routes/webhooks.js'
 
@@ -121,6 +122,10 @@ export const buildApp = ({
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })
+    // POST /admin/legacy/import/:entity — the only write path into those same
+    // tables, director-only. Its own plugin scope: it parses application/gzip
+    // as a Buffer and that parser must not leak onto any other route.
+    api.register(adminLegacyImportRoutes, { pool })
     // POST /contact (public) + /admin/contact-enquiries (backoffice) — the
     // storefront contact form posts here; both need the storefront CORS scope.
     api.register(contactRoutes, { pool, mailer })

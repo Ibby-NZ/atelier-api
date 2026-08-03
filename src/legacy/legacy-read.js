@@ -8,6 +8,10 @@
 // staging→live promotion is a separate, still-unsettled pass. Native CRUD lives
 // on the real platform tables (users/inventory/price-list-items/orders), not here.
 //
+// The single write path is the bulk import itself, and it lives elsewhere:
+// src/routes/admin-legacy-import.js (director-only, one entity batch per
+// request). Read routes stay read-only; do not add mutations to this module.
+//
 // One config-driven query path serves all four entities: column/search/filter
 // whitelists per entity mean the entity name and column names are never user
 // input, while every filter/search VALUE flows through a parameterised

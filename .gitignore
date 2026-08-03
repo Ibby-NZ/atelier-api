@@ -9,4 +9,8 @@ node_modules/
 .env.*
 !.env.example
 incoming/
+# Database dumps staged for a server restore. These are the customer database in
+# plaintext (names, addresses, order history) — the same reason incoming/ is
+# ignored. A dump lands here on its way to a server and must never reach GitHub.
+sql/
 .DS_Store

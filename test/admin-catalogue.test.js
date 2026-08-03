@@ -305,6 +305,33 @@ describe('back-office catalogue admin', () => {
       })
       expect(response.statusCode).toBe(400)
     })
+
+    it('stores a website URL on create', async () => {
+      const brand = await createBrandFixture('House', {
+        website_url: 'https://www.pierrefrey.com',
+      })
+      expect(brand.website_url).toBe('https://www.pierrefrey.com')
+    })
+
+    // The value becomes a public storefront href, so only http(s) may be stored.
+    it('rejects a schemeless website URL with 422', async () => {
+      const response = await inject('POST', '/admin/brands', backofficeCookie, {
+        name: brandName('NoScheme'),
+        currency: 'NZD',
+        website_url: 'pierrefrey.com',
+      })
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toMatch(/full URL/i)
+    })
+
+    it('rejects a javascript: website URL with 422', async () => {
+      const response = await inject('POST', '/admin/brands', backofficeCookie, {
+        name: brandName('Sneaky'),
+        currency: 'NZD',
+        website_url: 'javascript:alert(1)',
+      })
+      expect(response.statusCode).toBe(422)
+    })
   })
 
   describe('GET /admin/brands', () => {
@@ -372,6 +399,28 @@ describe('back-office catalogue admin', () => {
       })
       expect(response.statusCode).toBe(400)
     })
+
+    it('sets, clears and validates the website URL', async () => {
+      const created = await createBrandFixture('House')
+
+      const set = await inject('PATCH', `/admin/brands/${created.id}`, backofficeCookie, {
+        website_url: 'https://www.dedar.com',
+      })
+      expect(set.statusCode).toBe(200)
+      expect(set.json().brand.website_url).toBe('https://www.dedar.com')
+
+      // Explicit null clears the field (absent key would leave it alone).
+      const clear = await inject('PATCH', `/admin/brands/${created.id}`, backofficeCookie, {
+        website_url: null,
+      })
+      expect(clear.statusCode).toBe(200)
+      expect(clear.json().brand.website_url).toBeNull()
+
+      const bad = await inject('PATCH', `/admin/brands/${created.id}`, backofficeCookie, {
+        website_url: 'not a url',
+      })
+      expect(bad.statusCode).toBe(422)
+    })
   })
 
   describe('collections', () => {
@@ -436,6 +485,53 @@ describe('back-office catalogue admin', () => {
       expect(collections).toHaveLength(1)
       expect(collections[0].name).toBe('Spring Two Six')
       expect(collections[0].brand_name).toBe(brandName('House'))
+    })
+
+    it('stores and edits tile editorial (description + image), validating the image URL', async () => {
+      const brand = await createBrandFixture('House')
+      const created = await inject('POST', '/admin/collections', backofficeCookie, {
+        brand_id: brand.id,
+        name: 'Giverny',
+        description: 'Archival prints, reissued.',
+        image_url: 'https://cdn.example/giverny.jpg',
+      })
+      expect(created.statusCode).toBe(201)
+      expect(created.json().collection).toMatchObject({
+        description: 'Archival prints, reissued.',
+        image_url: 'https://cdn.example/giverny.jpg',
+      })
+      const id = created.json().collection.id
+
+      // Editorial-only patch: name is no longer required.
+      const patched = await inject('PATCH', `/admin/collections/${id}`, backofficeCookie, {
+        description: 'New season copy.',
+        image_url: null,
+      })
+      expect(patched.statusCode).toBe(200)
+      expect(patched.json().collection).toMatchObject({
+        name: 'Giverny',
+        description: 'New season copy.',
+        image_url: null,
+      })
+
+      // The image lands in a public <img src>, so the http(s)-only rule applies.
+      const bad = await inject('PATCH', `/admin/collections/${id}`, backofficeCookie, {
+        image_url: 'javascript:alert(1)',
+      })
+      expect(bad.statusCode).toBe(422)
+      expect(bad.json().message).toMatch(/Image/)
+    })
+
+    it('rejects an empty collection patch with 400', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Giverny')
+      const response = await inject(
+        'PATCH',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie,
+        {}
+      )
+      expect(response.statusCode).toBe(400)
     })
 
     it('renames a collection without changing its slug', async () => {

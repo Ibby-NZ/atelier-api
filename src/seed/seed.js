@@ -14,17 +14,29 @@ import {
 const upsertBrands = async (client, rows) => {
   const idsByName = new Map()
   for (const row of rows) {
+    // website_url fills blanks only (COALESCE keeps the DB value when set): a
+    // URL staff typed into the CRM outlives every reseed, while a house whose
+    // site we later verify picks it up on the next seed run.
     const { rows: result } = await client.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, website_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (slug) DO UPDATE SET
          name = EXCLUDED.name,
          story = EXCLUDED.story,
          country = EXCLUDED.country,
          currency = EXCLUDED.currency,
-         is_international = EXCLUDED.is_international
+         is_international = EXCLUDED.is_international,
+         website_url = COALESCE(brands.website_url, EXCLUDED.website_url)
        RETURNING id`,
-      [row.name, row.slug, row.story, row.country, row.currency, row.is_international]
+      [
+        row.name,
+        row.slug,
+        row.story,
+        row.country,
+        row.currency,
+        row.is_international,
+        row.website_url ?? null,
+      ]
     )
     idsByName.set(row.name, result[0].id)
   }
@@ -42,11 +54,17 @@ const requireBrandId = (brandIds, brandName, context) => {
 const upsertCollections = async (client, rows, brandIds) => {
   for (const row of rows) {
     const brandId = requireBrandId(brandIds, row.brand_name, `collection "${row.name}"`)
+    // Editorial refreshes on reseed like the rest of the catalogue (DO UPDATE);
+    // staff edits made in the CRM between reseeds are snapshot corrections, not
+    // operational data like inventory, so freshest-vendored wins.
     await client.query(
-      `INSERT INTO collections (brand_id, name, slug)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (brand_id, slug) DO UPDATE SET name = EXCLUDED.name`,
-      [brandId, row.name, row.slug]
+      `INSERT INTO collections (brand_id, name, slug, description, image_url)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (brand_id, slug) DO UPDATE SET
+         name = EXCLUDED.name,
+         description = EXCLUDED.description,
+         image_url = EXCLUDED.image_url`,
+      [brandId, row.name, row.slug, row.description, row.image_url]
     )
   }
   return rows.length

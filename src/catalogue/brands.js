@@ -8,7 +8,8 @@ const BRAND_COLUMNS = `
   country,
   currency,
   is_international,
-  story
+  story,
+  website_url
 `
 
 const toBrand = (row) =>
@@ -19,6 +20,7 @@ const toBrand = (row) =>
     currency: row.currency,
     is_international: row.is_international,
     story: row.story,
+    website_url: row.website_url,
   })
 
 const toCollection = (row) => Object.freeze({ slug: row.slug, name: row.name })

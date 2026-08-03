@@ -29,6 +29,8 @@ const VISIBLE_PRODUCT_COUNT = `(
 const COLLECTION_SELECT = `
   SELECT c.slug,
          c.name,
+         c.description,
+         c.image_url,
          ${VISIBLE_PRODUCT_COUNT},
          b.slug AS brand_slug,
          b.name AS brand_name
@@ -41,6 +43,8 @@ const toCollection = (row) =>
   Object.freeze({
     slug: row.slug,
     name: row.name,
+    description: row.description,
+    image_url: row.image_url,
     product_count: row.product_count,
     brand: Object.freeze({ slug: row.brand_slug, name: row.brand_name }),
   })

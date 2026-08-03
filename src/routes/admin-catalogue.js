@@ -100,6 +100,7 @@ const brandCreateSchema = {
     story: nullableText,
     country: nullableShort,
     is_international: { type: 'boolean', default: false },
+    website_url: nullableUrl,
   },
 }
 
@@ -113,6 +114,7 @@ const brandPatchSchema = {
     story: nullableText,
     country: nullableShort,
     is_international: { type: 'boolean' },
+    website_url: nullableUrl,
   },
 }
 
@@ -123,15 +125,19 @@ const collectionCreateSchema = {
   properties: {
     brand_id: { type: 'integer', minimum: 1 },
     name: nameProp,
+    description: nullableText,
+    image_url: nullableUrl,
   },
 }
 
 const collectionPatchSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['name'],
+  minProperties: 1,
   properties: {
     name: nameProp,
+    description: nullableText,
+    image_url: nullableUrl,
   },
 }
 

@@ -29,10 +29,10 @@ const seedFixtures = async (pool) => {
   const houseB = brandId.get(`${PREFIX}-house-b`)
 
   const { rows: collections } = await pool.query(
-    `INSERT INTO collections (brand_id, name, slug)
-     VALUES ($1, 'Shared Name A', $2),
-            ($1, 'Retired', $3),
-            ($4, 'Shared Name B', $5)
+    `INSERT INTO collections (brand_id, name, slug, description, image_url)
+     VALUES ($1, 'Shared Name A', $2, 'A blurb.', 'https://cdn.example/shared-a.jpg'),
+            ($1, 'Retired', $3, NULL, NULL),
+            ($4, 'Shared Name B', $5, NULL, NULL)
      RETURNING id, brand_id, slug`,
     [houseA, `${PREFIX}-shared`, `${PREFIX}-archived`, houseB, `${PREFIX}-shared`]
   )
@@ -113,10 +113,17 @@ describe('public collection endpoints and the collection product filter', () => 
       expect(houseA).toMatchObject({
         slug: `${PREFIX}-shared`,
         name: 'Shared Name A',
+        // Tile editorial (seeded from the atelier.co.nz snapshot, CRM-editable).
+        description: 'A blurb.',
+        image_url: 'https://cdn.example/shared-a.jpg',
         // The hidden product is not counted.
         product_count: 1,
         brand: { slug: `${PREFIX}-house-a`, name: 'Col Test House A' },
       })
+      // Absent editorial is explicit null, not a missing key.
+      const houseB = mine.find((c) => c.brand.slug === `${PREFIX}-house-b`)
+      expect(houseB.description).toBeNull()
+      expect(houseB.image_url).toBeNull()
     })
 
     it('omits archived collections', async () => {

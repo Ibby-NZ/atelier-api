@@ -88,7 +88,7 @@ export const buildUpdate = (input, columns) => {
   return { sets, params }
 }
 
-const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, archived_at, created_at`
+const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, website_url, archived_at, created_at`
 
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
@@ -96,6 +96,7 @@ const BRAND_UPDATE_COLUMNS = Object.freeze([
   'country',
   'currency',
   'is_international',
+  'website_url',
 ])
 
 const toBrand = (row) =>
@@ -107,9 +108,40 @@ const toBrand = (row) =>
     country: row.country,
     currency: row.currency,
     is_international: row.is_international,
+    website_url: row.website_url ?? null,
     archived_at: row.archived_at ?? null,
     created_at: row.created_at,
   })
+
+/**
+ * Normalise a URL destined for a public storefront `href`/`src` (brand website,
+ * collection image), so only absolute http(s) URLs are stored — anything else
+ * (including a javascript: URL) is a business-rule 422. Blank input clears the
+ * field. `label` names the field in the 422 message.
+ *
+ * @param {unknown} value
+ * @param {string} [label]
+ * @returns {string|null}
+ */
+export const websiteUrlFrom = (value, label = 'Website') => {
+  if (value === null || value === undefined) {
+    return null
+  }
+  const trimmed = String(value).trim()
+  if (trimmed === '') {
+    return null
+  }
+  let parsed
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw httpError(422, `${label} must be a full URL, e.g. https://example.com.`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw httpError(422, `${label} must be an http(s) URL.`)
+  }
+  return trimmed
+}
 
 const toCollection = (row) =>
   Object.freeze({
@@ -118,6 +150,8 @@ const toCollection = (row) =>
     brand_name: row.brand_name,
     name: row.name,
     slug: row.slug,
+    description: row.description ?? null,
+    image_url: row.image_url ?? null,
     archived_at: row.archived_at ?? null,
   })
 
@@ -148,8 +182,8 @@ export const createBrand = async (pool, input) => {
   const slug = slugFrom(name)
   try {
     const { rows } = await pool.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, website_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING ${BRAND_COLUMNS}`,
       [
         name,
@@ -158,6 +192,7 @@ export const createBrand = async (pool, input) => {
         input.country ?? null,
         input.currency,
         input.is_international ?? false,
+        websiteUrlFrom(input.website_url),
       ]
     )
     return toBrand(rows[0])
@@ -175,9 +210,12 @@ export const createBrand = async (pool, input) => {
  * @returns {Promise<object>}
  */
 export const updateBrand = async (pool, id, input) => {
-  const patch = Object.hasOwn(input, 'name')
+  let patch = Object.hasOwn(input, 'name')
     ? { ...input, name: input.name.trim() }
     : input
+  if (Object.hasOwn(patch, 'website_url')) {
+    patch = { ...patch, website_url: websiteUrlFrom(patch.website_url) }
+  }
   const { sets, params } = buildUpdate(patch, BRAND_UPDATE_COLUMNS)
   try {
     const { rows } = await pool.query(
@@ -195,7 +233,7 @@ export const updateBrand = async (pool, id, input) => {
   }
 }
 
-const COLLECTION_SELECT = `SELECT c.id, c.brand_id, c.name, c.slug, c.archived_at, b.name AS brand_name
+const COLLECTION_SELECT = `SELECT c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.archived_at, b.name AS brand_name
        FROM collections c
        JOIN brands b ON b.id = c.brand_id`
 
@@ -248,10 +286,16 @@ export const createCollection = async (pool, input) => {
   const slug = slugFrom(name)
   try {
     const { rows } = await pool.query(
-      `INSERT INTO collections (brand_id, name, slug)
-       VALUES ($1, $2, $3)
-       RETURNING id, brand_id, name, slug`,
-      [brand.id, name, slug]
+      `INSERT INTO collections (brand_id, name, slug, description, image_url)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, brand_id, name, slug, description, image_url`,
+      [
+        brand.id,
+        name,
+        slug,
+        input.description ?? null,
+        websiteUrlFrom(input.image_url, 'Image'),
+      ]
     )
     return toCollection({ ...rows[0], brand_name: brand.name })
   } catch (error) {
@@ -259,21 +303,31 @@ export const createCollection = async (pool, input) => {
   }
 }
 
+const COLLECTION_UPDATE_COLUMNS = Object.freeze(['name', 'description', 'image_url'])
+
 /**
- * Rename a collection. Its slug stays as generated (see the module header).
+ * Patch a collection: name and/or the storefront tile editorial (description,
+ * hero image). The slug stays as generated (see the module header). The image
+ * URL is a public `src`, so it passes the same http(s)-only gate as a brand
+ * website.
  *
  * @param {import('pg').Pool} pool
  * @param {number} id
- * @param {{ name: string }} input
+ * @param {{ name?: string, description?: string|null, image_url?: string|null }} input
  * @returns {Promise<object>}
  */
 export const updateCollection = async (pool, id, input) => {
+  let patch = Object.hasOwn(input, 'name') ? { ...input, name: input.name.trim() } : input
+  if (Object.hasOwn(patch, 'image_url')) {
+    patch = { ...patch, image_url: websiteUrlFrom(patch.image_url, 'Image') }
+  }
+  const { sets, params } = buildUpdate(patch, COLLECTION_UPDATE_COLUMNS)
   const { rows } = await pool.query(
-    `UPDATE collections c SET name = $1
+    `UPDATE collections c SET ${sets.join(', ')}
        FROM brands b
-      WHERE c.id = $2 AND b.id = c.brand_id
-      RETURNING c.id, c.brand_id, c.name, c.slug, b.name AS brand_name`,
-    [input.name.trim(), id]
+      WHERE c.id = $${params.length + 1} AND b.id = c.brand_id
+      RETURNING c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, b.name AS brand_name`,
+    [...params, id]
   )
   if (rows.length === 0) {
     throw httpError(404, `Collection ${id} not found.`)
@@ -318,7 +372,7 @@ export const setCollectionArchived = async (pool, id, archived) => {
     `UPDATE collections c SET archived_at = ${archived ? 'now()' : 'NULL'}
        FROM brands b
       WHERE c.id = $1 AND b.id = c.brand_id
-      RETURNING c.id, c.brand_id, c.name, c.slug, c.archived_at, b.name AS brand_name`,
+      RETURNING c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.archived_at, b.name AS brand_name`,
     [id]
   )
   if (rows.length === 0) {

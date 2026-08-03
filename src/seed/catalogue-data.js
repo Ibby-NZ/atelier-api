@@ -15,6 +15,7 @@ import {
 import { designs } from './data/atelier.js'
 import { suppliers } from './data/suppliers.js'
 import { tradeUnit } from './data/pricing.js'
+import { BRAND_WEBSITES } from './data/brand-websites.js'
 import { slugify } from './slugify.js'
 
 const HOUSE_BRAND = 'Atelier Textiles NZ'
@@ -73,6 +74,7 @@ const toBrandRow = (name) => {
     country: meta.country ?? null,
     currency,
     is_international: name !== HOUSE_BRAND,
+    website_url: BRAND_WEBSITES[meta.slug] ?? null,
   })
 }
 
@@ -86,12 +88,33 @@ export const buildBrandRows = () => {
   return allNames.map(toBrandRow)
 }
 
+// The snapshot titles most collections "<Brand> | <Range>" (or "<Brand> <Range>")
+// because atelier.co.nz lists them site-wide. On a brand page — the only place
+// the storefront shows them — the prefix is pure redundancy, so the display
+// name drops it. The SLUG stays derived from the FULL snapshot title: it is the
+// (brand_id, slug) upsert key, and changing it on a reseed would duplicate
+// every already-seeded collection instead of refreshing it in place.
+export const collectionDisplayName = (brandName, name) => {
+  if (name.startsWith(`${brandName} | `)) return name.slice(brandName.length + 3)
+  if (name.startsWith(`${brandName} `)) {
+    // Only strip the plain prefix when something word-like remains: "Pierre
+    // Frey Belvedere" → "Belvedere", but "Manuel Canovas 2024" stays whole —
+    // a tile labelled just "2024" reads as a mistake.
+    const rest = name.slice(brandName.length + 1)
+    if (/[a-zA-Z]/.test(rest)) return rest
+  }
+  return name
+}
+
 export const buildCollectionRows = () =>
   realCollections.map((collection) =>
     Object.freeze({
       brand_name: collection.brand,
-      name: collection.name,
+      name: collectionDisplayName(collection.brand, collection.name),
       slug: slugify(collection.name),
+      description: collection.description ?? null,
+      // `src` is the full atelier.co.nz upload URL; `img` is just its filename.
+      image_url: collection.src ?? null,
     })
   )
 

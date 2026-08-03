@@ -143,14 +143,48 @@ describe('catalogue seed import', () => {
     expect(goods[0].unit).toBe('units')
   })
 
-  it('links collections to their brand', async () => {
+  it('links collections to their brand, with tile editorial and a de-prefixed display name', async () => {
     const { rows } = await pool.query(
-      `SELECT co.name FROM collections co
+      `SELECT co.name, co.description, co.image_url FROM collections co
        JOIN brands b ON b.id = co.brand_id
        WHERE b.slug = 'pierre-frey' AND co.slug = 'pierre-frey-cappuccino'`
     )
     expect(rows).toHaveLength(1)
-    expect(rows[0].name).toBe('Pierre Frey | Cappuccino')
+    // The snapshot titles it "Pierre Frey | Cappuccino"; the slug keeps the full
+    // title (upsert-key stability) while the display name drops the redundant
+    // brand prefix — it only ever renders on the brand's own page.
+    expect(rows[0].name).toBe('Cappuccino')
+    expect(rows[0].description).toMatch(/natural tones/i)
+    expect(rows[0].image_url).toMatch(/^https:\/\/www\.atelier\.co\.nz\//)
+
+    // The plain prefix is only stripped when something word-like remains:
+    // a tile labelled just "2024" would read as a mistake.
+    const { rows: larsen } = await pool.query(
+      `SELECT co.name FROM collections co
+       JOIN brands b ON b.id = co.brand_id
+       WHERE b.slug = 'larsen' AND co.slug = 'larsen-2024'`
+    )
+    expect(larsen[0].name).toBe('Larsen 2024')
+  })
+
+  it('seeds the verified house website', async () => {
+    const { rows } = await pool.query(
+      `SELECT website_url FROM brands WHERE slug = 'manuel-canovas'`
+    )
+    expect(rows[0].website_url).toBe('https://www.manuelcanovas.com/')
+  })
+
+  it('seed fills a blank brand website but never overwrites a staff-entered one', async () => {
+    // Simulate a CRM edit between seeds, then re-run the seed.
+    await pool.query(
+      `UPDATE brands SET website_url = 'https://staff-entered.example.com'
+       WHERE slug = 'pierre-frey'`
+    )
+    await runSeed(pool)
+    const { rows } = await pool.query(
+      `SELECT website_url FROM brands WHERE slug = 'pierre-frey'`
+    )
+    expect(rows[0].website_url).toBe('https://staff-entered.example.com')
   })
 
   it('seeds shipping rates: three zones with two tiers each (boundary 20)', async () => {

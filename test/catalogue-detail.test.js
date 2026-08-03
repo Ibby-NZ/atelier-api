@@ -24,8 +24,8 @@ const sessionCookieFrom = (response) => {
 // no inventory row). Also a hidden product to prove the 404 path.
 const seedFixtures = async (pool) => {
   const { rows: brands } = await pool.query(
-    `INSERT INTO brands (name, slug, country, currency, is_international, story)
-     VALUES ($1, $2, 'New Zealand', 'NZD', false, 'A test house.')
+    `INSERT INTO brands (name, slug, country, currency, is_international, story, website_url)
+     VALUES ($1, $2, 'New Zealand', 'NZD', false, 'A test house.', 'https://det-test-house.example.com')
      RETURNING id`,
     ['Det Test House', `${PREFIX}-house`]
   )
@@ -197,6 +197,15 @@ describe('product detail and brand endpoints', () => {
       const { brand } = response.json()
       expect(brand.name).toBe('Det Test House')
       expect(brand.collections.map((c) => c.slug)).toContain(`${PREFIX}-collection`)
+    })
+
+    it('exposes the house website URL', async () => {
+      const response = await get(app, `/catalogue/brands/${PREFIX}-house`)
+      expect(response.json().brand.website_url).toBe('https://det-test-house.example.com')
+
+      const list = await get(app, '/catalogue/brands')
+      const listed = list.json().brands.find((b) => b.slug === `${PREFIX}-house`)
+      expect(listed.website_url).toBe('https://det-test-house.example.com')
     })
 
     it('404s for an unknown brand slug', async () => {

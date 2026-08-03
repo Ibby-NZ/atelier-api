@@ -25,6 +25,10 @@ const FILTER_COLUMNS = Object.freeze({
   price_band: 'p.price_band',
   lead_time: 'p.lead_time',
   product_type: 'p.product_type',
+  // A collection slug is unique per brand, not globally, so `collection` alone
+  // matches every house that happens to use that slug. Pair it with `brand` for
+  // a real collection page — that pair is the storefront's collection URL.
+  collection: 'col.slug',
 })
 
 // The price a shopper is actually allowed to see. International brands hide
@@ -59,10 +63,22 @@ const PRODUCT_COLUMNS = `
   b.slug AS brand_slug,
   b.name AS brand_name,
   b.is_international,
+  col.slug AS collection_slug,
+  col.name AS collection_name,
   cw.colourway_count,
   cw.in_stock,
   cw.colourway_image_url,
   cw.swatches
+`
+
+// The product's collection, when it still has a live one. Archiving a
+// collection keeps its products on sale (see admin-brands.js), so the join
+// condition — not a WHERE clause — carries the archived check: the product
+// stays in the grid and simply reads as uncollected. The same join makes the
+// `collection` filter unable to match an archived collection.
+const COLLECTION_JOIN = `
+  LEFT JOIN collections col
+    ON col.id = p.collection_id AND col.archived_at IS NULL
 `
 
 // Per-product colourway rollup: how many colourways, whether any has
@@ -123,6 +139,11 @@ const toPublicProduct = (row, includeTrade) => {
     colourway_count: row.colourway_count ?? 0,
     colourways: swatches.slice(0, CARD_SWATCH_LIMIT).map(toSwatch),
     brand: { slug: row.brand_slug, name: row.brand_name },
+    // Always present so the storefront can branch on null instead of on a
+    // missing key; null covers both "no collection" and "archived collection".
+    collection: row.collection_slug
+      ? { slug: row.collection_slug, name: row.collection_name }
+      : null,
   }
 
   const withRetail =
@@ -210,8 +231,14 @@ export const listProducts = async (
 
   const { where, params } = buildFilters(filters)
 
+  // The collection join is in the count query too: `collection` is a filter, so
+  // meta.total has to be the filtered total.
   const countResult = await pool.query(
-    `SELECT COUNT(*)::int AS total FROM products p JOIN brands b ON b.id = p.brand_id WHERE ${where}`,
+    `SELECT COUNT(*)::int AS total
+     FROM products p
+     JOIN brands b ON b.id = p.brand_id
+     ${COLLECTION_JOIN}
+     WHERE ${where}`,
     params
   )
   const total = countResult.rows[0].total
@@ -220,6 +247,7 @@ export const listProducts = async (
     `SELECT ${PRODUCT_COLUMNS}
      FROM products p
      JOIN brands b ON b.id = p.brand_id
+     ${COLLECTION_JOIN}
      ${COLOURWAY_ROLLUP}
      WHERE ${where}
      ORDER BY ${SORT_ORDERS[safeSort]}

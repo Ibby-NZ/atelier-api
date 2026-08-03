@@ -20,7 +20,17 @@ const PRODUCT_COLUMNS = `
   p.hi_res_asset_url,
   b.slug AS brand_slug,
   b.name AS brand_name,
-  b.is_international
+  b.is_international,
+  col.slug AS collection_slug,
+  col.name AS collection_name
+`
+
+// Mirrors the listing: an archived collection is dropped by the join condition
+// rather than the WHERE clause, so the product itself stays reachable and only
+// loses its collection label.
+const COLLECTION_JOIN = `
+  LEFT JOIN collections col
+    ON col.id = p.collection_id AND col.archived_at IS NULL
 `
 
 // A colourway is in stock when uncommitted quantity remains. Missing inventory
@@ -62,6 +72,9 @@ const toProductDetail = (row, colourways, includeTrade) => {
     price_hidden: row.is_international,
     hi_res_asset_url: row.hi_res_asset_url,
     brand: { slug: row.brand_slug, name: row.brand_name },
+    collection: row.collection_slug
+      ? { slug: row.collection_slug, name: row.collection_name }
+      : null,
     colourways: colourways.map(toColourway),
   }
 
@@ -88,6 +101,7 @@ export const getProductDetail = async (pool, slug, { includeTrade = false } = {}
     `SELECT ${PRODUCT_COLUMNS}
      FROM products p
      JOIN brands b ON b.id = p.brand_id
+     ${COLLECTION_JOIN}
      WHERE p.slug = $1 AND p.show_on_website = true
        AND p.archived_at IS NULL AND b.archived_at IS NULL`,
     [slug]

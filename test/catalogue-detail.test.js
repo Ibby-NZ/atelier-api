@@ -3,6 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'det-test'
@@ -73,6 +74,12 @@ const seedFixtures = async (pool) => {
 }
 
 const cleanup = async (pool) => {
+  // Applications first: deleting the user would SET NULL user_id, orphaning them.
+  await pool.query(
+    `DELETE FROM trade_applications
+      WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
+    [`%@${TEST_DOMAIN}`]
+  )
   await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${TEST_DOMAIN}`])
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
 }
@@ -86,7 +93,14 @@ describe('product detail and brand endpoints', () => {
     const response = await app.inject({
       method: 'POST',
       url,
-      payload: { email: testEmail(local), password: PASSWORD, name: local },
+      payload: {
+        email: testEmail(local),
+        password: PASSWORD,
+        name: local,
+        ...(url === '/auth/trade-application'
+          ? { application: sampleTradeApplication() }
+          : {}),
+      },
     })
     expect(response.statusCode).toBe(201)
     cookies[local] = sessionCookieFrom(response)

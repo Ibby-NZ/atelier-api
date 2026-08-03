@@ -5,6 +5,10 @@ import {
   readSessionUserId,
 } from '../auth/session.js'
 import { PUBLIC_USER_COLUMNS, ACTIVE_USER_CONDITION } from '../auth/user-columns.js'
+import {
+  validateTradeApplication,
+  submitTradeApplication,
+} from '../users/trade-applications.js'
 
 const LOGIN_RATE_LIMIT_MAX = 10
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
@@ -29,6 +33,58 @@ const registerBodySchema = {
     email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
     password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
     name: { type: 'string', maxLength: 200 },
+  },
+}
+
+// Trade application = register + the atelier.co.nz trade-account form. The
+// schema is structural only (types + max lengths -> 400); required fields and
+// formats are checked in the handler so the storefront gets field-level 422s
+// (order-request posture). business_type is a plain string here for the same
+// reason — the validator names the field instead of a bare enum 400.
+const APPLICATION_TEXT = { type: 'string', maxLength: 2000 }
+const tradeApplicationBodySchema = {
+  type: 'object',
+  required: ['email', 'password', 'application'],
+  additionalProperties: false,
+  properties: {
+    email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
+    password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
+    name: { type: 'string', maxLength: 200 },
+    application: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        business_name: APPLICATION_TEXT,
+        registered_name: APPLICATION_TEXT,
+        postal_address: APPLICATION_TEXT,
+        delivery_address: APPLICATION_TEXT,
+        landline_phone: APPLICATION_TEXT,
+        mobile_phone: APPLICATION_TEXT,
+        accounts_contact_name: APPLICATION_TEXT,
+        accounts_contact_person: APPLICATION_TEXT,
+        accounts_email: APPLICATION_TEXT,
+        design_contact_name: APPLICATION_TEXT,
+        design_contact_email: APPLICATION_TEXT,
+        design_contact_phone: APPLICATION_TEXT,
+        design_qualifications: APPLICATION_TEXT,
+        mailchimp_opt_in: { type: 'boolean' },
+        primary_contact_email: APPLICATION_TEXT,
+        wants_showroom_visit: { type: 'boolean' },
+        wants_account_manager: { type: 'boolean' },
+        nzbn: APPLICATION_TEXT,
+        business_type: APPLICATION_TEXT,
+        registered_office_address: APPLICATION_TEXT,
+        directors_names_addresses: APPLICATION_TEXT,
+        directors_dates_of_birth: APPLICATION_TEXT,
+        cash_account_acceptable: { type: 'boolean' },
+        trade_reference: APPLICATION_TEXT,
+        terms_accepted: { type: 'boolean' },
+        customer_full_name: APPLICATION_TEXT,
+        signatory_name: APPLICATION_TEXT,
+        signatory_position: APPLICATION_TEXT,
+        signature: APPLICATION_TEXT,
+      },
+    },
   },
 }
 
@@ -83,15 +139,42 @@ export const authRoutes = async (app, { pool }) => {
   )
 
   // Trade accounts start unapproved: guards treat them as customers until the
-  // back office flips trade_approved (US-006 gate).
+  // back office flips trade_approved (US-006 gate). The submitted form is
+  // stored alongside the account so the CRM's Applicants tab can review it.
   app.post(
     '/auth/trade-application',
     {
-      schema: { body: registerBodySchema },
+      schema: { body: tradeApplicationBodySchema },
       config: { rateLimit: AUTH_RATE_LIMIT },
     },
-    async (request, reply) =>
-      createAccount({ pool, reply, body: request.body, role: 'trade' })
+    async (request, reply) => {
+      const { email, password, name, application } = request.body
+      const errors = validateTradeApplication(application)
+      if (errors.length > 0) {
+        reply.code(422)
+        return { error: 'Unprocessable Entity', message: 'Validation failed.', errors }
+      }
+
+      const passwordHash = await hashPassword(password)
+      try {
+        const user = await submitTradeApplication(pool, {
+          email,
+          passwordHash,
+          name,
+          application,
+        })
+        setSessionCookie(reply, user.id)
+        reply.code(201)
+        return { user }
+      } catch (error) {
+        // Same shape as register's duplicate-email answer.
+        if (error.statusCode === 409) {
+          reply.code(409)
+          return { error: error.message }
+        }
+        throw error
+      }
+    }
   )
 
   app.post(

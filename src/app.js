@@ -12,6 +12,7 @@ import { orderRoutes } from './routes/orders.js'
 import { adminOrderRoutes } from './routes/admin-orders.js'
 import { adminCatalogueRoutes } from './routes/admin-catalogue.js'
 import { adminUsersRoutes } from './routes/admin-users.js'
+import { adminTradeApplicationRoutes } from './routes/admin-trade-applications.js'
 import { adminInventoryRoutes } from './routes/admin-inventory.js'
 import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
@@ -112,6 +113,9 @@ export const buildApp = ({
     // /admin/price-list-items — supplier pricing. All storefront admin islands,
     // same CORS + backoffice guard.
     api.register(adminUsersRoutes, { pool })
+    // /admin/trade-applications — read-only review of submitted trade forms
+    // (the CRM's Users -> Applicants tab). Approval stays on /admin/users/:id.
+    api.register(adminTradeApplicationRoutes, { pool })
     api.register(adminInventoryRoutes, { pool })
     api.register(adminPriceListRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the

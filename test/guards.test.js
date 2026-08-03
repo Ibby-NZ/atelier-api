@@ -4,6 +4,7 @@ import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
 import { effectiveRole } from '../src/auth/guards.js'
+import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const TEST_DOMAIN = 'guards-test.example.com'
@@ -16,8 +17,15 @@ const sessionCookieFrom = (response) => {
   return header.split(';')[0]
 }
 
-const deleteTestUsers = (pool) =>
-  pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${TEST_DOMAIN}`])
+// Applications first: deleting the user would SET NULL user_id and orphan them.
+const deleteTestUsers = async (pool) => {
+  await pool.query(
+    `DELETE FROM trade_applications
+      WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
+    [`%@${TEST_DOMAIN}`]
+  )
+  await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${TEST_DOMAIN}`])
+}
 
 describe('effectiveRole', () => {
   it('treats an unapproved trade user as a customer', () => {
@@ -41,7 +49,15 @@ describe('role guards and trade application', () => {
     const response = await app.inject({
       method: 'POST',
       url,
-      payload: { email: testEmail(local), password: PASSWORD, name: local },
+      payload: {
+        email: testEmail(local),
+        password: PASSWORD,
+        name: local,
+        // Trade application now carries the full atelier.co.nz form.
+        ...(url === '/auth/trade-application'
+          ? { application: sampleTradeApplication() }
+          : {}),
+      },
     })
     expect(response.statusCode).toBe(201)
     cookies[local] = sessionCookieFrom(response)
@@ -113,7 +129,11 @@ describe('role guards and trade application', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/auth/trade-application',
-        payload: { email: testEmail('trader2'), password: PASSWORD },
+        payload: {
+          email: testEmail('trader2'),
+          password: PASSWORD,
+          application: sampleTradeApplication(),
+        },
       })
       expect(response.statusCode).toBe(201)
       const body = response.json()
@@ -130,7 +150,11 @@ describe('role guards and trade application', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/auth/trade-application',
-        payload: { email: testEmail('trader'), password: PASSWORD },
+        payload: {
+          email: testEmail('trader'),
+          password: PASSWORD,
+          application: sampleTradeApplication(),
+        },
       })
       expect(response.statusCode).toBe(409)
     })

@@ -4,6 +4,7 @@ import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
 import { CARD_SWATCH_LIMIT } from '../src/catalogue/products.js'
+import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 // Merchandising fields on GET /catalogue/products: imagery, availability, the
 // card colourway strip, free-text search, sort, and trade pricing behind the
@@ -133,6 +134,12 @@ const seedFixtures = async (pool) => {
 }
 
 const cleanup = async (pool) => {
+  // Applications first: deleting the user would SET NULL user_id, orphaning them.
+  await pool.query(
+    `DELETE FROM trade_applications
+      WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
+    [`%@${TEST_DOMAIN}`]
+  )
   await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${TEST_DOMAIN}`])
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
 }
@@ -161,7 +168,14 @@ describe('GET /catalogue/products — merchandising fields', () => {
       const response = await app.inject({
         method: 'POST',
         url,
-        payload: { email: testEmail(local), password: PASSWORD, name: local },
+        payload: {
+          email: testEmail(local),
+          password: PASSWORD,
+          name: local,
+          ...(url === '/auth/trade-application'
+            ? { application: sampleTradeApplication() }
+            : {}),
+        },
       })
       expect(response.statusCode).toBe(201)
       cookies[local] = sessionCookieFrom(response)

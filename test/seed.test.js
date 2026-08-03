@@ -63,6 +63,27 @@ describe('catalogue seed import', () => {
     expect(rows[0].story).toMatch(/Founded 1935/)
   })
 
+  // Both paths onto a seeded database must land the client's roster URL: on a
+  // fresh database the seed writes it, and on an existing one the migration
+  // overwrites whatever was there (the seed's COALESCE would have kept it).
+  // Deliberately NOT pierre-frey: the COALESCE test further down overwrites
+  // that row to simulate a CRM edit and leaves it that way, so asserting on it
+  // here would only pass while this `it` happens to be declared first.
+  it('gives every stocked house its roster website', async () => {
+    const { rows } = await pool.query(
+      `SELECT slug, website_url FROM brands WHERE slug = ANY($1) ORDER BY slug`,
+      [['kieffer', 'liberty-london', 'rubelli-venezia']]
+    )
+    expect(rows).toEqual([
+      { slug: 'kieffer', website_url: 'https://www.kieffertextiles.com/' },
+      {
+        slug: 'liberty-london',
+        website_url: 'https://www.libertyfabric.com/product-category/fabrics/',
+      },
+      { slug: 'rubelli-venezia', website_url: 'https://rubelli.com/' },
+    ])
+  })
+
   it('creates the Atelier house brand as domestic (is_international=false)', async () => {
     const { rows } = await pool.query(
       `SELECT currency, is_international FROM brands WHERE slug = 'atelier-textiles-nz'`
@@ -79,6 +100,40 @@ describe('catalogue seed import', () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].currency).toBe('USD')
     expect(rows[0].is_international).toBe(true)
+  })
+
+  it('creates the represented-only houses, complete but empty', async () => {
+    const { rows } = await pool.query(
+      `SELECT name, country, currency, is_international, story, website_url
+         FROM brands WHERE slug = 'verel-de-belval'`
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0].name).toBe('Verel de Belval')
+    expect(rows[0].country).toBe('France')
+    expect(rows[0].currency).toBe('EUR')
+    expect(rows[0].is_international).toBe(true)
+    expect(rows[0].story).toBeNull()
+    expect(rows[0].website_url).toBe('https://www.metaphores.com/en/verel-de-belval')
+  })
+
+  // The storefront gates its collections section house-level: no products under
+  // the house, no section at all. These houses must therefore hold nothing — a
+  // represented-only house that acquired a collection would render a tile that
+  // cannot lead anywhere.
+  it('leaves every represented-only house with no collections and no products', async () => {
+    const { rows } = await pool.query(
+      `SELECT b.slug,
+              (SELECT count(*)::int FROM products p WHERE p.brand_id = b.id) AS products,
+              (SELECT count(*)::int FROM collections c WHERE c.brand_id = b.id) AS collections
+         FROM brands b
+        WHERE b.slug = ANY($1)`,
+      [['alpaka', 'armani-casa', 'hamam', 'le-crin', 'the-vale-london']]
+    )
+    expect(rows).toHaveLength(5)
+    for (const row of rows) {
+      expect(row.products).toBe(0)
+      expect(row.collections).toBe(0)
+    }
   })
 
   it('gives non-Atelier finished goods no retail price, house goods an indicative one', async () => {

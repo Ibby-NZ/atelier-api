@@ -16,6 +16,7 @@ import { designs } from './data/atelier.js'
 import { suppliers } from './data/suppliers.js'
 import { tradeUnit } from './data/pricing.js'
 import { BRAND_WEBSITES } from './data/brand-websites.js'
+import { REPRESENTED_HOUSES } from './data/represented-houses.js'
 import { slugify } from './slugify.js'
 
 const HOUSE_BRAND = 'Atelier Textiles NZ'
@@ -78,6 +79,21 @@ const toBrandRow = (name) => {
   })
 }
 
+// A house we represent but hold nothing from. It carries no story and no
+// supplier record, so unlike toBrandRow() there is nothing to resolve — the row
+// is the roster entry plus its link. Always international: the only domestic
+// brand is Atelier's own, and that one has products.
+const toRepresentedHouseRow = (house) =>
+  Object.freeze({
+    name: house.name,
+    slug: house.slug,
+    story: null,
+    country: house.country ?? null,
+    currency: house.currency,
+    is_international: true,
+    website_url: BRAND_WEBSITES[house.slug] ?? null,
+  })
+
 export const buildBrandRows = () => {
   const catalogueNames = realBrands.map((brand) => brand.name)
   const referencedNames = [
@@ -85,7 +101,18 @@ export const buildBrandRows = () => {
     ...designs.map((design) => design.brand),
   ]
   const allNames = [...new Set([...catalogueNames, ...referencedNames])]
-  return allNames.map(toBrandRow)
+  const stocked = allNames.map(toBrandRow)
+
+  // The represented-only houses come last and yield to the catalogue: the
+  // moment one of them gains a product or a design, its realCatalogue row wins
+  // and this list stops contributing it, so the two can never both produce the
+  // same slug (which would make the brands upsert hit one conflict key twice).
+  const stockedSlugs = new Set(stocked.map((row) => row.slug))
+  const represented = REPRESENTED_HOUSES.filter(
+    (house) => !stockedSlugs.has(house.slug)
+  ).map(toRepresentedHouseRow)
+
+  return [...stocked, ...represented]
 }
 
 // The snapshot titles most collections "<Brand> | <Range>" (or "<Brand> <Range>")

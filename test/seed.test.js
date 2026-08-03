@@ -112,8 +112,27 @@ describe('catalogue seed import', () => {
     expect(rows[0].country).toBe('France')
     expect(rows[0].currency).toBe('EUR')
     expect(rows[0].is_international).toBe(true)
-    expect(rows[0].story).toBeNull()
+    expect(rows[0].story).toMatch(/Lyon silk house/)
     expect(rows[0].website_url).toBe('https://www.metaphores.com/en/verel-de-belval')
+  })
+
+  // The brand page renders the story as its lede, and foundedYear() parses
+  // "Founded YYYY" out of it for the "est. YYYY" meta — so a house with no
+  // story renders a bare page, which is what BRAND_STORIES exists to prevent.
+  it('leaves no house without a description', async () => {
+    const { rows } = await pool.query(
+      `SELECT slug FROM brands WHERE story IS NULL OR btrim(story) = '' ORDER BY slug`
+    )
+    expect(rows).toEqual([])
+  })
+
+  // The snapshot is the source of record for every house it describes;
+  // BRAND_STORIES only covers the ones it says nothing about.
+  it('never lets BRAND_STORIES override a snapshot description', async () => {
+    const { rows } = await pool.query(
+      `SELECT story FROM brands WHERE slug = 'pierre-frey'`
+    )
+    expect(rows[0].story).toMatch(/^Founded 1935, an inventive/)
   })
 
   // The storefront gates its collections section house-level: no products under

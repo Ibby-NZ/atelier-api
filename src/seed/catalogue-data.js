@@ -15,6 +15,7 @@ import {
 import { designs } from './data/atelier.js'
 import { suppliers } from './data/suppliers.js'
 import { tradeUnit } from './data/pricing.js'
+import { BRAND_STORIES } from './data/brand-stories.js'
 import { BRAND_WEBSITES } from './data/brand-websites.js'
 import { REPRESENTED_HOUSES } from './data/represented-houses.js'
 import { slugify } from './slugify.js'
@@ -71,7 +72,10 @@ const toBrandRow = (name) => {
   return Object.freeze({
     name,
     slug: meta.slug,
-    story: meta.story ?? null,
+    // Snapshot first, BRAND_STORIES only as a fallback: the vendored catalogue
+    // is the source of record for every house it describes, and the seed-owned
+    // map exists to cover the ones it says nothing about.
+    story: meta.story ?? BRAND_STORIES[meta.slug] ?? null,
     country: meta.country ?? null,
     currency,
     is_international: name !== HOUSE_BRAND,
@@ -79,15 +83,16 @@ const toBrandRow = (name) => {
   })
 }
 
-// A house we represent but hold nothing from. It carries no story and no
-// supplier record, so unlike toBrandRow() there is nothing to resolve — the row
-// is the roster entry plus its link. Always international: the only domestic
-// brand is Atelier's own, and that one has products.
+// A house we represent but hold nothing from. The snapshot knows nothing about
+// it and it has no supplier record, so unlike toBrandRow() there is nothing to
+// resolve — the row is the roster entry plus the two seed-owned maps. Always
+// international: the only domestic brand is Atelier's own, and that one has
+// products.
 const toRepresentedHouseRow = (house) =>
   Object.freeze({
     name: house.name,
     slug: house.slug,
-    story: null,
+    story: BRAND_STORIES[house.slug] ?? null,
     country: house.country ?? null,
     currency: house.currency,
     is_international: true,

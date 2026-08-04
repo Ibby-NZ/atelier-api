@@ -29,10 +29,25 @@ const PG_UNIQUE_VIOLATION = '23505'
 // archived); customers never see them, but the back office lists on them.
 const USER_READ_COLUMNS = `${PUBLIC_USER_COLUMNS}, created_at, archived_at`
 
-// Only these columns are ever writable via updateUser. email/password_hash are
-// managed by the auth endpoints, not the admin panel; created_at/archived_at are
-// system-owned (archive() is the only path that touches archived_at).
-const USER_UPDATE_COLUMNS = Object.freeze(['role', 'trade_approved', 'name'])
+// Only these columns are ever writable via updateUser. password_hash stays with
+// the auth endpoints (a reset is a password flow, not a field edit) and
+// created_at/archived_at are system-owned (archive() is the only path that
+// touches archived_at).
+//
+// `email` IS editable: it is what the client signs in with, and a typo taken
+// down over the phone otherwise leaves an account nobody can reach and no way
+// to fix it short of SQL. It is normalised to lower case on the way in (login
+// looks up `lower(email)`) and a collision is the same 409 create answers with.
+const USER_UPDATE_COLUMNS = Object.freeze(['role', 'trade_approved', 'name', 'email'])
+
+// The two halves of the account roster the CRM presents separately: the Clients
+// section manages the people who buy, Users & permissions manages the staff who
+// serve them. Kept here rather than in the route so the SQL and the vocabulary
+// stay in one place.
+export const USER_SEGMENTS = Object.freeze({
+  clients: Object.freeze(['customer', 'trade']),
+  staff: Object.freeze(['backoffice', 'director']),
+})
 
 // Escape the LIKE wildcards so a search for "a_b" matches a literal underscore
 // rather than any single character. Pairs with the ESCAPE '\' clause in the SQL.
@@ -55,16 +70,32 @@ const toUser = (row) =>
  * default admin list only shows live clients.
  *
  * @param {import('pg').Pool} pool
- * @param {{ role?: string, q?: string, includeArchived?: boolean }} [options]
+ * `segment` narrows to a whole side of the roster (`clients` = customer+trade,
+ * `staff` = backoffice+director); `role` narrows to exactly one. Passing both is
+ * an intersection, which is how the Clients screen asks for "trade only".
+ *
+ * @param {{ role?: string, segment?: string, q?: string, includeArchived?: boolean }} [options]
  * @returns {Promise<object[]>}
  */
-export const listUsers = async (pool, { role, q, includeArchived = false } = {}) => {
+export const listUsers = async (
+  pool,
+  { role, segment, q, includeArchived = false } = {}
+) => {
   const clauses = []
   const params = []
 
   // Hide archived accounts by default (they stay reachable via includeArchived).
   if (!includeArchived) {
     clauses.push('archived_at IS NULL')
+  }
+
+  // Object.hasOwn, not a bare lookup: a plain USER_SEGMENTS[segment] would
+  // resolve prototype keys like 'constructor' to a function and blow up the
+  // query builder. The route's enum already rejects those; this is the second
+  // lock, because the module is called directly by tests and future callers.
+  if (segment && Object.hasOwn(USER_SEGMENTS, segment)) {
+    params.push(USER_SEGMENTS[segment])
+    clauses.push(`role = ANY($${params.length}::text[])`)
   }
 
   if (role) {
@@ -131,9 +162,9 @@ export const getUser = async (pool, id) => {
 }
 
 /**
- * Patch an account's role / trade_approved / name from a whitelisted body.
- * buildUpdate only ever writes the listed columns and always binds values as
- * placeholders. 404 when the id is unknown.
+ * Patch an account's role / trade_approved / name / email from a whitelisted
+ * body. buildUpdate only ever writes the listed columns and always binds values
+ * as placeholders. 404 when the id is unknown, 409 when the new email is taken.
  *
  * @param {import('pg').Pool} pool
  * @param {number} id
@@ -141,13 +172,40 @@ export const getUser = async (pool, id) => {
  * @returns {Promise<object>}
  */
 export const updateUser = async (pool, id, input) => {
-  const { sets, params } = buildUpdate(input, USER_UPDATE_COLUMNS)
-  const { rows } = await pool.query(
-    `UPDATE users SET ${sets.join(', ')}
-      WHERE id = $${params.length + 1}
-      RETURNING ${USER_READ_COLUMNS}`,
-    [...params, id]
-  )
+  // Lower-cased here, not in the route: every auth path looks the address up in
+  // lower case, so a mixed-case edit would create an account that cannot log in.
+  const emailed = Object.hasOwn(input, 'email')
+    ? { ...input, email: String(input.email).trim().toLowerCase() }
+    : input
+
+  // **Moving a login off `trade` clears its approval.** `trade_approved` only
+  // means anything on a trade row, so demoting an approved trade account used to
+  // leave a true flag stranded where nothing displays it — and re-promoting the
+  // row months later handed back trade pricing AND every trade-only house with
+  // no review having happened. Enforced here rather than in a screen so it holds
+  // for the CRM, the AdminJS panel and any future caller. An explicit
+  // `trade_approved: true` in the same body loses: the role is the stronger
+  // statement, and the two together are a contradiction, not an instruction.
+  const patch =
+    Object.hasOwn(emailed, 'role') && emailed.role !== 'trade'
+      ? { ...emailed, trade_approved: false }
+      : emailed
+
+  const { sets, params } = buildUpdate(patch, USER_UPDATE_COLUMNS)
+  let rows
+  try {
+    ;({ rows } = await pool.query(
+      `UPDATE users SET ${sets.join(', ')}
+        WHERE id = $${params.length + 1}
+        RETURNING ${USER_READ_COLUMNS}`,
+      [...params, id]
+    ))
+  } catch (error) {
+    if (error.code === PG_UNIQUE_VIOLATION) {
+      throw httpError(409, 'An account with that email already exists.')
+    }
+    throw error
+  }
   if (rows.length === 0) {
     throw httpError(404, `User ${id} not found.`)
   }

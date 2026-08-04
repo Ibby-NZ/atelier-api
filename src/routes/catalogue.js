@@ -9,7 +9,23 @@ import {
 import { getProductDetail } from '../catalogue/product-detail.js'
 import { listBrands, getBrandBySlug } from '../catalogue/brands.js'
 import { listCollections, getCollection } from '../catalogue/collections.js'
+import { canSeeTradeCatalogue } from '../catalogue/visibility.js'
 import { effectiveRole } from '../auth/guards.js'
+
+// Every public route below resolves the optional session ONCE and derives both
+// gates from it. They are not the same gate (see catalogue/visibility.js):
+// `includeTrade` is the price (approved trade only), `includeTradeOnly` is
+// which houses are visible at all (approved trade AND staff).
+const viewerGates = (user) => ({
+  includeTrade: !!user && effectiveRole(user) === 'trade',
+  includeTradeOnly: canSeeTradeCatalogue(user),
+})
+
+// The message a signed-out visitor gets for a represented house's product. It
+// names no detail of the product — only that the library it belongs to is open
+// to trade accounts, and where to apply.
+const TRADE_ONLY_MESSAGE =
+  'This design is part of our trade library. Sign in with an approved trade account, or apply for one, to view it.'
 
 // Querystring filters are all optional exact-match strings, plus free-text
 // search, sort and pagination. product_type and sort are constrained by enum;
@@ -72,8 +88,8 @@ export const catalogueRoutes = async (app, { pool }) => {
     async (request) => {
       const { page, limit, sort, ...filters } = request.query
       const user = await app.guards.loadOptionalUser(request)
-      const includeTrade = !!user && effectiveRole(user) === 'trade'
-      const result = await listProducts(pool, { filters, page, limit, sort, includeTrade })
+      const gates = viewerGates(user)
+      const result = await listProducts(pool, { filters, page, limit, sort, ...gates })
       return {
         products: result.products,
         meta: {
@@ -81,6 +97,10 @@ export const catalogueRoutes = async (app, { pool }) => {
           page: result.page,
           limit: result.limit,
           sort: result.sort,
+          // The storefront needs to know it is looking at the public subset, or
+          // it presents the house's own workroom as if it were the whole
+          // library. Never a secret — it is the invitation to apply for trade.
+          trade_gated: result.trade_gated,
         },
       }
     }
@@ -94,8 +114,22 @@ export const catalogueRoutes = async (app, { pool }) => {
     { schema: { params: slugParamsSchema } },
     async (request, reply) => {
       const user = await app.guards.loadOptionalUser(request)
-      const includeTrade = !!user && effectiveRole(user) === 'trade'
-      const product = await getProductDetail(pool, request.params.slug, { includeTrade })
+      const gates = viewerGates(user)
+      const { product, restricted } = await getProductDetail(
+        pool,
+        request.params.slug,
+        gates
+      )
+      // 403, not 404: the product exists and its URL is shareable, so pretending
+      // otherwise would render a dead page for a shopper who was sent the link —
+      // and the storefront's server-side render carries no session cookie, so a
+      // trade customer's own product page would 404 in the HTML. `trade_only`
+      // lets the page draw the application invitation rather than an error.
+      if (restricted) {
+        return reply
+          .code(403)
+          .send({ error: TRADE_ONLY_MESSAGE, message: TRADE_ONLY_MESSAGE, trade_only: true })
+      }
       if (!product) {
         return reply.code(404).send({ error: 'Product not found.' })
       }
@@ -123,9 +157,15 @@ export const catalogueRoutes = async (app, { pool }) => {
   app.get(
     '/catalogue/collections',
     { schema: { querystring: collectionQuerySchema } },
-    async (request) => ({
-      collections: await listCollections(pool, { brandSlug: request.query.brand }),
-    })
+    async (request) => {
+      const user = await app.guards.loadOptionalUser(request)
+      return {
+        collections: await listCollections(pool, {
+          brandSlug: request.query.brand,
+          includeTradeOnly: canSeeTradeCatalogue(user),
+        }),
+      }
+    }
   )
 
   // Brand-scoped because a collection slug is only unique within its house.
@@ -133,10 +173,12 @@ export const catalogueRoutes = async (app, { pool }) => {
     '/catalogue/brands/:slug/collections/:collectionSlug',
     { schema: { params: brandCollectionParamsSchema } },
     async (request, reply) => {
+      const user = await app.guards.loadOptionalUser(request)
       const collection = await getCollection(
         pool,
         request.params.slug,
-        request.params.collectionSlug
+        request.params.collectionSlug,
+        { includeTradeOnly: canSeeTradeCatalogue(user) }
       )
       if (!collection) {
         return reply.code(404).send({ error: 'Collection not found.' })

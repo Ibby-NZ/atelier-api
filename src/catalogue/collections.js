@@ -13,10 +13,17 @@
 // GET /catalogue/products?brand=&collection= so filtering, sorting, paging and
 // the trade-pricing gate stay in one read model.
 
-// Products counted for a collection are the ones a shopper could actually reach:
-// visible, unarchived, and belonging to an unarchived house. Same predicate the
-// product listing applies, so a non-zero count always yields a non-empty grid.
-const VISIBLE_PRODUCT_COUNT = `(
+// Products counted for a collection are the ones THIS VIEWER could actually
+// reach: visible, unarchived, belonging to an unarchived house, and — unless
+// the viewer may browse the represented houses — from an open house. Same
+// predicate the product listing applies, so a non-zero count always yields a
+// non-empty grid; counting hidden products would send a shopper to a tile that
+// promises twelve designs and opens on none.
+//
+// The collections themselves stay listed for every viewer, like the brands they
+// belong to: they are editorial (name, blurb, photograph) and the homepage
+// merchandises out of them. Only the count moves.
+const visibleProductCount = (includeTradeOnly) => `(
   SELECT count(*)::int
   FROM products p
   JOIN brands pb ON pb.id = p.brand_id
@@ -24,16 +31,18 @@ const VISIBLE_PRODUCT_COUNT = `(
     AND p.show_on_website = true
     AND p.archived_at IS NULL
     AND pb.archived_at IS NULL
+    ${includeTradeOnly ? '' : 'AND pb.trade_only = false'}
 ) AS product_count`
 
-const COLLECTION_SELECT = `
+const collectionSelect = (includeTradeOnly) => `
   SELECT c.slug,
          c.name,
          c.description,
          c.image_url,
-         ${VISIBLE_PRODUCT_COUNT},
+         ${visibleProductCount(includeTradeOnly)},
          b.slug AS brand_slug,
-         b.name AS brand_name
+         b.name AS brand_name,
+         b.trade_only
     FROM collections c
     JOIN brands b ON b.id = c.brand_id
    WHERE c.archived_at IS NULL AND b.archived_at IS NULL
@@ -46,7 +55,11 @@ const toCollection = (row) =>
     description: row.description,
     image_url: row.image_url,
     product_count: row.product_count,
-    brand: Object.freeze({ slug: row.brand_slug, name: row.brand_name }),
+    brand: Object.freeze({
+      slug: row.brand_slug,
+      name: row.brand_name,
+      trade_only: row.trade_only,
+    }),
   })
 
 /**
@@ -57,13 +70,16 @@ const toCollection = (row) =>
  * an empty result, not a 404.
  *
  * @param {import('pg').Pool} pool
- * @param {{ brandSlug?: string }} [options]
+ * @param {{ brandSlug?: string, includeTradeOnly?: boolean }} [options]
  * @returns {Promise<object[]>}
  */
-export const listCollections = async (pool, { brandSlug } = {}) => {
+export const listCollections = async (
+  pool,
+  { brandSlug, includeTradeOnly = false } = {}
+) => {
   const scoped = brandSlug ? `AND b.slug = $1` : ''
   const { rows } = await pool.query(
-    `${COLLECTION_SELECT} ${scoped}
+    `${collectionSelect(includeTradeOnly)} ${scoped}
      ORDER BY b.name ASC, c.name ASC, c.id ASC`,
     brandSlug ? [brandSlug] : []
   )
@@ -76,12 +92,18 @@ export const listCollections = async (pool, { brandSlug } = {}) => {
  * @param {import('pg').Pool} pool
  * @param {string} brandSlug
  * @param {string} collectionSlug
+ * @param {{ includeTradeOnly?: boolean }} [options]
  * @returns {Promise<object|null>} the collection, or null when either slug is
  *   unknown, archived, or the pair does not belong together
  */
-export const getCollection = async (pool, brandSlug, collectionSlug) => {
+export const getCollection = async (
+  pool,
+  brandSlug,
+  collectionSlug,
+  { includeTradeOnly = false } = {}
+) => {
   const { rows } = await pool.query(
-    `${COLLECTION_SELECT} AND b.slug = $1 AND c.slug = $2`,
+    `${collectionSelect(includeTradeOnly)} AND b.slug = $1 AND c.slug = $2`,
     [brandSlug, collectionSlug]
   )
   return rows[0] ? toCollection(rows[0]) : null

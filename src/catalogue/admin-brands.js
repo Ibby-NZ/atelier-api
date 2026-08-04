@@ -88,7 +88,7 @@ export const buildUpdate = (input, columns) => {
   return { sets, params }
 }
 
-const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, website_url, archived_at, created_at`
+const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, archived_at, created_at`
 
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
@@ -96,6 +96,11 @@ const BRAND_UPDATE_COLUMNS = Object.freeze([
   'country',
   'currency',
   'is_international',
+  // Whether a signed-out visitor may browse this house's products at all (see
+  // catalogue/visibility.js). Editable here because it is a commercial decision
+  // per house, not a property of the vendored catalogue — and the seed never
+  // overwrites it, so an office change survives every reseed.
+  'trade_only',
   'website_url',
 ])
 
@@ -108,6 +113,7 @@ const toBrand = (row) =>
     country: row.country,
     currency: row.currency,
     is_international: row.is_international,
+    trade_only: row.trade_only,
     website_url: row.website_url ?? null,
     archived_at: row.archived_at ?? null,
     created_at: row.created_at,
@@ -182,8 +188,8 @@ export const createBrand = async (pool, input) => {
   const slug = slugFrom(name)
   try {
     const { rows } = await pool.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international, website_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING ${BRAND_COLUMNS}`,
       [
         name,
@@ -192,6 +198,10 @@ export const createBrand = async (pool, input) => {
         input.country ?? null,
         input.currency,
         input.is_international ?? false,
+        // Closed unless the office says otherwise: a house added mid-negotiation
+        // must not appear on the public storefront because someone left a box
+        // unticked.
+        input.trade_only ?? true,
         websiteUrlFrom(input.website_url),
       ]
     )

@@ -156,6 +156,52 @@ describe('back-office users admin', () => {
       expect(emails).toContain(fixtureEmail('zephyrine'))
       expect(emails).not.toContain(fixtureEmail('nomatch'))
     })
+
+    // `segment` is how the CRM navigates: the Clients section manages the people
+    // who buy, Users & permissions manages the staff who serve them.
+    it('segment=clients returns customer and trade accounts only', async () => {
+      await insertUser(pool, { local: 'seg-customer', role: 'customer' })
+      await insertUser(pool, { local: 'seg-trade', role: 'trade', tradeApproved: true })
+      await insertUser(pool, { local: 'seg-staff', role: 'backoffice' })
+      await insertUser(pool, { local: 'seg-boss', role: 'director' })
+
+      const response = await inject('GET', '/admin/users?segment=clients', backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      const emails = response.json().users.map((u) => u.email)
+      expect(emails).toContain(fixtureEmail('seg-customer'))
+      expect(emails).toContain(fixtureEmail('seg-trade'))
+      expect(emails).not.toContain(fixtureEmail('seg-staff'))
+      expect(emails).not.toContain(fixtureEmail('seg-boss'))
+    })
+
+    it('segment=staff returns backoffice and director accounts only', async () => {
+      await insertUser(pool, { local: 'seg2-customer', role: 'customer' })
+      await insertUser(pool, { local: 'seg2-staff', role: 'backoffice' })
+
+      const response = await inject('GET', '/admin/users?segment=staff', backofficeCookie)
+      const emails = response.json().users.map((u) => u.email)
+      expect(emails).toContain(fixtureEmail('seg2-staff'))
+      expect(emails).not.toContain(fixtureEmail('seg2-customer'))
+    })
+
+    it('intersects segment with role — the Clients screen asking for trade only', async () => {
+      await insertUser(pool, { local: 'seg3-customer', role: 'customer' })
+      await insertUser(pool, { local: 'seg3-trade', role: 'trade' })
+
+      const response = await inject(
+        'GET',
+        '/admin/users?segment=clients&role=trade',
+        backofficeCookie
+      )
+      const emails = response.json().users.map((u) => u.email)
+      expect(emails).toContain(fixtureEmail('seg3-trade'))
+      expect(emails).not.toContain(fixtureEmail('seg3-customer'))
+    })
+
+    it('rejects an unknown segment with 400', async () => {
+      const response = await inject('GET', '/admin/users?segment=wizards', backofficeCookie)
+      expect(response.statusCode).toBe(400)
+    })
   })
 
   describe('PATCH /admin/users/:id', () => {
@@ -186,6 +232,74 @@ describe('back-office users admin', () => {
         name: 'Ghost',
       })
       expect(response.statusCode).toBe(404)
+    })
+
+    // Email is editable so a typo taken down over the phone can be corrected;
+    // without it the account is unreachable and unfixable short of SQL.
+    it('updates the email, lower-cased so login still resolves it', async () => {
+      const id = await insertUser(pool, { local: 'typo', role: 'trade' })
+      const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        email: `FIXED.Typo@${FIXTURE_DOMAIN}`,
+      })
+      expect(response.statusCode).toBe(200)
+      expect(response.json().user.email).toBe(fixtureEmail('fixed.typo'))
+    })
+
+    it('answers 409 when the new email is already taken', async () => {
+      const id = await insertUser(pool, { local: 'mover', role: 'trade' })
+      await insertUser(pool, { local: 'incumbent', role: 'customer' })
+      const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        email: fixtureEmail('incumbent'),
+      })
+      expect(response.statusCode).toBe(409)
+      // The original address is untouched, so nothing is left half-moved.
+      const { rows } = await pool.query('SELECT email FROM users WHERE id = $1', [id])
+      expect(rows[0].email).toBe(fixtureEmail('mover'))
+    })
+
+    // trade_approved only means anything on a trade row. Leaving it set on a
+    // demoted account strands a flag nothing displays, and re-promoting later
+    // restores trade pricing and every trade-only house with no review.
+    it('clears trade_approved when the role moves off trade', async () => {
+      const id = await insertUser(pool, {
+        local: 'demoted',
+        role: 'trade',
+        tradeApproved: true,
+      })
+      const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        role: 'customer',
+      })
+      expect(response.statusCode).toBe(200)
+      expect(response.json().user.trade_approved).toBe(false)
+    })
+
+    it('ignores a contradictory trade_approved sent with a non-trade role', async () => {
+      const id = await insertUser(pool, { local: 'contradiction', role: 'trade' })
+      const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        role: 'backoffice',
+        trade_approved: true,
+      })
+      expect(response.json().user.trade_approved).toBe(false)
+    })
+
+    it('leaves trade_approved alone when the role is not part of the patch', async () => {
+      const id = await insertUser(pool, {
+        local: 'renamed',
+        role: 'trade',
+        tradeApproved: true,
+      })
+      const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        name: 'New Name',
+      })
+      expect(response.json().user.trade_approved).toBe(true)
+    })
+
+    it('rejects a malformed email with 400 by schema', async () => {
+      const id = await insertUser(pool, { local: 'badmail', role: 'customer' })
+      const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        email: 'not-an-address',
+      })
+      expect(response.statusCode).toBe(400)
     })
   })
 

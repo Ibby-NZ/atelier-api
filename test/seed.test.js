@@ -261,6 +261,30 @@ describe('catalogue seed import', () => {
     expect(rows[0].website_url).toBe('https://staff-entered.example.com')
   })
 
+  it('opens the house workroom to the public and closes every represented maison', async () => {
+    const { rows } = await pool.query(
+      `SELECT slug FROM brands WHERE trade_only = false ORDER BY slug`
+    )
+    // Exactly one open house. If this ever grows a second entry it is because
+    // someone opened a maison in the CRM or added a domestic brand — both are
+    // real decisions, not a seed detail, so the assertion is deliberately exact.
+    expect(rows.map((row) => row.slug)).toEqual(['atelier-textiles-nz'])
+  })
+
+  it('never re-closes a house the office opened, on any later reseed', async () => {
+    // trade_only is written on INSERT only: which houses the public storefront
+    // may browse is an operational decision, and a reseed silently pulling a
+    // maison back off the public site would be invisible until someone noticed
+    // the grid had shrunk.
+    await pool.query(`UPDATE brands SET trade_only = false WHERE slug = 'pierre-frey'`)
+    await runSeed(pool)
+    const { rows } = await pool.query(
+      `SELECT trade_only FROM brands WHERE slug = 'pierre-frey'`
+    )
+    expect(rows[0].trade_only).toBe(false)
+    await pool.query(`UPDATE brands SET trade_only = true WHERE slug = 'pierre-frey'`)
+  })
+
   it('seeds shipping rates: three zones with two tiers each (boundary 20)', async () => {
     const { rows } = await pool.query(
       `SELECT zone, count(*)::int AS tiers,

@@ -1,6 +1,13 @@
 // Public brand read model: a flat brand list and a single brand with its
 // collections, for storefront brand pages. All brands are shown (they are curated
 // suppliers, not per-user data); pricing rules live on products, not brands.
+//
+// The house pages stay public even for the houses whose PRODUCTS are trade-only:
+// the directory is Atelier's marketing — the whole point of representing a
+// maison is that visitors know it is represented — and closing it would gut
+// /brands for everyone signed out. `trade_only` rides along on the shape so the
+// storefront can label the house and offer the trade application where its grid
+// would otherwise read as an empty collection.
 
 const BRAND_COLUMNS = `
   slug,
@@ -8,6 +15,7 @@ const BRAND_COLUMNS = `
   country,
   currency,
   is_international,
+  trade_only,
   story,
   website_url
 `
@@ -19,6 +27,7 @@ const toBrand = (row) =>
     country: row.country,
     currency: row.currency,
     is_international: row.is_international,
+    trade_only: row.trade_only,
     story: row.story,
     website_url: row.website_url,
   })

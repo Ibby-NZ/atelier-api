@@ -4,6 +4,15 @@
 // mini colourway strip alongside the specs. Trade pricing is revealed only to
 // approved trade users (FR-3) via the `includeTrade` flag the route derives
 // from the optional session — exactly the same gate the detail endpoint uses.
+//
+// A SECOND, independent flag decides which houses appear at all:
+// `includeTradeOnly` (see ./visibility.js). Without it the grid is the house's
+// own workroom alone — the represented maisons are reserved for approved trade
+// accounts and staff. `meta.trade_gated` tells the storefront which of the two
+// libraries it is looking at, so it can invite a visitor to apply rather than
+// silently serving a short grid.
+
+import { PUBLIC_BRAND_CONDITION } from './visibility.js'
 
 export const DEFAULT_PAGE = 1
 export const DEFAULT_LIMIT = 20
@@ -160,7 +169,7 @@ const toPublicProduct = (row, includeTrade) => {
 // Builds the WHERE clause fragments and bound params from validated filters.
 // `brand` matches on brand slug, `q` is a free-text search across the product,
 // its house and its colourways; every other key maps through FILTER_COLUMNS.
-const buildFilters = (filters) => {
+const buildFilters = (filters, includeTradeOnly) => {
   // Archived products/brands are removed from the public catalogue (a soft
   // delete unpublishes the product too, but filter both so an archived brand
   // hides all of its products even if one is still flagged visible).
@@ -169,6 +178,12 @@ const buildFilters = (filters) => {
     'p.archived_at IS NULL',
     'b.archived_at IS NULL',
   ]
+  // Represented houses are trade-only. Applied as a WHERE clause (not a join
+  // condition) because a product from a closed house must vanish entirely, not
+  // read as brandless.
+  if (!includeTradeOnly) {
+    clauses.push(PUBLIC_BRAND_CONDITION)
+  }
   const params = []
 
   if (filters.brand) {
@@ -216,12 +231,20 @@ const buildFilters = (filters) => {
  *   limit?: number,
  *   sort?: string,
  *   includeTrade?: boolean,
+ *   includeTradeOnly?: boolean,
  * }} [options]
- * @returns {Promise<{ products: object[], total: number, page: number, limit: number, sort: string }>}
+ * @returns {Promise<{ products: object[], total: number, page: number, limit: number, sort: string, trade_gated: boolean }>}
  */
 export const listProducts = async (
   pool,
-  { filters = {}, page, limit, sort, includeTrade = false } = {}
+  {
+    filters = {},
+    page,
+    limit,
+    sort,
+    includeTrade = false,
+    includeTradeOnly = false,
+  } = {}
 ) => {
   const safePage = Number.isInteger(page) && page > 0 ? page : DEFAULT_PAGE
   const safeLimit =
@@ -229,7 +252,7 @@ export const listProducts = async (
   const offset = (safePage - 1) * safeLimit
   const safeSort = Object.hasOwn(SORT_ORDERS, sort) ? sort : DEFAULT_SORT
 
-  const { where, params } = buildFilters(filters)
+  const { where, params } = buildFilters(filters, includeTradeOnly)
 
   // The collection join is in the count query too: `collection` is a filter, so
   // meta.total has to be the filtered total.
@@ -261,5 +284,9 @@ export const listProducts = async (
     page: safePage,
     limit: safeLimit,
     sort: safeSort,
+    // True when this response is the public subset — the storefront's cue to
+    // say "the rest of the library is open to trade accounts" instead of
+    // presenting a short grid as if it were everything.
+    trade_gated: !includeTradeOnly,
   }
 }

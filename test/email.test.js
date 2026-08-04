@@ -308,8 +308,9 @@ describe('order-request trigger wiring', () => {
     )
     await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
     const { rows: brands } = await pool.query(
-      `INSERT INTO brands (name, slug, country, currency, is_international, story)
-       VALUES ('Email Test House', $1, 'New Zealand', 'NZD', false, 'Test.')
+      `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story)
+       -- trade_only false: this fixture models the PUBLIC storefront.
+       VALUES ('Email Test House', $1, 'New Zealand', 'NZD', false, false, 'Test.')
        RETURNING id`,
       [`${PREFIX}-house`]
     )

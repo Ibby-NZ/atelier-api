@@ -38,10 +38,15 @@ describe('back-office catalogue admin', () => {
   const inject = (method, url, cookie, payload) =>
     app.inject({ method, url, headers: cookie ? { cookie } : {}, payload })
 
+  // trade_only defaults to TRUE on create (a new house is closed until the
+  // office opens it), but most of these fixtures are then checked against the
+  // anonymous public catalogue — so the shared fixture opens the house and the
+  // tests that care about the gate pass their own override.
   const createBrandFixture = async (suffix, overrides = {}) => {
     const response = await inject('POST', '/admin/brands', backofficeCookie, {
       name: brandName(suffix),
       currency: 'NZD',
+      trade_only: false,
       ...overrides,
     })
     return response.json().brand

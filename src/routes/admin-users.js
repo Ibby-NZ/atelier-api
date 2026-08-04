@@ -14,6 +14,7 @@ import {
   createUser,
   updateUser,
   setUserArchived,
+  USER_SEGMENTS,
 } from '../users/admin-users.js'
 
 // The valid stored roles (matches the users_role_check constraint). Shared by the
@@ -39,11 +40,15 @@ const createBodySchema = {
   },
 }
 
+// `segment` is the coarse split the CRM navigates by — Clients (customer +
+// trade) versus Users & permissions (backoffice + director). Enum-constrained so
+// an unknown segment is a 400 rather than a silently unfiltered list.
 const listQuerySchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
     role: { type: 'string', enum: USER_ROLES },
+    segment: { type: 'string', enum: Object.keys(USER_SEGMENTS) },
     q: { type: 'string' },
     include_archived: { type: 'boolean', default: false },
   },
@@ -59,8 +64,9 @@ const idParamsSchema = {
 }
 
 // minProperties: 1 rejects an empty patch with a 400. `name` is nullable so a
-// PATCH can clear it. email/password/archived_at are deliberately not editable
-// here (see the module header).
+// PATCH can clear it; `email` is not — an account with no address could never
+// sign in again. password/archived_at stay off this route (a password is an auth
+// flow, archiving has its own endpoint).
 const patchBodySchema = {
   type: 'object',
   additionalProperties: false,
@@ -69,6 +75,7 @@ const patchBodySchema = {
     role: { type: 'string', enum: USER_ROLES },
     trade_approved: { type: 'boolean' },
     name: { type: ['string', 'null'], maxLength: 200 },
+    email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
   },
 }
 
@@ -86,6 +93,7 @@ export const adminUsersRoutes = async (app, { pool }) => {
     async (request) => ({
       users: await listUsers(pool, {
         role: request.query.role,
+        segment: request.query.segment,
         q: request.query.q,
         includeArchived: request.query.include_archived,
       }),
@@ -124,7 +132,8 @@ export const adminUsersRoutes = async (app, { pool }) => {
     { preHandler: backoffice, schema: { params: idParamsSchema, body: patchBodySchema } },
     async (request, reply) => {
       // Self role-change guard: only blocked when editing your own account AND
-      // the body touches `role`. trade_approved/name self-edits are fine.
+      // the body touches `role`. trade_approved/name/email self-edits are fine —
+      // none of them can revoke your own back-office access.
       if (request.params.id === request.user.id && Object.hasOwn(request.body, 'role')) {
         reply.code(422)
         return {

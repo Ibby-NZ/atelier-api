@@ -18,9 +18,11 @@ const get = (app, url) => app.inject({ method: 'GET', url })
 // collection at all. House B: `shared` with one product.
 const seedFixtures = async (pool) => {
   const { rows: brands } = await pool.query(
-    `INSERT INTO brands (name, slug, country, currency, is_international)
-     VALUES ($1, $2, 'New Zealand', 'NZD', false),
-            ($3, $4, 'France', 'EUR', true)
+    `INSERT INTO brands (name, slug, country, currency, is_international, trade_only)
+     -- trade_only false: these fixtures model the PUBLIC storefront, and the
+     -- column defaults to closed (see catalogue/visibility.js).
+     VALUES ($1, $2, 'New Zealand', 'NZD', false, false),
+            ($3, $4, 'France', 'EUR', true, false)
      RETURNING id, slug`,
     ['Col Test House A', `${PREFIX}-house-a`, 'Col Test House B', `${PREFIX}-house-b`]
   )

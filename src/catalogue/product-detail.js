@@ -3,6 +3,16 @@
 // asset. Approved trade users additionally receive trade_price_cents; nobody else
 // ever does (FR-3, enforced by the `includeTrade` flag the route derives from the
 // authenticated user).
+//
+// The house-visibility gate (./visibility.js) is deliberately NOT folded into
+// the WHERE clause here, the way it is in the listing. A represented house's
+// product genuinely exists and its URL is shareable, so answering 404 to a
+// signed-out visitor would be a lie the storefront then has to render as a dead
+// page — and the storefront's SSR fetch carries no session cookie, so a trade
+// customer's own product page would 404 in the HTML and only appear once the
+// island rehydrated. Instead the row is fetched, then reported as `restricted`,
+// and the route turns that into a 403 the page can render as an invitation to
+// apply for trade. Nothing about the product is returned with it.
 
 const PRODUCT_COLUMNS = `
   p.slug,
@@ -21,6 +31,7 @@ const PRODUCT_COLUMNS = `
   b.slug AS brand_slug,
   b.name AS brand_name,
   b.is_international,
+  b.trade_only,
   col.slug AS collection_slug,
   col.name AS collection_name
 `
@@ -91,12 +102,21 @@ const toProductDetail = (row, colourways, includeTrade) => {
 
 /**
  * Loads a website-visible product by slug with its colourways and availability.
+ *
+ * Three outcomes, deliberately distinguished (the route maps them to 404 / 403 /
+ * 200): the slug is unknown or unpublished; the product belongs to a house this
+ * viewer may not browse; or the product itself.
+ *
  * @param {import('pg').Pool} pool
  * @param {string} slug
- * @param {{ includeTrade?: boolean }} [options]
- * @returns {Promise<object|null>} the product detail, or null if not found/hidden
+ * @param {{ includeTrade?: boolean, includeTradeOnly?: boolean }} [options]
+ * @returns {Promise<{ product: object|null, restricted: boolean }>}
  */
-export const getProductDetail = async (pool, slug, { includeTrade = false } = {}) => {
+export const getProductDetail = async (
+  pool,
+  slug,
+  { includeTrade = false, includeTradeOnly = false } = {}
+) => {
   const { rows } = await pool.query(
     `SELECT ${PRODUCT_COLUMNS}
      FROM products p
@@ -108,7 +128,13 @@ export const getProductDetail = async (pool, slug, { includeTrade = false } = {}
   )
   const productRow = rows[0]
   if (!productRow) {
-    return null
+    return { product: null, restricted: false }
+  }
+  // Answer before loading colourways: a restricted product returns nothing at
+  // all, so there is no second query to pay for and no shape to accidentally
+  // leak a field through.
+  if (productRow.trade_only && !includeTradeOnly) {
+    return { product: null, restricted: true }
   }
 
   const { rows: colourways } = await pool.query(
@@ -122,5 +148,8 @@ export const getProductDetail = async (pool, slug, { includeTrade = false } = {}
     [slug]
   )
 
-  return toProductDetail(productRow, colourways, includeTrade)
+  return {
+    product: toProductDetail(productRow, colourways, includeTrade),
+    restricted: false,
+  }
 }

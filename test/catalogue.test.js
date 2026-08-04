@@ -15,10 +15,12 @@ const get = (app, url) => app.inject({ method: 'GET', url })
 // seed row counts. Two brands: one domestic (priced), one international (hidden).
 const seedFixtures = async (pool) => {
   const { rows: brands } = await pool.query(
-    `INSERT INTO brands (name, slug, currency, is_international)
+    `INSERT INTO brands (name, slug, currency, is_international, trade_only)
+     -- trade_only false: these fixtures model the PUBLIC storefront, and the
+     -- column defaults to closed (see catalogue/visibility.js).
      VALUES
-       ($1, $2, 'NZD', false),
-       ($3, $4, 'NZD', true)
+       ($1, $2, 'NZD', false, false),
+       ($3, $4, 'NZD', true, false)
      RETURNING id, is_international`,
     [
       'Cat Test Domestic',

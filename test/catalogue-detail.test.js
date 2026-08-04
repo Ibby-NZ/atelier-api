@@ -25,8 +25,10 @@ const sessionCookieFrom = (response) => {
 // no inventory row). Also a hidden product to prove the 404 path.
 const seedFixtures = async (pool) => {
   const { rows: brands } = await pool.query(
-    `INSERT INTO brands (name, slug, country, currency, is_international, story, website_url)
-     VALUES ($1, $2, 'New Zealand', 'NZD', false, 'A test house.', 'https://det-test-house.example.com')
+    `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story, website_url)
+     -- trade_only false: these fixtures model the PUBLIC storefront, and the
+     -- column defaults to closed (see catalogue/visibility.js).
+     VALUES ($1, $2, 'New Zealand', 'NZD', false, false, 'A test house.', 'https://det-test-house.example.com')
      RETURNING id`,
     ['Det Test House', `${PREFIX}-house`]
   )

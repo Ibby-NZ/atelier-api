@@ -79,6 +79,12 @@ const toBrandRow = (name) => {
     country: meta.country ?? null,
     currency,
     is_international: name !== HOUSE_BRAND,
+    // The public storefront is the house's own workroom; every maison Atelier
+    // represents is reserved for approved trade accounts (see the API's
+    // catalogue/visibility.js). Only ever applied on INSERT — the brands upsert
+    // leaves an existing value alone, so opening or closing a house in the CRM
+    // survives every reseed.
+    trade_only: name !== HOUSE_BRAND,
     website_url: BRAND_WEBSITES[meta.slug] ?? null,
   })
 }
@@ -96,6 +102,7 @@ const toRepresentedHouseRow = (house) =>
     country: house.country ?? null,
     currency: house.currency,
     is_international: true,
+    trade_only: true,
     website_url: BRAND_WEBSITES[house.slug] ?? null,
   })
 

@@ -8,6 +8,7 @@
 // order without a pending row here.
 
 import { getShippingQuote } from '../shipping/rates.js'
+import { canSeeTradeCatalogue } from '../catalogue/visibility.js'
 
 // Throw an Error whose statusCode Fastify will honour on the reply.
 const httpError = (statusCode, message) =>
@@ -29,7 +30,14 @@ const CARD_PAYMENT_UNAVAILABLE =
 // Resolves each requested { sku, qty } against the catalogue, enforcing that the
 // product is a purchasable finished good with a retail price and enough stock.
 // Returns priced lines; throws a 422 on the first line that fails a rule.
-export const validateCheckoutLines = async (pool, lines) => {
+//
+// `includeTradeOnly` closes the same door the catalogue does: a SKU a visitor
+// cannot browse is a SKU they cannot buy. Without it the gate would be cosmetic
+// — the cart takes a bare SKU, so anyone who ever saw one (or guessed it) could
+// transact on a represented house while signed out. It is answered with the
+// SAME 422 as an unknown SKU deliberately: a checkout error is not the place to
+// confirm which designs exist.
+export const validateCheckoutLines = async (pool, lines, { includeTradeOnly = false } = {}) => {
   const validated = []
   for (const { sku, qty } of lines) {
     const { rows } = await pool.query(
@@ -40,16 +48,18 @@ export const validateCheckoutLines = async (pool, lines) => {
               p.retail_price_cents,
               p.currency,
               p.show_on_website,
+              b.trade_only,
               i.qty_available,
               i.qty_reserved
          FROM colourways c
          JOIN products p ON p.id = c.product_id
+         JOIN brands b ON b.id = p.brand_id
          LEFT JOIN inventory i ON i.colourway_id = c.id
         WHERE c.sku = $1`,
       [sku]
     )
     const row = rows[0]
-    if (!row || !row.show_on_website) {
+    if (!row || !row.show_on_website || (row.trade_only && !includeTradeOnly)) {
       throw httpError(422, `No purchasable product for SKU "${sku}".`)
     }
     if (row.product_type === 'fabric') {
@@ -120,7 +130,9 @@ export const createCheckoutSession = async (
     throw httpError(503, CARD_PAYMENT_UNAVAILABLE)
   }
 
-  const validated = await validateCheckoutLines(pool, lines)
+  const validated = await validateCheckoutLines(pool, lines, {
+    includeTradeOnly: canSeeTradeCatalogue(user),
+  })
 
   // One Stripe session charges in one currency, and the shipping line is priced
   // in it too — so a mixed-currency cart would silently mis-charge. Refuse it

@@ -16,6 +16,7 @@
 // concurrent requests can't both claim the same metres.
 
 import { randomUUID } from 'node:crypto'
+import { canSeeTradeCatalogue } from '../catalogue/visibility.js'
 
 // Mirror of the auth EMAIL_PATTERN — Fastify's Ajv has no email format, so the
 // 422 field-level check is hand-rolled here.
@@ -75,22 +76,31 @@ const buildNotes = (contact, fallbackEmail) => {
 // (FOR UPDATE OF c — the inventory row is the nullable side of the LEFT JOIN and
 // can't be locked) so concurrent requests for the same SKU serialise their
 // read-then-reserve. Throws 422 when the SKU isn't a listed product.
-const resolveLine = async (client, line) => {
+//
+// `includeTradeOnly` mirrors the catalogue gate: cutting metres off a
+// represented house's roll is a trade transaction, so a signed-out visitor can
+// only request from the houses they can browse. This DOES narrow the guest
+// order-request flow (FR-5/FR-6) to the open houses — deliberately: a guest who
+// cannot see a design has no legitimate way to have its SKU. Same 422 text as an
+// unknown SKU, so the refusal confirms nothing about what exists.
+const resolveLine = async (client, line, includeTradeOnly) => {
   const { rows } = await client.query(
     `SELECT c.id AS colourway_id,
             p.name,
             p.show_on_website,
+            b.trade_only,
             i.qty_available,
             i.qty_reserved
        FROM colourways c
        JOIN products p ON p.id = c.product_id
+       JOIN brands b ON b.id = p.brand_id
        LEFT JOIN inventory i ON i.colourway_id = c.id
       WHERE c.sku = $1
       FOR UPDATE OF c`,
     [line.sku]
   )
   const row = rows[0]
-  if (!row || !row.show_on_website) {
+  if (!row || !row.show_on_website || (row.trade_only && !includeTradeOnly)) {
     throw httpError(422, `No product available for SKU "${line.sku}".`)
   }
 
@@ -129,9 +139,10 @@ export const createOrderRequest = async (
   try {
     await client.query('BEGIN')
 
+    const includeTradeOnly = canSeeTradeCatalogue(user)
     const resolved = []
     for (const line of lines) {
-      resolved.push(await resolveLine(client, line))
+      resolved.push(await resolveLine(client, line, includeTradeOnly))
     }
 
     const anyShort = resolved.some((line) => line.short)

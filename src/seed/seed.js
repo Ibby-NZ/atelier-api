@@ -14,12 +14,18 @@ import {
 const upsertBrands = async (client, rows) => {
   const idsByName = new Map()
   for (const row of rows) {
-    // website_url fills blanks only (COALESCE keeps the DB value when set): a
-    // URL staff typed into the CRM outlives every reseed, while a house whose
-    // site we later verify picks it up on the next seed run.
+    // Two columns deliberately do NOT refresh on a reseed:
+    //   website_url — COALESCE keeps the DB value when set, so a URL staff typed
+    //     into the CRM outlives every reseed while a house whose site we later
+    //     verify still picks it up on the next run;
+    //   trade_only — absent from the SET list entirely, so it is written on
+    //     INSERT only. Which houses the public storefront may browse is an
+    //     operational decision the office makes in the CRM (like inventory and
+    //     shipping rates), and a reseed re-closing a house Atelier had opened
+    //     would silently take products off the public site.
     const { rows: result } = await client.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international, website_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (slug) DO UPDATE SET
          name = EXCLUDED.name,
          story = EXCLUDED.story,
@@ -35,6 +41,7 @@ const upsertBrands = async (client, rows) => {
         row.country,
         row.currency,
         row.is_international,
+        row.trade_only,
         row.website_url ?? null,
       ]
     )

@@ -14,8 +14,10 @@ const SKU = {
 
 const seedFixtures = async (pool) => {
   const { rows: brands } = await pool.query(
-    `INSERT INTO brands (name, slug, country, currency, is_international, story)
-     VALUES ($1, $2, 'New Zealand', 'NZD', false, 'A test house.')
+    `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story)
+     -- trade_only false: these fixtures model the PUBLIC storefront, and the
+     -- column defaults to closed (see catalogue/visibility.js).
+     VALUES ($1, $2, 'New Zealand', 'NZD', false, false, 'A test house.')
      RETURNING id`,
     ['Ord Test House', `${PREFIX}-house`]
   )

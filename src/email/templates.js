@@ -123,6 +123,39 @@ const TEMPLATES = Object.freeze({
       'View it in the back-office enquiries inbox.',
     ].join('\n'),
   }),
+
+  // A trade client asked for a copy of one of their own invoices from the
+  // account portal. The portal shows invoice HEADERS only — the D365 export
+  // carries no lines and FR-8 forbids calling Xero, so there is no PDF to
+  // serve and this is the workflow that replaces the missing download button.
+  // The invoice was re-resolved through the client's own scoped query before
+  // this send, so the number below is one they are entitled to.
+  backoffice_invoice_copy_request: ({ invoice_number, invoice_date, company_name, requested_by }) => ({
+    subject: `Invoice copy requested: ${invoice_number}`,
+    text: [
+      'A trade client has requested a copy of one of their invoices.',
+      '',
+      `Invoice: ${invoice_number}`,
+      `Invoice date: ${invoice_date ?? '—'}`,
+      `Account: ${company_name ?? '—'}`,
+      `Requested by: ${requested_by}`,
+      '',
+      'Send them the copy from Xero.',
+    ].join('\n'),
+  }),
+
+  // The client's acknowledgement for the same request, so the button visibly
+  // does something rather than silently posting.
+  invoice_copy_requested: ({ invoice_number }) => ({
+    subject: `${BRAND}: we've received your request for invoice ${invoice_number}`,
+    text: [
+      `We have passed your request for a copy of invoice ${invoice_number} to our accounts team.`,
+      '',
+      'They will email the copy to you shortly.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
 })
 
 export const TEMPLATE_NAMES = Object.freeze(Object.keys(TEMPLATES))

@@ -34,6 +34,21 @@ export const buildAdminResources = (db) => [
       actions: { new: { isAccessible: false } },
     },
   },
+  // The login → D365 customer link behind the trade client portal.
+  //
+  // The JSON API at /admin/trade-accounts is the intended path and belongs on
+  // the CRM's Users → Applicants screen next to the approve checkbox — but that
+  // screen lives in another repo, and until it exists NOTHING can create a link,
+  // which leaves the portal's samples, invoices and account-manager panels
+  // permanently unreachable for every client. These two resources are the
+  // stopgap so the back office can operate the feature from /panel today.
+  //
+  // Editable, unlike orders: there is no state machine here to desync, and
+  // `name_is_ambiguous` being hand-editable is safe because the client-facing
+  // reads re-derive the collision check live (see trade-accounts/viewer.js)
+  // rather than trusting the stored flag.
+  { resource: db.table('trade_accounts'), options: { navigation: PEOPLE } },
+  { resource: db.table('trade_account_users'), options: { navigation: PEOPLE } },
   { resource: db.table('orders'), options: { navigation: ORDERS, actions: READ_ONLY_ACTIONS } },
   { resource: db.table('order_lines'), options: { navigation: ORDERS, actions: READ_ONLY_ACTIONS } },
   { resource: db.table('webhook_events'), options: { navigation: ORDERS, actions: READ_ONLY_ACTIONS } },

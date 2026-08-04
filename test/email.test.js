@@ -45,9 +45,12 @@ describe('email templates', () => {
         'shipped',
         'contact_received',
         'backoffice_new_contact',
+        // The trade portal's invoice-copy request (both halves).
+        'backoffice_invoice_copy_request',
+        'invoice_copy_requested',
       ])
     )
-    expect(TEMPLATE_NAMES).toHaveLength(8)
+    expect(TEMPLATE_NAMES).toHaveLength(10)
   })
 
   it('request_received names the order and promises contact within 24 hours', () => {

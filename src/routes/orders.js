@@ -2,8 +2,24 @@ import {
   validateOrderRequestInput,
   createOrderRequest,
 } from '../orders/order-request.js'
-import { listUserOrders, lookupOrder } from '../orders/order-history.js'
+import {
+  listUserOrders,
+  lookupOrder,
+  DEFAULT_PAGE,
+  DEFAULT_LIMIT,
+  MAX_LIMIT,
+} from '../orders/order-history.js'
 import { notifyRequestReceived } from '../email/notifications.js'
+
+// Paging for /orders/mine. Fastify coerces both from the querystring; an
+// out-of-range value is a 400 by schema rather than a silently clamped read.
+const ordersMineQuerySchema = {
+  type: 'object',
+  properties: {
+    page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
+    limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
+  },
+}
 
 // Guest lookup requires both the order number and the matching email. Schema is
 // structural only (both required, non-empty); a mismatch is a 404, not a 400.
@@ -87,12 +103,18 @@ export const orderRoutes = async (app, { pool, mailer = null }) => {
 
   // Auth: the logged-in user's own orders, newest first. Ownership is enforced
   // in SQL (WHERE user_id = ...), so no order of another user can be returned.
+  // Paged — `meta.total` is the whole history, `orders` is one page of it.
   app.get(
     '/orders/mine',
-    { preHandler: app.guards.requireAuth },
+    {
+      preHandler: app.guards.requireAuth,
+      schema: { querystring: ordersMineQuerySchema },
+    },
     async (request) => {
-      const orders = await listUserOrders(pool, request.user.id)
-      return { orders }
+      return listUserOrders(pool, request.user.id, {
+        page: request.query.page,
+        limit: request.query.limit,
+      })
     }
   )
 

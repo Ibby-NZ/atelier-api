@@ -35,6 +35,7 @@ const start = async () => {
     storeBaseUrl: config.storeBaseUrl,
     crmBaseUrl: config.crmBaseUrl,
     mailer,
+    tradePriceListsEnabled: config.tradePriceListsEnabled,
     logLevel: config.logLevel,
     trustProxy: config.trustProxy,
     adminPanel: {

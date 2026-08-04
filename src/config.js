@@ -79,6 +79,13 @@ export const loadConfig = (env = process.env) => {
     port: Number(env.PORT ?? DEFAULT_PORT),
     host: env.HOST ?? DEFAULT_HOST,
     logLevel: env.LOG_LEVEL ?? DEFAULT_LOG_LEVEL,
+    // Client-facing per-house trade price lists (GET /account/price-lists).
+    // OFF by default and that is a deliberate business gate, not a rollout
+    // convenience: `products.trade_price_cents` is still seeded from the demo
+    // pricing snapshot (8 of 12 fabrics share one placeholder figure, finished
+    // goods have none), and a downloadable price list is a document a designer
+    // quotes a job from. Turn it on when the numbers are real.
+    tradePriceListsEnabled: env.TRADE_PRICE_LISTS_ENABLED === 'true',
     // Behind a reverse proxy request.ip is the proxy, so the per-IP login rate
     // limit collapses to one shared bucket. Set TRUST_PROXY (e.g. '127.0.0.1'
     // for same-host nginx) so Fastify reads the real client from X-Forwarded-For.

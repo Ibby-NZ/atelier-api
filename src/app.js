@@ -17,6 +17,8 @@ import { adminInventoryRoutes } from './routes/admin-inventory.js'
 import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
+import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
+import { accountRoutes } from './routes/account.js'
 import { contactRoutes } from './routes/contact.js'
 import { webhookRoutes } from './routes/webhooks.js'
 
@@ -28,6 +30,9 @@ export const buildApp = ({
   storeBaseUrl = 'http://localhost:4321',
   crmBaseUrl = 'http://localhost:5273',
   mailer = null,
+  // Client-facing trade price lists (GET /account/price-lists). Off unless the
+  // numbers behind trade_price_cents are real — see src/config.js.
+  tradePriceListsEnabled = false,
   logLevel = 'info',
   logger = true,
   trustProxy = false,
@@ -104,6 +109,10 @@ export const buildApp = ({
     api.register(shippingRoutes, { pool })
     api.register(checkoutRoutes, { pool, stripe, storeBaseUrl })
     api.register(orderRoutes, { pool, mailer })
+    // /account/* — the approved-trade client portal (dashboard, sample history,
+    // invoice record, price lists). requireRole('trade') throughout: staff are
+    // excluded exactly as they are from trade pricing.
+    api.register(accountRoutes, { pool, mailer, tradePriceListsEnabled })
     // /admin/orders — called by the storefront's AdminOrders island, so it needs
     // the same CORS allowance. Unrelated to the AdminJS panel below.
     api.register(adminOrderRoutes, { pool, mailer })
@@ -117,6 +126,10 @@ export const buildApp = ({
     // /admin/trade-applications — read-only review of submitted trade forms
     // (the CRM's Users -> Applicants tab). Approval stays on /admin/users/:id.
     api.register(adminTradeApplicationRoutes, { pool })
+    // /admin/trade-accounts — links a storefront login to its D365 customer, so
+    // the portal can serve that company's invoices and cuttings. Manual by
+    // design: an email match is a suggestion, never an automatic grant.
+    api.register(adminTradeAccountRoutes, { pool })
     api.register(adminInventoryRoutes, { pool })
     api.register(adminPriceListRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the

@@ -1,6 +1,6 @@
 /**
  * Import of the normalised Dynamics 365 exports (produced by
- * scripts/convert-d365-exports.py) into the `legacy_*` staging tables.
+ * scripts/convert-d365-exports.js) into the `legacy_*` staging tables.
  *
  * Upsert key is the D365 record GUID, so re-running the import against a fresh
  * export refreshes rows in place. That is the point: Atelier runs live on D365

@@ -7,7 +7,7 @@
 //
 // Three details shape the module:
 //   - `code_normalized` is DERIVED, never accepted from the client. It mirrors
-//     scripts/convert-price-lists.py (platform decision 6) so a hand-keyed item
+//     scripts/convert-price-lists.js (platform decision 6) so a hand-keyed item
 //     normalises exactly like an imported one, and it is recomputed whenever the
 //     raw `code` changes so the two never drift apart.
 //   - `repeat` is a Postgres non-reserved keyword and MUST be quoted as "repeat"
@@ -41,7 +41,7 @@ const rethrowConflict = (error) => {
 
 // Uniform code format (platform decision 6): uppercase, every run of
 // non-alphanumerics collapsed to a single '-', with no leading/trailing '-'.
-// Mirrors the `code_normalized` regex in scripts/convert-price-lists.py.
+// Mirrors the `code_normalized` regex in scripts/convert-price-lists.js.
 const normalizeCode = (code) =>
   String(code)
     .toUpperCase()

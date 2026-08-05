@@ -1,7 +1,7 @@
 /**
  * CLI entry for `npm run import:legacy`. Requires migrations applied and
  * DATABASE_URL set; reads the normalised files written by
- * scripts/convert-d365-exports.py.
+ * scripts/convert-d365-exports.js.
  *
  * The normalised files live under incoming/ (gitignored) rather than
  * src/seed/data/ because the account and sales-order exports are client PII.

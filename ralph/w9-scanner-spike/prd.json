@@ -17,8 +17,8 @@
         "atelier-api"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "done 2026-08-06 — delivered by the supervised session in commit 0fc323e; bookkeeping reconciled after the fact"
     },
     {
       "id": "US-002",
@@ -34,8 +34,8 @@
         "atelier-api"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "done 2026-08-06 — delivered by the supervised session in commit 0fc323e; bookkeeping reconciled after the fact"
     },
     {
       "id": "US-003",
@@ -50,8 +50,8 @@
         "atelier-api"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "done 2026-08-06 — delivered by the supervised session in commit 0fc323e; bookkeeping reconciled after the fact"
     }
   ]
 }

@@ -120,8 +120,8 @@ epics:
   w9-scanner-spike:
     name: "W9 Scanner spike"
     branch: aug6/w9-scanner-spike
-    status: pending
+    status: done
     stories:
-      US-001: pending   # Options matrix
-      US-002: pending   # Recommendation
-      US-003: pending   # ADR appended to architecture.md
+      US-001: done      # Options matrix
+      US-002: done      # Recommendation
+      US-003: done      # ADR appended to architecture.md

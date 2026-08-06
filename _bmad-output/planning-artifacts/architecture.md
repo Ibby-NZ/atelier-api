@@ -290,3 +290,38 @@ That is what the D365 item-code logic needs. Rates are a secondary output into t
 part is the supplier's colour code and does not match the price-list code.
 
 The source directory is the client's only copy and is mounted read-only.
+
+---
+
+## ADR 001 — Sample scanning uses a keyboard-wedge scanner, not a camera
+
+**Date:** 2026-08-06 · **Status:** proposed, awaiting confirmation of the showroom device
+**Full analysis:** `research-sample-scanner.md`
+
+**Context.** W4 gives the sample register `GET /admin/samples/by-barcode/:barcode` plus check-out and
+check-in verb routes, so the integration point is settled. What was not settled is what performs the
+scan. The CRM's `/sample-scanner` screen is a phone-frame preview that writes nothing.
+
+The decisive constraint: **`BarcodeDetector` is not implemented on iOS.** Safari does not provide it,
+and every iOS browser is WebKit underneath, so Chrome and Firefox on an iPhone do not either. A web
+app calling it fails on every iPhone and iPad, and fails silently — the constructor is simply absent.
+Any browser-camera option therefore requires a WebAssembly decoder, which is a real dependency and
+bundle cost, not a footnote.
+
+**Decision.** Use a Bluetooth barcode scanner paired as a keyboard wedge. It types the code into a
+focused input followed by Enter — no camera API, no WebAssembly, no app store, no permission prompt,
+and it works identically on every device. The existing screen needs only to be pointed at the
+endpoint.
+
+**Consequences.**
+- Hardware cost of roughly NZ$60–200 per showroom counter, and a label printer is implied but has
+  never been specified.
+- Scanning is tied to wherever the scanner sits. Shelf-walking with a phone is not supported.
+- A camera PWA with a WASM decoder remains available and bolts on beside this, because both paths
+  call the same `by-barcode` endpoint. Nothing is wasted by starting here.
+- If the showroom devices turn out to be iPads and Atelier later wants camera scanning, the WASM
+  dependency is unavoidable — the native API will not appear.
+
+**Open.** The `/sample-scanner` screen refers to a "Dataverse-vs-PWA backend call (§6.1)" as still
+open. W4 answers it for this platform — the register lives in Postgres, not Dataverse. If D365 is
+still intended to own sample tracking after cutover, W4 must be re-scoped before it is built.

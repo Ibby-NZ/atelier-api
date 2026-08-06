@@ -79,6 +79,19 @@ Story-specific detail belongs in the per-story entries below, not here.
   personally write (it discards their in-flight work), stage by explicit pathspec rather than `-A`,
   and gate the commit on the single test file you touched — a full-suite result is uninterpretable
   while someone else has source files open.
+- **A row mapper that grows a second `extra` argument breaks every `rows.map(toX)` call site**, and
+  breaks it silently: `map` passes the index as the second argument and `{ ...1 }` is `{}`, so the
+  output is accidentally correct today and wrong the moment `extra` is used for anything a number
+  could satisfy. `toProduct(row, extra)` in `admin-products.js` was already the house pattern for a
+  detail read that adds children/counts to a list shape; when copying it, convert the sibling call
+  sites to `rows.map((row) => toX(row))` in the same edit. Only `src/catalogue/admin-brands.js` was
+  affected — `brands.js`/`collections.js` (W7's) have their own local mappers.
+- **A single-row admin read never filters on `archived_at`.** `getAdminProduct` does not, and the
+  restore screen is why: the row a caller asks for by id is one they already know exists, and a 404
+  there reads as "someone deleted it" rather than "it is archived". Filtering belongs on the LIST
+  (`include_archived`), never on the by-id read. The same applies to the children a detail read
+  embeds — `getAdminProduct` returns every colourway, archived included, each carrying its own
+  `archived_at` for the screen to style.
 - **A mid-transaction race is reproducible deterministically by wrapping the pool, not by timing.**
   `deleteOrExplain` only uses `connect()`/`query()`/`release()`, so `{ connect: async () => ({
   query, release }) }` around a real client can run arbitrary work on another connection when a
@@ -567,4 +580,65 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   left unstaged deliberately — it is an edit to the operating instructions, which no story owns — but
   it needs a human to either commit it or explain it, since US-003 and US-004 both relied on it.
   Carried forward from US-002/003: a real cross-origin DELETE preflight from the CRM at :5273.
+---
+
+## 2026-08-06T03:37:07Z - W2-US-005 - Missing admin reads: brand, collection, price-list item by id
+
+- **Implemented.** Three by-id admin reads: `GET /admin/brands/:id` (the house with its collections
+  and both child counts), `GET /admin/collections/:id` (the collection with its house name and its
+  product count) and `GET /admin/price-list-items/:id` (wires the already-exported
+  `getPriceListItem`). All three are backoffice-only and answer 404 with
+  `{ error: 'Not Found', message }` — the shape `GET /admin/products/:id` already used.
+- Repos and files changed: `atelier-api` only —
+  `src/catalogue/admin-brands.js` (+`getAdminBrand`, +`getAdminCollection`, `toBrand`/`toCollection`
+  gain the `extra` argument, `COLLECTION_SELECT` split into columns + FROM, two `map` call sites
+  fixed), `src/routes/admin-catalogue.js` (+2 routes, +2 imports),
+  `src/routes/admin-price-lists.js` (+1 route, +1 import),
+  `test/admin-catalogue.test.js` (+11 tests in two describe blocks),
+  `test/admin-price-lists.test.js` (+5 tests), `CLAUDE.md` (`## CRUD completion`),
+  `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 716 tests passed; 705 before this story —
+  `test/admin-catalogue.test.js` 92 -> 103, `test/admin-price-lists.test.js` 25 -> 30).
+- **The counts are the point of the story, and they deliberately count archived rows.** Every one of
+  these reads exists because the CRM re-reads a row after a write instead of refetching the list, but
+  a brand detail carrying `product_count` / `collection_count` is also the only way a screen can know
+  in advance whether Delete will be accepted — and architecture.md's *CRM CRUD kit* forbids a
+  pre-flight "can I delete this" GET, so this read is where that information has to live. Making the
+  counts agree with the delete probes is therefore load-bearing: the probes count archived rows (an
+  archived product still blocks its house), so a count that skipped them would tell staff a house was
+  empty and then be contradicted by the 409. Two tests assert the agreement directly — archive the
+  only child, read the counts, then `DELETE` and assert the blocker counts are the same numbers — and
+  one asserts the other direction, that 0/0 really does delete with a 200.
+- **What else the tests assert:** the nested `collections` array is the same shape
+  `GET /admin/collections?brand_id=` returns (so one CRM renderer serves both) and includes archived
+  collections carrying `archived_at`; a product with a null `collection_id` is not counted by the
+  collection read (uncollected is the seed's normal state, not an error); an archived row is returned
+  by all three reads rather than 404'd; `wholesale_rate` comes back as a **number**, because the
+  detail read goes through the same `toPriceListItem` mapper as the list and pg would otherwise hand
+  the CRM's form a string; a PATCH is visible through the by-id read without a list refetch; 404 on
+  an unknown id and 401/403 on each of the three.
+- **Learnings:**
+  - Pattern: the `extra`-argument mapper trap and the "a by-id admin read never filters
+    `archived_at`" rule — both promoted to `## Codebase Patterns` above.
+  - Gotcha: `getPriceListItem` was already exported and already correct; the story was one route.
+    Before scoping a "wire the existing read model" story, grep the module's exports — the same thing
+    was true of the registry entries in US-001/US-002, and it is the difference between a 12-line
+    change and a day's work.
+  - Gotcha: a count subquery cannot be appended to `COLLECTION_SELECT`, because that constant already
+    ended in its `FROM … JOIN`. Splitting it into `COLLECTION_COLUMNS` + `COLLECTION_FROM` (the shape
+    `admin-products.js` already uses for `PRODUCT_COLUMNS`/`PRODUCT_FROM`) is what makes a detail read
+    composable; expect the same split to be needed for US-006's colourway detail.
+  - Gotcha: `BRAND_COLUMNS` is unqualified, so `getAdminBrand`'s query must stay alias-free —
+    `FROM brands`, and the correlated subquery says `WHERE brand_id = brands.id`. Adding an alias
+    later breaks the projection, which is the same trap `setCollectionArchived` documents.
+  - Context: both new read models are `src/catalogue/admin-brands.js` (`getAdminBrand` beside
+    `listAdminBrands`, `getAdminCollection` beside `listAdminCollections`). The probes the counts
+    mirror are `src/lifecycle/registry.js` `brand` (~line 182) and `collection` (~195).
+- **Needs human verification:** none for this story on its own — no screen calls these three routes
+  yet. Carry forward to W2-US-009/US-010: the houses screen showing a house's product/collection
+  counts and greying or explaining Delete from them, and the new AdminCollections screen rendering
+  `product_count`. Plus the standing cross-origin check `app.inject()` cannot prove — though these are
+  GETs, which the default CORS `methods` already allowed, so they are not at risk the way the DELETEs
+  were.
 ---

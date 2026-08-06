@@ -20,10 +20,12 @@
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import {
   listAdminBrands,
+  getAdminBrand,
   createBrand,
   updateBrand,
   setBrandArchived,
   listAdminCollections,
+  getAdminCollection,
   createCollection,
   updateCollection,
   setCollectionArchived,
@@ -207,6 +209,22 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
     })
   )
 
+  // Single-row reads. The CRM re-reads a row after a write rather than refetching
+  // the list, so these carry what the list cannot: the brand's collections, and
+  // the child counts that say in advance whether a DELETE will be accepted.
+  app.get(
+    '/admin/brands/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const brand = await getAdminBrand(pool, request.params.id)
+      if (!brand) {
+        reply.code(404)
+        return { error: 'Not Found', message: `Brand ${request.params.id} not found.` }
+      }
+      return { brand }
+    }
+  )
+
   app.post(
     '/admin/brands',
     { preHandler: backoffice, schema: { body: brandCreateSchema } },
@@ -234,6 +252,22 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
         includeArchived: request.query.include_archived,
       }),
     })
+  )
+
+  app.get(
+    '/admin/collections/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const collection = await getAdminCollection(pool, request.params.id)
+      if (!collection) {
+        reply.code(404)
+        return {
+          error: 'Not Found',
+          message: `Collection ${request.params.id} not found.`,
+        }
+      }
+      return { collection }
+    }
   )
 
   app.post(

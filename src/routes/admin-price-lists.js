@@ -16,6 +16,7 @@
 
 import {
   listPriceListItems,
+  getPriceListItem,
   createPriceListItem,
   updatePriceListItem,
   setPriceListItemArchived,
@@ -139,6 +140,24 @@ export const adminPriceListRoutes = async (app, { pool }) => {
         limit,
       })
       return { items, meta: { total, page, limit } }
+    }
+  )
+
+  // One row by id. No archived filter: the CRM re-reads the row it just archived
+  // to render the new state, and a 404 there would read as "someone deleted it".
+  app.get(
+    '/admin/price-list-items/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const item = await getPriceListItem(pool, request.params.id)
+      if (!item) {
+        reply.code(404)
+        return {
+          error: 'Not Found',
+          message: `Price-list item ${request.params.id} not found.`,
+        }
+      }
+      return { item }
     }
   )
 

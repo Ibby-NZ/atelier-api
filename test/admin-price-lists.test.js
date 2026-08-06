@@ -254,6 +254,70 @@ describe('back-office price-list management', () => {
     })
   })
 
+  describe('GET /admin/price-list-items/:id', () => {
+    it('returns one row in the same shape the list returns', async () => {
+      const response = await inject(
+        'GET',
+        `/admin/price-list-items/${fixtures.alphaFabric}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      const { item } = response.json()
+      expect(item.id).toBe(fixtures.alphaFabric)
+      expect(item.supplier).toBe(`${PREFIX}Alpha`)
+      expect(item.code).toBe('PLT-001')
+      expect(item.description).toBe('Linen Weave')
+      // pg returns numeric as a string; the mapper is what coerces it, and the
+      // detail read must go through the same one or the CRM's form gets a string.
+      expect(item.wholesale_rate).toBe(65)
+    })
+
+    it('reflects a PATCH without a list refetch', async () => {
+      await inject(
+        'PATCH',
+        `/admin/price-list-items/${fixtures.alphaFabric}`,
+        backofficeCookie,
+        { wholesale_rate: 71.5 }
+      )
+      const response = await inject(
+        'GET',
+        `/admin/price-list-items/${fixtures.alphaFabric}`,
+        backofficeCookie
+      )
+      expect(response.json().item.wholesale_rate).toBe(71.5)
+    })
+
+    it('returns an archived row rather than 404', async () => {
+      await inject(
+        'POST',
+        `/admin/price-list-items/${fixtures.alphaFabric}/archive`,
+        backofficeCookie
+      )
+      // Archive is the durable removal here (a re-import undoes a delete), so
+      // the archived row is the one staff go back to most — a 404 would read as
+      // "someone deleted it".
+      const response = await inject(
+        'GET',
+        `/admin/price-list-items/${fixtures.alphaFabric}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().item.archived_at).not.toBeNull()
+    })
+
+    it('returns 404 for an unknown id', async () => {
+      const response = await inject('GET', '/admin/price-list-items/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+      expect(response.json().message).toMatch(/not found/i)
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      const path = `/admin/price-list-items/${fixtures.alphaFabric}`
+      expect((await inject('GET', path, null)).statusCode).toBe(401)
+      expect((await inject('GET', path, customerCookie)).statusCode).toBe(403)
+    })
+  })
+
   describe('POST /admin/price-list-items', () => {
     it('creates an item, deriving code_normalized and defaulting source_file', async () => {
       const response = await inject('POST', '/admin/price-list-items', backofficeCookie, {

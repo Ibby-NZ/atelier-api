@@ -385,6 +385,99 @@ describe('back-office catalogue admin', () => {
     })
   })
 
+  // The re-read the CRM does after a write. Its counts are the interesting part:
+  // they answer the same question DELETE /admin/brands/:id answers, so a screen
+  // can grey the button out instead of discovering the refusal.
+  describe('GET /admin/brands/:id', () => {
+    it('returns the house with its collections and both child counts', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      await createProductFixture(brand.id)
+      await createProductFixture(brand.id, { name: 'Velvet Two' })
+
+      const response = await inject('GET', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      const detail = response.json().brand
+      expect(detail.id).toBe(brand.id)
+      expect(detail.slug).toBe(`${PREFIX}-house`)
+      expect(detail.product_count).toBe(2)
+      expect(detail.collection_count).toBe(1)
+      // Same shape the collections list returns, so one renderer serves both.
+      expect(detail.collections).toHaveLength(1)
+      expect(detail.collections[0]).toMatchObject({
+        id: collection.id,
+        brand_id: brand.id,
+        brand_name: brandName('House'),
+        name: 'Spring Two Six',
+        slug: 'spring-two-six',
+      })
+    })
+
+    it('counts archived children, because the delete probes do', async () => {
+      const brand = await createBrandFixture('House')
+      const product = await createProductFixture(brand.id)
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      await inject('POST', `/admin/products/${product.id}/archive`, backofficeCookie)
+      await inject('POST', `/admin/collections/${collection.id}/archive`, backofficeCookie)
+
+      const detail = (
+        await inject('GET', `/admin/brands/${brand.id}`, backofficeCookie)
+      ).json().brand
+      expect(detail.product_count).toBe(1)
+      expect(detail.collection_count).toBe(1)
+      // Listed too, carrying archived_at — hiding the row would hide the reason
+      // the delete below is refused.
+      expect(detail.collections[0].archived_at).not.toBeNull()
+
+      // The invariant the counts exist for: non-zero counts mean the delete is
+      // refused with those same numbers. A count that skipped archived rows
+      // would say "empty house" and then be contradicted by the 409.
+      const refusal = await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(refusal.statusCode).toBe(409)
+      expect(refusal.json().blockers.map((blocker) => blocker.count)).toEqual([1, 1])
+    })
+
+    it('reads zero counts for a house a delete would accept', async () => {
+      const brand = await createBrandFixture('House')
+      const detail = (
+        await inject('GET', `/admin/brands/${brand.id}`, backofficeCookie)
+      ).json().brand
+      expect(detail.product_count).toBe(0)
+      expect(detail.collection_count).toBe(0)
+      expect(detail.collections).toEqual([])
+
+      expect(
+        (await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)).statusCode
+      ).toBe(200)
+    })
+
+    it('returns an archived house rather than 404', async () => {
+      const brand = await createBrandFixture('House')
+      await inject('POST', `/admin/brands/${brand.id}/archive`, backofficeCookie)
+
+      // Archiving is reversible, so the row must stay readable — the restore
+      // screen reads it back.
+      const response = await inject('GET', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().brand.archived_at).not.toBeNull()
+    })
+
+    it('returns 404 for an unknown brand id', async () => {
+      const response = await inject('GET', '/admin/brands/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      const brand = await createBrandFixture('House')
+      expect(
+        (await inject('GET', `/admin/brands/${brand.id}`, null)).statusCode
+      ).toBe(401)
+      expect(
+        (await inject('GET', `/admin/brands/${brand.id}`, customerCookie)).statusCode
+      ).toBe(403)
+    })
+  })
+
   describe('PATCH /admin/brands/:id', () => {
     it('updates a subset of fields and leaves the slug untouched', async () => {
       const created = await createBrandFixture('House', { story: 'Old story.' })
@@ -596,6 +689,89 @@ describe('back-office catalogue admin', () => {
         { name: 'Ghost' }
       )
       expect(response.statusCode).toBe(404)
+    })
+  })
+
+  describe('GET /admin/collections/:id', () => {
+    it('returns the collection with its house name and product count', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      await createProductFixture(brand.id, { collection_id: collection.id })
+      // Same house, no collection: a product with a null collection_id is normal
+      // (the seed never assigns one), and it must not be counted here.
+      await createProductFixture(brand.id, { name: 'Velvet Two' })
+
+      const response = await inject(
+        'GET',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      const detail = response.json().collection
+      expect(detail).toMatchObject({
+        id: collection.id,
+        brand_id: brand.id,
+        brand_name: brandName('House'),
+        name: 'Spring Two Six',
+        slug: 'spring-two-six',
+        product_count: 1,
+      })
+    })
+
+    it('counts an archived product, because the delete probe does', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      const product = await createProductFixture(brand.id, {
+        collection_id: collection.id,
+      })
+      await inject('POST', `/admin/products/${product.id}/archive`, backofficeCookie)
+
+      const detail = (
+        await inject('GET', `/admin/collections/${collection.id}`, backofficeCookie)
+      ).json().collection
+      expect(detail.product_count).toBe(1)
+
+      // collection_id is SET NULL, so a delete that trusted a count which
+      // skipped archived rows would report success and quietly uncollect this
+      // product. The refusal agrees with the count.
+      const refusal = await inject(
+        'DELETE',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(refusal.statusCode).toBe(409)
+      expect(refusal.json().blockers[0].count).toBe(1)
+    })
+
+    it('returns an archived collection rather than 404', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      await inject('POST', `/admin/collections/${collection.id}/archive`, backofficeCookie)
+
+      const response = await inject(
+        'GET',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().collection.archived_at).not.toBeNull()
+    })
+
+    it('returns 404 for an unknown collection id', async () => {
+      const response = await inject('GET', '/admin/collections/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      expect(
+        (await inject('GET', `/admin/collections/${collection.id}`, null)).statusCode
+      ).toBe(401)
+      expect(
+        (await inject('GET', `/admin/collections/${collection.id}`, customerCookie))
+          .statusCode
+      ).toBe(403)
     })
   })
 

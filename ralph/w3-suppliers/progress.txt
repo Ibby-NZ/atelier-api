@@ -24,6 +24,17 @@ Story-specific detail belongs in the per-story entries below, not here.
   the same vocabulary `test/price-list-exposure.test.js` polices at the response layer.
 - **Any `brands` fixture needs `trade_only = false`**, including one created purely to exercise an FK —
   the column is `NOT NULL DEFAULT true`.
+- **pg parses `numeric[]` into JS NUMBERS but a scalar `numeric` into a STRING.** The house rule
+  "coerce numeric with `Number()`" is about the scalar case only; an array column arrives already
+  numeric, so a test asserting `['0.4000']` fails against `[0.4]`. Code that reads both shapes must
+  coerce defensively rather than assume either.
+- **A CHECK constraint cannot contain a subquery**, so per-element validation of an array column is
+  impossible in SQL. What IS expressible is an ordinary immutable function call —
+  `array_position(col, NULL) IS NULL` catches a NULL element (which would otherwise null the whole
+  computed result). Element ranges have to be enforced in the module that reads them.
+- **A "must be exactly one of these two columns" invariant is a plain CHECK**, e.g.
+  `a IS NULL OR cardinality(b) = 0`. Cheaper and more durable than a precedence rule each reader
+  re-implements, and it fails at write time where the typo is.
 
 ---
 
@@ -67,5 +78,54 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
 - **Needs human verification:** none — schema only, no screen and no endpoint. The columns become
   visible in the AdminJS panel at `/panel` (it introspects every table with a primary key), which a
   human may want to glance at once the CRM screen lands in US-007.
+---
+
+## 2026-08-06T15:22:40Z - W3-US-002 - Migration: supplier brand terms and discount tiers
+- Implemented `migrations/1786420800000_suppliers-brand-terms.js`: `supplier_brand_terms`
+  (supplier CASCADE, brand CASCADE + UNIQUE, `discount` numeric(6,4), `discount_chain`
+  numeric(6,4)[] NOT NULL DEFAULT '{}', `markup`, `indicative`, `note`, timestamps) and
+  `supplier_discount_tiers` (terms CASCADE, `label`, `pct`, `is_fallback`).
+- Constraints: `supplier_brand_terms_discount_range_check` (0 <= discount < 1),
+  `_markup_check` (> 0), `_chain_not_null_check` (`array_position(discount_chain, NULL) IS NULL`),
+  `_discount_shape_check` (`discount IS NULL OR cardinality(discount_chain) = 0` — a row may carry a
+  flat rate OR a chain, never both). Tiers: `_pct_check`, unique
+  `supplier_discount_tiers_label_unique (term_id, lower(btrim(label)))` and partial unique
+  `supplier_discount_tiers_fallback_unique (term_id) WHERE is_fallback`.
+- `src/suppliers/discount-chain.js` (new, pure): `chainMultiplier`, `applyDiscountChain`,
+  `resolveTermsChain`. The chain is multiplicative — `{0.4, 0.4}` is x0.36 — and the module is what
+  the "not -80%" assertion runs through. `resolveTermsChain` reproduces the seed snapshot's
+  precedence (chain, then category-matched tier with the `is_fallback` tier as the catch-all, then
+  the flat rate).
+- Repos and files changed: atelier-api — `migrations/1786420800000_suppliers-brand-terms.js` (new),
+  `src/suppliers/discount-chain.js` (new), `test/suppliers-terms.test.js` (new, 19 tests),
+  `CLAUDE.md` (## Suppliers), `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run migrate` (twice, second run "No migrations to run!") -> 0, `npm run lint` -> 0,
+  `npm test` -> 0 (41 files, 687 tests passed).
+- **Learnings:**
+  - pg parses `numeric[]` into JS numbers while a scalar `numeric` comes back as a string — the two
+    shapes of the same column family arrive as different types. Cost one red test here.
+  - A CHECK cannot hold a subquery, so array ELEMENT ranges cannot be enforced in SQL; a NULL
+    element can, via `array_position`. Range checking moved into the module that reads the column.
+  - Gotcha: the allowed-paths glob for this workstream is `migrations/*suppliers*` — note the
+    plural. A migration named `supplier-brand-terms` would fall outside it; the file is
+    `suppliers-brand-terms.js` for that reason alone.
+  - Gotcha: `npm test -- <file>` is refused by the tool permission layer in this harness. Run the
+    whole suite (`npm test`, ~25 s) instead of trying to narrow it.
+  - Pattern: the "never joined into a client-facing read model" criterion is testable as a source
+    scan — walk `src/**/*.js` (skipping the vendored `src/seed/data/`), collect every file naming
+    the table, assert the set is a subset of the owning domain. Same posture as
+    `test/lifecycle-registry.test.js`'s literal scan, and it fails the moment someone adds the join
+    rather than waiting for a response-layer assertion to notice.
+  - Context: the terms vocabulary is entirely derivable from `src/seed/data/suppliers.js` (JV's
+    three labelled tiers, five sister brands at a flat 0.5, JV Fabrics' `discountChain: [0.4, 0.4]`,
+    Fabricut's per-brand `markup` 2.0-2.5) and `src/seed/data/discounts.js` `resolveDiscount`, whose
+    precedence `resolveTermsChain` mirrors. Those files are VENDORED snapshots — the new module is a
+    deliberate re-implementation in `src/suppliers/`, not an import, so a re-copy of `data/` cannot
+    change API behaviour.
+  - Context: no row is written by this story. US-006's backfill is what populates both tables.
+- **Needs human verification:** none — schema plus a pure module, no screen and no endpoint. The two
+  tables will appear in the AdminJS panel at `/panel` only if a future story registers them as
+  resources; they are not registered here, deliberately (they are cost-bearing).
 ---
 

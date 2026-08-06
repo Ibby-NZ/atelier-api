@@ -7,7 +7,7 @@
  * DELIBERATELY NON-DESTRUCTIVE for prd.json: an existing file keeps its
  * `passes` and `notes` values, so regenerating mid-run cannot erase progress.
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -18,6 +18,12 @@ const WORKTREE_ROOT = '/Users/verumoffice/atelier-worktrees'
 const API = 'atelier-api'
 const CRM = 'atelier-crm'
 const STORE = 'atelier-storefront'
+
+const REPO_PATHS = Object.freeze({
+  [API]: '/Users/verumoffice/atelier-api',
+  [CRM]: '/Users/verumoffice/atelier-crm',
+  [STORE]: '/Users/verumoffice/atelier-storefront',
+})
 
 const GATES = Object.freeze({
   [API]: '( cd atelier-api && npm run lint && npm test )',
@@ -439,6 +445,7 @@ const WORKSTREAMS = [
   },
   {
     slug: 'w6-category-export',
+    readOnlyIncoming: 'colour-files',
     wsId: 'W6',
     name: 'Category export',
     epic: 'Epic 6',
@@ -567,6 +574,7 @@ const WORKSTREAMS = [
   },
   {
     slug: 'w8-colour-files',
+    readOnlyIncoming: 'colour-files',
     wsId: 'W8',
     name: 'Colour files',
     epic: 'Epic 8',
@@ -697,6 +705,113 @@ const renderPrompt = (ws) => {
     .replaceAll('{{N}}', String(ws.stories.length))
 }
 
+/**
+ * Block A as an executable script rather than a fenced block to paste.
+ *
+ * Pasting a fenced block into bash opens a backtick command substitution and
+ * swallows the whole thing, which silently half-executes the setup: the
+ * worktrees and the .env copy land, the createdb and the DATABASE_URL rewrite
+ * do not, and the loop then migrates the SHARED dev database. That happened.
+ * Hence: one command, `set -e`, and a final assertion.
+ */
+const renderSetup = (ws) => {
+  const L = []
+  L.push('#!/bin/bash')
+  L.push(`# Setup for ${ws.wsId} ${ws.name}. Run it once, from anywhere:`)
+  L.push(`#   /Users/verumoffice/atelier-api/ralph/${ws.slug}/setup.sh`)
+  L.push('#')
+  L.push('# Do NOT copy-paste this file into a terminal. Run it.')
+  L.push('set -euo pipefail')
+  L.push('')
+  L.push(`WS=${ws.slug}`)
+  L.push(`DB=${ws.db}`)
+  L.push(`ROOT=${WORKTREE_ROOT}/$WS`)
+  L.push('')
+  L.push('if [ -e "$ROOT" ]; then')
+  L.push('  echo "$ROOT already exists. Remove it first, or run teardown.sh." >&2')
+  L.push('  exit 1')
+  L.push('fi')
+  L.push('mkdir -p "$ROOT"')
+  L.push('')
+  L.push('echo "==> worktrees"')
+  for (const r of ws.repos) {
+    L.push(`git -C ${REPO_PATHS[r]} worktree add -b "aug6/$WS" "$ROOT/${r}" august-6th-updates`)
+  }
+  L.push('')
+  L.push('echo "==> node_modules symlinks (a story needing a NEW dependency must mark itself BLOCKED)"')
+  for (const r of ws.repos) {
+    L.push(`ln -s ${REPO_PATHS[r]}/node_modules "$ROOT/${r}/node_modules"`)
+  }
+  L.push('')
+  L.push('echo "==> .env (gitignored, so a worktree does not inherit it)"')
+  L.push(`cp ${REPO_PATHS[API]}/.env "$ROOT/atelier-api/.env"`)
+  if (ws.readOnlyIncoming) {
+    L.push('')
+    L.push('echo "==> incoming/ as a READ-ONLY copy — the client\'s only copy of this data"')
+    L.push('mkdir -p "$ROOT/atelier-api/incoming"')
+    L.push(`cp -R ${REPO_PATHS[API]}/incoming/${ws.readOnlyIncoming} "$ROOT/atelier-api/incoming/"`)
+    L.push('chmod -R a-w "$ROOT/atelier-api/incoming"')
+  }
+  L.push('')
+  L.push('echo "==> database (never share atelier_dev between concurrent loops)"')
+  L.push('createdb "$DB" 2>/dev/null || echo "    $DB already exists, reusing"')
+  L.push('sed -i "" "s|^DATABASE_URL=.*|DATABASE_URL=postgresql://localhost:5432/$DB|" "$ROOT/atelier-api/.env"')
+  L.push('')
+  L.push('# The failure this script exists to prevent: a half-run setup leaves .env')
+  L.push('# pointing at atelier_dev and the loop migrates the shared database.')
+  L.push('if ! grep -q "^DATABASE_URL=postgresql://localhost:5432/$DB$" "$ROOT/atelier-api/.env"; then')
+  L.push('  echo "FATAL: DATABASE_URL was not rewritten to $DB. Refusing to continue." >&2')
+  L.push('  grep "^DATABASE_URL=" "$ROOT/atelier-api/.env" >&2')
+  L.push('  exit 1')
+  L.push('fi')
+  L.push('( cd "$ROOT/atelier-api" && npm run migrate )')
+  L.push('')
+  L.push('echo "==> gates (must be green BEFORE the loop starts)"')
+  L.push('cd "$ROOT"')
+  for (const r of ws.repos) L.push(GATES[r])
+  L.push('')
+  L.push('echo ""')
+  L.push('echo "Ready. Launch with:"')
+  L.push(`echo "  cd $ROOT"`)
+  L.push(`echo "  ./atelier-api/ralph/ralph.sh $WS ${Math.ceil(ws.stories.length * 1.5)}"`)
+  return L.join('\n') + '\n'
+}
+
+const renderTeardown = (ws) => {
+  const L = []
+  L.push('#!/bin/bash')
+  L.push(`# Teardown for ${ws.wsId} ${ws.name}. Run AFTER the branch is merged.`)
+  L.push('set -euo pipefail')
+  L.push('')
+  L.push(`WS=${ws.slug}`)
+  L.push(`DB=${ws.db}`)
+  L.push(`ROOT=${WORKTREE_ROOT}/$WS`)
+  L.push('')
+  L.push('# Refuse to discard unmerged work.')
+  for (const r of ws.repos) {
+    L.push(`if [ -d "$ROOT/${r}" ]; then`)
+    L.push(`  if [ -n "$(git -C "$ROOT/${r}" status --porcelain)" ]; then`)
+    L.push(`    echo "${r} has uncommitted changes. Refusing." >&2; exit 1`)
+    L.push('  fi')
+    L.push(`  if [ -n "$(git -C "$ROOT/${r}" log --oneline august-6th-updates..HEAD)" ]; then`)
+    L.push(`    echo "${r} has commits not in august-6th-updates. Merge first, or delete by hand." >&2; exit 1`)
+    L.push('  fi')
+    L.push('fi')
+  }
+  L.push('')
+  // Delete the branch too. `worktree add -b` creates it, so leaving it behind
+  // makes a later re-run of setup.sh fail with "branch already exists". The
+  // unmerged-commit checks above are what make this safe.
+  for (const r of ws.repos) {
+    L.push(`git -C ${REPO_PATHS[r]} worktree remove "$ROOT/${r}" 2>/dev/null || true`)
+    L.push(`git -C ${REPO_PATHS[r]} branch -D "aug6/$WS" 2>/dev/null || true`)
+  }
+  L.push('dropdb "$DB" 2>/dev/null || true')
+  L.push('rmdir "$ROOT" 2>/dev/null || true')
+  L.push('echo "Removed $ROOT and database $DB."')
+  return L.join('\n') + '\n'
+}
+
 const renderPrd = (ws, existing) => {
   const priorState = new Map(
     (existing?.userStories ?? []).map((s) => [s.id, { passes: s.passes, notes: s.notes }]),
@@ -732,7 +847,12 @@ for (const ws of WORKSTREAMS) {
   const existing = existsSync(prdPath) ? JSON.parse(readFileSync(prdPath, 'utf8')) : null
   writeFileSync(prdPath, `${JSON.stringify(renderPrd(ws, existing), null, 2)}\n`)
   writeFileSync(join(dir, 'CLAUDE.md'), renderPrompt(ws))
-  written += 2
+  for (const [file, body] of [['setup.sh', renderSetup(ws)], ['teardown.sh', renderTeardown(ws)]]) {
+    const path = join(dir, file)
+    writeFileSync(path, body)
+    chmodSync(path, 0o755)
+  }
+  written += 4
 
   const total = ws.stories.length
   console.log(

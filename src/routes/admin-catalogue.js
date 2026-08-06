@@ -12,9 +12,10 @@
 //   - `product_type` is likewise create-only: the inventory unit is derived from
 //     it, so changing it later would leave stock in the wrong unit.
 //   - Hard DELETE goes through the lifecycle registry, never a bare SQL delete:
-//     every child edge out of brands and collections is CASCADE or SET NULL, so
+//     almost every child edge out of the catalogue is CASCADE or SET NULL, so
 //     the database would report success while destroying (or silently
-//     uncollecting) the catalogue underneath it.
+//     uncollecting) everything underneath it. The one RESTRICT edge —
+//     `order_lines.colourway_id` — is a backstop, not the defence.
 
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import {
@@ -414,6 +415,33 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
       replyDelete(
         reply,
         await deleteOrExplain(pool, 'collection', request.params.id, {
+          user: request.user,
+        })
+      )
+  )
+
+  // A product owns its colourways and their stock rows (both CASCADE), so those
+  // go with it; what it must never take with it is commerce record. The probes
+  // reach the grandchildren through the colourways — order lines, and stock that
+  // is on hand or reserved — because the cascade would otherwise destroy them
+  // and report success.
+  app.delete(
+    '/admin/products/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'product', request.params.id, { user: request.user })
+      )
+  )
+
+  app.delete(
+    '/admin/colourways/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'colourway', request.params.id, {
           user: request.user,
         })
       )

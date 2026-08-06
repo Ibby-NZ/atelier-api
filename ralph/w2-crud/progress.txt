@@ -43,6 +43,18 @@ Story-specific detail belongs in the per-story entries below, not here.
   provable; `app.inject()` does not preflight.
 - **`sprint-status.yaml` can lag prd.json.** Story pick reads prd.json only, so a stale `blocked`
   in the yaml does not stall the loop; fix your own story's line and leave the others.
+- **A test fixture that reaches commerce must be cleaned up before its brand.** `cleanupFixtures`
+  in `test/admin-catalogue.test.js` deletes brands by slug prefix and relies on CASCADE; the one
+  RESTRICT edge in the schema (`order_lines.colourway_id`) stops that cascade dead, so an order
+  fixture makes the *cleanup itself* raise 23503 in the NEXT test's `beforeEach`. Delete orders by
+  order-number prefix first (their lines cascade). Same rule for any future fixture that inserts
+  into `orders`.
+- **A mid-transaction race is reproducible deterministically by wrapping the pool, not by timing.**
+  `deleteOrExplain` only uses `connect()`/`query()`/`release()`, so `{ connect: async () => ({
+  query, release }) }` around a real client can run arbitrary work on another connection when a
+  chosen statement is about to execute. That is how the 23503 backstop gets exercised against the
+  real database instead of a stub that just throws the error code. Applies to any check-then-write
+  in this codebase.
 
 ---
 
@@ -281,5 +293,69 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   delete dialog staying open on a 409 and offering "Archive instead") gets eyeballed when W2-US-009
   wires `useCrudScreen` into AdminProducts/AdminBrands. Worth checking then: a real cross-origin
   DELETE preflight from the CRM at :5273, which `app.inject()` cannot prove.
+---
+
+## 2026-08-06T03:16:02Z - W2-US-002 - DELETE for product and colourway
+
+- **Implemented.** `DELETE /admin/products/:id` and `DELETE /admin/colourways/:id`, both
+  backoffice-only, both the one-line `replyDelete(reply, await deleteOrExplain(pool, '<entity>',
+  request.params.id, { user: request.user }))` shape US-001 established. As with US-001 there was no
+  registry work to do — W1's `LIFECYCLE_ENTITIES` already carries `product` and `colourway` with
+  exactly the probes architecture.md § *Delete policy* specifies — so this was routes + tests only.
+- Repos and files changed: `atelier-api` only —
+  `src/routes/admin-catalogue.js` (+2 routes, header note widened to the whole catalogue),
+  `test/admin-catalogue.test.js` (+13 tests in two describe blocks, +2 fixtures, cleanup reordered),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 679 tests passed; 666 before).
+- **What the tests actually assert**, against the acceptance criteria:
+  - *Order lines block with a named count.* A product whose colourway carries an order line comes
+    back 409 with `{ relation: 'order_lines', label: 'order lines', count: 1, capped: false }`, and
+    both the product and the colourway still exist. The probe reaches the grandchild through the
+    colourway — nothing about the product row itself says it has been sold.
+  - *Non-zero inventory blocks*, on hand OR reserved (two separate tests). The product-level blocker
+    reads "colourways holding stock", the colourway-level one "units of stock on hand"; those labels
+    are W1's and the CRM will render them verbatim.
+  - *Colourways and zero-quantity inventory cascade as owned children.* Deleting a never-sold
+    product returns 200 and its colourway and stock row are gone; its house is untouched. Deleting a
+    colourway takes its stock row and leaves the product.
+  - *The 23503 backstop produces the same 409 shape.* See the note below — this one is the reason
+    the story is more than a copy of US-001.
+  - Plus 401 anonymous, 403 customer (row still present in both), 404 unknown id with `blockers: []`.
+- **The backstop test is a real race, not a stubbed error code.** The probes cover `order_lines` for
+  both entities, so no ordinary request can reach the 23503 path — the only way in is the grandchild
+  window delete.js documents: the transaction locks the PRODUCT, so an order line inserted against
+  one of its existing colourways after the probes have run is not stopped by anything. The test
+  reproduces that deterministically by passing `deleteOrExplain` a pool wrapper whose `query` runs
+  the insert on a second connection when the statement is about to be `DELETE FROM products`.
+  Postgres serialises the insert against the cascade's delete of the colourway, the RESTRICT edge
+  fires, and the catch re-answers it as a 409. The test then runs the ordinary probe path over the
+  same product and asserts `Object.keys` equality plus `probed.message === backstop.message` modulo
+  `1+` vs `1` — which is what "the same 409 shape" means, rather than two hand-written expectations
+  that could drift apart.
+- **Learnings:**
+  - Pattern: the pool-wrapper technique for reproducing a mid-transaction race, and the
+    delete-orders-before-brands cleanup rule — both promoted to `## Codebase Patterns` above.
+  - Gotcha: "samples" appears in this story's first acceptance criterion, and **there is no samples
+    table** — no migration creates one (E4 US-001 does, and is `pending`), and W1's registry
+    entries for product and colourway carry no samples probe. Nothing was stubbed for it: a probe
+    against a non-existent relation would fail the registry's `information_schema` safety test.
+    Whoever lands E4 must add that probe to the two registry entries and a test here; until then the
+    criterion is unmeetable, not unmet.
+  - Gotcha: `constraintBlockers` reports `count: 1, capped: true` — a "1+", because pg says a row
+    exists and nothing about how many. A CRM dialog that renders `count` without honouring `capped`
+    will tell staff there is exactly one order line when there may be a hundred.
+  - Gotcha: the delete of an order line's colourway is refused, but the delete of its ORDER is not
+    gated here at all — `orders` is `deletable: false` in the registry and cleanup relies on the
+    order cascade taking its lines. That is why the fixture cleanup works and why no test tries to
+    delete a colourway by deleting its order first.
+  - Context: the probe bodies for both entities are `src/lifecycle/registry.js` lines ~208-254; the
+    23503 mapping is `CONSTRAINT_BLOCKERS` in `src/lifecycle/delete.js`, keyed on
+    `order_lines_colourway_id_fkey` — the only RESTRICT edge in the schema
+    (`migrations/1784603440195_users-orders-shipping-schema.js`).
+- **Needs human verification:** none for this story on its own — no screen calls these yet. Carry
+  forward to W2-US-009 (AdminProducts wiring): a real cross-origin DELETE preflight from the CRM at
+  :5273, which `app.inject()` cannot prove, and the 409 dialog rendering both blocker labels
+  ("colourways holding stock" / "units of stock on hand") and the `capped` "+" suffix.
 ---
 

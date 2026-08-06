@@ -172,6 +172,8 @@ describe('back-office sample routes', () => {
       ['PATCH', '/admin/samples/1', { location: 'Bay 1' }],
       ['POST', '/admin/samples/1/archive', undefined],
       ['POST', '/admin/samples/1/restore', undefined],
+      ['POST', '/admin/samples/1/check-out', { holder_name: 'Somebody' }],
+      ['POST', '/admin/samples/1/check-in', undefined],
       ['DELETE', '/admin/samples/1', undefined],
     ]
 

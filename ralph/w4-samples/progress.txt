@@ -99,6 +99,37 @@ Story-specific detail belongs in the per-story entries below, not here.
   available, commit the bookkeeping for any uncommitted entry you find here alongside your own.
   To look at `atelier_w4`, `node -e` with `require('dotenv')` + `require('pg')` against
   `process.env.DATABASE_URL` remains the way in (`psql` is denied too).
+- **"Never a pre-check" is a claim about the SQL, not about the answer, so a status-code test
+  cannot prove it.** A read-then-write implementation returns the same 409 as the correct one on
+  every uncontended request, and the concurrency test passes too if the pre-check happens to sit
+  inside a transaction holding the row locked. Drive the module against the four-line recording
+  stub pool (`{ connect, query }` returning `{ rows: [{ id: 1 }], rowCount: 1 }`) and assert that
+  **no statement before the deciding write names the table at all** — `statements.slice(0,
+  writeIndex).filter((sql) => /sample_loans/i.test(sql))` is empty. The same stub proves the
+  transaction shape (BEGIN / `FOR UPDATE` / … / COMMIT, and `not.toMatch(/FOR NO KEY UPDATE/)`) and
+  is the ONLY way to reach a failure AFTER the first write, which is the window a two-statement
+  handler outside a transaction leaves open: make the stub throw on the second write and assert
+  `ROLLBACK` was issued and `COMMIT` was not.
+- **A 409 whose evidence is a row COUNT needs no pre-check either.** "Nothing was out to check in"
+  is `UPDATE … WHERE <predicate> RETURNING`/`rowCount === 0`, not `SELECT` then `UPDATE`: the write
+  answers the question it is asked. It is only safe while the transaction already holds the parent
+  locked `FOR UPDATE` — that is what stops a concurrent movement landing between the two
+  statements — so the lock and the rowCount are one design, not two.
+- **`FOR UPDATE` and not `FOR NO KEY UPDATE` whenever the transaction's own child INSERT
+  references the locked row.** Inserting a row that points at the parent takes `FOR KEY SHARE` on
+  it, and `FOR KEY SHARE` conflicts with `FOR UPDATE` and with nothing weaker — so the weaker mode
+  leaves two movements on one parent running side by side. Same rule `src/lifecycle/delete.js`
+  already states for check-then-delete; it applies identically to check-then-insert.
+- **A POST whose body is genuinely optional must type it `['object', 'null']`.** Fastify hands a
+  bodyless POST to the validator as null, so a plain `type: 'object'` body schema 400s the most
+  ordinary call such a route receives — and the handler then needs `request.body ?? {}`. Routes
+  with no body schema at all (archive/restore) never hit this, which is why it does not show up
+  until the first optional-body verb.
+- **Fastify's bundled Ajv has no `format` keywords, timestamps included.** `date_effective` uses an
+  explicit `YYYY-MM-DD` pattern for this reason (`src/routes/admin-price-lists.js:66`) and a
+  timestamptz needs the same treatment. A pattern can only police the SHAPE — only Postgres knows
+  the calendar — so `2026-02-31` passes it and arrives as a 22007/22008, which the domain module
+  must map to a 422 or it surfaces as a 500.
 - **The allowed-file list is data, not a constant — re-read `ralph/w4-samples/CLAUDE.md` every
   iteration before concluding a story is blocked on ownership.** A human unblocks by editing BOTH
   `prd.json` (clearing the `BLOCKED:` prefix) and the file list itself, and those two edits can land
@@ -597,4 +628,90 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   how the counter actually works (a sample can be marked `missing` or `retired` directly, but goes
   out and comes back only through the verb routes), and that a sample with any loan history is
   never hard-deletable, archiving being the only way one leaves the list.
+---
+
+## 2026-08-06T19:14:00Z - W4-US-006 - Check-out and check-in verb routes
+
+- Shipped the register's two MOVEMENTS as verb routes:
+  `POST /admin/samples/:id/check-out` (body `{ holder_name (required), trade_account_id?,
+  due_back_at?, out_at?, notes? }`) and `POST /admin/samples/:id/check-in` (body optional,
+  `{ returned_at? }`). Both backoffice-only, both inside the plugin US-005 already registered, so
+  `src/app.js` needed no edit at all this iteration.
+- New module `src/samples/sample-loans.js` holds `withSampleTxn`, `checkOutSample` and
+  `checkInSample`. `withSampleTxn` mirrors `withOrderTxn` (`src/orders/admin-orders.js:207`):
+  BEGIN, `SELECT id, status FROM samples WHERE id = $1 FOR UPDATE` (404 if missing), run `fn`,
+  COMMIT, then re-read through `getSample` on the POOL — so every movement hands the CRM the same
+  shape a plain read does.
+- Check-out writes TWO tables in the one transaction: `INSERT INTO sample_loans` then
+  `UPDATE samples SET status = 'out'`. "Already out" is the caught 23505 on
+  `sample_loans_open_unique` mapped to 409; there is no pre-check anywhere. Check-in is the mirror:
+  `UPDATE sample_loans SET returned_at = COALESCE($2, now()) WHERE sample_id = $1 AND returned_at
+  IS NULL` then `UPDATE samples SET status = 'in_library'`, with "not out" derived from that
+  UPDATE's own `rowCount === 0`.
+- Repos and files changed: atelier-api only — `src/samples/sample-loans.js` (new),
+  `src/routes/admin-samples.js` (two routes, two schemas, one import — additive),
+  `test/samples-checkout.test.js` (new, 30 tests), `test/samples-routes.test.js` (two rows added to
+  the parameterised 401/403 guard sweep), plus the bookkeeping (`prd.json`, `sprint-status.yaml`,
+  `progress.txt`, `CLAUDE.md`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (57 files, 1322 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the five entries added to
+    `## Codebase Patterns` above — "never a pre-check" is a claim about the SQL and needs a
+    statement-order assertion rather than a status code, a rowCount is evidence enough for a 409
+    when the parent is already locked, `FOR UPDATE` is required whenever the same transaction
+    INSERTs a row referencing the locked parent, an optional POST body must be typed
+    `['object', 'null']`, and a timestamp needs an explicit pattern plus a 22007/22008 mapping.
+  - Gotchas:
+    - **The two 409s have different mechanisms and both had to be proved, not assumed.**
+      "Already out" is the database's (23505 on the partial index); "not out" is the closing
+      UPDATE's rowCount. A test that only asserted the codes would pass against a pre-check
+      implementation of either, which is why `test/samples-checkout.test.js` carries two
+      statement-order tests and a `Promise.all` contention test (two concurrent check-outs of one
+      barcode -> `[200, 409]` and exactly ONE loan row).
+    - **The verb routes write `status` with their own SQL and must keep doing so.**
+      `updateSample` refuses `out` (`WRITABLE_SAMPLE_STATUSES`), so routing the status write
+      through it would 422 the whole movement. That refusal is the point: this transaction is the
+      only place the assertion "it is out" can be made true.
+    - **No guard refuses a `missing`, `retired` or ARCHIVED sample a check-out**, deliberately, and
+      that is a judgement a human should confirm rather than a gap. A missing sample somebody has
+      just scanned out has by definition been found; refusing would make the register argue with
+      the person holding the object. Adding such a guard is a product decision, so it was not
+      taken here. Check-in likewise sets `in_library` unconditionally — a sample that came back
+      damaged is a follow-up PATCH to `retired`, which is freely writable.
+    - **Check-in does not rewrite the loan's `notes`.** A loan is append-only history and the note
+      is what was typed when the sample went out. There is no loan PATCH route anywhere in this
+      PRD, so a mistyped loan note currently cannot be corrected through the API — flagging rather
+      than inventing a route US-006 does not name.
+    - `checkInSample`'s rollback is real: a 409 leaves `samples.status` untouched, asserted against
+      the database, because the status write sits after the failing statement inside the same
+      transaction.
+    - Fixture cleanup order here is `sample_loans` -> `samples` -> `brands` -> `showrooms` ->
+      `trade_accounts`, and the `trade_accounts` fixture uses `randomUUID()` rather than a literal
+      guid — the pattern entry two stories back explains why a literal one makes a suite pass
+      exactly once per database.
+  - Context:
+    - The normative sentence is `_bmad-output/planning-artifacts/architecture.md` § *Samples
+      domain* lines 191-193 ("Check-out and check-in are verb routes, not a status PATCH... 'Already
+      out' is a caught 23505 on the partial index, never a pre-check"); the epic row is
+      `epics.md:102`.
+    - **US-007 is next and needs nothing out of bounds.** `src/app.js` already registers
+      `adminSampleRoutes` and its sample-order routes belong in that same plugin (or a sibling
+      module registered the same way — either is additive). It DOES need
+      `src/lifecycle/registry.js` for its "DELETE is refused unless requested or cancelled"
+      criterion, and that file is now on this workstream's allowed list (additive, own entries
+      only), exactly as the `sample` entry US-005 added. `ALLOWED_TRANSITIONS` + `requireStatus`
+      go in a module the CRM mirrors; `requireStatus` at `src/orders/admin-orders.js:46` is the
+      shape, and `withSampleTxn` here is the shape for a `withSampleOrderTxn` if one is wanted.
+    - **Still owed and named by no story** (unchanged from US-005): `CONSTRAINT_BLOCKERS` in
+      `src/lifecycle/delete.js` has no `sample_loans_sample_id_fkey` entry, the `product` and
+      `colourway` registry entries carry no `samples` probe, and there is **no showroom CRUD
+      anywhere in this PRD** — `showrooms` has a table, an `archived_at`, no routes and no registry
+      entry, so US-008's `AdminShowrooms.jsx` will have nothing to call.
+- **Needs human verification:** none in a browser — no screen exists yet, and there is no e2e
+  harness on this machine. Two judgement calls a person should confirm before US-009 wires the
+  scanner to these endpoints: (1) that a `missing`, `retired` or archived sample may be checked out
+  without an argument from the system, and (2) that check-in always returns the sample to
+  `in_library`, a damaged return being a separate PATCH to `retired`.
 ---

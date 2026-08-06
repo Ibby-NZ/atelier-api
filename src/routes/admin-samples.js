@@ -18,6 +18,12 @@
 //     VALUE, not an exception: Fastify's error serializer drops custom
 //     properties, so a thrown error could not carry `blockers`, which is the
 //     entire point of the 409.
+//
+// Check-out and check-in (W4-US-006) are VERB routes here, not a status PATCH:
+// each writes two tables and must be one transaction, so both go through
+// `withSampleTxn` in ../samples/sample-loans.js. Their two 409s come from the
+// writes themselves — a caught 23505 on the partial index, and a closing UPDATE
+// that matched nothing — never from a pre-check.
 
 import {
   listSamples,
@@ -32,6 +38,7 @@ import {
   DEFAULT_LIMIT,
   MAX_LIMIT,
 } from '../samples/admin-samples.js'
+import { checkOutSample, checkInSample } from '../samples/sample-loans.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 
 // Required on create, editable after — a printed tag can be mistyped.
@@ -116,6 +123,48 @@ const patchSchema = {
   properties: {
     barcode: barcodeProp,
     ...sampleProps,
+  },
+}
+
+// Fastify's bundled Ajv carries no `format` keywords (the same reason the auth
+// schemas use EMAIL_PATTERN and `date_effective` uses an explicit YYYY-MM-DD
+// pattern), so a timestamp is validated with a pattern here: a date, optionally
+// with a time and an offset. The pattern can only police the SHAPE — only
+// Postgres knows the calendar — so `2026-02-31` gets through it and comes back
+// as a 422 from the module's 22007 mapping.
+const timestampProp = {
+  type: 'string',
+  pattern: '^\\d{4}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:?\\d{2})?)?$',
+}
+
+// The snapshot: whoever took it, as given at the counter. Required, because a
+// loan that cannot say who has the sample answers nothing.
+const checkOutSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['holder_name'],
+  properties: {
+    holder_name: { type: 'string', minLength: 1, maxLength: 500 },
+    // The company, where the borrower is a linked trade client. Most are not.
+    trade_account_id: { type: 'integer', minimum: 1 },
+    // Optional on purpose: plenty of samples go out with no date agreed, and
+    // inventing one would make them overdue on a deadline nobody set.
+    due_back_at: timestampProp,
+    out_at: timestampProp,
+    notes: { type: 'string', maxLength: 5000 },
+  },
+}
+
+// Everything is optional — the common check-in is a bare POST with no body at
+// all, which Fastify hands the handler as null, hence the union type. (An
+// object-only schema would 400 the most ordinary call this route receives.)
+// `returned_at` exists so a movement recorded after the fact carries the day it
+// happened.
+const checkInSchema = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  properties: {
+    returned_at: timestampProp,
   },
 }
 
@@ -209,6 +258,26 @@ export const adminSampleRoutes = async (app, { pool }) => {
       if (!sample) return notFound(reply, `Sample ${request.params.id} not found.`)
       return { sample }
     }
+  )
+
+  // The two movements. Verbs rather than a status PATCH because each writes two
+  // tables and only means anything if both writes land together — see
+  // ../samples/sample-loans.js. Both answer with the same `{ sample }` shape
+  // every other write here does, so a screen re-renders one thing.
+  app.post(
+    '/admin/samples/:id/check-out',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: checkOutSchema } },
+    async (request) => ({
+      sample: await checkOutSample(pool, request.params.id, request.body),
+    })
+  )
+
+  app.post(
+    '/admin/samples/:id/check-in',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: checkInSchema } },
+    async (request) => ({
+      sample: await checkInSample(pool, request.params.id, request.body ?? {}),
+    })
   )
 
   // 'sample' is a code literal, never a path parameter: the registry is not an

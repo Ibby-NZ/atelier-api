@@ -827,3 +827,57 @@ migrations.
   deleting a design does not yet see the samples cut from it. There is also **no showroom CRUD
   anywhere**: `showrooms` has a table and an `archived_at` but no routes and no registry entry,
   which the CRM's showrooms screen will need.
+
+### Check-out and check-in (`src/samples/sample-loans.js`)
+
+- **`POST /admin/samples/:id/check-out` and `POST /admin/samples/:id/check-in` are VERBS, not a
+  status PATCH**, and the reason is that each writes TWO tables and only means anything if both
+  writes land together: check-out opens a `sample_loans` row AND moves `samples.status` to `out`,
+  check-in closes the loan AND moves it back to `in_library`. They live in the `adminSampleRoutes`
+  plugin `src/app.js` already registers, so a further samples route needs no second registration.
+- **They write `status` with their own SQL and must keep doing so.** `updateSample` refuses `out`
+  (`WRITABLE_SAMPLE_STATUSES`), which is the whole point — this transaction is the only place the
+  assertion "it is out" can be made true — so routing the status write through it would 422 the
+  movement.
+- **`withSampleTxn(pool, id, fn)` mirrors `withOrderTxn`** (`src/orders/admin-orders.js:207`):
+  BEGIN, `SELECT id, status FROM samples WHERE id = $1 FOR UPDATE` (404 when the id is unknown),
+  run `fn(client, sample)`, COMMIT, then re-read through `getSample` on the POOL — so a movement
+  hands the CRM exactly the shape a plain read does. **`FOR UPDATE`, never `FOR NO KEY UPDATE`:**
+  the INSERT inside the same transaction takes `FOR KEY SHARE` on the sample it references, and
+  `FOR KEY SHARE` conflicts with `FOR UPDATE` and with nothing weaker, so the weaker mode would let
+  two movements on one sample run side by side. Same rule `src/lifecycle/delete.js` states for
+  check-then-delete.
+- **Neither 409 is a pre-check, and they get there by different routes.** "Already out" is the
+  caught 23505 on `sample_loans_open_unique` — a read-then-insert reads a row another transaction
+  is about to write, and the scanner is a concurrent device. "Not out" is the closing
+  `UPDATE sample_loans … WHERE sample_id = $1 AND returned_at IS NULL` reporting
+  `rowCount === 0`: the write answers the question it was asked, which is only safe because the
+  transaction already holds the sample locked.
+- **A status-code test cannot prove "never a pre-check"** — a pre-check returns the same 409 on
+  every uncontended request. `test/samples-checkout.test.js` asserts it over the STATEMENTS
+  instead, against a four-line recording stub pool: no statement before the deciding write names
+  `sample_loans` at all. The same stub pins the transaction shape and is the only way to reach a
+  failure AFTER the first write (make it throw on the second, assert `ROLLBACK` and no `COMMIT`) —
+  the window a two-statement handler outside a transaction leaves open.
+- **No guard refuses a `missing`, `retired` or ARCHIVED sample a check-out**, deliberately. Those
+  are statements staff made about the object, and a missing sample somebody has just scanned out
+  has by definition been found; refusing would make the register argue with the person holding the
+  thing. Check-in returns the sample to `in_library` unconditionally — a damaged return is a
+  follow-up PATCH to `retired`, which is freely writable.
+- **`holder_name` is required; `due_back_at` is not.** Plenty of samples go out with no date
+  agreed and inventing one would make them overdue on a deadline nobody set. `out_at` and
+  `returned_at` are optional and default to `now()`, so a movement recorded after the fact carries
+  the day it happened, and nothing refuses a return earlier than the loan's `out_at` — a back-dated
+  correction has to stay possible.
+- **Check-in does not rewrite the loan's `notes`.** A loan is append-only history and the note is
+  what was typed when the sample went out. There is no loan PATCH route, so a mistyped loan note
+  cannot currently be corrected through the API.
+- **A timestamp body field needs an explicit pattern, and the pattern is not enough.** Fastify's
+  bundled Ajv carries no `format` keywords (the same reason `date_effective` uses an explicit
+  `YYYY-MM-DD` pattern), so `timestampProp` in `src/routes/admin-samples.js` is a regex — which can
+  only police the SHAPE. `2026-02-31` passes it and arrives as a pg 22007/22008, mapped to a **422**
+  by the module, because a rejected value must never surface as a 500.
+- **An optional POST body must be typed `['object', 'null']`.** Fastify hands a bodyless POST to
+  the validator as null, so a plain `type: 'object'` schema would 400 the most ordinary check-in
+  there is; the handler passes `request.body ?? {}`. Routes with no body schema at all
+  (archive/restore) never hit this.

@@ -825,7 +825,11 @@ const renderSetup = (ws) => {
     L.push('echo "==> incoming/ as a READ-ONLY copy — the client\'s only copy of this data"')
     L.push('mkdir -p "$ROOT/atelier-api/incoming"')
     L.push(`cp -R ${REPO_PATHS[API]}/incoming/${ws.readOnlyIncoming} "$ROOT/atelier-api/incoming/"`)
-    L.push('chmod -R a-w "$ROOT/atelier-api/incoming"')
+    // Protect the FILES, not the directories. The converters write their
+    // normalised output into a subdirectory of incoming/, so a blanket
+    // `chmod -R a-w` blocks the mkdir and the run dies EACCES — which looks
+    // like a converter bug and is not one.
+    L.push('find "$ROOT/atelier-api/incoming" -type f -exec chmod a-w {} +')
   }
   L.push('')
   L.push('echo "==> database (never share atelier_dev between concurrent loops)"')

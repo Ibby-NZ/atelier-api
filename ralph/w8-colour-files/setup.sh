@@ -27,7 +27,7 @@ cp /Users/verumoffice/atelier-api/.env "$ROOT/atelier-api/.env"
 echo "==> incoming/ as a READ-ONLY copy — the client's only copy of this data"
 mkdir -p "$ROOT/atelier-api/incoming"
 cp -R /Users/verumoffice/atelier-api/incoming/colour-files "$ROOT/atelier-api/incoming/"
-chmod -R a-w "$ROOT/atelier-api/incoming"
+find "$ROOT/atelier-api/incoming" -type f -exec chmod a-w {} +
 
 echo "==> database (never share atelier_dev between concurrent loops)"
 createdb "$DB" 2>/dev/null || echo "    $DB already exists, reusing"

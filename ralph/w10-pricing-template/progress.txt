@@ -16,7 +16,7 @@ Started: 2026-08-06T02:40:24Z
 - A Postgres CHECK is satisfied by NULL (unknown, not false), so a `~ '^[A-Z]$'` check on a nullable
   column still lets the column stay empty. That is what makes widening the class checks safe for the
   19.5k existing rows.
-- `npm test` runs 37 files / 603 tests against the real local Postgres in ~22s. `fileParallelism:
+- `npm test` runs 37 files / 636 tests against the real local Postgres in ~32s. `fileParallelism:
   false` is load-bearing — do not touch it.
 - **`incoming/pricing-templates/` does NOT exist in this worktree** — `incoming/` is gitignored, so
   the corpus lives only in the main checkout, which the sandbox refuses to read. `npm run
@@ -50,6 +50,20 @@ Started: 2026-08-06T02:40:24Z
 - A validator can be strict about TYPE and silent about RANGE, and that is often the correct pair:
   the type is knowable now, the legitimate range is a client decision nobody has made. Say so in a
   comment at the check, or the next person adds the guess back.
+- **`src/` CAN import from `scripts/`** — same package, plain relative specifier, no bundler, no
+  `files` field in package.json, and `test/` already imports `../scripts/lib/*`. An earlier note in
+  CLAUDE.md claiming otherwise was wrong and has been corrected. The cost is real but small: pulling
+  in `scripts/lib/price-template.js` also loads `xlsx.js`/`zip.js`/`xml.js`, which are pure function
+  modules with no top-level side effects.
+- Separate an INPUT vocabulary (what a source cell may say) from a STORED one (what the column
+  CHECK accepts). Adding an input alias can only turn a previously fatal cell into a mapped one; it
+  can never change what an already-mapped cell produces, which is how a byte-pinned output file
+  stays safe. Assert at module load that every input map's values are in its stored set, so an
+  alias cannot quietly widen storage.
+- **A converter that fails loudly and writes nothing is itself the corpus proof.** The committed
+  output exists, therefore no source row carried a value the old vocabulary lacked — so a widened
+  vocabulary cannot change a single committed byte. That argument holds even where the corpus
+  cannot be read, and it is worth writing down instead of re-deriving.
 ---
 
 ## 2026-08-06T14:44:00Z - W10-US-001 - Migration: price_list_items v2 columns
@@ -282,4 +296,96 @@ Started: 2026-08-06T02:40:24Z
   runnable from any worktree: `npm run convert:pricing && git diff --exit-code
   src/seed/data/price-lists.json` in the main checkout, then `npm run import:pricing` against a
   scratch database to confirm the 19.5k v1 rows land with `template_version = 'v1'`.
+---
+
+## 2026-08-06T16:00:00Z - W10-US-005 - Shared vocabulary module
+- The five pipeline vocabularies now live once, in `scripts/lib/price-template.js`, split into
+  STORED sets (`CATEGORIES`, `UNITS`, `CURRENCIES` — each mirroring a column CHECK) and INPUT maps
+  (`CATEGORY_BY_ITEM_TYPE`, `UNIT_BY_PACK`, `CURRENCY_MAP`), with `assertStorable(map, stored, what)`
+  run at module load so an alias can never reach outside the stored set. `UNIT_BY_PACK` gained
+  `p/hide`/`p/panel` (both units have been in the CHECK since the table was created, with no
+  template rows yet) and `CURRENCY_MAP` gained `eur`/`usd`/`gbp` as INPUT ALIASES only — the stored
+  set is unchanged and a test asserts `new Set(CURRENCY_MAP.values())` still equals `CURRENCIES`.
+  A comment at `CURRENCIES` names the four places a new currency must be added in lockstep (DB
+  CHECK, `CURRENCIES`, `CURRENCY_MAP`, `CURRENCY_ENUM`) and notes that the last now derives from
+  the second. The three consumers import instead of copying: `scripts/convert-price-lists.js`
+  (its `CATEGORY_BY_FILE_TOKEN` is now `assertStorable`-checked), `src/seed/price-lists.js` and
+  `src/routes/admin-price-lists.js` (`CATEGORY_ENUM`/`UNIT_ENUM`/`CURRENCY_ENUM` are spreads of the
+  shared sets).
+- **Scope note — the class letters were widened here too, and that is not in US-005's written
+  criteria.** `FREIGHT_CLASSES` (`A`–`E`) and `DUTY_CLASSES` (`A`) existed in three hand-copied
+  places and all three still contradicted the column CHECKs that US-001 widened to `~ '^[A-Z]$'`.
+  They are replaced by one exported `CLASS_LETTER = /^[A-Z]$/` + `isClassLetter`, used by `mapV1`,
+  by a new `optionalClassLetter` in the importer's validator, and by the admin schema (where
+  `duty_class` moves from free text to the same pattern, turning what would have been an opaque
+  23514 into a 400). Rationale: US-001 already ratified the shape and CLAUDE.md recorded that the
+  application layer "is widened separately"; leaving it narrow means the client's first `F` still
+  fails the converter, which is the exact bug US-001 exists to prevent. No story after this one
+  owns it.
+- Repos and files changed (atelier-api only):
+  - `scripts/lib/price-template.js` (+~85 lines: the vocabulary block, `assertStorable`,
+    `CLASS_LETTER`/`isClassLetter`; `mapV1`'s two class checks now call the predicate)
+  - `scripts/convert-price-lists.js` (imports `CATEGORIES`/`assertStorable`, wraps its file-token map)
+  - `src/seed/price-lists.js` (imports the three stored sets, adds `optionalClassLetter`, drops the
+    five local sets and `requireEnum`'s now-unused `optional` option)
+  - `src/routes/admin-price-lists.js` (enums derived from the shared sets, `classLetterProp`)
+  - `test/price-template.test.js` (+15 tests: a `shared vocabularies` describe, alias mapping and
+    class-letter cases in `mapV1`), `test/price-lists.test.js` (+18: widened class letters accepted
+    end to end, `hide`/`panel` units, the two rejection rows retuned to `AB`/`a`)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 636 tests passed; was 603). Plus, all
+  writing to scratch paths only:
+  - a v1 fixture reproducing the committed file's FIRST record converted to a scratch path and
+    compared byte-for-byte in Node against line 2 of `src/seed/data/price-lists.json` —
+    `identical bytes: true`.
+  - a v2 fixture exercising every new alias (`p/hide`, `p/panel`, `USD`, `gbp`, freight `K`, duty
+    `F`) -> two rows, correct units/currencies, class letters stored raw; its output fed straight
+    to `validatePriceListItems`, accepted.
+  - an audit of the committed 19,514 records: units are `metre,piece,roll,yard` (no hide/panel row
+    exists), currencies `EUR,GBP,USD`, freight classes `A`–`E`, duty classes `A`/null — so nothing
+    added or widened here can touch a committed byte. The whole committed file re-validates under
+    the new validator.
+  `src/seed/data/price-lists.json` untouched (`git status` clean for it).
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - Split INPUT vocabulary from STORED vocabulary and assert the containment at module load; see
+      the Codebase Patterns block.
+    - `src/` importing from `scripts/` works and is now done deliberately — see Codebase Patterns.
+    - A JSON-Schema `pattern` only applies to string instances, so `{ type: ['string','null'],
+      pattern: '^[A-Z]$' }` still lets an explicit null clear the column. Deriving the pattern from
+      the exported regex's `.source` keeps the schema and the predicate one source.
+  - Gotchas (what will bite the next iteration):
+    - **`test/admin-price-lists.test.js` is NOT in this workstream's allowed file list**, so the
+      route's tightened `duty_class` (free text -> one uppercase letter) has no direct route-level
+      test. It is covered indirectly (the shared pattern is asserted in `price-template.test.js`)
+      and no existing admin test sends a multi-character class. If a story ever needs to assert the
+      400, it needs that file unlocked.
+    - Widening the class letters made three previously-passing negative cases wrong: `mapV1`'s
+      `[13, 'Z']`/`[10, 'Q']` rows and the validator's `freight_class: 'Z'` row. They now use
+      multi-character values (`ZZ`, `Q1`, `AB`) and a lower-case one — a single letter of ANY case
+      now passes the converter, because `mapV1` upper-cases the cell before checking.
+    - `requireEnum`'s `{ optional: true }` option is gone (no caller left). Re-adding it is not the
+      way to validate a nullable enum here — `optionalClassLetter` is the shape to copy.
+    - The vocabularies are exported as live `Map`/`Set` objects, which `Object.freeze` does not
+      protect. Nothing mutates them and `assertStorable` only reads, but a caller COULD `.add`. If
+      that ever matters, declare frozen arrays and derive the collections from them.
+    - US-006 must not regenerate `src/seed/data/price-lists.json` to "pick up" the new aliases:
+      there is nothing to pick up. The corpus audit above proves no committed row uses any of them.
+  - Context (where the relevant code lives):
+    - Vocabularies, `assertStorable`, `CLASS_LETTER`, both mappers, header matching:
+      `scripts/lib/price-template.js`. Its tests: `test/price-template.test.js`.
+    - Importer validator + upsert: `src/seed/price-lists.js`. Back-office write schema:
+      `src/routes/admin-price-lists.js`; its read/write SQL: `src/pricing/admin-price-lists.js`
+      (untouched — no vocabulary lives there).
+    - The CHECKs these mirror: `migrations/1785110400000_price-list-items.js` (category, unit,
+      currency) and `migrations/1786334400000_price-list-template-v2.js` (both class letters).
+- **Needs human verification:** the CRM's back-office **Supplier rates** screen (atelier-crm,
+  `src/screens/Admin*`) is the one place a person should look: its duty-class field now accepts a
+  single uppercase letter only, where the API previously took any text up to 200 characters, so a
+  screen offering a free-text box or a hard-coded `A`–`E` freight dropdown needs its input widened
+  to the full alphabet and narrowed to one character. Nothing else renders these vocabularies. Also
+  still outstanding from US-002/US-003/US-004 and not runnable from any worktree:
+  `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` in the main
+  checkout, which is the only place `incoming/pricing-templates/` exists.
 ---

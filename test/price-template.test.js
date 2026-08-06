@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   TEMPLATES, mapV1, mapV2, matchTemplate, normaliseHeader, acceptedHeaders,
+  CATEGORIES, UNITS, CURRENCIES, CATEGORY_BY_ITEM_TYPE, UNIT_BY_PACK, CURRENCY_MAP,
+  assertStorable, isClassLetter,
 } from '../scripts/lib/price-template.js'
 
 // The pricing-template registry is pure: no database, no fixtures on disk.
@@ -41,6 +43,62 @@ const contextOf = (overrides = {}) => ({
   errors: [],
   skipped: [],
   ...overrides,
+})
+
+describe('shared vocabularies', () => {
+  it('stores exactly the values the column CHECKs accept', () => {
+    expect([...CATEGORIES]).toEqual(['fabric', 'wallpaper', 'trimming', 'accessory'])
+    expect([...UNITS]).toEqual(['metre', 'yard', 'roll', 'piece', 'hide', 'panel'])
+    expect([...CURRENCIES]).toEqual(['EUR', 'USD', 'GBP'])
+  })
+
+  it.each([
+    ['item type', CATEGORY_BY_ITEM_TYPE, CATEGORIES],
+    ['pack type', UNIT_BY_PACK, UNITS],
+    ['currency', CURRENCY_MAP, CURRENCIES],
+  ])('maps every %s cell onto a stored value', (what, map, stored) => {
+    expect(() => assertStorable(map, stored, what)).not.toThrow()
+  })
+
+  it('refuses an input map that reaches outside the stored set', () => {
+    // The guard that stops an alias quietly widening storage: adding
+    // ['yen', 'JPY'] would pass the converter and fail the column CHECK.
+    const rogue = new Map([...CURRENCY_MAP, ['yen', 'JPY']])
+    expect(() => assertStorable(rogue, CURRENCIES, 'currency')).toThrow(/"JPY"/)
+  })
+
+  it('accepts p/hide and p/panel, units the CHECK has always allowed', () => {
+    expect(UNIT_BY_PACK.get('p/hide')).toBe('hide')
+    expect(UNIT_BY_PACK.get('p/panel')).toBe('panel')
+  })
+
+  it('takes an ISO currency code as an input alias for the long name', () => {
+    for (const [alias, name] of [['eur', 'euro'], ['usd', 'us dollar'], ['gbp', 'pound sterling']]) {
+      expect(CURRENCY_MAP.get(alias)).toBe(CURRENCY_MAP.get(name))
+    }
+    // Input aliases only — the stored set is not widened by them.
+    expect(new Set(CURRENCY_MAP.values())).toEqual(CURRENCIES)
+  })
+
+  it('leaves every previously mapped cell mapping to what it always did', () => {
+    // The byte-pin argument for adding aliases, asserted rather than reasoned:
+    // the new keys are new, so no cell that used to map changes meaning.
+    expect(CURRENCY_MAP.get('euro')).toBe('EUR')
+    expect(CURRENCY_MAP.get('us dollar')).toBe('USD')
+    expect(CURRENCY_MAP.get('pound sterling')).toBe('GBP')
+    expect(UNIT_BY_PACK.get('p/m')).toBe('metre')
+    expect(UNIT_BY_PACK.get('p/y')).toBe('yard')
+    expect(UNIT_BY_PACK.get('p/roll')).toBe('roll')
+    expect(UNIT_BY_PACK.get('p/p')).toBe('piece')
+  })
+
+  it.each(['A', 'E', 'F', 'Z'])('treats %s as a class letter', (letter) => {
+    expect(isClassLetter(letter)).toBe(true)
+  })
+
+  it.each(['a', 'AB', '1', '', null, undefined, 5])('refuses %j as a class letter', (value) => {
+    expect(isClassLetter(value)).toBe(false)
+  })
 })
 
 describe('template registry', () => {
@@ -182,8 +240,8 @@ describe('mapV1', () => {
       [4, 'Soft Furnishings', /unmappable item type/],
       [5, 'p/box', /unmappable pack type/],
       [12, 'Yen', /unmappable currency/],
-      [13, 'Z', /unknown freight class/],
-      [10, 'Q', /unknown duty class/],
+      [13, 'ZZ', /unknown freight class/],
+      [10, 'Q1', /unknown duty class/],
       [2, '', /empty code/],
       [11, '65,50', /non-numeric wholesale rate/],
       [11, '-3', /negative wholesale rate/],
@@ -199,6 +257,38 @@ describe('mapV1', () => {
       expect(context.errors[0]).toMatch(pattern)
     }
   })
+
+  it.each([
+    ['p/hide', 'hide'],
+    ['p/panel', 'panel'],
+  ])('maps the %s pack type onto %s', (pack, unit) => {
+    const row = [...V1_ROW]
+    row[5] = pack
+    expect(mapV1(row, contextOf()).unit).toBe(unit)
+  })
+
+  it.each([['EUR', 'EUR'], ['usd', 'USD'], ['GBP', 'GBP']])(
+    'reads the ISO code %s as the currency %s',
+    (cell, stored) => {
+      const row = [...V1_ROW]
+      row[12] = cell
+      expect(mapV1(row, contextOf()).currency).toBe(stored)
+    }
+  )
+
+  it.each([['F', 'Z'], ['Z', 'B']])(
+    'takes any single uppercase letter as a class (freight %s, duty %s)',
+    (freight, duty) => {
+      // The letters stay raw and uninterpreted; the broker's table is still
+      // owed, so refusing an 'F' would reject the client's own file.
+      const row = [...V1_ROW]
+      row[13] = freight
+      row[10] = duty
+      const item = mapV1(row, contextOf())
+      expect(item.freight_class).toBe(freight)
+      expect(item.duty_class).toBe(duty)
+    }
+  )
 
   it('skips an unpriced row instead of failing the whole run', () => {
     const row = [...V1_ROW]

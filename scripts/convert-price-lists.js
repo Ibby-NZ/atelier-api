@@ -19,17 +19,23 @@ import { fileURLToPath } from 'node:url'
 import { openWorkbook, sharedStrings, sheetRows } from './lib/xlsx.js'
 import { decodeText, csvRows } from './lib/text.js'
 import { dumps } from './lib/python-format.js'
-import { matchTemplate, acceptedHeaders } from './lib/price-template.js'
+import {
+  matchTemplate, acceptedHeaders, assertStorable, CATEGORIES,
+} from './lib/price-template.js'
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DEFAULT_IN = join(REPO, 'incoming', 'pricing-templates')
 const DEFAULT_OUT = join(REPO, 'src', 'seed', 'data', 'price-lists.json')
 
-const CATEGORY_BY_FILE_TOKEN = new Map([
+// The filename's own category token, for a v1 drop whose Item Type cell is
+// blank. It is checked against the shared stored vocabulary because a typo here
+// would sail past mapV1's fallback (which trusts fileCategory) and surface only
+// as a CHECK violation at import time, a whole pipeline away from the mistake.
+const CATEGORY_BY_FILE_TOKEN = assertStorable(new Map([
   ['FABRIC', 'fabric'],
   ['WPPR', 'wallpaper'],
   ['TRIMMING', 'trimming'],
-])
+]), CATEGORIES, 'file-token category')
 
 // Filename prefixes whose plain title-casing would mangle the supplier name.
 const SUPPLIER_OVERRIDES = new Map([

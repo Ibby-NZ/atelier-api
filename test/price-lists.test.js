@@ -108,9 +108,34 @@ describe('price list import', () => {
     ['negative price', { wholesale_rate: -5 }, /wholesale_rate/],
     ['unknown currency', { currency: 'NZD' }, /currency/],
     ['unknown unit', { unit: 'bolt' }, /unit/],
-    ['unknown freight class', { freight_class: 'Z' }, /freight_class/],
+    ['a multi-character freight class', { freight_class: 'AB' }, /freight_class/],
+    ['a lower-case duty class', { duty_class: 'a' }, /duty_class/],
   ])('validation rejects %s', (_label, overrides, pattern) => {
     expect(() => validatePriceListItems([item(overrides)])).toThrow(pattern)
+  })
+
+  it.each(['A', 'E', 'F', 'Z'])('validation accepts %s as a class letter', (letter) => {
+    // The validator used to stop at 'E' for freight and at 'A' for duty, long
+    // after the column CHECKs widened to any single uppercase letter.
+    expect(() => validatePriceListItems([item({ freight_class: letter, duty_class: letter })]))
+      .not.toThrow()
+  })
+
+  it('validates against the converter vocabularies, so hide and panel units pass', () => {
+    expect(() => validatePriceListItems([
+      item({ code: 'PLT-HIDE', unit: 'hide' }),
+      item({ code: 'PLT-PANEL', unit: 'panel' }),
+    ])).not.toThrow()
+  })
+
+  it('imports a freight class the old set would have rejected', async () => {
+    // End to end: validator and column CHECK now agree on the same shape.
+    await importPriceLists(pool, [item({ code: 'PLT-CLASS', freight_class: 'F', duty_class: 'B' })])
+    const { rows } = await pool.query(
+      'SELECT freight_class, duty_class FROM price_list_items WHERE supplier = $1 AND code = $2',
+      [SUPPLIER, 'PLT-CLASS']
+    )
+    expect(rows[0]).toEqual({ freight_class: 'F', duty_class: 'B' })
   })
 })
 

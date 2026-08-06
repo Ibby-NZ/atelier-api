@@ -25,25 +25,95 @@ const V1_HEADER = Object.freeze([
   'duty rate', 'wholesale rate', 'currency', 'freight rate',
 ])
 
-const CATEGORY_BY_ITEM_TYPE = new Map([
+/**
+ * The vocabularies below are the pipeline's single source of truth. The
+ * importer's validator (src/seed/price-lists.js) and the back-office write
+ * schema (src/routes/admin-price-lists.js) each kept a hand-copied duplicate,
+ * and the copies drifted — three of them still said a freight class could only
+ * be 'A'-'E' after the column CHECK had been widened.
+ *
+ * Two kinds, and keeping them apart is the whole point:
+ *   - an INPUT map says what a template CELL may say and what it means. Adding
+ *     an entry can only turn a cell that used to fail the entire run into one
+ *     that maps; it cannot change what an already-mapped cell produces, so the
+ *     byte-pinned price-lists.json is safe from it by construction.
+ *   - a STORED set is what the database column will accept. Widening one of
+ *     those is a migration.
+ * `assertStorable` proves at module load that no input map reaches outside its
+ * stored set, so an alias can never quietly widen storage.
+ */
+
+// Stored vocabularies — each mirrors a CHECK on price_list_items
+// (migrations/1785110400000_price-list-items.js).
+export const CATEGORIES = new Set(['fabric', 'wallpaper', 'trimming', 'accessory'])
+export const UNITS = new Set(['metre', 'yard', 'roll', 'piece', 'hide', 'panel'])
+// Adding a currency is FOUR edits in lockstep, each failing at a different layer
+// when missed: (1) the DB CHECK on price_list_items.currency, in a migration;
+// (2) CURRENCIES here, which the importer validates against; (3) CURRENCY_MAP
+// below, or no template cell can name it; and (4) CURRENCY_ENUM in
+// src/routes/admin-price-lists.js, the hand-entry schema — which now derives
+// from CURRENCIES, so (2) and (4) are one edit rather than two that can drift.
+export const CURRENCIES = new Set(['EUR', 'USD', 'GBP'])
+
+// Input vocabularies, keyed by the lowercased cell.
+export const CATEGORY_BY_ITEM_TYPE = new Map([
   ['fabrics', 'fabric'],
   ['w/p', 'wallpaper'],
   ['trimmings', 'trimming'],
   ['accessories', 'accessory'],
 ])
-const UNIT_BY_PACK = new Map([
+// p/hide and p/panel have no template rows yet, but both units have been in the
+// column CHECK since the table was created (platform decision 7), so accepting
+// them stores nothing new — it only stops a hide or panel drop failing a run.
+export const UNIT_BY_PACK = new Map([
   ['p/m', 'metre'],
   ['p/y', 'yard'],
   ['p/roll', 'roll'],
   ['p/p', 'piece'],
+  ['p/hide', 'hide'],
+  ['p/panel', 'panel'],
 ])
-const CURRENCY_MAP = new Map([
+// The long names are what today's drops write. The ISO codes are INPUT ALIASES
+// only — a supplier typing "EUR" is saying exactly what "Euro" says — and the
+// stored set is deliberately NOT widened by them.
+export const CURRENCY_MAP = new Map([
   ['euro', 'EUR'],
   ['us dollar', 'USD'],
   ['pound sterling', 'GBP'],
+  ['eur', 'EUR'],
+  ['usd', 'USD'],
+  ['gbp', 'GBP'],
 ])
-const FREIGHT_CLASSES = new Set(['A', 'B', 'C', 'D', 'E'])
-const DUTY_CLASSES = new Set(['A'])
+
+/**
+ * Every value an input map produces must be one the database stores. Called at
+ * module load, so a mistyped alias fails whichever process imported it at
+ * startup rather than as a CHECK violation half way through a 2,000-row import.
+ */
+export const assertStorable = (map, stored, what) => {
+  for (const value of map.values()) {
+    if (!stored.has(value)) {
+      throw new Error(`${what} maps onto "${value}", which is not a stored value`)
+    }
+  }
+  return map
+}
+
+assertStorable(CATEGORY_BY_ITEM_TYPE, CATEGORIES, 'item type')
+assertStorable(UNIT_BY_PACK, UNITS, 'pack type')
+assertStorable(CURRENCY_MAP, CURRENCIES, 'currency')
+
+/**
+ * A duty or freight class is a single uppercase letter, stored raw and
+ * uninterpreted — the broker's duty table (A10) and a freight class -> rate
+ * table are both still owed. The sets this replaces ('A'-'E' for freight, 'A'
+ * alone for duty) encoded a guess about a table nobody has, so the first 'F' a
+ * supplier sent would have rejected the client's own file as if it were a bug
+ * in ours. This is the shape both column CHECKs were widened to in
+ * migrations/1786334400000_price-list-template-v2.js.
+ */
+export const CLASS_LETTER = /^[A-Z]$/
+export const isClassLetter = (value) => typeof value === 'string' && CLASS_LETTER.test(value)
 
 const INTEGER_PATTERN = /^[+-]?\d+$/
 
@@ -110,9 +180,9 @@ export const mapV1 = (row, context) => {
   const isoCurrency = CURRENCY_MAP.get(currency.toLowerCase().split(/\s+/).filter(Boolean).join(' '))
   if (!isoCurrency) return fail(`unmappable currency "${currency}"`)
   const freight = rawFreight.toUpperCase() || null
-  if (freight && !FREIGHT_CLASSES.has(freight)) return fail(`unknown freight class "${freight}"`)
+  if (freight && !isClassLetter(freight)) return fail(`unknown freight class "${freight}"`)
   const duty = rawDuty.toUpperCase() || null
-  if (duty && !DUTY_CLASSES.has(duty)) return fail(`unknown duty class "${duty}"`)
+  if (duty && !isClassLetter(duty)) return fail(`unknown duty class "${duty}"`)
   if (!code) return fail('empty code')
   // Platform decision 6 (15 Jul): standardise supplier codes to the uniform
   // format on import; keep the raw code so mismatches stay traceable.

@@ -11,6 +11,9 @@
 //   - Fastify's bundled Ajv has no `format` keywords (same reason the auth
 //     schemas use EMAIL_PATTERN), so `date_effective` is validated with an
 //     explicit YYYY-MM-DD pattern rather than `format: 'date'`.
+//   - The category/unit/currency enums and the class-letter pattern come from
+//     scripts/lib/price-template.js, the converter's vocabulary module, so a
+//     hand-keyed item is validated by exactly the rules an imported one is.
 
 import {
   listPriceListItems,
@@ -21,11 +24,14 @@ import {
   DEFAULT_LIMIT,
   MAX_LIMIT,
 } from '../pricing/admin-price-lists.js'
+import { CATEGORIES, UNITS, CURRENCIES, CLASS_LETTER } from '../../scripts/lib/price-template.js'
 
-const CATEGORY_ENUM = ['fabric', 'wallpaper', 'trimming', 'accessory']
-const UNIT_ENUM = ['metre', 'yard', 'roll', 'piece', 'hide', 'panel']
-const CURRENCY_ENUM = ['EUR', 'USD', 'GBP']
-const FREIGHT_CLASS_ENUM = ['A', 'B', 'C', 'D', 'E']
+// Derived from the shared vocabularies rather than re-typed: a hand-entered item
+// must be exactly as valid as an imported one, and these lists had already
+// drifted from the column CHECKs once.
+const CATEGORY_ENUM = [...CATEGORIES]
+const UNIT_ENUM = [...UNITS]
+const CURRENCY_ENUM = [...CURRENCIES]
 
 // Required-field shapes.
 const supplierProp = { type: 'string', minLength: 1, maxLength: 200 }
@@ -40,7 +46,10 @@ const wholesaleRateProp = { type: 'number', exclusiveMinimum: 0 }
 // explicit null (the columns are nullable in the schema).
 const nullableText = { type: ['string', 'null'], maxLength: 2000 }
 const nullableShort = { type: ['string', 'null'], maxLength: 200 }
-const freightClassProp = { type: ['string', 'null'], enum: [...FREIGHT_CLASS_ENUM, null] }
+// Both class columns CHECK a single uppercase letter, so the schema says the
+// same thing and a bad letter is a 400 here rather than an opaque 23514 at the
+// database. `pattern` only applies to strings, so null still clears the field.
+const classLetterProp = { type: ['string', 'null'], pattern: CLASS_LETTER.source }
 const dateProp = { type: ['string', 'null'], pattern: '^\\d{4}-\\d{2}-\\d{2}$' }
 
 // Optional properties shared by create and patch.
@@ -51,8 +60,8 @@ const optionalProps = {
   width: nullableShort,
   repeat: nullableShort,
   vertical_repeat: nullableShort,
-  duty_class: nullableShort,
-  freight_class: freightClassProp,
+  duty_class: classLetterProp,
+  freight_class: classLetterProp,
   date_effective: dateProp,
 }
 

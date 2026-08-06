@@ -35,6 +35,20 @@ Story-specific detail belongs in the per-story entries below, not here.
 - **A "must be exactly one of these two columns" invariant is a plain CHECK**, e.g.
   `a IS NULL OR cardinality(b) = 0`. Cheaper and more durable than a precedence rule each reader
   re-implements, and it fails at write time where the typo is.
+- **An inline column `check:` is auto-named `<table>_<column>_check` by Postgres**, whether it is
+  written in a `createTable` column or an `addColumns` one — node-pg-migrate emits an unnamed
+  `CHECK (...)` and the server names it. So a `rejects.toThrow(/<table>_<column>_check/)` assertion
+  works without an explicit `addConstraint`, and `pg_get_constraintdef(oid)` finds it by that name.
+- **Two tables that must share a vocabulary should be asserted against EACH OTHER, not against a
+  literal.** `pg_get_constraintdef` renders an IN list as `= ANY (ARRAY['x'::text, …])`, so the
+  allowed values parse straight back out with `/'([^']+)'::text/g`. A drift between two such CHECKs
+  never throws — it just stops matching — so nothing else would catch it.
+- **Adding a column to a read model's whitelist is INERT unless the route's schema also lists it.**
+  Fastify's Ajv runs `removeAdditional: true`, so a key absent from the route's `properties` is
+  stripped from the body/querystring before the handler sees it. `FILTER_COLUMNS`
+  (`src/catalogue/products.js`) and `PRODUCT_UPDATE_COLUMNS` (`src/catalogue/admin-products.js`)
+  are each gated by a schema in a route file — `src/routes/catalogue.js` and
+  `src/routes/admin-catalogue.js` respectively. Both edits are needed or neither is worth making.
 
 ---
 
@@ -127,5 +141,56 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
 - **Needs human verification:** none — schema plus a pure module, no screen and no endpoint. The two
   tables will appear in the AdminJS panel at `/panel` only if a future story registers them as
   resources; they are not registered here, deliberately (they are cost-bearing).
+---
+
+## 2026-08-06T15:24:30Z - W3-US-003 - Migration: products.category
+- Implemented `migrations/1786507200000_product-category.js`: one nullable `text` column on
+  `products` carrying the inline check `category IN ('fabric','wallpaper','trimming','accessory')`
+  — byte-identical to the `price_list_items.category` check from `1785110400000_price-list-items.js`,
+  so the catalogue and the rate ledger share one axis. No index (four values over a table of
+  hundreds is not selective, and the joins this unblocks are aggregate).
+- Nullable is the AC and the right call: every existing product is uncategorised, not wrong. A
+  NOT NULL would need a default, the only available default is `fabric`, and that would assert a
+  category for rows nobody has looked at while reading as populated. Epic 6's spreadsheet round trip
+  is what fills it in.
+- `category` is NOT `product_type`. `product_type` is `fabric | finished_good`, drives the
+  colourway's inventory unit (metres vs units) and is create-only for that reason; `category` is the
+  merchandising axis the rates are filed by, and a wallpaper is a `finished_good`. A test asserts
+  the two coexist independently so a later reader cannot collapse them.
+- **Scope note — no read-model wiring was added, deliberately.** The workstream's allowed-paths list
+  grants `src/catalogue/products.js` FILTER_COLUMNS and the product update whitelist, but both are
+  gated by a route schema in a file W3 must NOT touch (`src/routes/catalogue.js` `listQuerySchema`,
+  and `src/routes/admin-catalogue.js` — owned by W2). Fastify's Ajv strips a key absent from the
+  schema, so either edit alone is dead code. The story's ACs are schema-only, and Epic 6 US-004
+  ("apply the validated categories in one transaction") owns the write path.
+- Repos and files changed: atelier-api — `migrations/1786507200000_product-category.js` (new),
+  `test/suppliers-product-category.test.js` (new, 7 tests), `CLAUDE.md` (## Suppliers),
+  `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run migrate` (twice, second run "No migrations to run!") -> 0, `npm run lint` -> 0,
+  `npm test` -> 0 (42 files, 694 tests passed).
+- **Learnings:**
+  - An inline column `check:` is emitted unnamed by node-pg-migrate (`ADD "category" text CHECK
+    (...)`), and Postgres auto-names it `<table>_<column>_check`. That is why the existing
+    `suppliers_discount_method_check` assertion works with no `addConstraint`, and it holds for
+    `addColumns` as well as `createTable`.
+  - Pattern: to prove two tables share a vocabulary, compare their live CHECK definitions to each
+    OTHER via `pg_get_constraintdef(oid)` rather than to a hardcoded list. Postgres rewrites `IN`
+    to `= ANY (ARRAY['x'::text, …])`, so `/'([^']+)'::text/g` recovers the values. A drift between
+    the two sets never raises — it silently stops joining — so no other assertion would catch it.
+  - Gotcha: `psql` is refused by the tool permission layer in this harness (as is `npm test --
+    <file>`, per US-002). Read schema facts back through a vitest assertion or the migration's own
+    echoed SQL, not through an ad-hoc client.
+  - Gotcha for whoever wires category into an endpoint: adding it to `FILTER_COLUMNS` or
+    `PRODUCT_UPDATE_COLUMNS` does nothing on its own. `removeAdditional: true` strips it upstream
+    unless the route's schema `properties` names it too, and both route files belong to other
+    workstreams.
+  - Context: the four-value vocabulary originates in `scripts/convert-price-lists.js` (item type ->
+    category) and is pinned by `migrations/1785110400000_price-list-items.js`. Widening it later is
+    a one-line migration — on BOTH tables, or the two sides stop matching.
+- **Needs human verification:** none — one nullable column, no screen and no endpoint. The column
+  appears in the AdminJS panel at `/panel` (it introspects `products`, an editable resource) as a
+  free-text field with no dropdown; a human may want to glance at it, and note that the panel will
+  surface the raw CHECK violation rather than a friendly message if someone types a fifth value.
 ---
 

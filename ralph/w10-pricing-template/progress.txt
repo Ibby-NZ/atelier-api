@@ -16,7 +16,7 @@ Started: 2026-08-06T02:40:24Z
 - A Postgres CHECK is satisfied by NULL (unknown, not false), so a `~ '^[A-Z]$'` check on a nullable
   column still lets the column stay empty. That is what makes widening the class checks safe for the
   19.5k existing rows.
-- `npm test` runs 37 files / 593 tests against the real local Postgres in ~22s. `fileParallelism:
+- `npm test` runs 37 files / 603 tests against the real local Postgres in ~22s. `fileParallelism:
   false` is load-bearing — do not touch it.
 - **`incoming/pricing-templates/` does NOT exist in this worktree** — `incoming/` is gitignored, so
   the corpus lives only in the main checkout, which the sandbox refuses to read. `npm run
@@ -38,6 +38,18 @@ Started: 2026-08-06T02:40:24Z
 - Adding a key to a converter's output means auditing whatever compares two output rows.
   `sameExceptSource` iterated only the FIRST row's keys, so a richer row would have been silently
   dropped as an exact duplicate of a thinner one. Compare key COUNTS too.
+- **`src/seed/price-lists.js` builds its dedupe key with a literal NUL byte, not a space**
+  (`${supplier}\0${category}\0${code}`). The Read tool renders NUL as a space, so an exact-match
+  edit anchored on that line ALWAYS fails with "String to replace not found". `sed -n 'N,Mp' <file>
+  | cat -et` shows it as `^@`. Anchor edits on a neighbouring line instead. Other files may hide the
+  same thing — an unexplained failed match is the tell.
+- To give an `unnest` batch a per-column expression (a COALESCE, a cast, a default), NAME the
+  rowset: `SELECT COALESCE(b."col", 'x'), b."other" FROM unnest($1::text[], ...) AS b("col",
+  "other")`. `SELECT *` cannot wrap a single column. The alias list takes the same quoted names, so
+  it is generated from the same `COLUMNS` array and cannot drift out of order.
+- A validator can be strict about TYPE and silent about RANGE, and that is often the correct pair:
+  the type is knowable now, the legitimate range is a client decision nobody has made. Say so in a
+  comment at the check, or the next person adds the guess back.
 ---
 
 ## 2026-08-06T14:44:00Z - W10-US-001 - Migration: price_list_items v2 columns
@@ -207,4 +219,67 @@ Started: 2026-08-06T02:40:24Z
   `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` in the main
   checkout, which is the only place `incoming/pricing-templates/` exists. That proves both the
   byte-identity of the v1 path and that no real drop's filename has stopped parsing.
+---
+
+## 2026-08-06T15:40:00Z - W10-US-004 - Importer accepts the v2 fields
+- Taught `src/seed/price-lists.js` the four v2 columns. `validatePriceListItems` now checks
+  `brand_name`, `pattern_match` and `template_version` with a new `optionalText` helper (absent or
+  null is normal — every v1 row omits them — but a present value must be a non-empty string), and
+  `duty_percent` is type-checked only (`Number.isFinite`) with NO range, commented as such. All four
+  joined `COLUMNS`, so `unnest` now binds them; `duty_percent` joined `wholesale_rate` in a new
+  `COLUMN_TYPES` map as `numeric` (the 3-deep ternary would not have taken a third entry legibly).
+  The upsert SELECT is no longer `SELECT *`: the rowset is aliased `AS b(...)` so
+  `template_version` can be `COALESCE(b."template_version", 'v1')` — an `unnest` batch binds an
+  explicit NULL for a key a v1 item does not carry and that NULL defeats the column's
+  `NOT NULL DEFAULT 'v1'`. The upsert key `(supplier, category, code)` and the set-everything-to-
+  EXCLUDED contract are untouched.
+- Repos and files changed (atelier-api only):
+  - `src/seed/price-lists.js` (+~45 lines: `optionalText`, four validations, four columns,
+    `COLUMN_TYPES`, `SELECT_LIST`, the aliased unnest)
+  - `test/price-lists.test.js` (+10 tests in a new `price list import — v2 fields` describe)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 603 tests passed; was 593). Plus a real
+  end-to-end seam check: a two-row v2 CSV fixture converted to a scratch path with
+  `node scripts/convert-price-lists.js`, then its output fed straight to `validatePriceListItems`
+  via `node -e` — accepted, with `duty_percent: 7.125`, `template_version: "v2"` and the blank
+  second row's `brand_name`/`pattern_match`/`duty_percent` as nulls. `src/seed/data/price-lists.json`
+  untouched (`git status` clean for it).
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - An `unnest` batch needs a NAMED rowset (`AS b(cols…)`) the moment any one column needs an
+      expression. Generate the alias list from the same `COLUMNS` array as the INSERT list so the
+      two cannot drift.
+    - Validate type strictly, leave range alone where no range has been stated — and comment the
+      omission at the check so it is visibly deliberate rather than forgotten.
+  - Gotchas (what will bite the next iteration):
+    - **The dedupe key in `validatePriceListItems` is joined with literal NUL bytes**, which Read
+      renders as spaces; editing that exact line by string match is impossible until you anchor
+      elsewhere. Cost one failed edit here — see Codebase Patterns.
+    - **A later v1 file for a key already imported from a v2 one CLEARS its v2 fields** and sets
+      `template_version` back to `'v1'`, because every non-key column is still `= EXCLUDED`. That is
+      this table's freshest-wins contract applied uniformly, not an oversight; it is asserted by a
+      test and commented above `UPSERT_SQL`. Adding a quieter COALESCE rule for just these columns
+      would be a product decision.
+    - `template_version` is deliberately NOT enum-checked in the importer. The accepted set is the
+      converter's registry, so an older API importing a newer converter's file must still store the
+      row. US-005 moves the OTHER vocabularies into `price-template.js` — do not sweep this one in
+      with them, and note that `src/seed/price-lists.js` cannot import from `scripts/` anyway.
+    - `FREIGHT_CLASSES` (`A`–`E`) and `DUTY_CLASSES` (`A`) in `src/seed/price-lists.js` are STILL
+      narrower than the DB check (`~ '^[A-Z]$'`), and `test/price-lists.test.js` still asserts
+      `freight_class: 'Z'` is rejected. Untouched here on purpose — US-005 owns the vocabularies and
+      must update that `it.each` row in the same change.
+    - `duty_percent` >= 1000 passes validation and overflows `numeric(6,3)` at the INSERT. Loud, and
+      intentional: no legitimate range has been stated.
+  - Context (where the relevant code lives):
+    - Validator, `COLUMNS`, `UPSERT_SQL`: `src/seed/price-lists.js`. CLI: `src/seed/import-price-lists.js`.
+    - What the converter emits: `mapV1`/`mapV2` in `scripts/lib/price-template.js`.
+    - Schema: `migrations/1786334400000_price-list-template-v2.js`.
+    - Tests: `test/price-lists.test.js` (import behaviour + the schema block from US-001).
+- **Needs human verification:** none from this change — the importer is a CLI and no screen renders
+  the new columns yet (`/admin/price-list-items` does not select them; adding them there is not in
+  this story's scope). What a human must still do before merge, unchanged from US-002/US-003 and not
+  runnable from any worktree: `npm run convert:pricing && git diff --exit-code
+  src/seed/data/price-lists.json` in the main checkout, then `npm run import:pricing` against a
+  scratch database to confirm the 19.5k v1 rows land with `template_version = 'v1'`.
 ---

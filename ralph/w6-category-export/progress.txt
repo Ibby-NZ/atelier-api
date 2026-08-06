@@ -5,7 +5,80 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- (nothing yet — the first iteration adds to this)
+- **`src/` and `scripts/` may import each other freely** — one package, plain relative specifiers,
+  no bundler, no `files` field. `src/seed/price-lists.js` already imports `scripts/lib/price-template.js`;
+  `scripts/lib/text.js` now imports back the other way. A shared module belongs wherever its owner
+  lives, and the other side re-exports.
+- **`incoming/pricing-templates/` does not exist in a worktree** (gitignored, main checkout only),
+  so `npm run convert:pricing` cannot run here at all and the byte-identity gate cannot be run as
+  written. Verify a converter-adjacent change with a hand-made fixture instead:
+  `node scripts/convert-price-lists.js <in-dir> <out.json>`, filename matching
+  `^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b`, then compare the emitted record against the
+  matching line of the committed `src/seed/data/price-lists.json` (line 2 is its first record;
+  strip the trailing comma). `test/price-template.test.js`'s byte-pin block names the exact cells
+  behind that line.
+- **`atelier_w6` was seeded AFTER `1786593600000_featured-rank` ran**, so the migration's UPDATE
+  matched nothing and `test/featured-rank.test.js` failed on a database defect, not on any code.
+  Repaired once by running the migration's own exported `brandFeatureSql`/`collectionFeatureSql`
+  against the seeded rows (a migration may export more than `up`/`down`, and here that is what
+  makes the repair the exact statement rather than a retyped copy). If a featured assertion fails
+  again after a reseed, this is why — do not chase it into `src/`.
+- **A W6 gate run is both repos** even for an api-only story: `( cd atelier-api && npm run lint && npm test )`
+  and `( cd atelier-crm && npm test && npm run build )`. The CRM has no ESLint, so `build` is its
+  only compile check.
+- **A new route plugin has to be registered in `src/app.js`, and that file is nobody's exclusive
+  property.** It is not on W6's MUST-NOT list, and a route file no `api.register` line names is
+  dead code — so the edit is one import plus one registration, appended, never a restructure. Every
+  workstream adding a route makes the same two-line change, so keep it additive and adjacent to
+  the existing block or the human merge turns into a conflict for no reason.
+- **`npm test -- <file>` and `npx vitest` are both blocked at the tool level here; `npm test` is
+  not.** Budget for the whole suite (~33 s, 52 files) on every check rather than trying to narrow
+  it — the narrowing attempt costs a denied call and tells you nothing.
+- **A 4xx that has to carry structured detail must be RETURNED, never thrown.** Fastify's error
+  serializer emits exactly `{ statusCode, error, message }` and drops every custom property, so a
+  thrown error cannot carry `errors`/`blockers`/counts. `reply.code(422); return { ... }` is the
+  house shape (`src/routes/orders.js` does it, `src/lifecycle/` returns its refusals for the same
+  reason). `Object.assign(new Error(m), { statusCode })` stays correct for a message-only refusal.
+- **A route that takes an uploaded FILE registers its own content-type parser inside its plugin.**
+  `app.addContentTypeParser([...types], { parseAs: 'buffer', bodyLimit }, (req, body, done) =>
+  done(null, body))` — parsers are ENCAPSULATED to the plugin scope, so no other route's body
+  handling changes (same posture as the Stripe webhook and `admin-legacy-import.js`). There is no
+  multipart parser in this API and adding one is a dependency, so the client posts raw bytes. Set
+  `bodyLimit` on BOTH the parser and the route; Fastify's default is 1 MB. Do NOT register
+  `text/plain` or `application/json` — the root instance already parses both, and re-registering an
+  inherited type throws at boot. The consequence: a caller posting JSON to a file route arrives with
+  an OBJECT body, so the handler must check `Buffer.isBuffer` rather than assume bytes.
+- **A read model takes `db` — a pool OR an open client — and that is what lets a write step run
+  the SAME read inside its own transaction.** `src/lifecycle/archive.js` and
+  `src/email/recipients.js` already take that shape; anything a later story has to apply should be
+  written that way from the start rather than duplicated. Where the read decides what the write
+  will do, it needs `FOR UPDATE` in the transactional case and must NOT take locks in the dry-run
+  case, so the lock is an option on the shared function, not a second copy of it. Lock in a
+  deterministic order (`ORDER BY id`) or two concurrent callers with overlapping row sets deadlock
+  instead of queueing.
+- **The CRM's `apiFetch` cannot fetch a FILE.** It parses JSON and returns null for every other
+  content type, so a CSV read through it arrives as nothing at all. `apiDownload(path)` (appended to
+  `src/lib/api.js`) is the sibling: same base URL, same `credentials: 'include'`, same ApiError
+  contract — so a 404's own sentence still reaches the screen — returning `{ blob, disposition }`.
+  Saving it is a temporary `<a download>` off `URL.createObjectURL`, revoked a tick later (revoking
+  in the same tick cancels the save in some browsers).
+- **`Content-Disposition` is invisible to a cross-origin caller.** It is not a CORS-safelisted
+  response header, and the API names it in no `Access-Control-Expose-Headers`, so CRM :5273 → API
+  :3001 reads it as null every time. Any download helper therefore needs a filename rule of its own
+  or the office saves a file called "download"; mirror the API's naming (built from a slug, never
+  from free text that could carry a quote or a CR) rather than exposing the header.
+- **A CRM screen's shared registrations are additive, exactly like the API's `src/app.js`.** A
+  screen no `<Route>` in `App.jsx` names is dead code, and a route no `sectionTabs.jsx` tab reaches
+  is a screen nobody can find — and `layout.jsx`'s SideNav `match` array must list it too or the nav
+  goes dark on the new tab. Three lists, one appended entry each, never a reorder: every workstream
+  adding a screen edits the same three lines.
+- **A React effect keyed on an array built during render never settles.** `brandOptions(rows)` has a
+  new identity every render, so key the effect on the ROWS the list returned — the same rule
+  `useAdminList` states about its `filters` object, in a new place.
+- **Ajv applies a querystring `default` only when the key is ABSENT.** `?brand=` sends the empty
+  string, which is present, so it meets the `pattern` instead and 400s. That is the right answer
+  for an export (the caller asked for a house and named none) and the opposite of the CRM list
+  rule, where `buildListQuery` drops an empty filter precisely so it never reaches the API.
 
 ---
 
@@ -13,3 +86,237 @@ Story-specific detail belongs in the per-story entries below, not here.
 
 Appended by each iteration, newest last. Never rewrite an existing entry.
 
+## 2026-08-06T18:17:00Z - W6-US-001 - Extract the encoding-sniffing CSV reader
+- Moved `decodeText` and `csvRows` out of `scripts/lib/text.js` into a new `src/lib/csv-text.js`,
+  verbatim (same table, same generator, same comments). `scripts/lib/text.js` is now a one-line
+  re-export, so `scripts/convert-price-lists.js`, `test/converters.test.js` and
+  `test/colour-files.test.js` keep their existing import specifier and were not touched — which is
+  what makes "no behaviour change" checkable rather than asserted.
+- Repos and files changed: atelier-api — `src/lib/csv-text.js` (new), `scripts/lib/text.js`
+  (re-export), `ralph/w6-category-export/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` (atelier-api) -> 0, `npm test` (atelier-api) -> 0 (51 files, 1164 tests),
+  `npm test` (atelier-crm) -> 0 (37 files, 567 tests), `npm run build` (atelier-crm) -> 0.
+- Byte identity: `npm run convert:pricing` cannot run in a worktree (`incoming/` is gitignored and
+  absent). Proved instead with a hand-made `ALTAGAMMA WPPR PL JUNE 2026.csv` carrying the v1 header
+  and the cells behind the committed file's first record: the converter's output line is byte-for-byte
+  equal to line 2 of `src/seed/data/price-lists.json`. That file is unmodified.
+- **Learnings:**
+  - The re-export is deliberately not "update every caller": leaving the specifiers alone is what
+    lets `test/converters.test.js` stand unchanged as the proof this was a move. A future story that
+    wants the direct path can import `src/lib/csv-text.js` without disturbing the converters.
+  - `decodeText` takes a Buffer (it falls back to `bytes.toString('latin1')`), not a Uint8Array —
+    the upload path in US-003 must hand it the raw Buffer Fastify gives it.
+  - `csvRows` yields `[lineNumber, fields]` with `lineNumber` 1-based and counting the header, so a
+    row-number in a validation error is that number directly, with no offset arithmetic.
+  - Context: the pricing converter is `scripts/convert-price-lists.js` over `scripts/lib/`; the
+    accepted header layouts and every shared vocabulary live in `scripts/lib/price-template.js`.
+- **Needs human verification:** none — no route, no screen and no data file changed.
+---
+
+## 2026-08-06T18:40:00Z - W6-US-002 - Product sheet export with an empty Category column
+- `GET /admin/product-sheet/export.csv?brand=<slug>` (backoffice-only, director inherits) downloads
+  one house's products as a fill-in sheet. Header contract, in order:
+  `Product ID,House,Collection,Design,Category`. `Product ID` is `products.id` — the stable server
+  key, so US-003's re-import matches on identity and never on row order. `Category` is emitted
+  EMPTY for every row.
+- The hardened CSV writer is now `csvCell`/`csvRow`/`csvDocument` in `src/lib/csv-text.js`, beside
+  the reader US-001 put there: formula lead-ins (`= + - @ TAB CR`) get an apostrophe, RFC 4180
+  quoting for quote/comma/newline, CRLF separators, trailing newline. Epic 6 allows "E5 US-001 (the
+  CSV writer) or its own extraction" — W5 is not merged into this branch and `src/reports/**` is
+  W5's, so this is the own extraction.
+- Repos and files changed: atelier-api — `src/lib/csv-text.js` (writer half added),
+  `src/products/product-sheet.js` (new), `src/routes/admin-product-sheet.js` (new), `src/app.js`
+  (import + one `api.register` line), `test/product-sheet.test.js` (new, 20 tests), `CLAUDE.md`
+  (`## Category export`), `ralph/w6-category-export/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` (atelier-api) -> 0, `npm test` (atelier-api) -> 0 (52 files, 1185 tests),
+  `npm test` (atelier-crm) -> 0 (37 files, 567 tests), `npm run build` (atelier-crm) -> 0.
+- **Learnings:**
+  - The empty Category column is not a simplification, it is what makes US-004's counts possible:
+    exporting the stored value would leave a re-import unable to tell "the office confirmed this"
+    from "the office did not touch this row". Blank must therefore mean *skipped* in US-003/US-004,
+    and a value equal to the stored one must count as *unchanged*.
+  - `src/pricing/trade-price-lists.js` still carries its own copy of the same two cell rules. It is
+    outside W6's writable set and nothing about the trade list changed, so it was left alone; the
+    new module says so in a comment, and whoever next touches that file should import from
+    `src/lib/csv-text.js`. Do NOT "tidy" it in a W6 story.
+  - A test asserting the DEFAULT brand cannot assume the seed: CI runs migrations only, so
+    `atelier-textiles-nz` may not exist. Assert instead that the no-`?brand=` response EQUALS the
+    `?brand=atelier-textiles-nz` one — true at 200 and at 404 alike — plus a direct assertion on
+    the exported `DEFAULT_BRAND_SLUG` constant.
+  - `csvCell('=HYPERLINK("x")')` is `"'=HYPERLINK(""x"")"`, not `'=HYPERLINK…`: the quote in the
+    payload triggers RFC-4180 quoting on top of the neutralisation. A `startsWith("'=")` assertion
+    fails on the writer being MORE correct, which cost one red run here.
+  - Archived products are excluded from the sheet and hidden (`show_on_website = false`) ones are
+    included — a back-office sheet, so a design still being photographed is exactly the kind nobody
+    has categorised yet. A house with no products is a header-only file, not a 404; an unknown slug
+    IS a 404.
+  - Context: the header contract and the query live in `src/products/product-sheet.js`; the four
+    legal values are `products.category`'s CHECK (`migrations/1786507200000_product-category.js`),
+    shared verbatim with `price_list_items.category`, and are deliberately NOT printed in the file —
+    a CSV has nowhere to put a note Excel will not hand back as a data row. US-005's panel states
+    them and US-003 reports an unknown one with its row number.
+- **Needs human verification:** no screen exists yet (US-005 builds it), so a person should
+  download the sheet once from a signed-in back-office session — e.g.
+  `http://localhost:3001/admin/product-sheet/export.csv?brand=atelier-textiles-nz` — open it in
+  Excel and confirm it opens as five columns with an empty Category, and that a design named
+  `=cut to order` shows as text rather than evaluating.
+---
+
+## 2026-08-06T18:38:28+12:00 - W6-US-003 - Re-import parse and validate
+- `POST /admin/product-sheet/validate` (backoffice-only) takes the filled-in sheet back as the raw
+  file and reports what WOULD happen. It writes nothing at all — US-004 applies. `parseProductSheet`
+  (pure) and `validateProductSheet` (one read query) live in `src/products/product-sheet.js`, beside
+  the export that wrote the file, so the header contract has exactly one definition.
+- Contract: a structural failure is 400 (not a Buffer, empty file, a header this API never wrote);
+  row-level failures are 422 `{ message, errors: [{ row, message }], error_count, summary }`; a clean
+  sheet is 200 `{ summary: { rows, skipped, repeats, unchanged, changed }, changes }`. When there are
+  no errors the file balances: `rows === skipped + repeats + unchanged + changed`.
+- Rules: the row number in every message is `csvRows`'s own line number, so it counts the header and
+  points at the line Excel shows. A blank Category is `skipped` (the row nobody touched). A category
+  is trimmed and lower-cased before matching the shared `CATEGORIES` set. A repeated Product ID
+  saying the same thing collapses (`repeats`); saying two different things is an error naming both
+  rows. An id that matches no product, or matches an archived one, is reported — never resolved
+  through the House/Design cells beside it. Blank lines are ignored. A header line ending in a stray
+  comma is accepted (trailing EMPTY header cells are dropped, as in the pricing pipeline). The
+  upload is deliberately NOT brand-scoped: `products.id` is unique across the catalogue.
+- Repos and files changed: atelier-api — `src/products/product-sheet.js` (import half added),
+  `src/routes/admin-product-sheet.js` (content-type parser + the validate route),
+  `test/product-sheet.test.js` (+21 tests), `CLAUDE.md` (`## Category export`),
+  `ralph/w6-category-export/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` (atelier-api) -> 0, `npm test` (atelier-api) -> 0 (52 files, 1206 tests),
+  `npm test` (atelier-crm) -> 0 (37 files, 567 tests), `npm run build` (atelier-crm) -> 0.
+- **Learnings:**
+  - A 4xx carrying structured detail must be RETURNED through `reply.code(...)`, not thrown —
+    Fastify's serializer drops custom error properties. Promoted to Codebase Patterns.
+  - An upload route registers its own `parseAs: 'buffer'` content-type parser inside its plugin
+    scope, and must then check `Buffer.isBuffer(request.body)`: the ROOT instance still parses
+    `application/json` and `text/plain`, so a caller using either arrives with a parsed object or a
+    string and `decodeText` would throw a TypeError (a 500) on it. Promoted to Codebase Patterns.
+  - `products.id` is int4, so a typed-in digit string past 2147483647 reaches the `ANY($1::int[])`
+    cast and surfaces as a 500 from Postgres. It is refused in the parser as what it is — not a
+    Product ID — which is the general shape: range-check anything that will be cast to `int` before
+    it reaches SQL.
+  - Two suites in one test file may each own an app + fixtures, and that is cheaper than sharing
+    them: `/auth/register`'s 10-per-15-min bucket is per app INSTANCE and per route, so a second
+    `buildApp()` starts with a fresh bucket. Vitest runs suites in a file sequentially, so the two
+    `beforeAll`s cannot interleave — they only need different fixture prefixes and email domains
+    (`sheet-test-` / `sheet-import-test-`; note the second is NOT matched by the first's
+    `LIKE 'sheet-test-%'` cleanup).
+  - `decodeText` is proved end to end rather than in isolation: the unmatched-row error quotes the
+    file's own Design cell, so the cp1252 test (`é` = 0xE9, `’` = 0x92 — the second byte is what
+    distinguishes cp1252 from latin-1) asserts a decoded name coming back out of an HTTP response.
+  - Do not write a literal U+FEFF into source to strip a BOM — it is invisible in the file and in
+    every diff. `String.fromCharCode(0xfeff)` + `startsWith` says the same thing visibly.
+  - Context: the header contract, the parser and the matcher are all in
+    `src/products/product-sheet.js`; the vocabulary is `CATEGORIES` in `scripts/lib/price-template.js`
+    (imported, never retyped — `products.category` and `price_list_items.category` are one set);
+    `validateProductSheet` returns an `updates` array that is deliberately NOT served, and is the
+    seam US-004 applies.
+- **Needs human verification:** no screen exists yet (US-005 builds the panel), so a person should
+  drive the round trip once by hand from a signed-in back-office session: download
+  `/admin/product-sheet/export.csv?brand=<house>`, open it in Excel, type a category into a few
+  rows, save as "CSV (Comma delimited)" — which is cp1252 on Windows — and POST the file to
+  `/admin/product-sheet/validate` with `content-type: text/csv`. Confirm the counts match what they
+  typed and that the categories in the database are unchanged afterwards.
+---
+
+## 2026-08-06T18:47:00Z - W6-US-004 - Apply validated categories
+- `POST /admin/product-sheet/apply` (backoffice-only) writes the filled-in sheet. One transaction:
+  either every category the office typed lands or none does. It takes the FILE again rather than
+  the validate step's report — a list of updates handed back by a client is a list the client could
+  have edited — so the counts are recomputed at write time and returned, never echoed.
+- Contract: 200 `{ applied, summary: { rows, skipped, repeats, unchanged, changed }, changes }`,
+  where `applied` is the UPDATE's own `rowCount` (the database's count, not the report's
+  prediction). A row-level failure is the SAME 422 body the dry run returns, built by one shared
+  `refusalBody(report)` in the route file, and the transaction is rolled back — "Nothing has been
+  written" is a statement about a rollback there, not about a route that cannot write. A file that
+  is not a product sheet at all is a 400 thrown by the parser BEFORE a connection is taken.
+- Re-uploading the same file changes nothing: a stated category equal to the stored one is
+  `unchanged`, never a write, so the second run reports `applied: 0, changed: 0` and touches no row.
+- Repos and files changed: atelier-api — `src/products/product-sheet.js` (`matchProductSheet` split
+  out of `validateProductSheet`, `applyProductSheet` added), `src/routes/admin-product-sheet.js`
+  (`refusalBody` + the apply route), `test/product-sheet.test.js` (+10 tests, third suite),
+  `CLAUDE.md` (`## Category export`), `ralph/w6-category-export/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` (atelier-api) -> 0, `npm test` (atelier-api) -> 0 (52 files, 1216 tests),
+  `npm test` (atelier-crm) -> 0 (37 files, 567 tests), `npm run build` (atelier-crm) -> 0.
+- **Learnings:**
+  - The dry run and the apply must not be two implementations of one decision. `validateProductSheet`
+    was split into the pure `parseProductSheet` (already there) plus a private
+    `matchProductSheet(db, parsed, { lock })`; `validateProductSheet` is now two lines over it and
+    the apply calls the same function inside its transaction with `lock: true`. Promoted the general
+    shape to Codebase Patterns.
+  - `FOR UPDATE` on the matching read is what makes the report true at write time: without it a
+    product could be archived or hard-deleted between the decision and the UPDATE, and the office
+    would be told a row was written that was not. `ORDER BY id` beside it is the deadlock rule —
+    two overlapping sheets applied at once take the same locks in the same order.
+  - A backstop still earns its place after the lock: `rowCount !== updates.length` throws a 409 and
+    rolls back, because the alternative is reporting a count the database did not do. Same posture
+    as `src/lifecycle/delete.js`'s 23503 catch — unreachable by an ordinary request, correct anyway.
+  - A write suite needs a `beforeEach` that resets only the FIXTURE ROWS, never the users: this file
+    now has three suites, and re-registering would spend the 10-per-15-min bucket. Each suite owns
+    its own `buildApp()` (fresh limiter store), its own slug prefix and its own email domain — and
+    the prefixes must not be prefixes OF each other: `sheet-test-%` does not match
+    `sheet-apply-test-house`, which is the only reason three cleanups can coexist.
+  - Asserting the two routes' refusals are `toEqual` is what keeps one CRM renderer serving both;
+    asserting each separately would let the messages drift apart and both tests stay green.
+  - Context: the header contract, the parser, the matcher and the apply all live in
+    `src/products/product-sheet.js`; the four legal values come from `CATEGORIES` in
+    `scripts/lib/price-template.js` and are never retyped.
+- **Needs human verification:** no screen exists yet (US-005 builds the panel), so a person should
+  drive the whole round trip once from a signed-in back-office session: download
+  `/admin/product-sheet/export.csv?brand=<house>`, type categories into a few rows in Excel, save as
+  "CSV (Comma delimited)", POST it to `/admin/product-sheet/validate` (content-type `text/csv`),
+  read the counts, then POST the SAME file to `/admin/product-sheet/apply` and confirm the products
+  carry the categories in the CRM — then POST it a third time and confirm `applied` is 0.
+---
+
+## 2026-08-06T19:05:00Z - W6-US-005 - CRM export and import panel
+- `AdminProductSheet` (`/admin/product-sheet`, Catalogue → Categories) is the office's end of the
+  round trip: a house selector plus Download, then a file input that CHECKS the filled-in sheet on
+  choose and shows the report, with Apply appearing only once the dry run comes back clean. The
+  brand selector is what makes the generalisation visible — one sheet shape, any house, and the
+  hint says so beside the filename the download will save under.
+- Repos and files changed: atelier-crm — `src/screens/adminProductSheet.js` (new, pure),
+  `src/screens/adminProductSheet.test.js` (new, 36 tests), `src/screens/AdminProductSheet.jsx`
+  (new), `src/lib/api.js` (`apiDownload` appended), `src/App.jsx` (one import + one Route),
+  `src/components/sectionTabs.jsx` (one `catalogueTabs` entry), `src/components/layout.jsx` (one
+  slug in the Catalogue `match` array), `CLAUDE.md` (`## Category export`). atelier-api —
+  `ralph/w6-category-export/{prd.json,progress.txt,PR-BODY.md}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` (atelier-api) -> 0, `npm test` (atelier-api) -> 0 (52 files, 1216 tests),
+  `npm test` (atelier-crm) -> 0 (38 files, 603 tests), `npm run build` (atelier-crm) -> 0.
+- **Learnings:**
+  - **`apiFetch` cannot fetch a file**: it parses JSON and returns null for every other content
+    type, so a CSV read through it arrives as nothing at all. `apiDownload(path)` is the appended
+    sibling, returning `{ blob, disposition }` with the same base URL, credentials and ApiError
+    contract. Promoted to Codebase Patterns.
+  - **`Content-Disposition` is invisible cross-origin** — it is not CORS-safelisted and the API
+    does not name it in `Access-Control-Expose-Headers` — so a download helper needs a fallback
+    name or the office saves a file called "download". Promoted to Codebase Patterns.
+  - The CRM's shared registration files take the same additive rule the API's `src/app.js` does:
+    a screen no `<Route>` names is dead code, and a route no tab reaches is a screen nobody can
+    find. `App.jsx`, `catalogueTabs` and the SideNav `match` array each took exactly one appended
+    entry — never a reorder — because every workstream adding a screen edits the same three lists.
+    `CLAUDE.md` already states the `match` half: omit it and the nav goes dark on the new tab.
+  - A load effect must be keyed on the ROWS the list returned, never on an array derived during
+    render (`brandOptions(rows)` has a new identity every time and an effect keyed on it never
+    settles) — the same rule `useAdminList` states about its `filters` object.
+  - The screen deliberately holds no parser: `adminProductSheet.test.js` scans the `.jsx` for
+    `FileReader`/`csvRows` and asserts their absence, because a second opinion about what is in the
+    sheet is a second implementation of the API's parser and the two drift the first time either
+    changes. Only the mistakes the API answers *less readably* than it could are pre-checked — an
+    `.xlsx` upload, which the API can only report as a broken header row.
+  - Context: every rule is in `src/screens/adminProductSheet.js` (paths, the slug guard, the
+    content type, `fileProblem`, `filenameFrom`, `refusalFrom`, `canApply`, the count wording) with
+    its test beside it; the `.jsx` is layout, per the no-jsdom convention.
+- **Needs human verification:** the whole round trip, in a browser, signed in as back office at
+  `http://localhost:5273/#/admin/product-sheet` — pick a house, Download, confirm the file opens in
+  Excel as five columns with Category empty, type a category into a few rows, save as "CSV (Comma
+  delimited)", choose it in section 2 and read the report, press Apply, then confirm the categories
+  on `/admin/products`. Also worth eyeballing: a deliberately broken row (a misspelt category) shows
+  its row number and no Apply button, and an `.xlsx` chosen by mistake is refused by name.
+---

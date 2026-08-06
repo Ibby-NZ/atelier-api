@@ -87,13 +87,13 @@ epics:
   w6-category-export:
     name: "W6 Category export"
     branch: aug6/w6-category-export
-    status: pending
+    status: done
     stories:
-      US-001: pending   # Extract the encoding-sniffing CSV reader
-      US-002: pending   # Product sheet export with an empty Category column
-      US-003: pending   # Re-import parse and validate
-      US-004: pending   # Apply validated categories
-      US-005: pending   # CRM export and import panel
+      US-001: done      # Extract the encoding-sniffing CSV reader
+      US-002: done      # Product sheet export with an empty Category column
+      US-003: done      # Re-import parse and validate
+      US-004: done      # Apply validated categories
+      US-005: done      # CRM export and import panel
   w7-featured:
     name: "W7 Featured"
     branch: aug6/w7-featured

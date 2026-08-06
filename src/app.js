@@ -16,6 +16,7 @@ import { adminTradeApplicationRoutes } from './routes/admin-trade-applications.j
 import { adminInventoryRoutes } from './routes/admin-inventory.js'
 import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
+import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
@@ -137,6 +138,9 @@ export const buildApp = ({
     // Back-office only: the record carries the freight terms, the PO address and
     // each house's discount, none of which may reach a client-facing response.
     api.register(adminSupplierRoutes, { pool })
+    // /admin/product-sheet/* — the spreadsheet round trip that fills in
+    // products.category. Backoffice-only; the export is a CSV download.
+    api.register(adminProductSheetRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })

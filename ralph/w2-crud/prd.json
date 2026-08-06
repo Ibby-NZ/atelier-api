@@ -18,7 +18,7 @@
       ],
       "priority": 1,
       "passes": false,
-      "notes": "BLOCKED: needs W1's src/lifecycle registry + deleteOrExplain, which W2 must not author and which is absent from this branch (W1 US-001 still pending)."
+      "notes": ""
     },
     {
       "id": "US-002",
@@ -35,7 +35,7 @@
       ],
       "priority": 2,
       "passes": false,
-      "notes": "BLOCKED: needs W1's src/lifecycle registry + deleteOrExplain, which W2 must not author and which is absent from this branch (W1 US-001 still pending)."
+      "notes": ""
     },
     {
       "id": "US-003",
@@ -51,7 +51,7 @@
       ],
       "priority": 3,
       "passes": false,
-      "notes": "BLOCKED: needs W1's src/lifecycle registry + deleteOrExplain (absent, W2 must not author it), and the contact-enquiry half sits in src/contact/** + src/routes/contact.js, which Epic 2 allocates to no workstream."
+      "notes": ""
     },
     {
       "id": "US-004",

@@ -35,7 +35,7 @@ epics:
     stories:
       US-001: done      # DELETE for brand and collection
       US-002: done      # DELETE for product and colourway
-      US-003: blocked   # DELETE for price-list item and contact enquiry — waits on W1 US-001 (src/lifecycle); contact files unallocated
+      US-003: done      # DELETE for price-list item and contact enquiry
       US-004: pending   # DELETE for user with the self-delete guard
       US-005: pending   # Missing admin reads: brand, collection, price-list item by id
       US-006: pending   # Colourway list and detail endpoints

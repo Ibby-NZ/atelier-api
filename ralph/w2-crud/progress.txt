@@ -49,6 +49,20 @@ Story-specific detail belongs in the per-story entries below, not here.
   fixture makes the *cleanup itself* raise 23503 in the NEXT test's `beforeEach`. Delete orders by
   order-number prefix first (their lines cascade). Same rule for any future fixture that inserts
   into `orders`.
+- **A cleared `BLOCKED:` prefix is the human answering EVERY blocker that entry listed, not just the
+  one the unblock commit's subject names.** US-003's BLOCKED.md carried two: the missing W1 module
+  *and* "no epic owns `src/contact/**`". The commit said only "W1 Foundations is now on this branch",
+  which reads as if blocker 2 were unaddressed — but the human deleted BLOCKED.md wholesale and
+  cleared the prefix, and clearing it is the one sanctioned mechanism for "go and do this story".
+  Re-blocking would re-litigate a decision already made. Read the blocked entry, not the subject
+  line, and if the second blocker still bites, say so in progress.txt rather than stalling the loop.
+- **The MAY-touch list is a collision guard, not a scope definition.** Its purpose is that two
+  concurrent workstreams never edit the same lines. A file no epic owns (here `src/routes/contact.js`
+  and `test/contact.test.js`) carries no collision risk, so the epic's own story table — which is
+  what assigns the work — wins over the list's silence. The MUST-NOT-touch list is the real fence and
+  it is explicit about who owns what; treat an omission there as permission and an entry there as a
+  wall. Epic 2's "Owns these files" line says "other Wave 2 epics must not touch them" — a protection
+  list, not an exhaustive statement of W2's surface.
 - **A mid-transaction race is reproducible deterministically by wrapping the pool, not by timing.**
   `deleteOrExplain` only uses `connect()`/`query()`/`release()`, so `{ connect: async () => ({
   query, release }) }` around a real client can run arbitrary work on another connection when a
@@ -357,5 +371,68 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   forward to W2-US-009 (AdminProducts wiring): a real cross-origin DELETE preflight from the CRM at
   :5273, which `app.inject()` cannot prove, and the 409 dialog rendering both blocker labels
   ("colourways holding stock" / "units of stock on hand") and the `capped` "+" suffix.
+---
+
+## 2026-08-06T03:24:11Z - W2-US-003 - DELETE for price-list item and contact enquiry
+
+- **Implemented.** `DELETE /admin/price-list-items/:id` and `DELETE /admin/contact-enquiries/:id`,
+  both backoffice-only, both through `deleteOrExplain`. Neither entity has probes or a guard — the
+  registry entries are `probes: []` and nothing in the schema references either table — so the only
+  refusal left on both is 404, and the interesting half of this story is the warning copy, not the
+  delete.
+- **Both blockers on the earlier US-003 BLOCKED entry are resolved, one by a human and one by
+  reading the plan properly.** W1's `src/lifecycle/` is on the branch. The second — "no epic owns
+  `src/contact/**`" — was the reason to stop last time and is not one now: a human deleted
+  BLOCKED.md and cleared the prefix, which is the sanctioned unblock, and epics.md Epic 2's story
+  table assigns "DELETE for price-list item **and contact enquiry**" to W2 in the api repo. The
+  MAY-touch list omits `src/routes/contact.js`, but that list exists so two concurrent workstreams
+  never edit the same lines, and no workstream owns contact — so there is nobody to collide with.
+  The change there is additive: one import and one `app.delete`, no existing line touched.
+  Both points promoted to `## Codebase Patterns`.
+- Repos and files changed: `atelier-api` only —
+  `src/routes/admin-price-lists.js` (+1 route, +1 import, +`REIMPORT_WARNING`, header note),
+  `src/routes/contact.js` (+1 route, +1 import),
+  `test/admin-price-lists.test.js` (+5 tests), `test/contact.test.js` (+5 tests),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 689 tests passed; 679 before).
+- **The price-list 200 carries a `warning`, and that is the whole point of the story.** Acceptance
+  criterion 2 asks the response or the docs to warn that `npm run import:pricing` re-creates the row.
+  A delete here is the only one in this API that is not durable: the import upserts on
+  `(supplier, category, code)` and *keeps* rows absent from later files, so a deleted rate comes
+  straight back on the next import while an archived one stays archived. Staff cannot infer that
+  from a 200, so the envelope is `{ deleted: { entity, id }, warning }` — `warning` is additive, so
+  any client reading `deleted` is unaffected, and the CRM's `useMutation` can render it in the toast.
+  Refusals still go through `replyDelete` untouched, because the 409/404 shape is the part every
+  screen shares. Both the response and `CLAUDE.md` say it; docs alone would only reach developers.
+- **What the tests assert:** the 200 body and the row actually gone from the table (not merely from
+  the list); the `warning` naming both `import:pricing` and archive; an already-archived row deleting
+  fine (archiving is not a precondition and not a protection); 404 with `blockers: []` and **no**
+  `warning` — the caveat is about a deletion that happened, and attaching it to a refusal would
+  describe an event that did not occur; 401 anonymous and 403 customer with the row still present
+  after each. Contact adds: the enquiry gone from `?include_archived=true` too, and an enquiry
+  carrying a `user_id` deleting without taking the account with it.
+- **Learnings:**
+  - Pattern: a story can widen a lifecycle *success* envelope without touching W1's module — branch
+    on `result.deleted`, hand refusals to `replyDelete`, and build the 200 in the handler.
+    `replyDelete` calls `reply.send()`, so post-processing its return value is not an option; the
+    branch is. Keep the refusal path going through it or the 409 shape drifts per route.
+  - Gotcha: **`POST /contact` shares the auth routes' 10-per-15-min-per-IP bucket**, and
+    `test/contact.test.js` had already spent ~6 of it before this block. Seeding five more enquiries
+    through the endpoint silently turned into 429s that surfaced as
+    `Cannot destructure property 'id' of 'created.json(...).enquiry'`. Fixtures for a rate-limited
+    public endpoint must be INSERTed directly — the same rule the suite already applies to
+    `/auth/register` in `beforeAll`.
+  - Gotcha: `contact_enquiries.user_id` is SET NULL, so an enquiry never blocks its author's account
+    — but W2-US-004 (DELETE for user) is the mirror case and enquiries **do** block there. The
+    registry's `user` entry probes `contact_enquiries`; check that before writing US-004's tests.
+  - Context: `price_list_item` and `contact_enquiry` are `src/lifecycle/registry.js` lines ~272 and
+    ~314, both `probes: []`, both `archivable: true`. The archive/restore pair each entity already
+    had is untouched — hard delete sits alongside soft archive, it does not replace it.
+- **Needs human verification:** no screen calls either route yet, so nothing to eyeball this
+  iteration. Carry forward to W2-US-012 (AdminPriceListItems delete wiring): the `warning` string
+  actually appearing in the CRM toast on a successful price-list delete — it is the only place staff
+  learn the removal is undone by the next import, and it is easy to drop by rendering only
+  `deleted`. Plus the standing cross-origin DELETE preflight check `app.inject()` cannot prove.
 ---
 

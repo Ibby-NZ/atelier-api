@@ -572,3 +572,32 @@ Inventory create and delete — `POST /admin/inventory`, `DELETE /admin/inventor
 - **A row is DECLINED with a stated reason; a malformed BATCH is rejected before any SQL.** Emptiness is a decline — a house with no catalogue row, a row carrying no design or no colour code (Liberty prints exactly one, whose design, colour code and name are all "-") — and each reason names a KIND of row, so the summary reads "7,823 house not in the catalogue, 1 no design name" rather than a number nobody can account for. A missing coordinate or a non-string field is malformed and throws with `file:sheet:row` before a connection is even taken, the same posture as `validateLegacyRecords` and `validatePriceListItems`. Rows in = colourways out + skipped + repeats + conflicts, exactly, and the whole corpus balances.
 - **The supplier colour code is NEVER joined to `price_list_items.code`** — the D365 item code's numeric part is the supplier's colour code and does not match the price list's. Nothing in the importer reads or writes that table, and a stub-pool test asserts it by logging every statement the import issues. The `design_code` the file carries (what the supplier's own price list keys on) has no column to land in and is deliberately dropped rather than squeezed into one that means something else.
 - The whole import is one transaction in chunked `unnest` batches: either the catalogue gains every colourway or it gains none, because a half-imported house looks exactly like a house the supplier stopped carrying. Guarded by `test/colour-files.test.js` (114 tests), which covers the plan purely, the statement order and the price-list abstinence through a stub pool, and the real database behaviour — idempotency proved by comparing every catalogue row before and after a second run, plus `inventoryCreated: 0`.
+
+## Category export
+
+The office fills in `products.category` through a spreadsheet round trip. Its pieces are shared with
+the supplier pricing pipeline rather than reimplemented beside it.
+
+- **`src/lib/csv-text.js` is the one encoding sniff and the one CSV reader** — strict UTF-8 (BOM
+  tolerated), then a table-driven cp1252, then latin-1, which cannot fail. It moved out of
+  `scripts/lib/text.js` because the API now has to read a file staff saved out of Excel, and roughly
+  two-fifths of the supplier drops are cp1252 with nothing declaring it. `scripts/lib/text.js`
+  stays as a re-export so `scripts/convert-price-lists.js`, `test/converters.test.js` and
+  `test/colour-files.test.js` keep their specifier — that unchanged test suite is the proof the move
+  changed no behaviour, which it could not be if the callers had moved too.
+- **`src/` and `scripts/` import each other in both directions and that is deliberate**: one package,
+  plain relative specifiers, no bundler, no `files` field. `src/seed/price-lists.js` already reaches
+  into `scripts/lib/price-template.js` for the shared vocabularies; this is the same seam pointing
+  the other way. A shared module lives with whoever owns it and the other side re-exports.
+- **`decodeText` takes a Buffer, not a Uint8Array** — its last fallback is `bytes.toString('latin1')`.
+  A route hands it the raw body Fastify gives it.
+- **`csvRows` yields `[lineNumber, fields]` 1-based and counting the header row**, so a row number in
+  a validation message is that number verbatim; adding an offset is how an error points at the wrong
+  line.
+- **`npm run convert:pricing` cannot run in a worktree** (`incoming/` is gitignored and exists only
+  in the main checkout), so the byte-identity gate on `src/seed/data/price-lists.json` is a
+  main-checkout step. Verify a change to this reader with a hand-made fixture instead —
+  `node scripts/convert-price-lists.js <in-dir> <out.json>` over a file named to match
+  `^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b` — and diff the emitted record against the
+  corresponding line of the committed JSON. `test/price-template.test.js`'s byte-pin block names the
+  exact cells behind its first record.

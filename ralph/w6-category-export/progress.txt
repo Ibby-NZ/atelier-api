@@ -5,11 +5,59 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- (nothing yet — the first iteration adds to this)
+- **`src/` and `scripts/` may import each other freely** — one package, plain relative specifiers,
+  no bundler, no `files` field. `src/seed/price-lists.js` already imports `scripts/lib/price-template.js`;
+  `scripts/lib/text.js` now imports back the other way. A shared module belongs wherever its owner
+  lives, and the other side re-exports.
+- **`incoming/pricing-templates/` does not exist in a worktree** (gitignored, main checkout only),
+  so `npm run convert:pricing` cannot run here at all and the byte-identity gate cannot be run as
+  written. Verify a converter-adjacent change with a hand-made fixture instead:
+  `node scripts/convert-price-lists.js <in-dir> <out.json>`, filename matching
+  `^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b`, then compare the emitted record against the
+  matching line of the committed `src/seed/data/price-lists.json` (line 2 is its first record;
+  strip the trailing comma). `test/price-template.test.js`'s byte-pin block names the exact cells
+  behind that line.
+- **`atelier_w6` was seeded AFTER `1786593600000_featured-rank` ran**, so the migration's UPDATE
+  matched nothing and `test/featured-rank.test.js` failed on a database defect, not on any code.
+  Repaired once by running the migration's own exported `brandFeatureSql`/`collectionFeatureSql`
+  against the seeded rows (a migration may export more than `up`/`down`, and here that is what
+  makes the repair the exact statement rather than a retyped copy). If a featured assertion fails
+  again after a reseed, this is why — do not chase it into `src/`.
+- **A W6 gate run is both repos** even for an api-only story: `( cd atelier-api && npm run lint && npm test )`
+  and `( cd atelier-crm && npm test && npm run build )`. The CRM has no ESLint, so `build` is its
+  only compile check.
 
 ---
 
 ## Story log
 
 Appended by each iteration, newest last. Never rewrite an existing entry.
+
+## 2026-08-06T18:17:00Z - W6-US-001 - Extract the encoding-sniffing CSV reader
+- Moved `decodeText` and `csvRows` out of `scripts/lib/text.js` into a new `src/lib/csv-text.js`,
+  verbatim (same table, same generator, same comments). `scripts/lib/text.js` is now a one-line
+  re-export, so `scripts/convert-price-lists.js`, `test/converters.test.js` and
+  `test/colour-files.test.js` keep their existing import specifier and were not touched — which is
+  what makes "no behaviour change" checkable rather than asserted.
+- Repos and files changed: atelier-api — `src/lib/csv-text.js` (new), `scripts/lib/text.js`
+  (re-export), `ralph/w6-category-export/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` (atelier-api) -> 0, `npm test` (atelier-api) -> 0 (51 files, 1164 tests),
+  `npm test` (atelier-crm) -> 0 (37 files, 567 tests), `npm run build` (atelier-crm) -> 0.
+- Byte identity: `npm run convert:pricing` cannot run in a worktree (`incoming/` is gitignored and
+  absent). Proved instead with a hand-made `ALTAGAMMA WPPR PL JUNE 2026.csv` carrying the v1 header
+  and the cells behind the committed file's first record: the converter's output line is byte-for-byte
+  equal to line 2 of `src/seed/data/price-lists.json`. That file is unmodified.
+- **Learnings:**
+  - The re-export is deliberately not "update every caller": leaving the specifiers alone is what
+    lets `test/converters.test.js` stand unchanged as the proof this was a move. A future story that
+    wants the direct path can import `src/lib/csv-text.js` without disturbing the converters.
+  - `decodeText` takes a Buffer (it falls back to `bytes.toString('latin1')`), not a Uint8Array —
+    the upload path in US-003 must hand it the raw Buffer Fastify gives it.
+  - `csvRows` yields `[lineNumber, fields]` with `lineNumber` 1-based and counting the header, so a
+    row-number in a validation error is that number directly, with no offset arithmetic.
+  - Context: the pricing converter is `scripts/convert-price-lists.js` over `scripts/lib/`; the
+    accepted header layouts and every shared vocabulary live in `scripts/lib/price-template.js`.
+- **Needs human verification:** none — no route, no screen and no data file changed.
+---
 

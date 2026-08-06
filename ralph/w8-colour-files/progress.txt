@@ -96,6 +96,31 @@ Story-specific detail belongs in the per-story entries below, not here.
   shape is still the import's decision), the ledger holds exactly one row per key. Keeping the
   first decides silently and keeping both makes the pricing converter refuse the whole file, so the
   code gets NO rate and every coordinate is printed. 230 of 15,841 codes end up there.
+- **An identity key that SLUGIFIES its parts finds the repeats a raw-string comparison cannot.**
+  The converter's exact-repeat rule compares whole records, so Liberty's two sheets writing one
+  colourway "Deco Scallop"/"Pewter" and "DECO SCALLOP"/"PEWTER" survived it as two rows; the
+  importer's slugified key collapses them into one. 28 of the 35 repeated SKUs in the corpus are
+  exactly that. The converse matters as much: after casing is normalised away, a name that STILL
+  differs ("Blue Grass"/"Bluegrass", "Lino"/"Linen") is the supplier genuinely disagreeing with
+  itself, and separating the two counts is what turns 35 rows of noise into 7 a person can settle.
+- **The catalogue's identity key is the SLUG, so match houses on it and never on the name.** It
+  absorbs the differences that are not differences — an accent, a full point, a case ("Braquenié"
+  and "S. Harris" resolve; the supplier's ALL CAPS resolves) — while still refusing a genuinely
+  different name, so "Colefax & Fowler" and "Colefax and Fowler" cannot merge into one house by
+  accident. 22 of the corpus's 37 brand spellings resolve this way against the seeded 41.
+- **An importer DECLINES what a human must decide and REJECTS what nobody can act on.** A house
+  with no catalogue row, or a row carrying no design, is declined with a stated reason and counted
+  — the rows stay in the normalised file and land on the next run once the decision is made. A
+  non-string field or a missing coordinate is malformed: it throws before a connection is taken,
+  because a row nobody can locate cannot be reported afterwards. Conflating the two either fails a
+  38,000-row import over one supplier placeholder, or swallows a genuinely broken file.
+- **`INSERT … ON CONFLICT DO NOTHING` plus a select-back is the honest upsert for a partial
+  writer.** A pipeline that knows three columns of a twenty-column table must not write EXCLUDED
+  over the other seventeen: it would replace a catalogue entry with a thinner one, re-capitalise a
+  house-styled name into the supplier's ALL CAPS, and undo a publish somebody made in the CRM. The
+  cost is one extra SELECT (DO NOTHING returns no row for a key that already existed); what it buys
+  is an import that provably changes nothing on a second run. Read back what you need from the
+  existing row — the product's own `product_type`, here — rather than assuming your own default.
 - **Verify a derivation against the file's own redundancy before shipping it.** Several of these
   sheets decompose a value into extra columns they then leave blank further down (Jean Monro splits
   its item codes across three unlabelled cells for the first 102 rows of one sheet and none of the
@@ -502,4 +527,95 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
      whether a Larsen wallcovering is sold by the roll or by the metre; the file does not.
   4. **Madeaux's 13 grasscloth wallpapers state two rates in one cell** ("£35/m" and "£350/roll"),
      so none is written. Which one does the office buy at?
+---
+
+## 2026-08-06T18:55:00Z - W8-US-006 - Import colourways into products and colourways
+
+- **What was implemented** — the normalised file lands in the live catalogue, one product per
+  (house, design) and one colourway per row:
+  - `src/seed/colourways-import.js` (new) — the pure planning layer and the write.
+    `validateColourwayRows` throws on the first malformed row (with `file:sheet:row`) BEFORE a
+    connection is taken; `prepareColourwayImport(rows, brands)` takes the catalogue's brands as
+    data and returns the products, the colourways, the declines by reason, the unknown houses, the
+    repeats collapsed and the name conflicts, so the whole plan is testable and printable without a
+    database; `importColourways(pool, rows)` writes it in one transaction in chunked `unnest`
+    batches.
+  - `src/seed/import-colourways.js` (new) + `npm run import:colour` — the CLI. Defaults to
+    `incoming/colour-files/normalized/colourways.json` (gitignored, client data — same rule the
+    legacy import follows), takes a path argument, and prints the summary plus three reports:
+    houses with no catalogue row, rows declined by reason, colour codes carrying two names.
+    `MAX_REPORTED = 50` caps what is printed, never what is counted.
+  - `test/colour-files.test.js` — 98 -> 114 tests.
+- **Repos and files changed** — atelier-api only: `src/seed/colourways-import.js` (new),
+  `src/seed/import-colourways.js` (new), `test/colour-files.test.js`, `package.json` (scripts
+  only), `CLAUDE.md`. No migration, no route, no converter change.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 863 tests, 114 in colour-files).
+- **The decisions this story had to make, each measured rather than chosen**
+  - **The colourway SKU is `<brand slug>-<design>-<supplier colour code>`, uppercased, every part
+    slugified.** Nothing shorter is unique (Madeaux and Maria Flora number colours per design, so
+    "01" repeats across designs) and the office's own Brand-Product-Colour generator lives in the
+    CRM demo app and was deliberately never ported. Measured over the corpus: 38,064 rows produce
+    38,064 distinct SKUs, and NONE of them collides with the 34 demo SKUs the seed already holds.
+  - **A house is resolved by SLUG against `brands`, never created.** 22 of the 37 spellings
+    resolve, carrying 38,064 of the 45,923 rows; 15 spellings covering 7,823 rows have no
+    catalogue row and are reported with a count and a first coordinate.
+  - **`colourways.name` is NOT NULL and 917 rows name no colour**, so those carry the supplier's
+    own colour code — what the colour is identified by on the supplier's own document. Inventing
+    "Colour 1" would read as a name somebody chose.
+  - **Products are DO NOTHING, colourways upsert on the SKU, inventory is DO NOTHING at zero.**
+    See the CLAUDE.md entry for why each; the short version is that this file knows a design's name
+    and nothing else.
+- **Whole-corpus plan** (`prepareColourwayImport` over the 45,923 normalised rows against the
+  seeded 41 brands; the numbers balance exactly):
+  **45,923 rows in = 38,064 colourways out + 7,824 skipped + 28 repeats collapsed + 7 conflicts**,
+  across **8,438 products and 22 houses**. Declines: 7,823 "house not in the catalogue", 1 "no
+  design name". The 7 conflicts are precisely the seven US-004's clash report named (six Madeaux
+  section reprints, Maria Flora's Filigrana 102).
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - The plan is a pure function over `(rows, brands)`, so every corpus measurement in this entry
+      was taken without a database and the CLI can print the whole report before writing. Taking
+      the brands as an ARGUMENT rather than querying inside is what made that possible.
+    - Idempotency is proved by comparing every catalogue row before and after a second run, not by
+      re-reading the summary — a summary can be identical while the rows were rewritten. The
+      second signal is `inventoryCreated: 0`, which only a genuine no-op produces.
+  - Gotchas for the next iteration:
+    - **The real corpus has NOT been written to a database by this loop.** Creating a scratch
+      database is denied in this sandbox and `atelier_w8` is the suite's own database — 38,064
+      colourways in it would falsify other suites' counts. The database path is covered by the
+      integration tests with prefixed fixtures; the whole-corpus run is the pure plan. A human
+      running `npm run import:colour` against a seeded database is what closes that gap.
+    - **A `DO UPDATE` multi-row upsert cannot hit one conflict key twice**, which is why the plan
+      dedupes colourways into a Map by SKU before any SQL. That is a guarantee by construction, not
+      a validator — do not "simplify" the Map into an array.
+    - **`incoming/colour-files/normalized/` still does not exist.** Neither US-004, US-005 nor this
+      story ever ran the converter's default output path, so `npm run import:colour` with no
+      argument will report a missing file until somebody runs `npm run convert:colour` once.
+    - **Liberty's `Sheet1 (2)` row 403 is a placeholder** — design, colour code and name are all
+      "-". The importer declines it with `no design name`. It would be cleaner still for
+      `liberty.js` to decline it at source with a stated reason (the corpus total would move from
+      45,923 to 45,922), but that changes numbers already recorded in CLAUDE.md and three progress
+      entries, so it is left as a note rather than taken unilaterally.
+    - `design_code` is read, validated and then DROPPED: no column holds it. It is what the
+      supplier's price list keys on, so if the office ever wants the join, that is a migration and
+      belongs to whichever workstream owns the schema — not to this importer.
+  - Context: the plan and the write are `src/seed/colourways-import.js`, the CLI
+    `src/seed/import-colourways.js`, tests at the end of `test/colour-files.test.js` (three
+    describe blocks: planning, statements, database).
+- **Needs human verification:** no screen and no route is touched, but this is the first story in
+  the workstream that writes to catalogue TABLES, so three things need a person, on top of US-002's
+  three, US-003's four, US-004's three and US-005's four:
+  1. **Run `npm run convert:colour` then `npm run import:colour` once against a real database and
+     eyeball the CRM's Products screen.** 8,438 products and 38,064 colourways appear, all with
+     `show_on_website = false`, so nothing reaches the public storefront until somebody publishes
+     it — that is the intended posture and it is worth confirming on the screen rather than in a
+     count.
+  2. **The 15 houses with no catalogue row (7,823 colourways) import nothing until they exist.**
+     The list is printed by the run and is in CLAUDE.md. Somebody has to name them — or decide
+     Atelier does not carry them — and a house must be created in the CRM, never by this importer.
+  3. **The SKU shape is this story's decision and is now the catalogue's.** `COLEFAX-FOWLER-
+     BOWOOD-01020-01` is what an order line will quote. If the office wants the D365 shape
+     (`{colour code} {YY}{SUPPLIER_TOKEN}`) or the CRM generator's (`CF-SWT-01`) instead, changing
+     it later means re-keying every imported colourway, so it is worth confirming before the first
+     production import.
 ---

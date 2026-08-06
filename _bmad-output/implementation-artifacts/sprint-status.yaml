@@ -116,7 +116,7 @@ epics:
       US-003: done      # Adapters for the multi-sheet and multi-brand files
       US-004: done      # Normalised output, loud failure, per-file summary
       US-005: done      # Rates as a secondary output
-      US-006: pending   # Import colourways into products and colourways
+      US-006: done      # Import colourways into products and colourways
   w9-scanner-spike:
     name: "W9 Scanner spike"
     branch: aug6/w9-scanner-spike

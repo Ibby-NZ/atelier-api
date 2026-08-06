@@ -1,5 +1,12 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { deflateRawSync } from 'node:zlib'
+import runner from 'node-pg-migrate'
+import { loadConfig } from '../src/config.js'
+import { createPool } from '../src/db.js'
+import {
+  importColourways, prepareColourwayImport, validateColourwayRows, colourwayKeys, colourwayName,
+  NO_DESIGN, NO_COLOUR_CODE,
+} from '../src/seed/colourways-import.js'
 import {
   normaliseLabel, worksheetPaths, openColourWorkbook, HEADER_SCAN_LIMIT,
 } from '../scripts/lib/colour-sheet.js'
@@ -1894,5 +1901,343 @@ describe('colour-rates — the adapters', () => {
     ])
     expect(Object.fromEntries(reading.skips))
       .toEqual({ 'header translation': 1, 'sample cutting': 1 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The importer (US-006). The rows below are the normalised file's own shape —
+// what scripts/convert-colour-files.js writes — so nothing here reads incoming/
+// either. The database tests use the same real local Postgres every other suite
+// does; fixtures are namespaced by slug prefix and cleaned up by it.
+
+const HOUSE = 'W8 Import Test House'
+const HOUSE_SLUG = 'w8-import-test-house'
+const FIXTURE_PREFIX = 'w8-import-test-'
+const PRODUCT_SLUG = 'w8-import-test-house-alpha-weave'
+const CATALOGUE_BRAND = { id: 7, name: HOUSE, slug: HOUSE_SLUG, currency: 'GBP' }
+
+const importRow = (overrides = {}) => ({
+  supplier: 'W8 Import Test Supplier',
+  brand: HOUSE,
+  design: 'ALPHA WEAVE',
+  design_code: 'AW1',
+  colour_code: '01',
+  colour_name: 'Stone',
+  source_file: 'w8-import-test.xlsx',
+  source_sheet: 'Sheet1',
+  source_row: 2,
+  ...overrides,
+})
+
+describe('colourway import — planning', () => {
+  it('keys a row on the catalogue spelling of the house, not the supplier ones', () => {
+    const keys = colourwayKeys(CATALOGUE_BRAND, importRow({ brand: 'w8 IMPORT test HOUSE' }))
+    expect(keys).toEqual({
+      productSlug: PRODUCT_SLUG,
+      sku: 'W8-IMPORT-TEST-HOUSE-ALPHA-WEAVE-01',
+    })
+  })
+
+  it('declines a row it cannot key, naming the kind of row', () => {
+    // Liberty prints one such row: design, colour code and name are all "-".
+    expect(colourwayKeys(CATALOGUE_BRAND, importRow({ design: '-' })).reason).toBe(NO_DESIGN)
+    expect(colourwayKeys(CATALOGUE_BRAND, importRow({ colour_code: '' })).reason)
+      .toBe(NO_COLOUR_CODE)
+  })
+
+  it('shows the supplier colour code where the file names no colour', () => {
+    expect(colourwayName(importRow({ colour_name: '' }))).toBe('01')
+    expect(colourwayName(importRow({ colour_name: '  Stone ' }))).toBe('Stone')
+  })
+
+  it('reports a house the catalogue does not hold and imports none of its rows', () => {
+    const plan = prepareColourwayImport([
+      importRow(),
+      importRow({ brand: 'FOX LINTON', colour_code: '02', source_row: 3 }),
+      importRow({ brand: 'FOX LINTON', colour_code: '03', source_row: 4 }),
+    ], [CATALOGUE_BRAND])
+    expect(plan.colourways).toHaveLength(1)
+    expect(plan.unknownBrands).toEqual([
+      { brand: 'FOX LINTON', rows: 2, first: 'w8-import-test.xlsx:Sheet1:3' },
+    ])
+    expect(plan.skipped).toBe(2)
+  })
+
+  it('collapses a repeat that differs only in the supplier casing', () => {
+    // Liberty's two sheets write one colourway "Deco Scallop"/"Pewter" and
+    // "DECO SCALLOP"/"PEWTER" — 28 of the corpus's 35 repeated SKUs are this.
+    const plan = prepareColourwayImport([
+      importRow({ design: 'Deco Scallop', colour_name: 'Pewter' }),
+      importRow({ design: 'DECO SCALLOP', colour_name: 'PEWTER', source_row: 9 }),
+    ], [CATALOGUE_BRAND])
+    expect(plan.colourways).toHaveLength(1)
+    expect(plan.colourways[0].name).toBe('Pewter')
+    expect(plan.duplicates).toBe(1)
+    expect(plan.conflicts).toEqual([])
+  })
+
+  it('reports a colour code carrying two different names and keeps the first', () => {
+    const plan = prepareColourwayImport([
+      importRow({ colour_name: 'Blue Grass' }),
+      importRow({ colour_name: 'Bluegrass', source_row: 40 }),
+    ], [CATALOGUE_BRAND])
+    expect(plan.colourways).toHaveLength(1)
+    expect(plan.duplicates).toBe(0)
+    expect(plan.conflicts).toEqual([{
+      sku: 'W8-IMPORT-TEST-HOUSE-ALPHA-WEAVE-01',
+      kept: {
+        sku: 'W8-IMPORT-TEST-HOUSE-ALPHA-WEAVE-01',
+        name: 'Blue Grass',
+        productSlug: PRODUCT_SLUG,
+        source: 'w8-import-test.xlsx:Sheet1:2',
+      },
+      dropped: { name: 'Bluegrass', source: 'w8-import-test.xlsx:Sheet1:40' },
+    }])
+  })
+
+  it('accounts for every row: colourways + skips + repeats = rows in', () => {
+    const plan = prepareColourwayImport([
+      importRow(),
+      importRow({ colour_code: '02', source_row: 3 }),
+      importRow({ brand: 'RSC', source_row: 4 }),
+      importRow({ design: '-', source_row: 5 }),
+      importRow({ source_row: 6 }),
+    ], [CATALOGUE_BRAND])
+    expect(plan.colourways.length + plan.skipped + plan.duplicates + plan.conflicts.length)
+      .toBe(plan.rows)
+    expect(plan.skips).toEqual([
+      { reason: NO_DESIGN, rows: 1, first: 'w8-import-test.xlsx:Sheet1:5' },
+    ])
+    expect(plan.products).toHaveLength(1)
+  })
+
+  it('rejects a malformed batch, naming the row and its coordinate', () => {
+    expect(() => validateColourwayRows({})).toThrow(/must be an array/)
+    expect(() => validateColourwayRows([importRow(), null]))
+      .toThrow(/colourway row 1: invalid row/)
+    expect(() => validateColourwayRows([importRow({ colour_name: undefined })]))
+      .toThrow(/w8-import-test.xlsx:Sheet1:2\): invalid colour_name/)
+    expect(() => validateColourwayRows([importRow({ brand: '  ' })]))
+      .toThrow(/invalid brand \(expected a non-empty string\)/)
+    expect(() => validateColourwayRows([importRow({ source_row: 0 })]))
+      .toThrow(/invalid source_row/)
+  })
+})
+
+describe('colourway import — statements', () => {
+  // A stub pool logging SQL, the same instrument test/lifecycle-delete.test.js
+  // uses for statement order. Two things only a stub can assert: that the whole
+  // import is one transaction, and that it never touches price_list_items.
+  const stubPool = () => {
+    const statements = []
+    const client = {
+      query: async (text, params) => {
+        statements.push(text.trim().split('\n')[0].trim())
+        if (/FROM brands/.test(text)) return { rows: [CATALOGUE_BRAND] }
+        if (/FROM products WHERE slug/.test(text)) {
+          return { rows: params[0].map((slug, i) => ({ id: i + 1, slug, product_type: 'fabric' })) }
+        }
+        if (/INTO colourways/.test(text)) {
+          return { rows: params[2].map((sku, i) => ({ id: i + 1, sku })) }
+        }
+        return { rows: [], rowCount: 0 }
+      },
+      release: () => {},
+    }
+    return { pool: { connect: async () => client }, statements }
+  }
+
+  it('runs one transaction and never reads or writes price_list_items', async () => {
+    const { pool, statements } = stubPool()
+    await importColourways(pool, [importRow(), importRow({ colour_code: '02', source_row: 3 })])
+    expect(statements[0]).toBe('BEGIN')
+    expect(statements.at(-1)).toBe('COMMIT')
+    // The supplier's colour code is NOT the price list's code — the D365 item
+    // code's numeric part is the colour code and does not match it — so no
+    // statement here may reach that table.
+    expect(statements.filter((sql) => /price_list/i.test(sql))).toEqual([])
+  })
+
+  it('takes no connection at all when the batch is malformed', async () => {
+    const { pool, statements } = stubPool()
+    await expect(importColourways(pool, [importRow({ source_row: 'two' })])).rejects
+      .toThrow(/invalid source_row/)
+    expect(statements).toEqual([])
+  })
+})
+
+describe('colourway import — database', () => {
+  let pool
+
+  const cleanup = async () => {
+    await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${FIXTURE_PREFIX}%`])
+  }
+
+  const catalogue = async () => {
+    const { rows } = await pool.query(
+      `SELECT p.slug, p.name, p.product_type, p.show_on_website, p.currency,
+              c.sku, c.name AS colour, c.hex_tones, c.image_url,
+              i.qty_available, i.qty_reserved, i.unit
+       FROM products p
+       JOIN colourways c ON c.product_id = p.id
+       LEFT JOIN inventory i ON i.colourway_id = c.id
+       WHERE p.slug LIKE $1
+       ORDER BY c.sku`,
+      [`${FIXTURE_PREFIX}%`]
+    )
+    return rows
+  }
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    pool = createPool(config.databaseUrl)
+    await runner({
+      databaseUrl: config.databaseUrl,
+      dir: 'migrations',
+      direction: 'up',
+      migrationsTable: 'pgmigrations',
+      log: () => {},
+    })
+    await cleanup()
+    await pool.query(
+      `INSERT INTO brands (name, slug, currency, is_international, trade_only)
+       VALUES ($1, $2, 'GBP', true, false)`,
+      [HOUSE, HOUSE_SLUG]
+    )
+  })
+
+  afterAll(async () => {
+    await cleanup()
+    await pool.end()
+  })
+
+  it('lands a row as a product, a colourway and a zeroed stock row', async () => {
+    const summary = await importColourways(pool, [
+      importRow(),
+      importRow({ colour_code: '02', colour_name: '', source_row: 3 }),
+    ])
+    expect(summary).toMatchObject({
+      rows: 2, products: 1, colourways: 2, brands: 1, skipped: 0, inventoryCreated: 2,
+    })
+    expect(await catalogue()).toEqual([
+      {
+        slug: PRODUCT_SLUG,
+        name: 'ALPHA WEAVE',
+        product_type: 'fabric',
+        // Never published by an import: a design reaches the storefront when
+        // somebody in the CRM says so.
+        show_on_website: false,
+        currency: 'GBP',
+        sku: 'W8-IMPORT-TEST-HOUSE-ALPHA-WEAVE-01',
+        colour: 'Stone',
+        hex_tones: null,
+        image_url: null,
+        qty_available: '0.00',
+        qty_reserved: '0.00',
+        unit: 'metres',
+      },
+      {
+        slug: PRODUCT_SLUG,
+        name: 'ALPHA WEAVE',
+        product_type: 'fabric',
+        show_on_website: false,
+        currency: 'GBP',
+        sku: 'W8-IMPORT-TEST-HOUSE-ALPHA-WEAVE-02',
+        // The file names no colour, so the catalogue shows the code the
+        // supplier identifies it by rather than a name nobody wrote.
+        colour: '02',
+        hex_tones: null,
+        image_url: null,
+        qty_available: '0.00',
+        qty_reserved: '0.00',
+        unit: 'metres',
+      },
+    ])
+  })
+
+  it('changes nothing on a re-import', async () => {
+    const rows = [importRow(), importRow({ colour_code: '02', colour_name: '', source_row: 3 })]
+    await importColourways(pool, rows)
+    const before = await catalogue()
+    const summary = await importColourways(pool, rows)
+    expect(await catalogue()).toEqual(before)
+    // Stock is DO NOTHING, so a re-run creates none — which is what proves the
+    // second run wrote nothing rather than rewriting the same values.
+    expect(summary.inventoryCreated).toBe(0)
+    expect(summary.colourways).toBe(2)
+  })
+
+  it('leaves an operator edit alone', async () => {
+    await importColourways(pool, [importRow()])
+    await pool.query(
+      `UPDATE products SET show_on_website = true, name = 'Alpha Weave', lead_time = '6 weeks'
+       WHERE slug = $1`,
+      [PRODUCT_SLUG]
+    )
+    await pool.query(
+      `UPDATE colourways SET image_url = 'https://example.test/stone.jpg', hex_tones = $2
+       WHERE sku = $1`,
+      ['W8-IMPORT-TEST-HOUSE-ALPHA-WEAVE-01', JSON.stringify(['#cccccc'])]
+    )
+    await importColourways(pool, [importRow()])
+    const { rows } = await pool.query(
+      `SELECT p.name, p.show_on_website, p.lead_time, c.image_url, c.hex_tones
+       FROM products p JOIN colourways c ON c.product_id = p.id
+       WHERE c.sku = $1`,
+      ['W8-IMPORT-TEST-HOUSE-ALPHA-WEAVE-01']
+    )
+    expect(rows[0]).toEqual({
+      // The product is INSERT … DO NOTHING: this file knows a design's name and
+      // nothing else, so re-importing must not re-capitalise a house-styled name
+      // or take a published design off the storefront.
+      name: 'Alpha Weave',
+      show_on_website: true,
+      lead_time: '6 weeks',
+      image_url: 'https://example.test/stone.jpg',
+      hex_tones: ['#cccccc'],
+    })
+  })
+
+  it('never creates a house, and imports nothing under one it cannot find', async () => {
+    const summary = await importColourways(pool, [
+      importRow({ brand: 'RSC', design: 'BERNARDO PAISLEY', source_row: 11 }),
+    ])
+    expect(summary.colourways).toBe(0)
+    expect(summary.unknownBrands).toEqual([
+      { brand: 'RSC', rows: 1, first: 'w8-import-test.xlsx:Sheet1:11' },
+    ])
+    const { rows } = await pool.query(
+      'SELECT count(*)::int AS n FROM brands WHERE slug = $1', ['rsc']
+    )
+    expect(rows[0].n).toBe(0)
+  })
+
+  it('rejects the whole batch before any SQL when one row is malformed', async () => {
+    const before = await catalogue()
+    await expect(importColourways(pool, [
+      importRow({ design: 'BETA WEAVE', source_row: 20 }),
+      importRow({ design: 'BETA WEAVE', colour_code: null, source_row: 21 }),
+    ])).rejects.toThrow(/colourway row 1 .*invalid colour_code/)
+    expect(await catalogue()).toEqual(before)
+  })
+
+  it('takes an existing product type, so a finished good stocks in units', async () => {
+    const { rows: brand } = await pool.query('SELECT id FROM brands WHERE slug = $1', [HOUSE_SLUG])
+    await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency)
+       VALUES ($1, 'GAMMA THROW', $2, 'finished_good', 'GBP')`,
+      [brand[0].id, 'w8-import-test-house-gamma-throw']
+    )
+    await importColourways(pool, [
+      importRow({ design: 'GAMMA THROW', colour_code: '77', source_row: 30 }),
+    ])
+    const { rows } = await pool.query(
+      `SELECT p.product_type, i.unit FROM products p
+       JOIN colourways c ON c.product_id = p.id
+       JOIN inventory i ON i.colourway_id = c.id
+       WHERE c.sku = $1`,
+      ['W8-IMPORT-TEST-HOUSE-GAMMA-THROW-77']
+    )
+    expect(rows[0]).toEqual({ product_type: 'finished_good', unit: 'units' })
   })
 })

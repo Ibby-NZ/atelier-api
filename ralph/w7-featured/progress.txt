@@ -69,6 +69,22 @@ Story-specific detail belongs in the per-story entries below, not here.
   only guarantees the BUILD succeeds — the empty case has to be designed, and it bites hardest
   where a layout prop (here `overlay`, the header floating in the first band) assumes the section
   is there.
+- **A rule two surfaces read must live in ONE module, even when the wrapper is a one-liner.**
+  `featured_rank` is one office decision shown on two pages; a second copy of "what counts as a
+  rank" is exactly the thing that gets corrected on one surface and not the other. The named
+  wrappers (`featuredCollections`, `featuredHouses`) stay, because they are what the page reads.
+- **Replacing a DERIVED choice with an explicit one changes the empty case, and that is the whole
+  design decision.** A heuristic always produces something, so a surface fed by one never had to
+  answer "nobody chose anything" — and a filter it carried for its own reasons ("only rows we can
+  show a photograph of") silently becomes a veto over the office's choice. Keep the chosen row and
+  give it a designed ground; omit the SECTION only when nothing was chosen at all.
+- **An Astro page with `prerender = false` can be verified with NO dev server and NO fixed port.**
+  The node adapter is in `middleware` mode, so `dist/server/entry.mjs` exports a connect-style
+  handler that drives a bare `http.createServer` on port 0 (never 4321 — another loop holds it).
+  Build once with `PUBLIC_API_BASE_URL` pointed at a fixture API (`import.meta.env.PUBLIC_*` is
+  inlined at BUILD time even for SSR code, so the rebuild is required), then re-serve the same
+  build while mutating the fixture's data between requests — one build covers every scenario.
+  `express` cannot be imported from the scratchpad (no node_modules there); the raw handler can.
 - **Verify a build-time-fetching page against a fixture API on a spare port**, not against the
   shared one: `node <scratch>/fixture-api.mjs` serving the three catalogue endpoints, then a
   wrapper that spawns `npm run build` with `PUBLIC_API_BASE_URL` pointed at it, then parse
@@ -534,4 +550,101 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
     office finds them acceptable is a design call.
   - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
     be started.)
+---
+
+## 2026-08-06T17:23:12Z - W7-US-007 - Storefront brands page reads featured
+
+- `/brands`'s "in focus" strip is now the office's `featured_rank` choice. The derived guess it
+  replaced — `is_international` AND has-a-photograph, ranked by designs held then by name — is
+  gone from `src/pages/brands/index.astro` entirely. The full directory below is untouched and
+  still alphabetical (`localeCompare`, so "de Le Cuona" files under D, not after Z).
+- New shared module `src/lib/featured.js` (`featuredRank`, `featuredByRank`) holds the ONE
+  definition of what a rank means: positive integer, ties broken on the order the API gave, input
+  never reordered, output frozen. `featuredCollections()` (home) and the new `featuredHouses()`
+  (houses) are both named wrappers over it — the homepage's behaviour is byte-identical and its
+  25 existing tests pass unchanged.
+- `src/lib/houses.js` gained `featuredHouses()`, `houseArtwork()` and `FOCUS_SLOTS` (3, the
+  design's three-column row), with a new `src/lib/houses.test.js` (11 tests; the file had none).
+- **The artwork chain, the same three rungs as the homepage's and it never borrows**: the
+  editorial photograph published for THIS house (EmDash winning over the markdown baseline —
+  precedence resolved in the page, exactly as `/brands/[slug]` does) → a design of THIS house's
+  own from the anonymous catalogue → the shared `.weave` ground. Every map is read at this house's
+  slug and at no other key, so a tile can never caption another maison's interior with this
+  house's name. No `<img>` is emitted without a source.
+- **An unphotographed featured house is KEPT.** The old strip excluded one ("a grey rectangle
+  beside a photograph"), which was right while the strip chose itself and is wrong now: excluding
+  it silently deletes the office's decision from the page, and under the trade gate a featured
+  house with no photograph is the NORMAL case (a represented house's designs are not in an
+  anonymous product list at all, and only `pierre-frey.md` is committed as editorial). The weave
+  tones rotate across the three cards, the same answer `primitives.css` already gives a grid of
+  missing images.
+- Nothing featured omits the strip, and that is the whole outage state here: `/brands` is not
+  `overlay`, so its header, directory and sourcing band still render — unlike the home's hero,
+  which needed an `is-empty` band. An API outage still renders the page's own error line.
+- Repos and files changed: atelier-storefront only — `src/lib/featured.js` (new),
+  `src/lib/houses.js`, `src/lib/houses.test.js` (new), `src/lib/home.js` (delegates),
+  `src/pages/brands/index.astro`, `src/styles/houses.css`, `CLAUDE.md` (`## Featured`, plus the
+  two now-false lines in the trade-gate and shared-helper sections); plus atelier-api bookkeeping
+  (`ralph/w7-featured/prd.json`, `ralph/w7-featured/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`).
+- Gates: `npm run lint` (store) -> 0, `npm test` (store) -> 0 (132 tests, 11 new),
+  `npm run build` (store) -> 0. The two untouched repos were run as well: `npm run lint` +
+  `npm test` (api) -> 0 (940 tests, 50 files); `npm test` + `npm run build` (crm) -> 0 (459 tests).
+
+- **Verified without a browser**, by RENDERING the page — it is `prerender = false`, so the
+  US-006 trick of parsing `dist/client/*.html` does not apply. The node adapter is `middleware`
+  mode, so `dist/server/entry.mjs`'s handler drives a bare `http.createServer` on port 0 while a
+  fixture API answers on 3199. 18 checks, all passing:
+  - The seeded choice (de-le-cuona 1, larsen 2, manuel-canovas 3): strip in rank order, the one
+    house with a design of its own shows it, the other two paint `scrim-tile-media weave` and
+    emit no `<img>`, no card carries a photograph belonging to another house, heading reads
+    "Three maisons", the directory below lists all five alphabetically, and the designs-held line
+    is printed only where the count is non-zero.
+  - A re-ordered list with a FOURTH featured house: the strip re-orders and takes the first
+    three; `pierre-frey` (which has both) shows its committed editorial slideshow image rather
+    than its catalogue photograph, proving rung 1 beats rung 2; the fourth house is absent from
+    the strip and present in the directory.
+  - Nothing featured: no strip, directory intact. API down: no strip, "Could not load the
+    houses" error line, page still renders.
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only) — promoted to `## Codebase Patterns` above:
+    a rule two surfaces read lives in one module; replacing a derived choice with an explicit one
+    changes the empty case (and an incidental filter becomes a veto); how to render a
+    `prerender = false` Astro page with no dev server and no fixed port.
+  - Gotchas:
+    - **`import.meta.env.PUBLIC_*` is inlined at BUILD time even in SSR code**, so pointing a
+      server-rendered page at a fixture API still needs a rebuild — the env var at request time
+      does nothing. `dist/` is gitignored, so a fixture build leaves no trace to clean up.
+    - **EmDash logs `Cannot open database because the directory does not exist` on every render
+      in a worktree** (`data/` is gitignored and never created here). It is non-fatal by design —
+      `src/lib/emdash.js` never throws and the markdown baseline still resolves — but it will
+      look like a failure to whoever renders a page next. It is not one.
+    - `.sort()` mutates, so the strip and the directory cannot share one array: the page maps the
+      API's list ONCE (that order is the tie-break between two houses at the same rank) and the
+      directory sorts a COPY. Sorting in place would silently make the strip alphabetical.
+    - `.scrim-tile-media` already existed in `primitives.css` with the comment "the weave stand-in
+      has no intrinsic size" and had no caller left; it is the right hook, not a new figure.
+    - `houseArtwork` returns a plain string, not `collectionArtwork`'s `{ image, src }` — both of
+      a house's rungs are URLs, and only the homepage mixes an `ImageMetadata` with one.
+  - Context:
+    - The rule: `atelier-storefront/src/lib/featured.js`. The house helpers:
+      `src/lib/houses.js` (+ `houses.test.js`). The page: `src/pages/brands/index.astro`.
+      The plain-ground tones: `src/styles/houses.css`, under "In focus".
+    - The API side this reads: `listBrands` in `atelier-api/src/catalogue/brands.js`.
+    - Architecture: `_bmad-output/planning-artifacts/architecture.md` § "Featured ordering",
+      the "Storefront asymmetry" paragraph.
+- **Needs human verification:**
+  - `/brands` against a live API — this is the check US-001 and US-003 both queued. Confirm de Le
+    Cuona / Larsen / Manuel Canovas are the three houses the office wants in focus (nothing on the
+    storefront has ever hand-picked houses, so the migration's seed is a judgement call), and
+    reorder in the CRM if not.
+  - **The plain weave tiles are the design call of this story.** On the live catalogue all three
+    seeded houses are represented-only, so all three cards will paint the weave ground with the
+    house name over it, and the strip today shows at most one photograph. A human should decide
+    whether that reads as a designed name plate or as three missing images — the alternatives are
+    featuring houses that HAVE editorial pages (a CRM edit, no code) or commissioning art for the
+    three.
+  - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
+    be started. The render harness above proves the markup, not how it looks.)
 ---

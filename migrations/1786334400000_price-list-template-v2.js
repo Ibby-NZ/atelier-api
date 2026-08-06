@@ -43,15 +43,27 @@ export const up = (pgm) => {
     template_version: { type: 'text', notNull: true, default: 'v1' },
   })
 
+  // freight_class is a genuine WIDEN: every existing row already satisfied
+  // IN ('A'..'E'), which is a subset of ^[A-Z]$, so re-adding it validates the
+  // table and cannot fail.
   pgm.dropConstraint('price_list_items', 'price_list_items_freight_class_check')
   pgm.addConstraint('price_list_items', 'price_list_items_freight_class_check', {
     check: "freight_class ~ '^[A-Z]$'",
   })
-  // duty_class had no check at all; it gets the same shape as freight_class so
-  // a lower-case or multi-character cell still fails loudly at the boundary.
-  pgm.addConstraint('price_list_items', 'price_list_items_duty_class_check', {
-    check: "duty_class ~ '^[A-Z]$'",
-  })
+  // duty_class is NOT a widen — it had no check at all, and until now
+  // POST/PATCH /admin/price-list-items accepted 200 characters of free text
+  // into it, which the CRM renders as a plain input. So a live database may
+  // hold a staff-typed note ("Pending broker confirmation") that this pattern
+  // rejects, and a validating constraint would abort the whole deploy on it.
+  // NOT VALID enforces the shape on every INSERT and UPDATE from here on while
+  // leaving the existing rows alone. Validate it in a later migration once the
+  // column has been audited — the letters are stored raw and uninterpreted, so
+  // nothing reads a legacy value in the meantime.
+  pgm.sql(`
+    ALTER TABLE price_list_items
+      ADD CONSTRAINT price_list_items_duty_class_check
+      CHECK (duty_class ~ '^[A-Z]$') NOT VALID
+  `)
 }
 
 /**

@@ -229,4 +229,97 @@ describe('contact form + enquiries inbox', () => {
       expect(response.statusCode).toBe(404)
     })
   })
+
+  describe('DELETE /admin/contact-enquiries/:id', () => {
+    // Archiving spam only hides it behind ?include_archived=true; the inbox has
+    // to be able to be rid of it outright.
+    //
+    // These fixtures are INSERTed rather than posted: POST /contact shares the
+    // auth routes' 10-per-15-min-per-IP bucket with the tests above, and this
+    // block would spend the rest of it and start receiving 429s.
+    const seedOne = async (subject, userId = null) => {
+      const { rows } = await pool.query(
+        `INSERT INTO contact_enquiries (name, email, subject, message, user_id)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        ['Seed', testEmail('seed'), subject, 'msg', userId]
+      )
+      return rows[0].id
+    }
+
+    const rowCount = async (id) => {
+      const { rows } = await pool.query('SELECT 1 FROM contact_enquiries WHERE id = $1', [
+        id,
+      ])
+      return rows.length
+    }
+
+    it('deletes an enquiry outright and drops it from both lists', async () => {
+      const id = await seedOne('spam')
+      const response = await inject(
+        'DELETE',
+        `/admin/contact-enquiries/${id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({ deleted: { entity: 'contact_enquiry', id } })
+      expect(await rowCount(id)).toBe(0)
+
+      const withArchived = (
+        await inject('GET', '/admin/contact-enquiries?include_archived=true', backofficeCookie)
+      ).json()
+      expect(withArchived.enquiries).toHaveLength(0)
+    })
+
+    it('deletes an archived enquiry too', async () => {
+      const id = await seedOne('archived spam')
+      await inject('POST', `/admin/contact-enquiries/${id}/archive`, backofficeCookie)
+      const response = await inject(
+        'DELETE',
+        `/admin/contact-enquiries/${id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(await rowCount(id)).toBe(0)
+    })
+
+    it('deletes an enquiry sent by a logged-in customer without touching the account', async () => {
+      const account = await pool.query('SELECT id FROM users WHERE email = $1', [
+        testEmail('shopper'),
+      ])
+      const userId = account.rows[0].id
+      const id = await seedOne('from an account', userId)
+
+      const response = await inject(
+        'DELETE',
+        `/admin/contact-enquiries/${id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(await rowCount(id)).toBe(0)
+
+      const survivor = await pool.query('SELECT 1 FROM users WHERE id = $1', [userId])
+      expect(survivor.rows).toHaveLength(1)
+    })
+
+    it('returns 404 with an empty blockers list for an unknown id', async () => {
+      const response = await inject(
+        'DELETE',
+        '/admin/contact-enquiries/99999999',
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(404)
+      expect(response.json().blockers).toEqual([])
+    })
+
+    it('rejects anonymous with 401 and customer with 403, leaving the row', async () => {
+      const id = await seedOne('keep me')
+      expect(
+        (await inject('DELETE', `/admin/contact-enquiries/${id}`, null)).statusCode
+      ).toBe(401)
+      expect(
+        (await inject('DELETE', `/admin/contact-enquiries/${id}`, customerCookie)).statusCode
+      ).toBe(403)
+      expect(await rowCount(id)).toBe(1)
+    })
+  })
 })

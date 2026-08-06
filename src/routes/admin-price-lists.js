@@ -14,9 +14,12 @@
 //   - The category/unit/currency enums and the class-letter pattern come from
 //     scripts/lib/price-template.js, the converter's vocabulary module, so a
 //     hand-keyed item is validated by exactly the rules an imported one is.
+//   - Hard DELETE goes through the lifecycle registry, never a bare SQL delete.
+//     It is the one delete here whose success is qualified — see REIMPORT_WARNING.
 
 import {
   listPriceListItems,
+  getPriceListItem,
   createPriceListItem,
   updatePriceListItem,
   setPriceListItemArchived,
@@ -25,6 +28,16 @@ import {
   MAX_LIMIT,
 } from '../pricing/admin-price-lists.js'
 import { CATEGORIES, UNITS, CURRENCIES, CLASS_LETTER } from '../../scripts/lib/price-template.js'
+import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
+
+// A price-list item is the one row in this API whose deletion is not durable:
+// `npm run import:pricing` upserts on (supplier, category, code) and keeps rows
+// absent from later files, so the next import re-creates a deleted row verbatim
+// while leaving an archived one archived. Staff cannot be expected to know that,
+// so the 200 says it — the CRM renders the message in its toast.
+const REIMPORT_WARNING =
+  'Deleted, but not permanently: npm run import:pricing re-creates this row from ' +
+  'the supplier file. Archive it instead if the removal must survive a re-import.'
 
 // Derived from the shared vocabularies rather than re-typed: a hand-entered item
 // must be exactly as valid as an imported one, and these lists had already
@@ -139,6 +152,24 @@ export const adminPriceListRoutes = async (app, { pool }) => {
     }
   )
 
+  // One row by id. No archived filter: the CRM re-reads the row it just archived
+  // to render the new state, and a 404 there would read as "someone deleted it".
+  app.get(
+    '/admin/price-list-items/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const item = await getPriceListItem(pool, request.params.id)
+      if (!item) {
+        reply.code(404)
+        return {
+          error: 'Not Found',
+          message: `Price-list item ${request.params.id} not found.`,
+        }
+      }
+      return { item }
+    }
+  )
+
   app.post(
     '/admin/price-list-items',
     { preHandler: backoffice, schema: { body: createSchema } },
@@ -186,6 +217,23 @@ export const adminPriceListRoutes = async (app, { pool }) => {
         }
       }
       return { item }
+    }
+  )
+
+  // A rate row has no dependants — nothing in the schema references
+  // price_list_items — so the registry entry carries no probes and no guard, and
+  // the only refusal left is 404. `replyDelete` still sends it, so the refusal
+  // shape stays identical to every other delete; only the success envelope is
+  // widened, by the one additive `warning` key.
+  app.delete(
+    '/admin/price-list-items/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const result = await deleteOrExplain(pool, 'price_list_item', request.params.id, {
+        user: request.user,
+      })
+      if (!result.deleted) return replyDelete(reply, result)
+      return { deleted: { entity: result.entity, id: result.id }, warning: REIMPORT_WARNING }
     }
   )
 }

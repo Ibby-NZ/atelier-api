@@ -31,20 +31,20 @@ epics:
   w2-crud:
     name: "W2 CRUD completion"
     branch: aug6/w2-crud
-    status: pending
+    status: done
     stories:
-      US-001: pending   # DELETE for brand and collection
-      US-002: pending   # DELETE for product and colourway
-      US-003: pending   # DELETE for price-list item and contact enquiry
-      US-004: pending   # DELETE for user with the self-delete guard
-      US-005: pending   # Missing admin reads: brand, collection, price-list item by id
-      US-006: pending   # Colourway list and detail endpoints
-      US-007: pending   # Shipping-rate CRUD with the last-tier guard
-      US-008: pending   # Inventory create and delete
-      US-009: pending   # Delete on the products and houses screens
-      US-010: pending   # Standalone AdminCollections screen
-      US-011: pending   # AdminShipping screen
-      US-012: pending   # Delete on stock, supplier rates, orders and users screens
+      US-001: done      # DELETE for brand and collection
+      US-002: done      # DELETE for product and colourway
+      US-003: done      # DELETE for price-list item and contact enquiry
+      US-004: done      # DELETE for user with the self-delete guard
+      US-005: done      # Missing admin reads: brand, collection, price-list item by id
+      US-006: done      # Colourway list and detail endpoints
+      US-007: done      # Shipping-rate CRUD with the last-tier guard
+      US-008: done      # Inventory create and delete
+      US-009: done      # Delete on the products and houses screens
+      US-010: done      # Standalone AdminCollections screen
+      US-011: done      # AdminShipping screen
+      US-012: done      # Delete on stock, supplier rates, orders and users screens
   w3-suppliers:
     name: "W3 Suppliers"
     branch: aug6/w3-suppliers

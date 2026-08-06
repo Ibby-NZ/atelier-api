@@ -105,7 +105,7 @@ const BRAND_UPDATE_COLUMNS = Object.freeze([
   'website_url',
 ])
 
-const toBrand = (row) =>
+const toBrand = (row, extra) =>
   Object.freeze({
     id: row.id,
     name: row.name,
@@ -118,6 +118,7 @@ const toBrand = (row) =>
     website_url: row.website_url ?? null,
     archived_at: row.archived_at ?? null,
     created_at: row.created_at,
+    ...extra,
   })
 
 /**
@@ -150,7 +151,7 @@ export const websiteUrlFrom = (value, label = 'Website') => {
   return trimmed
 }
 
-const toCollection = (row) =>
+const toCollection = (row, extra) =>
   Object.freeze({
     id: row.id,
     brand_id: row.brand_id,
@@ -160,7 +161,17 @@ const toCollection = (row) =>
     description: row.description ?? null,
     image_url: row.image_url ?? null,
     archived_at: row.archived_at ?? null,
+    ...extra,
   })
+
+// Split into columns + FROM (the shape admin-products.js uses) so the detail
+// read can slot a count subquery in between them.
+const COLLECTION_COLUMNS = `c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.archived_at, b.name AS brand_name`
+
+const COLLECTION_FROM = `FROM collections c
+       JOIN brands b ON b.id = c.brand_id`
+
+const COLLECTION_SELECT = `SELECT ${COLLECTION_COLUMNS} ${COLLECTION_FROM}`
 
 /**
  * Every brand, alphabetically. Unlike the public list this carries ids, because
@@ -174,7 +185,52 @@ export const listAdminBrands = async (pool, { includeArchived = false } = {}) =>
   const { rows } = await pool.query(
     `SELECT ${BRAND_COLUMNS} FROM brands ${where} ORDER BY name ASC, id ASC`
   )
-  return rows.map(toBrand)
+  // Arrow, not a bare `map(toBrand)`: the mapper takes a second `extra`
+  // argument, and map would hand it the array index.
+  return rows.map((row) => toBrand(row))
+}
+
+/**
+ * One brand by id with its collections and the two child counts, or null when it
+ * does not exist. This is what the CRM re-reads after a write, so that
+ * server-generated fields (the slug) and anything a trigger touched appear
+ * without refetching the whole list.
+ *
+ * Two deliberate choices, both about matching what a DELETE would do:
+ *   - The counts are the same question the lifecycle probes ask — every child
+ *     row, **archived included** — so a house reading 0/0 is exactly a house
+ *     `DELETE /admin/brands/:id` accepts, and one reading 3/1 is one it refuses
+ *     with those numbers. A count that skipped archived rows would tell staff a
+ *     house was empty and then be contradicted by the 409.
+ *   - Archived collections are listed too, each carrying its `archived_at`, the
+ *     same way getAdminProduct returns every colourway. Filtering here would
+ *     hide the rows that block the delete.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @returns {Promise<object|null>}
+ */
+export const getAdminBrand = async (pool, id) => {
+  const { rows } = await pool.query(
+    `SELECT ${BRAND_COLUMNS},
+            (SELECT COUNT(*)::int FROM products WHERE brand_id = brands.id) AS product_count
+       FROM brands
+      WHERE id = $1`,
+    [id]
+  )
+  const row = rows[0]
+  if (!row) {
+    return null
+  }
+  const { rows: collections } = await pool.query(
+    `${COLLECTION_SELECT} WHERE c.brand_id = $1 ORDER BY c.name ASC, c.id ASC`,
+    [id]
+  )
+  return toBrand(row, {
+    product_count: row.product_count,
+    collection_count: collections.length,
+    collections: collections.map((row) => toCollection(row)),
+  })
 }
 
 /**
@@ -244,10 +300,6 @@ export const updateBrand = async (pool, id, input) => {
   }
 }
 
-const COLLECTION_SELECT = `SELECT c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.archived_at, b.name AS brand_name
-       FROM collections c
-       JOIN brands b ON b.id = c.brand_id`
-
 /**
  * Collections, optionally narrowed to one brand, with the owning brand's name.
  *
@@ -273,7 +325,30 @@ export const listAdminCollections = async (
     `${COLLECTION_SELECT} ${where} ORDER BY b.name ASC, c.name ASC, c.id ASC`,
     params
   )
-  return rows.map(toCollection)
+  return rows.map((row) => toCollection(row))
+}
+
+/**
+ * One collection by id with its house's name and its product count, or null when
+ * it does not exist. The count follows the same rule as getAdminBrand's: it
+ * counts archived products too, because `products.collection_id` is SET NULL and
+ * the delete probe counts them — an unprobed delete would report success while
+ * silently uncollecting every one of them.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @returns {Promise<object|null>}
+ */
+export const getAdminCollection = async (pool, id) => {
+  const { rows } = await pool.query(
+    `SELECT ${COLLECTION_COLUMNS},
+            (SELECT COUNT(*)::int FROM products WHERE collection_id = c.id) AS product_count
+       ${COLLECTION_FROM}
+      WHERE c.id = $1`,
+    [id]
+  )
+  const row = rows[0]
+  return row ? toCollection(row, { product_count: row.product_count }) : null
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   listEnquiries,
   setEnquiryArchived,
 } from '../contact/contact.js'
+import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { notifyContactReceived } from '../email/notifications.js'
 
 // Same posture as register/login: 10 submissions per 15 min per IP.
@@ -117,5 +118,24 @@ export const contactRoutes = async (app, { pool, mailer = null }) => {
       }
       return { enquiry }
     }
+  )
+
+  // Hard delete, for spam — archiving keeps it in the inbox behind a flag, which
+  // is the wrong answer for a message nobody should ever read again. Nothing
+  // references contact_enquiries, so the registry entry has no probes and no
+  // guard; `deleteOrExplain` returns its refusal rather than throwing it, so the
+  // handler pipes the result straight to `replyDelete`. The entity name is a
+  // code literal, never `:entity` from the URL — the registry knows 'brand' and
+  // 'user' alike, so it is not an authorisation boundary.
+  app.delete(
+    '/admin/contact-enquiries/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'contact_enquiry', request.params.id, {
+          user: request.user,
+        })
+      )
   )
 }

@@ -56,11 +56,27 @@ export const UNITS = new Set(['metre', 'yard', 'roll', 'piece', 'hide', 'panel']
 export const CURRENCIES = new Set(['EUR', 'USD', 'GBP'])
 
 // Input vocabularies, keyed by the lowercased cell.
+//
+// Both the plural and the singular are accepted, plus "wallpaper" spelled out
+// beside the "w/p" the current corpus uses. The 74 files on hand only ever say
+// Fabrics / w/p / Trimmings / Accessories (in mixed case), so these aliases
+// cannot change a single committed row — verified by regenerating
+// price-lists.json and getting a byte-identical file. They exist for the drops
+// that have not arrived yet: this template is meant to be universal going
+// forward, and rejecting a supplier's file because it says "Fabric" rather than
+// "Fabrics" would read as a bug in ours.
 export const CATEGORY_BY_ITEM_TYPE = new Map([
   ['fabrics', 'fabric'],
+  ['fabric', 'fabric'],
   ['w/p', 'wallpaper'],
+  ['wallpaper', 'wallpaper'],
+  ['wallpapers', 'wallpaper'],
+  ['wall covering', 'wallpaper'],
+  ['wallcovering', 'wallpaper'],
   ['trimmings', 'trimming'],
+  ['trimming', 'trimming'],
   ['accessories', 'accessory'],
+  ['accessory', 'accessory'],
 ])
 // p/hide and p/panel have no template rows yet, but both units have been in the
 // column CHECK since the table was created (platform decision 7), so accepting

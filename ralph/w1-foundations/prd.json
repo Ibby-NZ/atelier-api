@@ -21,8 +21,8 @@
         "atelier-api"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T01:15:05Z"
     },
     {
       "id": "US-002",
@@ -38,8 +38,8 @@
         "atelier-api"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T01:15:05Z"
     },
     {
       "id": "US-003",
@@ -56,8 +56,8 @@
         "atelier-api"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T01:15:05Z"
     },
     {
       "id": "US-004",
@@ -77,8 +77,8 @@
         "atelier-crm"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T01:15:05Z"
     },
     {
       "id": "US-005",
@@ -96,8 +96,8 @@
         "atelier-crm"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T01:15:05Z"
     },
     {
       "id": "US-006",
@@ -119,8 +119,8 @@
         "atelier-storefront"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T01:15:05Z"
     }
   ]
 }

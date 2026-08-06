@@ -1,6 +1,6 @@
 # Epics — "August 6th updates"
 
-Nine epics, one per workstream, in dependency order. The 1:1 mapping is load-bearing: each epic
+Ten epics, one per workstream, in dependency order. The 1:1 mapping is load-bearing: each epic
 becomes exactly one Ralph `prd.json`.
 
 Story sizing rule: one story = one iteration = one context window. Hard ceiling **3 files of new
@@ -12,9 +12,9 @@ Every story's acceptance criteria end with the gates for the repos it touches. *
 Wave schedule:
 
 ```
-Wave 1  E1 (alone, supervised)  ·  E8  ·  E9
-Wave 2  E2  ·  E3  ·  E7            (3 concurrent, after E1 merges)
-Wave 3  E4  ·  E6                   (E6 needs E3's category column)
+Wave 1  E1 (alone, supervised)  ·  E10  ·  E9
+Wave 2  E8 (needs E10)  ·  E2  ·  E3  ·  E7   (after E1 merges)
+Wave 3  E4  ·  E6                             (both need E3's category column)
 Wave 4  E5
 ```
 
@@ -176,7 +176,7 @@ fallback, not a broken image.
 ## Epic 8 — Colour files (`aug6/w8-colour-files`) · api only · 6 stories
 
 **Goal:** import the supplier colour files into the colourway catalogue.
-**Requires:** nothing. Runs in Wave 1 alongside E1 — disjoint file footprint.
+**Requires:** E10 Pricing template merged — the rate output uses its column shape.
 
 | # | Story | Repos |
 |---|---|---|
@@ -207,6 +207,36 @@ gates, so a loop with nothing to verify against is the wrong instrument. One sup
 
 Must account for the existing `SampleScanner.jsx` phone-frame preview and Epic 4's
 `GET /admin/samples/by-barcode/:barcode`.
+
+---
+
+## Epic 10 — Pricing template (`aug6/w10-pricing-template`) · api only · 6 stories
+
+**Goal:** one universal pricing template for every supplier going forward. v2 is a strict superset
+of the existing 14 columns, in the same order, with new columns appended — that is what lets it be
+universal without breaking a single existing drop.
+**Requires:** nothing. Runs in Wave 1 alongside E1; footprints are disjoint.
+**Blocks:** E8 (its rate output is emitted in this template's shape).
+
+| # | Story | Repos |
+|---|---|---|
+| US-001 | Migration: `brand_name`, `pattern_match`, `duty_percent`, `template_version`; widen the class checks | api |
+| US-002 | Template registry, with v1's mapper moved verbatim | api |
+| US-003 | v2 mapping and the omit-on-v1 rule | api |
+| US-004 | Importer accepts the v2 fields | api |
+| US-005 | Shared vocabulary module, replacing three hand-copied lists | api |
+| US-006 | Byte-pin unit test and regeneration tripwire | api |
+
+Key acceptance criteria — **the header row is the version**: no version column, no preamble line.
+A version column can be misdeclared by deleting a column; a header mismatch fails loudly.
+**v2-only fields are omitted entirely on v1 rows, never written as null** — nulls would grow all
+19.5k committed records and make the next regeneration a total diff. `template_version` must use
+`COALESCE`, because `unnest` binds an explicit NULL for a missing key and that defeats the column
+DEFAULT. `npm run convert:pricing` must still produce a byte-identical `price-lists.json`.
+
+`duty_class` and `freight_class` widen to a single uppercase letter: today's sets encode a guess
+about a broker table nobody has, so the first `B` would reject the client's own file as a bug in
+ours. No placeholder duty or freight *value* is written anywhere.
 
 ---
 

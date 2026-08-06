@@ -18,6 +18,7 @@
 import { PUBLIC_USER_COLUMNS } from '../auth/user-columns.js'
 import { buildUpdate } from '../catalogue/admin-brands.js'
 import { hashPassword } from '../auth/passwords.js'
+import { setArchived } from '../lifecycle/archive.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -224,12 +225,8 @@ export const updateUser = async (pool, id, input) => {
  * @returns {Promise<object|null>}
  */
 export const setUserArchived = async (pool, id, archived) => {
-  const archivedExpr = archived ? 'now()' : 'NULL'
-  const { rows } = await pool.query(
-    `UPDATE users SET archived_at = ${archivedExpr}
-      WHERE id = $1
-      RETURNING ${USER_READ_COLUMNS}`,
-    [id]
-  )
-  return rows[0] ? toUser(rows[0]) : null
+  const row = await setArchived(pool, 'user', id, archived, {
+    returning: USER_READ_COLUMNS,
+  })
+  return row ? toUser(row) : null
 }

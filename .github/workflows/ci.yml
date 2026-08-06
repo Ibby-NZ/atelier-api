@@ -1,0 +1,72 @@
+# atelier-api gates, run by GitHub rather than by the agent that wrote the code.
+#
+# Two things here are specific to this repo and are why it cannot be the generic
+# node workflow:
+#
+#   - **The tests need a real Postgres.** There are no database mocks: every
+#     suite runs the migrations through node-pg-migrate and talks to a live
+#     server. Hence the service container, and hence DATABASE_URL.
+#   - **`loadConfig` throws without COOKIE_SECRET (32+ chars).** Nothing in the
+#     suite can build an app without it, so it is set here as a throwaway CI
+#     value. It signs nothing that outlives the job.
+#
+# There is no typecheck step because there is no TypeScript in this repo. If a
+# template tells you to add one, it is wrong.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [august-6th-updates]
+
+# Read-only. This workflow can clone the repository and nothing else — it cannot
+# push, tag, or write to main.
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: lint + test
+    runs-on: ubuntu-latest
+
+    services:
+      # 14 to match the Homebrew Postgres the team develops against; a newer
+      # server would let a query through here that fails in production.
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: atelier
+          POSTGRES_PASSWORD: atelier
+          POSTGRES_DB: atelier_ci
+        ports:
+          - 5432:5432
+        # Without this the first migration can race the server's startup and the
+        # whole run fails on a connection refused that looks like a code fault.
+        options: >-
+          --health-cmd "pg_isready -U atelier"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://atelier:atelier@localhost:5432/atelier_ci
+      # Throwaway, and long enough to satisfy the 32-character minimum. A real
+      # secret would be pointless here: the job signs no cookie anyone will hold.
+      COOKIE_SECRET: ci-cookie-secret-0123456789abcdef0123456789abcdef
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      # vitest.config.js sets fileParallelism: false on purpose — node-pg-migrate
+      # takes a Postgres advisory lock, so parallel files throw "Another
+      # migration is already running". Do not add -threads here.
+      - run: npm test

@@ -5,7 +5,29 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- (nothing yet — the first iteration adds to this)
+- **The database will NOT stop a destructive delete in this schema.** Of the 13 FK edges between the
+  live (non-`legacy_*`) tables, exactly ONE is RESTRICT (`order_lines_colourway_id_fkey`). Eight are
+  CASCADE and four are SET NULL. So `DELETE FROM brands WHERE id = <a stocked house>` raises nothing
+  and destroys its collections, products, colourways and inventory while returning success. Any new
+  delete path must probe first; "the FK will protect us" is false here.
+- **A Fastify error cannot carry structured detail.** The error serializer emits exactly
+  `{ statusCode, error, message }` and drops every custom property. Anything a screen needs to render
+  (blocker lists, field errors, an "archive instead" affordance) must be a RETURN value the handler
+  sends, never a thrown `Object.assign(new Error(...), { ... })`. That is why `deleteOrExplain`
+  returns its 409 rather than throwing it.
+- **`FOR UPDATE`, not `FOR NO KEY UPDATE`, is what makes a check-then-write safe.** Postgres takes
+  `FOR KEY SHARE` on a referenced row whenever a transaction inserts a row pointing at it, and
+  `FOR KEY SHARE` conflicts with `FOR UPDATE` and with nothing weaker. Any "verify, then act" pair in
+  one transaction needs the strong lock or the window stays open.
+- **A stub `pool` is the cheap way to test transaction SHAPE.** `{ connect: async () => client }`
+  where `client.query` logs the SQL text lets a test assert statement order, lock mode and rollback
+  behaviour, and lets it reach error branches (a pg 23503) whose real-world trigger is a race. Use it
+  alongside real-database behaviour tests, not instead of them.
+- **pg `numeric` comes back as a string** (`'4.00'`), so any quantity read inside a guard or probe
+  must go through `Number()` before it is compared. Already house policy; it bites in new code first.
+- **Direct `pool.query` INSERTs beat `/auth/register` for user fixtures.** Register is rate-limited
+  10 per 15 min per IP and burns an argon2 hash per call. A test that only needs a `users` row (not a
+  session cookie) should insert one with a placeholder `password_hash` and skip the limiter entirely.
 
 ---
 
@@ -13,3 +35,274 @@ Story-specific detail belongs in the per-story entries below, not here.
 
 Appended by each iteration, newest last. Never rewrite an existing entry.
 
+## 2026-08-06T01:15:05Z - W1-US-001 - Lifecycle registry and deleteOrExplain
+
+- Implemented the shared delete mechanism: a frozen entity registry plus
+  `deleteOrExplain(pool, entityName, id, ctx)` that returns a refusal instead of throwing one, and
+  `replyDelete(reply, result)` to keep future handlers thin. No route registers it yet — W2 owns the
+  callers; this story ships the mechanism only.
+- Registry covers the nine entities whose tables exist today: `brand`, `collection`, `product`,
+  `colourway`, `inventory`, `price_list_item`, `user`, `shipping_rate`, `contact_enquiry`.
+  Supplier/sample/sample-order/sample-loan entries from architecture.md's delete-policy table are
+  deliberately ABSENT — their tables are created by W3/W4, and US-003's information_schema assertion
+  would fail on a declared table that does not exist. Those workstreams add their own entries.
+- Guards implemented: `inventory` refuses while `qty_reserved > 0` (409), `shipping_rate` refuses the
+  last tier for a zone (409, because a zone with no tiers makes `getShippingQuote` answer 400 and
+  stops checkout there), `user` refuses a self-delete (403, from `ctx.user.id`).
+- Repos and files changed — atelier-api only:
+  - `src/lifecycle/registry.js` (new) — the frozen registry, the three guards, `assertEntity`
+    (runs at import time, so a malformed probe throws at boot rather than reaching SQL),
+    `requireEntity`, `LIFECYCLE_ENTITY_NAMES`.
+  - `src/lifecycle/delete.js` (new) — `deleteOrExplain`, `replyDelete`, `constraintBlockers`,
+    `lockSql`.
+  - `test/lifecycle-delete.test.js` (new) — 23 tests.
+  - `ralph/w1-foundations/prd.json`, `_bmad-output/implementation-artifacts/sprint-status.yaml`,
+    `ralph/w1-foundations/progress.txt`, `CLAUDE.md` (bookkeeping).
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 570 tests; was 547, +23). No migration in
+  this story, so the double-migrate proof does not apply.
+- **Learnings:**
+  - The single-round-trip probe is `UNION ALL` over `SELECT '<relation>', count(*)::int FROM
+    (<probe sql> LIMIT 101) AS probe_<i>`. Because ALL of an entity's probes run in that one
+    statement, any test that deletes a `user` executes the `trade_applications` probe against the
+    real database even though no test inserts a trade application — a broken probe body cannot hide.
+  - `LIMIT 101` with a cap of 100 is what makes `capped` honest: 101 hits report
+    `{ count: 100, capped: true }` and the message renders "100+ products".
+  - `inventory`'s `idColumn` is **`colourway_id`, not `id`** — the table has both (`id` is the PK,
+    `colourway_id` is UNIQUE), and every existing caller (`/admin/inventory/:colourwayId`, the order
+    state machine) addresses stock by colourway. A registry entry keyed on `id` would type-check
+    fine and address the wrong thing.
+  - `archivable` is a property of the ENTITY, not of the row: `inventory` and `shipping_rates` have
+    no `archived_at` column, so their refusals must not offer "archive instead". Check for the
+    column before adding a new entry with `archivable: true`.
+  - The 23503 backstop reports `{ count: 1, capped: true }` — the database says "at least one" and
+    nothing about how many, and "1+" is the honest reading. An unrecognised constraint degrades the
+    blocker LABEL, never the status (same posture as `rethrowConflict` for 23505).
+  - Gotcha for W2: fixture cleanup must delete `orders` BEFORE `brands`, because
+    `order_lines.colourway_id` is the schema's one RESTRICT edge and a brand cascade cannot get past
+    it — the cleanup itself 23503s otherwise.
+  - Gotcha for W2's price-list item screen: architecture.md notes the confirm copy must warn that a
+    deleted price-list item **comes back on the next `npm run import:pricing`** (the upsert
+    re-creates it from the supplier file). That warning is UI copy; the registry entry carries only a
+    comment.
+  - Context: the mechanism is `src/lifecycle/{registry,delete}.js`. The eight archive helpers US-002
+    consolidates are `setBrandArchived`/`setCollectionArchived` (`src/catalogue/admin-brands.js`),
+    `setProductArchived`/`setColourwayArchived` (`src/catalogue/admin-products.js`),
+    `setPriceListItemArchived` (`src/pricing/admin-price-lists.js`), `setOrderArchived`
+    (`src/orders/admin-orders.js`, wrapped in `withOrderTxn` + a terminal-state guard),
+    `setUserArchived` (`src/users/admin-users.js`) and `setEnquiryArchived`
+    (`src/contact/contact.js`). Three different return conventions between them: throw 404 / return
+    null / return via a re-fetch; `price_list_items` also stamps `updated_at` and `products` also
+    clears `show_on_website`.
+- **Needs human verification:** none. Nothing is wired to a route or a screen yet.
+---
+
+## 2026-08-06T01:15:05Z - W1-US-002 - setArchived replaces the eight duplicated archive helpers
+
+- Added `setArchived(db, entityName, id, archived, options)` and pointed all eight archive helpers at
+  it. Each keeps its own thin wrapper and its own return shape (three different conventions survive:
+  throw 404 / return null / re-fetch through a joined read model), because that is what the callers'
+  existing tests assert. `withOrderTxn` and its terminal-state guard are untouched — the order
+  helper now passes its transaction's `client` into `setArchived` instead of running its own UPDATE.
+- Repos and files changed — atelier-api only:
+  - `src/lifecycle/archive.js` (new) — `setArchived`.
+  - `src/lifecycle/registry.js` — added the `order` entry (`archivable: true, deletable: false`),
+    a `deletable` check in `assertEntity`, and `requireDeletableEntity`.
+  - `src/lifecycle/delete.js` — `deleteOrExplain` now resolves through `requireDeletableEntity`.
+  - The eight callers, UPDATE fragment only: `src/catalogue/admin-brands.js` (brand, collection),
+    `src/catalogue/admin-products.js` (product, colourway), `src/pricing/admin-price-lists.js`,
+    `src/orders/admin-orders.js`, `src/users/admin-users.js`, `src/contact/contact.js`.
+  - `test/lifecycle-archive.test.js` (new) — 7 tests, for the helper's own contract only.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (38 files, 577 tests; was 570, +7). **No existing test
+  file was modified** (`git diff --name-only -- test/` is empty) — that is the move-not-rewrite proof
+  the story asks for.
+- **Learnings:**
+  - **`order` had to enter the registry for archiving, and must never be deletable.** architecture.md
+    lists orders among the never-hard-deletable entities, but `setArchived` is keyed on the registry,
+    so the entry has to exist. Hence `deletable: false` and `requireDeletableEntity`, which
+    `deleteOrExplain` (and only `deleteOrExplain`) resolves through. **The normal protection is
+    ABSENCE** — `requireEntity` throws on an unknown name, so order_lines, webhook_events, trade
+    applications, trade accounts and every `legacy_*` table need no entry at all. Only add
+    `deletable: false` for an entity that has to be in the registry for some other reason.
+  - The real duplication was four lines, not a function: the `now()`/`NULL` fragment, the WHERE on
+    the id column, the RETURNING projection and "no row means unknown id". Everything else differed
+    per caller. Two callers need extra SET fragments (`products` clears `show_on_website` when
+    archiving but NOT when restoring; `price_list_items` stamps `updated_at`), and `collections`
+    needs an `UPDATE … FROM brands` join purely to decorate the RETURNING with the house name — so
+    `setArchived` takes `extraSets`, `alias`, `from`, `filter` and `returning`, all frozen code
+    literals in the same posture as `buildUpdate`'s column whitelists.
+  - `price_list_items` was the one helper using a parameterised `CASE WHEN $2::boolean` instead of
+    the literal fragment. It now matches the other seven; `archived` is a trusted boolean argument,
+    never user input, which is what makes switching the fragment on it safe.
+  - `setArchived` takes `db`, not `pool`, so it works with an open client. That is load-bearing for
+    the order helper: the terminal-state guard and the write must be the same transaction or a
+    concurrent transition slips between them.
+  - Every column constant used as a RETURNING projection (`BRAND_COLUMNS`, `ROW_COLUMNS`,
+    `USER_READ_COLUMNS`, `ENQUIRY_COLUMNS`) is UNQUALIFIED, so it only works while the statement has
+    no alias. The collection wrapper passes a fully qualified projection because it does.
+- **Needs human verification:** none. Behaviour is unchanged by construction; the existing
+  archive/restore suites are the evidence.
+---
+
+## 2026-08-06T01:15:05Z - W1-US-003 - Registry safety tests
+
+- `test/lifecycle-registry.test.js` (new, 79 tests). Four groups:
+  1. **Shape**, parameterised over every entity and every probe: probe sql matches
+     `/^SELECT 1 FROM [a-z_ ]/`, its placeholders are exactly `['$1']`, it contains no `;`; relation
+     names, entity names, tables and id columns match `/^[a-z][a-z0-9_]*$/`; relations are unique per
+     entity; the whole registry is frozen down to each probe object.
+  2. **`assertEntity` actually bites** — 14 synthetic malformed entries (uppercase table, a table
+     name carrying a quote, `$2`, a second placeholder, `DELETE` in place of the select, a spaced
+     relation, a duplicated relation, a string guard, …), each asserted to throw. The real registry is
+     validated at import time, so a bad entry cannot be observed any other way; without these the
+     validator could be entirely decorative and nothing would notice.
+  3. **Schema agreement**, against the live database: every declared `table.idColumn` exists in
+     `information_schema.columns`, and `archivable` agrees exactly with whether the table has an
+     `archived_at` column (both directions).
+  4. **No caller derives an entity name from a request** — reads every `.js` under `src/` except
+     `src/lifecycle/` and `src/seed/data/`, matches every `deleteOrExplain(`/`setArchived(` call and
+     asserts the second argument is a single-quoted literal that is a registry key.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 656 tests; was 577, +79).
+- **Learnings:**
+  - **The call-site scan needs its own "did I find anything" assertion.** A regex that silently
+    matches nothing passes every per-site assertion vacuously, so the suite would go green the day a
+    refactor renamed the function. `expect(callSites.length).toBeGreaterThanOrEqual(8)` is the guard.
+    Verified the negative separately: `request.params.entity` and a bare identifier both fail the
+    literal test, `'brand'` passes.
+  - `src/lifecycle/` is excluded from that scan deliberately — the module's own parameter is named
+    `entityName`, and it defines the contract rather than consuming it. The exclusion is by directory
+    prefix, so W2's route files are covered the moment they exist.
+  - **The registry is not an authorisation boundary.** `requireEntity` throwing on an unknown name
+    proves nothing about safety: `'brand'` and `'user'` are both known, so a path-derived name would
+    still let a client choose which table is written to. That is why the test demands a literal, not
+    merely a valid name.
+  - `archivable` is asserted in BOTH directions against `information_schema`. One direction would let
+    a new entity claim `archivable: true` on a table with no `archived_at`, and the CRM would offer
+    "Archive instead" on a blocked delete that then 500s.
+  - `readdirSync(dir, { recursive: true })` returns paths relative to `dir`, so the prefix filters
+    read `file.startsWith('lifecycle/')` — not an absolute path check.
+  - `it.each(Object.entries(...))` names the case from the first tuple element, which is why the
+    entity name is the first element and the entity object the second; the probe cases build an
+    explicit `"entity.relation"` key for the same reason.
+- **Needs human verification:** none — this story is tests only.
+---
+
+## 2026-08-06T01:15:05Z - W1-US-004 - CRM list kit: list.js, useAdminList, Pagination
+
+- Three files under `atelier-crm/src/admin/`, each with a `.test.js` sibling. No screen consumes them
+  yet — W2 onward wires them in, and CRM screen files are outside this workstream's ownership.
+  - `list.js` — pure: `buildListQuery`, `listPath`, `pageCount`, `clampPage`, `readList`,
+    `DEFAULT_LIMIT` (25).
+  - `useAdminList.js` — `{ path, key, limit, filters }` -> `{ rows, total, page, setPage,
+    totalPages, status, error, reload }`, plus the exported pure `pageAfterLoad`.
+  - `Pagination.jsx` — `{ page, totalPages, total, unit, onPage, busy }`, null when
+    `totalPages <= 1`.
+- Gates: `npm test` -> 0 (29 files, 364 tests; was 334, +30), `npm run build` -> 0.
+  API gates re-run unchanged (656 tests) since the bookkeeping commit touches that repo too.
+- **Learnings:**
+  - **A hook-free function component CAN be tested in this repo.** There is no jsdom, but a component
+    with no hooks is just a function returning an element tree — call it and walk `props.children`.
+    `Pagination.test.js` does exactly that and covers the real rules (which page Next targets, which
+    button is dead at each end). This is a genuinely new option beside the house
+    "rules in a .js, dumb .jsx" convention, and it only holds while the component stays hook-free.
+  - **Two hook invariants have no runtime surface here, so they are asserted against the SOURCE**
+    (`readFileSync` on the module, same technique as the API's call-site scan): the effect's
+    dependency arrays must contain no `filters` identifier, and the load must carry an `active` flag
+    with two `if (!active) return` guards. Both regressions (an infinite refetch loop, a stale
+    response landing last) are invisible without a renderer.
+  - **A kit file no screen imports is still compile-checked** — because its `.test.js` sibling
+    imports it, and vitest transforms through the same Vite/react pipeline. `npm run build` alone
+    would tree-shake an unimported module away, so a new kit file without a test sibling is
+    genuinely unchecked in this repo.
+  - `buildListQuery` keeps `0` and `false` and drops only null/undefined/'' — dropping `false` would
+    silently swallow a filter where false is a real answer. A flag that should vanish when off is
+    passed as `flag || null`, which is documented on the function.
+  - `readList` falls back to `rows.length` when there is no `meta.total`: `/admin/brands` and
+    `/admin/inventory` return the whole list unpaged, and reporting `total: 0` above a full table is
+    how a shared reader gets that wrong.
+  - `pageAfterLoad` must return null when the target equals the current page, or `setPage` re-runs
+    the effect forever. It also steps to the new LAST page, not always page 1.
+  - Existing paginator copies to replace when W2 touches those screens: `AdminPriceListItems.jsx`,
+    `ClientsList.jsx`, `PriceLists.jsx`, `Reserves.jsx`, `SalesOrdersList.jsx`. This story
+    deliberately did not edit them — they are screens, owned by later workstreams.
+- **Needs human verification:** none yet — nothing renders this kit. The first screen W2 wires up
+  needs a human to eyeball the paginator against the existing ones (`/admin/price-list-items` is the
+  closest visual reference).
+---
+
+## 2026-08-06T01:15:05Z - W1-US-005 - CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
+
+- `atelier-crm/src/lib/api.js` gains `apiDelete` (append only). Three new files under
+  `src/admin/`, each with a `.test.js` sibling:
+  - `deleteFlow.js` — pure: `blockerLine`, `describeBlockers(error, opts)`, `attemptDelete(del, opts)`,
+    `deleteDialog(state)`.
+  - `ConfirmDialog.jsx` — `{ open, title, body, lines, confirmLabel, secondaryLabel, onConfirm,
+    onSecondary, onCancel, busy, error }`, plus the exported pure `escapeCancels`.
+  - `useCrudScreen.js` — composes `useAdminList` + `useToast` + `useMutation` + the delete flow,
+    returning four namespaces (`list`, `toast`, `mutation`, `remove`).
+- Gates: `npm test` -> 0 (32 files, 389 tests; was 364, +25), `npm run build` -> 0.
+- **Learnings:**
+  - **`GhostButton` (`src/admin/parts.jsx`) does NOT forward refs** — it is a plain function
+    component, so `ref={...}` on it is silently dropped, with no error and no warning that points at
+    the cause. ConfirmDialog therefore uses native `<button>`s carrying a copy of GhostButton's
+    inline style. Anything in this repo that needs a DOM ref on a button hits this.
+  - **Injecting the request makes the "no pre-flight" rule testable.** `attemptDelete(del)` takes the
+    request as a function, so a `vi.fn()` stub proves it is called exactly once. An acceptance
+    criterion phrased as an absence ("there is no pre-flight request") is otherwise only assertable
+    against source text.
+  - The confirm button is REMOVED on the explanation step, not merely disabled: the blockers will not
+    have vanished a second later, so a retry can only fail again. `deleteDialog` returns
+    `confirmLabel: null` and ConfirmDialog renders nothing for a null label.
+  - **"Archive instead" needs BOTH conditions** — the API's `archivable: true` and an `archive`
+    action from the screen. `inventory` and `shipping_rates` have no `archived_at` column, so the API
+    reports `archivable: false` and offering the button would produce a 500 on click.
+  - `describeBlockers` must fall back to `messageOf` on a missing body. That is not an edge case: a
+    404, a 403 self-delete, a network drop and a non-JSON 500 all take that path, and it is the only
+    sentence the dialog has to show.
+  - Naming: `useAdminList` and `useMutation` both return `error`, meaning different things (the list
+    failed to load vs this edit was refused). `useCrudScreen` returns namespaces rather than
+    flattening, or a stale save error renders above a healthy table.
+  - The API contract this kit consumes is atelier-api `src/lifecycle/delete.js` `replyDelete`:
+    `{ statusCode, error, message, blockers: [{ relation, label, count, capped }], archivable }`.
+    `capped` renders as a trailing `+` ("100+ order lines").
+- **Needs human verification:** the dialog has never been rendered — no jsdom here and no screen
+  consumes it yet. When W2 wires the first delete button, a person must check in a real browser:
+  Escape closes it, focus starts on Cancel, the backdrop click cancels, and a real 409 (delete a
+  house that has products) shows the blocker lines with Archive instead.
+---
+
+## 2026-08-06T01:15:05Z - W1-US-006 - CI workflows for all three repos
+
+- `.github/workflows/ci.yml` in each repo. All three: `on.pull_request.branches: [august-6th-updates]`,
+  `permissions: contents: read`, `actions/checkout@v4` + `actions/setup-node@v4` (node 22, npm cache),
+  `npm ci`, then that repo's real gates. No workflow runs a typecheck; each says in a comment why,
+  because the story templates keep re-adding one.
+  - api: a `postgres:14` service container with a `pg_isready` healthcheck, `DATABASE_URL` and a
+    throwaway 32-character `COOKIE_SECRET`; runs `npm run lint` then `npm test`.
+  - crm: `npm test` then `npm run build`. No lint step — there is no ESLint in that repo, which is
+    exactly why build is a gate and not a release step.
+  - storefront: `npm run lint`, `npm test`, `npm run build`.
+- Gates (all nine, all 0): api `npm run lint` + `npm test` (39 files, 656 tests) · crm `npm test`
+  (32 files, 389 tests) + `npm run build` · storefront `npm run lint` + `npm test` (108) + `npm run build`.
+- **Learnings:**
+  - **`npm ci` cannot be verified from a worktree on this machine.** Every worktree's `node_modules`
+    is a SYMLINK to the main checkout, so running `npm ci` would delete and rebuild the shared tree
+    and break every other loop. The install step is therefore unverified locally by construction —
+    the first PR run is what proves it. All three repos do have a committed `package-lock.json`,
+    which is the precondition `npm ci` needs.
+  - **Node 22, not 20.** Two independent reasons: `node --test "src/**/*.test.js"` (the storefront's
+    runner) needs >= 21 for glob patterns and on an older runtime silently matches NO files and
+    reports a green run over zero tests; and node-pg-migrate `require()`s the ESM migration files,
+    which is only unflagged from 22.12. `setup-node` with `'22'` resolves to the newest 22.x.
+  - **The Postgres service needs the healthcheck.** Without `--health-cmd pg_isready` the first
+    migration can race the server's startup, and the connection-refused that follows reads as a code
+    fault rather than a timing one. Image pinned to `postgres:14` to match what the team develops
+    against — a newer server would let a query through CI that fails in production.
+  - The storefront build needs **no API and no database**: `src/lib/api.js` `safeFetch` exists so a
+    build-time fetch cannot fail the build, and EmDash's SQLite state under `data/` is gitignored and
+    created on demand. Verified by building here with no `data/` directory present.
+  - `permissions: contents: read` at the workflow level is the enforceable form of "no workflow can
+    push to main/master" — a job token with read-only contents cannot push, tag or open a release.
+- **Needs human verification:** the first pull request into `august-6th-updates` is the proof. Nothing
+  about a GitHub Actions runner can be exercised from this machine — in particular the `npm ci` step
+  and the Postgres service container.
+---

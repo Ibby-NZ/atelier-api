@@ -9,14 +9,25 @@ epics:
   w1-foundations:
     name: "W1 Foundations"
     branch: aug6/w1-foundations
+    status: done
+    stories:
+      US-001: done      # Lifecycle registry and deleteOrExplain
+      US-002: done      # setArchived replaces the eight duplicated archive helpers
+      US-003: done      # Registry safety tests
+      US-004: done      # CRM list kit: list.js, useAdminList, Pagination
+      US-005: done      # CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
+      US-006: done      # CI workflows for all three repos
+  w10-pricing-template:
+    name: "W10 Pricing template"
+    branch: aug6/w10-pricing-template
     status: pending
     stories:
-      US-001: pending   # Lifecycle registry and deleteOrExplain
-      US-002: pending   # setArchived replaces the eight duplicated archive helpers
-      US-003: pending   # Registry safety tests
-      US-004: pending   # CRM list kit: list.js, useAdminList, Pagination
-      US-005: pending   # CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
-      US-006: pending   # CI workflows for all three repos
+      US-001: pending   # Migration: price_list_items v2 columns
+      US-002: pending   # Template registry with v1 moved verbatim
+      US-003: pending   # v2 mapping and the omit-on-v1 rule
+      US-004: pending   # Importer accepts the v2 fields
+      US-005: pending   # Shared vocabulary module
+      US-006: pending   # Byte-pin unit test and regeneration tripwire
   w2-crud:
     name: "W2 CRUD completion"
     branch: aug6/w2-crud

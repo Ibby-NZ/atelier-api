@@ -79,31 +79,78 @@ commit_count() {
 }
 
 # Scoped permissions. Anything not listed is DENIED — in --print mode there is
-# nobody to approve a prompt. Expect the first workstream to stall on something
-# legitimate; widen this list rather than reaching for bypassPermissions.
+# nobody to approve a prompt.
+#
+# NOTE ON SYNTAX, learned the hard way: these are PREFIX rules. `Bash(cmd:*)`
+# means "any command starting with `cmd`". A `*` in the MIDDLE is not a glob —
+# `Bash(git -C * add:*)` requires the literal string "git -C * add" and matches
+# nothing, so every git write was denied on the first run. Each repo therefore
+# gets its own explicit prefix, and the bare forms cover an agent that has cd'd
+# into a repo first.
 ALLOWED=(
   "Read" "Edit" "Write" "Glob" "Grep" "TodoWrite"
   "Bash(npm run lint)" "Bash(npm test)" "Bash(npm run build)"
   "Bash(npm run migrate)" "Bash(npm run migrate:down)" "Bash(npm run migrate:create:*)"
   "Bash(npm run seed)" "Bash(npm run convert:*)" "Bash(npm run import:*)"
   "Bash(node:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(find:*)" "Bash(wc:*)"
-  "Bash(git -C * status:*)" "Bash(git -C * diff:*)" "Bash(git -C * log:*)"
-  "Bash(git -C * show:*)" "Bash(git -C * add:*)" "Bash(git -C * commit:*)"
-  "Bash(git -C * checkout -- *)" "Bash(git -C * rev-parse:*)"
+  "Bash(grep:*)" "Bash(head:*)" "Bash(tail:*)" "Bash(sed:*)" "Bash(diff:*)"
+  "Bash(mkdir:*)" "Bash(cd:*)" "Bash(pwd)" "Bash(echo:*)" "Bash(chmod:*)"
+  # git reads
+  "Bash(git status:*)" "Bash(git diff:*)" "Bash(git log:*)" "Bash(git show:*)"
+  "Bash(git rev-parse:*)" "Bash(git ls-files:*)" "Bash(git check-ignore:*)"
+  # git writes — staging, committing and reverting a file only
+  "Bash(git add:*)" "Bash(git commit:*)" "Bash(git checkout --:*)" "Bash(git restore:*)"
 )
+# Per-repo forms, because the loop's cwd is the workstream root and the prompt
+# tells agents to use `git -C <repo> ...`.
+for _r in atelier-api atelier-crm atelier-storefront; do
+  for _v in status diff log show rev-parse ls-files check-ignore add commit restore; do
+    ALLOWED+=("Bash(git -C $_r $_v:*)")
+  done
+  ALLOWED+=("Bash(git -C $_r checkout --:*)")
+done
 
-# Belt and braces. These must never run, whatever the prompt says.
-DISALLOWED=(
-  "Bash(git push:*)" "Bash(git -C * push:*)"
-  "Bash(git rebase:*)" "Bash(git -C * rebase:*)"
-  "Bash(git merge:*)" "Bash(git -C * merge:*)"
-  "Bash(git stash:*)" "Bash(git -C * stash:*)"
-  "Bash(git reset:*)" "Bash(git -C * reset:*)"
-  "Bash(git switch:*)" "Bash(git -C * switch:*)"
-  "Bash(git branch:*)" "Bash(git -C * branch:*)"
-  "Bash(git checkout:*)"
-  "Bash(rm -rf:*)" "Bash(dropdb:*)" "Bash(psql:*)"
-)
+# Deny rules take precedence over allow rules. The pre-push hook installed below
+# is the real guarantee — these are the cheap second line.
+DISALLOWED=()
+for _p in "" "-C atelier-api " "-C atelier-crm " "-C atelier-storefront "; do
+  for _v in push rebase merge stash reset switch branch "cherry-pick" "remote" "clean"; do
+    DISALLOWED+=("Bash(git ${_p}${_v}:*)")
+  done
+done
+DISALLOWED+=("Bash(rm -rf:*)" "Bash(dropdb:*)" "Bash(createdb:*)" "Bash(psql:*)")
+
+# The deterministic guard. Permission strings are matched by prefix, so a
+# compound command could in principle slip past them; a hook cannot be talked
+# around. Refuses every push from a loop worktree, and any push to main/master
+# from anywhere. Hooks live in the common dir, so one install covers every
+# worktree of that repo.
+for _repo in /Users/verumoffice/atelier-api /Users/verumoffice/atelier-crm /Users/verumoffice/atelier-storefront; do
+  [ -d "$_repo/.git" ] || continue
+  _hook="$_repo/.git/hooks/pre-push"
+  if [ ! -f "$_hook" ]; then
+    cat > "$_hook" <<'HOOK'
+#!/bin/bash
+# Installed by ralph.sh. The live sites and API run off main/master; no
+# autonomous loop may push anywhere, and nobody may push to those two.
+while read -r local_ref _ remote_ref _; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master)
+      echo "pre-push: refusing to push to ${remote_ref#refs/heads/} — the live site runs off it." >&2
+      exit 1 ;;
+  esac
+  case "$local_ref" in
+    refs/heads/aug6/*)
+      echo "pre-push: refusing to push $local_ref — workstream branches are local until reviewed." >&2
+      exit 1 ;;
+  esac
+done
+exit 0
+HOOK
+    chmod +x "$_hook"
+    echo "installed pre-push guard in $_repo"
+  fi
+done
 
 echo "Ralph — $WS"
 echo "  root         : $PWD"

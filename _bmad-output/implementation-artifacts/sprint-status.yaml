@@ -103,7 +103,7 @@ epics:
       US-002: done      # Admin patch support and whole-list reorder endpoints
       US-003: done      # Public read-model ordering
       US-004: done      # Seed test: featured survives a reseed
-      US-005: pending   # CRM featured panel
+      US-005: done      # CRM featured panel
       US-006: pending   # Storefront homepage reads featured
       US-007: pending   # Storefront brands page reads featured
   w8-colour-files:

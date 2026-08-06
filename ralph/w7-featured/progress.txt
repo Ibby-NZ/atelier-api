@@ -46,6 +46,15 @@ Story-specific detail belongs in the per-story entries below, not here.
   `INSERT INTO <t> (<cols>) … ON CONFLICT (…) DO UPDATE SET <list>` out of the source, keep
   `DO NOTHING` as a distinct (null) case, and assert the extraction found every table first — a
   regex that matches nothing passes every per-statement check.
+- **A screen that saves a WHOLE LIST must load archive-inclusive rows.** A whole-list write is
+  authoritative — anything absent from the submitted array stops being featured/ranked — so a list
+  built from only the rows the screen happened to be showing silently drops the archived ones. Load
+  everything and apply the "Show archived" toggle locally; the picker that ADDS a row can still
+  exclude archived rows, which is not the same question.
+- **A CRM read model rarely carries the key its write endpoint wants.** `GET /admin/collections`
+  returns `brand_id` + `brand_name`, while every collection write names the `(brand_slug, slug)`
+  PAIR — so the screen joins the slug on from the brands list itself, and an entry it cannot
+  resolve blocks the save rather than sending a null.
 - **Filter a shared-database assertion to the fixture's own prefix and assert RELATIVE order.**
   `atelier_w7` is seeded and the migration already featured real rows, so any absolute position or
   `toHaveLength` over a public listing is asserting about the seed as much as the fixture.
@@ -323,4 +332,81 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
       last paragraph before the storefront asymmetry note.
 - **Needs human verification:** none — this story adds tests only and renders nothing. The screens
   already queued for a human eyeball by US-001..003 are unchanged.
+---
+
+## 2026-08-06T16:56:30Z - W7-US-005 - CRM featured panel
+
+- `src/screens/featuredOrder.js` (new, pure, no React) holds every ordering rule, with
+  `featuredOrder.test.js` beside it (47 tests). `AdminBrands.jsx` gained a "Featured on the
+  storefront" panel drawing two strips through one `FeaturedList` sub-component parameterised by
+  `BRAND_LIST` / `COLLECTION_LIST` — the two differ only in how a row is named, labelled and sent.
+- The module: `featuredFrom` (rank order, API tie-break repeated), `withBrandSlug`, `move`,
+  `addFeatured`, `removeFeatured`, `candidates`, `sameOrder`, `unresolved`, `saveBody`,
+  `FEATURED_LIMIT`, `STOREFRONT_TIMING_NOTE`. Every operation returns a NEW list, and a refused
+  move returns the input BY IDENTITY so the caller can tell nothing happened.
+- Acceptance criteria, each mapped to where it is enforced:
+  - **Ends** — `move` refuses a target outside the list (and the Up/Down buttons are disabled at
+    the ends as well, so the edge is visible rather than merely inert).
+  - **Duplicates impossible** — `addFeatured` refuses a key already in the list, so the body can
+    never carry one; a test drives a sequence of adds/moves/removes and asserts the built body has
+    no repeated key. For collections the key is the PAIR, so two houses' "2024" are both featurable
+    while the same pair twice is refused.
+  - **Capped** — `FEATURED_LIMIT = 12`, the CRM's copy of the API's `maxItems`; the office is
+    stopped at the twelfth rather than by a 400 after arranging thirteen.
+  - **Standing note** — `STOREFRONT_TIMING_NOTE` renders as a `PanelNote` at the top of the panel
+    and is asserted to name both surfaces and both timings.
+- `AdminBrands` now loads `/admin/brands` and `/admin/collections` with `include_archived=true`
+  unconditionally and applies the "Show archived" toggle locally (`live()`), because an archived
+  row stays FEATURED on purpose and a list built from only the visible rows would silently
+  unfeature it on the next whole-list save. Side effect: toggling "Show archived" no longer
+  refetches.
+- Repos and files changed: atelier-crm only — `src/screens/featuredOrder.js` (new),
+  `src/screens/featuredOrder.test.js` (new), `src/screens/AdminBrands.jsx`, `CLAUDE.md`
+  (new `## Featured` section); plus atelier-api bookkeeping (`ralph/w7-featured/prd.json`,
+  `ralph/w7-featured/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`).
+- Gates: `npm test` (crm) -> 0 (459 tests, 34 files; 47 new), `npm run build` (crm) -> 0.
+  The two untouched repos were run as well: `npm run lint` + `npm test` (api) -> 0 (940 tests,
+  50 files); `npm run lint` + `npm test` + `npm run build` (storefront) -> 0 (108 tests).
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only) — promoted to `## Codebase Patterns` above:
+    a whole-list write forces the screen to load archive-inclusive rows; a CRM screen must join
+    `brand_slug` itself because the admin collection read model does not carry it.
+  - Gotchas:
+    - **`AdminBrands.jsx` is now 838 lines, over the house 800-line guidance.** The story's
+      permitted-file list names exactly `AdminBrands.jsx` plus the new `featuredOrder.js`, and JSX
+      cannot live in the `.js` (the pure module must import no React, or it stops being unit
+      testable in a repo with no jsdom), so the panel had to go here. If a future story is allowed
+      a new `.jsx`, `FeaturedList` at the foot of the file is the piece to lift out — it takes
+      nine props and touches no other screen state.
+    - The featured drafts are rebuilt from server truth whenever `brands`/`collections` reload, and
+      `useMutation.run` reloads after EVERY mutation — so an unsaved reorder is discarded if the
+      office saves a house name first. Same behaviour `brandDraft` already had; worth knowing
+      before adding a third draft to this screen.
+    - `candidates` excludes archived rows but `featuredFrom` KEEPS them. That asymmetry is
+      deliberate and is the kind of thing a later "tidy-up" would collapse: archiving is reversible
+      and must not cost the office a position, but nothing is gained by newly featuring a row that
+      cannot appear.
+    - The API's collection reorder body needs `brand_slug`, which `GET /admin/collections` does not
+      return (it returns `brand_id` + `brand_name`). Any future screen sending a collection PAIR
+      has to join it from the brands list, exactly as `withBrandSlug` does.
+    - `apiSend('PUT', path, body)` is correct here — the DELETE caveat in the delete kit
+      (`apiDelete`, no body) does not apply, and PUT is already in the API's CORS `methods` list
+      (shipping rates were the precedent).
+  - Context:
+    - Rules: `atelier-crm/src/screens/featuredOrder.js`; panel + `FeaturedList` at the foot of
+      `atelier-crm/src/screens/AdminBrands.jsx`.
+    - The endpoints it drives: `src/routes/admin-catalogue.js` (the two `app.put` calls) and
+      `setFeaturedBrands`/`setFeaturedCollections` in `src/catalogue/admin-brands.js`.
+    - Architecture: `_bmad-output/planning-artifacts/architecture.md` section "Featured ordering",
+      the "Storefront asymmetry" paragraph.
+- **Needs human verification:**
+  - The CRM's Houses & collections screen (`http://localhost:5273/#/admin/brands`) — the new
+    "Featured on the storefront" panel: confirm both strips list what the migration seeded (3
+    houses, 7 collections), that Up/Down/Remove/Add behave, and that a saved reorder round-trips
+    through a reload. This is the round trip US-002 asked a human to eyeball.
+  - The same screen's Houses list with "Show archived" both on and off — the toggle no longer
+    refetches, so confirm archived rows still appear and disappear as before.
+  - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
+    be started.)
 ---

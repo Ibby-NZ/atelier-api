@@ -5,56 +5,37 @@
  * src/seed/data/price-lists.json, consumed by `npm run import:pricing`.
  *
  * No dependencies — CSVs are sniffed as utf-8 or cp1252, XLSX is read straight
- * from the zip (sharedStrings + sheet1). Every template shares one 14-column
- * layout; this script normalises the messy bits (currency naming, item-type
- * casing, Excel serial dates, float noise) and fails loudly on anything it
- * cannot map, listing every offending file:line.
+ * from the zip (sharedStrings + sheet1). The accepted layouts and their row
+ * mappers live in lib/price-template.js — the header row is what says which one
+ * a file is. This script owns the file walk, the filename's supplier fallback
+ * (v2 files name their own supplier per row) and the dedupe, and fails loudly on
+ * anything it cannot map, listing every offending file:line.
  *
  * Usage: node scripts/convert-price-lists.js [input-dir] [output-json]
  */
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, extname, basename, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { openWorkbook, sharedStrings, sheetRows, excelDate } from './lib/xlsx.js'
+import { openWorkbook, sharedStrings, sheetRows } from './lib/xlsx.js'
 import { decodeText, csvRows } from './lib/text.js'
-import { parseNumber, round4, generalFormat, floatRepr, dumps } from './lib/python-format.js'
+import { dumps } from './lib/python-format.js'
+import {
+  matchTemplate, acceptedHeaders, assertStorable, CATEGORIES,
+} from './lib/price-template.js'
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DEFAULT_IN = join(REPO, 'incoming', 'pricing-templates')
 const DEFAULT_OUT = join(REPO, 'src', 'seed', 'data', 'price-lists.json')
 
-const COLUMNS = 14
-
-const EXPECTED_HEADER = [
-  'date effective', 'product range', 'code', 'description', 'item type',
-  'pack type', 'contents', 'width', 'repeat', 'vertical repeat',
-  'duty rate', 'wholesale rate', 'currency', 'freight rate',
-]
-
-const CATEGORY_BY_ITEM_TYPE = new Map([
-  ['fabrics', 'fabric'],
-  ['w/p', 'wallpaper'],
-  ['trimmings', 'trimming'],
-  ['accessories', 'accessory'],
-])
-const CATEGORY_BY_FILE_TOKEN = new Map([
+// The filename's own category token, for a v1 drop whose Item Type cell is
+// blank. It is checked against the shared stored vocabulary because a typo here
+// would sail past mapV1's fallback (which trusts fileCategory) and surface only
+// as a CHECK violation at import time, a whole pipeline away from the mistake.
+const CATEGORY_BY_FILE_TOKEN = assertStorable(new Map([
   ['FABRIC', 'fabric'],
   ['WPPR', 'wallpaper'],
   ['TRIMMING', 'trimming'],
-])
-const UNIT_BY_PACK = new Map([
-  ['p/m', 'metre'],
-  ['p/y', 'yard'],
-  ['p/roll', 'roll'],
-  ['p/p', 'piece'],
-])
-const CURRENCY_MAP = new Map([
-  ['euro', 'EUR'],
-  ['us dollar', 'USD'],
-  ['pound sterling', 'GBP'],
-])
-const FREIGHT_CLASSES = new Set(['A', 'B', 'C', 'D', 'E'])
-const DUTY_CLASSES = new Set(['A'])
+]), CATEGORIES, 'file-token category')
 
 // Filename prefixes whose plain title-casing would mangle the supplier name.
 const SUPPLIER_OVERRIDES = new Map([
@@ -65,13 +46,17 @@ const SUPPLIER_OVERRIDES = new Map([
 ])
 
 const FILENAME_PATTERN = /^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b/
-const INTEGER_PATTERN = /^[+-]?\d+$/
 
 const capitalise = (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
 
+/**
+ * The supplier and category the FILENAME declares, or nulls when it declares
+ * neither. A v2 file carries its own Supplier column, so an unrecognised name is
+ * only fatal for a template that has nowhere else to get the name from.
+ */
 const parseFilename = (stem) => {
   const match = FILENAME_PATTERN.exec(stem)
-  if (!match) throw new Error(`cannot derive supplier from filename "${stem}"`)
+  if (!match) return { supplier: null, fileCategory: null }
   const prefix = match[1].trim()
   const supplier = SUPPLIER_OVERRIDES.get(prefix)
     ?? prefix.split(/\s+/).filter(Boolean).map(capitalise).join(' ')
@@ -92,118 +77,12 @@ const xlsxRows = function* (path) {
 
 const rowsOf = (path, isXlsx) => (isXlsx ? xlsxRows(path) : csvRows(decodeText(readFileSync(path))))
 
-const parseInteger = (text) => {
-  const trimmed = text.trim()
-  if (!INTEGER_PATTERN.test(trimmed)) throw new Error(`not an integer: "${text}"`)
-  return Number(trimmed)
-}
-
-const isoDate = (year, month, day) => {
-  if (year < 1 || year > 9999 || month < 1 || month > 12 || day < 1) {
-    throw new Error('date out of range')
-  }
-  const at = new Date(Date.UTC(year, month - 1, day))
-  if (at.getUTCFullYear() !== year || at.getUTCMonth() !== month - 1 || at.getUTCDate() !== day) {
-    throw new Error('date out of range')
-  }
-  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-}
-
-const parseDate = (value, isXlsx) => {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  if (isXlsx) return excelDate(parseNumber(trimmed))
-  const parts = trimmed.split('/')
-  if (parts.length !== 3) throw new Error(`not a d/m/Y date: "${value}"`)
-  const [day, month, year] = parts.map(parseInteger)
-  return isoDate(year, month, day)
-}
-
-/** Trim; collapse float noise like '256.60000000000002' to '256.6'. */
-const cleanMeasure = (value) => {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  try {
-    return generalFormat(round4(parseNumber(trimmed)))
-  } catch {
-    return trimmed
-  }
-}
-
-const normaliseRow = (row, context) => {
-  const { lineNumber, source, supplier, fileCategory, isXlsx, errors, skipped } = context
-  const fail = (message) => {
-    errors.push(`${source}:${lineNumber}: ${message}`)
-    return null
-  }
-
-  const cells = []
-  for (let index = 0; index < COLUMNS; index += 1) cells.push((row[index] ?? '').trim())
-  const [rawDate, productRange, code, description, itemType, pack, contents,
-    width, repeat, verticalRepeat, rawDuty, wholesale, currency, rawFreight] = cells
-
-  const category = CATEGORY_BY_ITEM_TYPE.get(itemType.toLowerCase()) ?? fileCategory
-  if (!category) return fail(`unmappable item type "${itemType}"`)
-  const unit = UNIT_BY_PACK.get(pack.toLowerCase())
-  if (!unit) return fail(`unmappable pack type "${pack}"`)
-  const isoCurrency = CURRENCY_MAP.get(currency.toLowerCase().split(/\s+/).filter(Boolean).join(' '))
-  if (!isoCurrency) return fail(`unmappable currency "${currency}"`)
-  const freight = rawFreight.toUpperCase() || null
-  if (freight && !FREIGHT_CLASSES.has(freight)) return fail(`unknown freight class "${freight}"`)
-  const duty = rawDuty.toUpperCase() || null
-  if (duty && !DUTY_CLASSES.has(duty)) return fail(`unknown duty class "${duty}"`)
-  if (!code) return fail('empty code')
-  // Platform decision 6 (15 Jul): standardise supplier codes to the uniform
-  // format on import; keep the raw code so mismatches stay traceable.
-  const codeNormalized = code.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  if (!codeNormalized) return fail(`code "${code}" normalises to nothing`)
-
-  let rate
-  try {
-    // No comma handling on purpose: "65,50" is ambiguous (EU decimal vs thousands),
-    // and no current template uses commas — fail loudly so a human decides.
-    rate = round4(parseNumber(wholesale))
-  } catch {
-    return fail(`non-numeric wholesale rate "${wholesale}"`)
-  }
-  if (rate === 0) {
-    // Unpriced rows (price on application / not yet priced) carry nothing usable.
-    skipped.push(`${source}:${lineNumber}: ${code} "${description}" has no wholesale rate`)
-    return null
-  }
-  if (rate < 0) return fail(`negative wholesale rate ${floatRepr(rate)}`)
-
-  let effective
-  try {
-    effective = parseDate(rawDate, isXlsx)
-  } catch {
-    return fail(`bad date "${rawDate}"`)
-  }
-
-  return {
-    supplier,
-    product_range: productRange || null,
-    category,
-    code,
-    code_normalized: codeNormalized,
-    description: description || null,
-    contents: contents || null,
-    unit,
-    width: cleanMeasure(width),
-    repeat: cleanMeasure(repeat),
-    vertical_repeat: cleanMeasure(verticalRepeat),
-    duty_class: duty,
-    wholesale_rate: rate,
-    currency: isoCurrency,
-    freight_class: freight,
-    date_effective: effective,
-    source_file: source,
-  }
-}
-
+// Key counts are compared too: a v2 row carries keys a v1 row does not, so
+// comparing only the earlier row's keys would call the two identical and drop
+// the richer one. A genuine clash must surface as a conflict, not a silent keep-first.
 const sameExceptSource = (left, right) =>
-  Object.keys(left).every((key) => key === 'source_file' || left[key] === right[key])
+  Object.keys(left).length === Object.keys(right).length
+  && Object.keys(left).every((key) => key === 'source_file' || left[key] === right[key])
 
 const compareKeys = (left, right) => {
   for (let index = 0; index < left.length; index += 1) {
@@ -234,18 +113,26 @@ const convert = (inputDir, outputPath) => {
     const first = rows.next()
     if (first.done) continue
     const [headerLine, header] = first.value
-    const normalisedHeader = header.slice(0, COLUMNS)
-      .map((cell) => cell.toLowerCase().split(/\s+/).filter(Boolean).join(' '))
-    const headerMatches = normalisedHeader.length === EXPECTED_HEADER.length
-      && normalisedHeader.every((cell, index) => cell === EXPECTED_HEADER[index])
-    if (!headerMatches) {
-      errors.push(`${name}:${headerLine}: unexpected header ${JSON.stringify(header)}`)
+    // The header row IS the version — nothing else in the file declares it.
+    const template = matchTemplate(header)
+    if (template === null) {
+      errors.push(
+        `${name}:${headerLine}: unexpected header ${JSON.stringify(header)}`
+        + `; accepted: ${acceptedHeaders().join(' | ')}`,
+      )
+      continue
+    }
+    // Only a template declaring its own Supplier column can survive a filename
+    // this script cannot read a supplier out of.
+    if (supplier === null && !template.header.includes('supplier')) {
+      errors.push(`${name}:${headerLine}: cannot derive supplier from the filename`
+        + `, and ${template.version} has no Supplier column`)
       continue
     }
 
     for (const [lineNumber, row] of rows) {
       if (!row.some((cell) => String(cell).trim())) continue
-      const item = normaliseRow(row, {
+      const item = template.map(row, {
         lineNumber, source: name, supplier, fileCategory, isXlsx, errors, skipped,
       })
       if (item === null) continue

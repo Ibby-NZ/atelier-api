@@ -20,14 +20,14 @@ epics:
   w10-pricing-template:
     name: "W10 Pricing template"
     branch: aug6/w10-pricing-template
-    status: pending
+    status: done
     stories:
-      US-001: pending   # Migration: price_list_items v2 columns
-      US-002: pending   # Template registry with v1 moved verbatim
-      US-003: pending   # v2 mapping and the omit-on-v1 rule
-      US-004: pending   # Importer accepts the v2 fields
-      US-005: pending   # Shared vocabulary module
-      US-006: pending   # Byte-pin unit test and regeneration tripwire
+      US-001: done      # Migration: price_list_items v2 columns
+      US-002: done      # Template registry with v1 moved verbatim
+      US-003: done      # v2 mapping and the omit-on-v1 rule
+      US-004: done      # Importer accepts the v2 fields
+      US-005: done      # Shared vocabulary module
+      US-006: done      # Byte-pin unit test and regeneration tripwire
   w2-crud:
     name: "W2 CRUD completion"
     branch: aug6/w2-crud

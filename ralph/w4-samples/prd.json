@@ -136,11 +136,12 @@
         "Gates green: `( cd atelier-crm && npm test && npm run build )`"
       ],
       "repos": [
+        "atelier-api",
         "atelier-crm"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Needed the showroom API no story creates (routes, module, registry entry) — all in-bounds files | done 2026-08-06T07:45:45Z"
     },
     {
       "id": "US-009",

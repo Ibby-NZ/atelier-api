@@ -20,9 +20,10 @@
 //     entire point of the 409.
 //
 // The plugin carries BOTH samples lifecycles: the loan register (`/admin/samples`)
-// and showroom stocking (`/admin/sample-orders`, W4-US-007, at the bottom of the
-// file). One registration in src/app.js, one guard, two independent domains that
-// nothing joins.
+// and showroom stocking (`/admin/sample-orders`, W4-US-007), plus the address
+// book they both point at (`/admin/showrooms`, W4-US-008), each in its own block
+// at the bottom of the file. One registration in src/app.js, one guard, two
+// independent domains that nothing joins.
 //
 // Check-out and check-in (W4-US-006) are VERB routes here, not a status PATCH:
 // each writes two tables and must be one transaction, so both go through
@@ -56,6 +57,16 @@ import {
   MAX_LIMIT as ORDER_MAX_LIMIT,
 } from '../samples/sample-orders.js'
 import { SAMPLE_ORDER_STATUSES } from '../samples/sample-order-states.js'
+import {
+  listShowrooms,
+  getShowroom,
+  createShowroom,
+  updateShowroom,
+  setShowroomArchived,
+  DEFAULT_PAGE as SHOWROOM_DEFAULT_PAGE,
+  DEFAULT_LIMIT as SHOWROOM_DEFAULT_LIMIT,
+  MAX_LIMIT as SHOWROOM_MAX_LIMIT,
+} from '../samples/showrooms.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 
 // Required on create, editable after — a printed tag can be mistyped.
@@ -264,6 +275,66 @@ const transitionSchema = {
   properties: {
     status: { type: 'string', enum: [...SAMPLE_ORDER_STATUSES] },
     at: timestampProp,
+  },
+}
+
+// --- Showrooms (W4-US-008) --------------------------------------------------
+// The address book both samples screens read: the register filters and the
+// sample form pick a showroom from it, and `AdminShowrooms` edits it. It rides
+// in this plugin rather than a file of its own because a showroom exists only to
+// be pointed at by these two lifecycles.
+// ---------------------------------------------------------------------------
+
+const showroomProps = {
+  address: nullableText,
+  city: nullableText,
+  contact_name: nullableText,
+  contact_email: nullableText,
+  contact_phone: nullableText,
+  notes: { type: ['string', 'null'], maxLength: 5000 },
+}
+
+// NOT nullable and required on create: the column is NOT NULL and unique, and a
+// showroom nobody can name is a row no screen can offer.
+const showroomNameProp = { type: 'string', minLength: 1, maxLength: 500 }
+
+const showroomListQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    q: { type: 'string', maxLength: 200 },
+    include_archived: { type: 'boolean', default: false },
+    page: { type: 'integer', minimum: 1, default: SHOWROOM_DEFAULT_PAGE },
+    limit: {
+      type: 'integer',
+      minimum: 1,
+      maximum: SHOWROOM_MAX_LIMIT,
+      default: SHOWROOM_DEFAULT_LIMIT,
+    },
+  },
+}
+
+const showroomCreateSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['name'],
+  properties: {
+    name: showroomNameProp,
+    ...showroomProps,
+  },
+}
+
+// `name` is patchable — it is not a slug, nothing addresses a showroom by it,
+// and a typo taken down over the phone otherwise stands forever. Typed
+// `string` rather than `['string','null']` so clearing it is a 400 here rather
+// than a 23502 the module has to map.
+const showroomPatchSchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: {
+    name: showroomNameProp,
+    ...showroomProps,
   },
 }
 
@@ -483,6 +554,89 @@ export const adminSampleRoutes = async (app, { pool }) => {
       replyDelete(
         reply,
         await deleteOrExplain(pool, 'sample_order', request.params.id, {
+          user: request.user,
+        })
+      )
+  )
+
+  // --- Showrooms (W4-US-008) ------------------------------------------------
+
+  app.get(
+    '/admin/showrooms',
+    { preHandler: backoffice, schema: { querystring: showroomListQuerySchema } },
+    async (request) => {
+      const { q, include_archived, page, limit } = request.query
+      const { showrooms, total } = await listShowrooms(pool, {
+        q,
+        includeArchived: include_archived,
+        page,
+        limit,
+      })
+      return { showrooms, meta: { total, page, limit } }
+    }
+  )
+
+  // The by-id read is where the child counts live — the CRUD kit forbids a
+  // pre-flight "can I delete this" GET, so this is the only advance warning a
+  // screen gets that Delete will be refused.
+  app.get(
+    '/admin/showrooms/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const showroom = await getShowroom(pool, request.params.id)
+      if (!showroom) return notFound(reply, `Showroom ${request.params.id} not found.`)
+      return { showroom }
+    }
+  )
+
+  app.post(
+    '/admin/showrooms',
+    { preHandler: backoffice, schema: { body: showroomCreateSchema } },
+    async (request, reply) => {
+      const showroom = await createShowroom(pool, request.body)
+      reply.code(201)
+      return { showroom }
+    }
+  )
+
+  app.patch(
+    '/admin/showrooms/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: showroomPatchSchema } },
+    async (request) => ({
+      showroom: await updateShowroom(pool, request.params.id, request.body),
+    })
+  )
+
+  app.post(
+    '/admin/showrooms/:id/archive',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const showroom = await setShowroomArchived(pool, request.params.id, true)
+      if (!showroom) return notFound(reply, `Showroom ${request.params.id} not found.`)
+      return { showroom }
+    }
+  )
+
+  app.post(
+    '/admin/showrooms/:id/restore',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const showroom = await setShowroomArchived(pool, request.params.id, false)
+      if (!showroom) return notFound(reply, `Showroom ${request.params.id} not found.`)
+      return { showroom }
+    }
+  )
+
+  // Blocked by anything standing in the showroom or addressed to it. The
+  // `samples` probe is the load-bearing one: that FK is SET NULL, so an unprobed
+  // delete would report success while silently un-homing every sample.
+  app.delete(
+    '/admin/showrooms/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'showroom', request.params.id, {
           user: request.user,
         })
       )

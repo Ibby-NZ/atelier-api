@@ -938,6 +938,39 @@ migrations.
   key**; the showroom join is INNER (`showroom_id` is NOT NULL) and the rest are LEFT. `q` searches
   the label, the showroom and the design, and deliberately not `notes` — the office's running
   commentary would make a list of requests answer with orders whose request matched nothing typed.
-- **Still owed and named by no story:** there is no showroom CRUD anywhere — `showrooms` has a
-  table, an `archived_at`, no routes and no registry entry — so the CRM's showrooms screen has
-  nothing to call.
+- ~~Still owed and named by no story: there is no showroom CRUD anywhere.~~ Built by W4-US-008 —
+  see *The showroom address book* below.
+
+### The showroom address book (`src/samples/showrooms.js`)
+
+- **`GET|POST /admin/showrooms`, `GET|PATCH|DELETE /admin/showrooms/:id`,
+  `POST /admin/showrooms/:id/archive|restore`** — backoffice-only, in the `adminSampleRoutes`
+  plugin, so `src/app.js` needed no edit. No story in the samples PRD names this surface: US-008
+  draws `AdminShowrooms` in the CRM and every showroom list on both samples screens (the register's
+  filter, the sample form's picker) had nothing to call, because `showrooms` had a table from
+  US-001 and nothing else. Every file it needed was already this workstream's.
+- **A showroom is a plain address-book row** — name, address, city, three contact fields, notes —
+  and says nothing about what stands in it. That is `samples.showroom_id` and
+  `sample_orders.showroom_id`, both pointing this way.
+- **`name` is NOT NULL, unique and PATCHABLE.** Unlike a slug it is not a URL and nothing addresses
+  a showroom by it (both child tables point at the id), so a typo taken down over the phone is a
+  correction rather than a new showroom — the same reasoning as `colourways.sku` and
+  `samples.barcode`. A duplicate is the database's 23505 on `showrooms_name_key` mapped to a 409,
+  never a pre-check. The PATCH schema types `name` as `string` rather than `['string','null']`, so
+  clearing it is a 400 at the route; the module maps the 23502 to a 422 for a direct caller.
+- **The child counts are on the BY-ID read and deliberately not on the list.** They are the only
+  advance warning a screen has that Delete will be refused — the CRM kit forbids a pre-flight "can
+  I delete this" GET, which races the delete — and they count ARCHIVED rows, exactly as the probes
+  do. A count filtering `archived_at` would report an empty showroom and then be contradicted by
+  the 409. Same posture as `GET /admin/brands/:id`; a test asserts the agreement in both
+  directions.
+- **`showroom` is in the lifecycle registry with TWO probes and no guard**, and the SET NULL one is
+  why probes exist at all. `sample_orders.showroom_id` is NOT NULL + RESTRICT, so the database
+  would refuse that half loudly; `samples.showroom_id` is SET NULL, so without its probe a delete
+  would answer 200 while silently un-homing every sample that stood there. `test/samples-showrooms.test.js`
+  asserts the samples are untouched after a refusal — the failure the status code cannot see.
+  `archivable: true`, so a blocked delete offers archiving, which for a showroom that has ever been
+  sent an order is the only way out.
+- The list query is **alias-free**, because `SHOWROOM_COLUMNS` is unqualified — adding an alias
+  later would break the projection, the same rule `BRAND_COLUMNS` carries. `q` searches the name,
+  the city and the contact and deliberately not the notes.

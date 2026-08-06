@@ -356,6 +356,27 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     ],
   },
 
+  // The two edges out of a showroom differ, and the SET NULL one is why the
+  // probes are here at all. `sample_orders.showroom_id` is NOT NULL and
+  // RESTRICT, so the database would refuse that half loudly; `samples.showroom_id`
+  // is SET NULL, so without a probe deleting a showroom silently un-homes every
+  // sample that stood in it and answers 200. Same shape as `supplier`, and for
+  // the same reason.
+  showroom: {
+    table: 'showrooms',
+    idColumn: 'id',
+    label: 'showroom',
+    archivable: true,
+    probes: [
+      probe('samples', 'samples', 'SELECT 1 FROM samples WHERE showroom_id = $1'),
+      probe(
+        'sample_orders',
+        'sample orders',
+        'SELECT 1 FROM sample_orders WHERE showroom_id = $1'
+      ),
+    ],
+  },
+
   // A sample's loans ARE the register: who had what, when, and whether it came
   // back. `sample_loans.sample_id` is RESTRICT, so the database would refuse this
   // one anyway — the probe still wins, because it reports HOW MANY movements are

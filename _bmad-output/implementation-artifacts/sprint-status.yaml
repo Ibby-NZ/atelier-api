@@ -69,7 +69,7 @@ epics:
       US-005: done      # Sample CRUD routes and by-barcode lookup
       US-006: done      # Check-out and check-in verb routes
       US-007: done      # Sample-order lifecycle module and routes
-      US-008: pending   # AdminSamples and AdminShowrooms screens
+      US-008: done      # AdminSamples and AdminShowrooms screens (+ the showroom API they needed)
       US-009: pending   # AdminSampleOrders, live scanner, retired-route redirects
   w5-reporting:
     name: "W5 Reporting"

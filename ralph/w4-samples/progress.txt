@@ -162,6 +162,32 @@ Story-specific detail belongs in the per-story entries below, not here.
   illegal transition test that only checks 409 passes against a handler that writes first and
   refuses afterwards. Read the row before, read it after, `toEqual` the two — every stamp, every
   column, including `updated_at`.
+- **A story whose deliverable needs a surface NO story names is not automatically blocked — check
+  the allowed-file list against what the surface actually costs.** Three iterations recorded "there
+  is no showroom CRUD anywhere in this PRD" as a wall for US-008. It was not one: `src/samples/**`,
+  `src/routes/admin-samples.js`, `src/lifecycle/registry.js` and `test/samples*.test.js` were
+  already this workstream's, and the whole surface fitted inside them with no `src/app.js` edit at
+  all (a further samples route belongs in the plugin US-005 registered). A block is for a FORBIDDEN
+  path or a product decision; "no story names it" is neither on its own. Name the files the missing
+  work would touch before concluding either way.
+- **"This value comes from the server, never the browser" needs a SOURCE scan as well as a
+  behavioural test, and the behavioural test needs BOTH directions.** One assertion that a
+  long-past due date still reads "not overdue" is passed by today's correct function and by a
+  helper added next month that recomputes; one scan for `Date.now(`/`new Date(`/`Date.parse(`/
+  `getTime(` over the module AND the `.jsx` is what forbids the helper. Assert the scanned sources
+  are non-empty — a scan that read nothing passes every per-file check vacuously — and give the
+  behavioural test its mirror case (a FUTURE due date the API calls overdue), because only a reader
+  of the server's boolean gets both right.
+- **A negative source assertion that is a SUBSTRING of a positive one proves nothing.**
+  `expect(src).toContain('SAMPLE_STATUSES.map')` passes on the strength of
+  `WRITABLE_SAMPLE_STATUSES.map` alone, so a test asserting "the form offers the writable set and
+  the filter the full one" can pass with the filter deleted. Anchor on the surrounding character
+  (`{SAMPLE_STATUSES.map`). The same trap as the prose-ban one, inverted.
+- **A CRM source scan for endpoints must anchor on the opening QUOTE.** `/\/admin\/[a-z-]+/`
+  matches every relative kit import (`'../admin/drafts.js'`, `'../admin/parts.jsx'`) and reports
+  `/admin/drafts` as an endpoint the screen calls. `/['"`]\/admin\/[a-z-]+/` then `.slice(1)` is
+  the shape. And it still matches a path written inside BACKTICKS in a comment — the "do not ban a
+  token in prose" rule in a new place: keep example paths out of backticks in a file a scan reads.
 
 ---
 
@@ -843,4 +869,102 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   reopened; (2) that a sample order may be deleted outright only while `requested` or `cancelled`,
   everything else archiving instead; and (3) that an order is created `requested` and advanced,
   rather than being creatable directly in a later state.
+---
+
+## 2026-08-06T07:45:45Z - W4-US-008 - AdminSamples and AdminShowrooms screens
+
+- Shipped both CRM screens AND the showroom API surface they needed. Three iterations had recorded
+  "no showroom CRUD anywhere in this PRD" as a wall for this story; it was not one — every file the
+  surface needed was already on this workstream's allowed list, and `src/app.js` needed no edit
+  because the routes went into the `adminSampleRoutes` plugin US-005 registered. See the new
+  `## Codebase Patterns` entry: "no story names it" is not a block on its own.
+- **atelier-api (the enabling half).** `src/samples/showrooms.js` (new): `listShowrooms` (filters
+  `q`, `include_archived`; paginated `{ showrooms, total }`), `getShowroom` (carrying
+  `sample_count` + `sample_order_count`), `createShowroom`, `updateShowroom`,
+  `setShowroomArchived`, plus `SHOWROOM_UPDATE_COLUMNS`. Routes appended to
+  `src/routes/admin-samples.js`: `GET|POST /admin/showrooms`,
+  `GET|PATCH|DELETE /admin/showrooms/:id`, `POST /admin/showrooms/:id/archive|restore`, all
+  backoffice-only. `src/lifecycle/registry.js` gained the `showroom` entity (table `showrooms`,
+  `archivable: true`, probes on `samples` and `sample_orders`) — additive, nothing else moved.
+- **atelier-crm (the story).** `AdminSamples.jsx` + `adminSamples.js` + `adminSamples.test.js`, and
+  `AdminShowrooms.jsx` + `adminShowrooms.js` + `adminShowrooms.test.js`. Both compose
+  `useCrudScreen` and touch no step of the delete flow themselves. `src/App.jsx` gained the two
+  routes and two imports; `src/components/sectionTabs.jsx` gained two `samplesTabs` entries
+  (`register`, `showrooms`) beside the existing demo tabs.
+- Repos and files changed: atelier-api — `src/samples/showrooms.js` (new),
+  `src/routes/admin-samples.js` (one import block, five schemas, seven routes — additive),
+  `src/lifecycle/registry.js` (one entity, added), `test/samples-showrooms.test.js` (new, 52
+  tests), `CLAUDE.md`; atelier-crm — `src/screens/AdminSamples.jsx`, `adminSamples.js`,
+  `adminSamples.test.js`, `AdminShowrooms.jsx`, `adminShowrooms.js`, `adminShowrooms.test.js` (all
+  new), `src/App.jsx`, `src/components/sectionTabs.jsx`, `CLAUDE.md`; plus the bookkeeping
+  (`prd.json`, `sprint-status.yaml`, `progress.txt`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (59 files, 1438 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (39 files, 617 tests; build 144 modules).
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the four entries added to
+    `## Codebase Patterns` above — "no story names it" is not a block, a
+    server-derived-value claim needs a source scan plus a two-directional behavioural test, a
+    negative assertion that is a substring of a positive one is vacuous, and a CRM endpoint scan
+    must anchor on the opening quote (and stay out of backticks in prose).
+  - Gotchas:
+    - **`safeFetch` returns `{ data, error }`, not the body.** `apiFetch` returns the body and
+      throws; `safeFetch` wraps it and never throws. The two pickers on AdminSamples use
+      `safeFetch` deliberately — a showroom list that failed to load must leave an empty `<select>`
+      rather than take the whole register down — and the destructure is `({ data })`.
+    - **The scan that bans a token has now bitten twice in one iteration.** Writing
+      "Not `due_back_at < Date.now()`" in a comment tripped the date-arithmetic ban, and writing
+      an example endpoint inside backticks tripped the endpoint scan. Both were caught by the gate,
+      but the rule is cheaper to remember than to rediscover: a file a scan reads must not spell
+      the banned token, even to explain it.
+    - **Check-out/check-in is on the register screen, and that is a judgement a human should
+      confirm.** US-009 gives the scanner the same two endpoints. It is here because `out` is
+      unwritable by PATCH, so without a movement verb no CRM user could ever produce an `out`
+      sample — which would make this story's own `status` filter and `overdue` column display data
+      nothing in the CRM can create. Narrowing it to the scanner alone would ship a register that
+      cannot record a loan taken at the counter.
+    - **The colourway link is an id box, not a picker.** Showroom and supplier are `<select>`s read
+      whole from their endpoints; `colourways` is ~19k rows and needs the search UI Manage stock
+      has. The row shows the resolved design and house names, so a wrong id is visible rather than
+      silent. A picker is owed and is not in any story.
+    - **`layout.jsx` is NOT on this workstream's allowed list**, so the SideNav's Samples item
+      still carries `match: ['/samples', '/sample-scanner']` and the nav goes dark on the two new
+      tabs. One line for whoever owns that file; deliberately not touched.
+    - Fixture cleanup here is `sample_orders` (by `showroom_id IN (SELECT id FROM showrooms WHERE
+      name LIKE $1)`) -> `sample_loans` -> `samples` -> `brands` -> `showrooms`, anchored on
+      `${PREFIX}%` with no separator. The suite renames nothing, but the showroom NAME is unique,
+      so a leaked row 23505s the next run exactly as US-003's `trade_accounts` guid did.
+  - Context:
+    - The story's four acceptance criteria map to: the kit (a source scan on both screens for
+      `useCrudScreen` + the absence of `apiDelete`/`attemptDelete`/`describeBlockers`/
+      `deleteDialog`/`Math.ceil(`), overdue-from-the-API (the two-directional test plus the
+      date-arithmetic source ban), the cutting-comments ban (a source scan on the path, the table
+      name and the field access), and the CRM gates.
+    - **US-009 is next and needs nothing out of bounds.** `sampleFlow.js` mirrors
+      `src/samples/sample-order-states.js` (`ALLOWED_TRANSITIONS` so the UI never offers a move
+      that 409s, `isDeletableStatus` so Delete is greyed rather than discovered); the endpoint is
+      `POST /admin/sample-orders/:id/transition` with body `{ status, at? }` answering
+      `{ sample_order }`. `SampleScanner.jsx` can import `byBarcodePath`, `checkOutPath`,
+      `checkInPath`, `checkOutBody`, `loanState` and `movementVerb` from
+      `src/screens/adminSamples.js` rather than re-deriving them — `movementVerb` is what decides
+      which verb a scan offers. `AdminSampleOrders.jsx` should take the `samplesTabs` key
+      `orders`; the strip already carries `tracking`, `register`, `showrooms`, `scanner`.
+      The redirects US-009 owes are `/samples` and `/showroom-samples`, and note that `/samples` is
+      currently the DEMO Tracking screen and is still a live tab in the strip — retiring it is part
+      of that story, not this one.
+    - **Still owed and named by no story** (two of the three from US-005/US-006/US-007 remain):
+      `CONSTRAINT_BLOCKERS` in `src/lifecycle/delete.js` has no `sample_loans_sample_id_fkey` or
+      `sample_orders_showroom_id_fkey` entry (the probes cover both; only a lost race falls through
+      to the generic "related records"), and the `product`/`colourway` registry entries still carry
+      no `samples` probe, so deleting a design does not yet see the samples cut from it. The
+      showroom-CRUD gap is closed by this story.
+- **Needs human verification:** BOTH new screens, in a browser — this is the first W4 story with a
+  UI, there is no jsdom and no e2e harness on this machine, so nothing here has been rendered.
+  Specifically: (1) `/admin/samples` — the filter bar (search, status, showroom, the tri-state
+  overdue select), that an overdue row prints in clay, and that the expanded row's check-out form,
+  movement history and Save all behave; (2) `/admin/showrooms` — the create form, the rename, and
+  that a showroom with samples in it refuses Delete with a dialog offering "Archive instead";
+  (3) the samples tab strip now has four tabs and the SideNav item does not light on the two new
+  ones (see the `layout.jsx` gotcha). Two judgement calls a person should confirm: that recording a
+  check-out from the register screen (not only from the scanner) is what the counter wants, and
+  that a colourway is acceptable as a typed id until a picker exists.
 ---

@@ -31,6 +31,14 @@ Story-specific detail belongs in the per-story entries below, not here.
   `removeAdditional: true`, so a whitelist entry with no matching `properties` key is inert — the
   key is stripped before the handler ever sees it — and a schema entry with no whitelist entry is
   ignored. Neither half fails loudly on its own.
+- **An ordering test must be built so no assertion can pass by accident.** Rank the row whose NAME
+  sorts LAST first (otherwise a plain `ORDER BY name` passes), give two rows the SAME rank (or the
+  tie-break is never exercised), and archive the LOWEST-ranked row (or an implementation that
+  treats rank N as slot N passes). Assert the same list twice, too — a non-total ORDER BY is free
+  to return a different permutation each time and a single call cannot see that.
+- **Filter a shared-database assertion to the fixture's own prefix and assert RELATIVE order.**
+  `atelier_w7` is seeded and the migration already featured real rows, so any absolute position or
+  `toHaveLength` over a public listing is asserting about the seed as much as the fixture.
 
 ---
 
@@ -183,6 +191,70 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   - Nothing renders these endpoints yet — the CRM panel is US-005. A human should eyeball the
     CRM's Brands screen once that lands, and confirm the reorder round-trips.
   - Confirm `FEATURED_LIMIT = 12` is an acceptable cap before US-005 hardcodes the same number.
+  - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
+    be started.)
+---
+
+## 2026-08-06T16:52:00Z - W7-US-003 - Public read-model ordering
+
+- `ORDER BY featured_rank ASC NULLS LAST, <name>, <id>` now drives all three public reads, and
+  `featured_rank` is exposed on both public shapes (explicitly null when unfeatured):
+  - `listBrands` — `featured_rank ASC NULLS LAST, name ASC, id ASC`.
+  - `listCollections` — `c.featured_rank ASC NULLS LAST` in front of the pre-existing
+    `b.name ASC, c.name ASC, c.id ASC` tail. Featured collections lead **across houses**, because
+    the hero is one list the office ordered and grouping by house first would scatter it; the
+    unfeatured majority stays exactly where it was.
+  - the collections nested in `getBrandBySlug` — same clause, and they carry the rank too.
+- No index of any kind was added, and the suite asserts against `pg_indexes` that no UNIQUE index
+  mentions `featured_rank` on either table. Two fixture rows deliberately SHARE rank 104, so a
+  unique index would fail the fixture insert as well.
+- **The trade-only interaction: featuring is viewer-independent, only the count moves.** Houses and
+  collections are listed for every viewer (a closed house is flagged `trade_only`, never hidden),
+  so a featured house a guest cannot buy from cannot drop out and leave a gap. The suite asserts a
+  guest and an approved trade viewer receive the IDENTICAL slug order while the closed house's
+  featured collection reports `product_count` 0 to the guest and 1 to the trade viewer.
+- The other hole a consumer could invent: an archived featured row is excluded from every public
+  read, so ranks arrive with gaps. The fixture archives the LOWEST-ranked house (100) on purpose,
+  and the test asserts the returned featured rows are still an unbroken PREFIX — rank is an order,
+  never a slot number.
+- Repos and files changed: atelier-api only — `src/catalogue/brands.js`,
+  `src/catalogue/collections.js`, `test/featured-public.test.js` (new, 12 tests), `CLAUDE.md`
+  (`## Featured` → new `### Public reads`), `ralph/w7-featured/prd.json`,
+  `ralph/w7-featured/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (936 passed, 49 files). The two untouched repos were
+  run as well: `( cd atelier-crm && npm test && npm run build )` -> 0 (412 tests),
+  `( cd atelier-storefront && npm run lint && npm test && npm run build )` -> 0 (108 tests).
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only) — promoted to `## Codebase Patterns` above:
+    how to build an ordering fixture no wrong implementation can pass, and why a shared-database
+    listing assertion must filter to its own prefix and check RELATIVE order.
+  - Gotchas:
+    - **A featured fixture must set ranks with a direct `UPDATE`, never through
+      `PUT /admin/{brands,collections}/featured`.** Those clear every rank in the table, which
+      would wipe the migration's seeded ranks that `test/featured-rank.test.js` asserts are still
+      there. `featured-public.test.js` therefore needs no snapshot/restore — its rows are inserted
+      with their ranks and deleted whole in cleanup — unlike `featured-admin.test.js`.
+    - Ranks 100+ were used so nothing in the fixture can collide meaningfully with the seeded
+      1–3 / 1–7; the assertions filter to the `feat-pub-test-` prefix and compare relative order,
+      so they hold on a seeded database and on an empty CI one alike.
+    - `product_count` is the ONLY viewer-dependent field on a collection. US-006 should know that a
+      featured collection belonging to a `trade_only` house renders as a hero slide that opens on
+      an empty grid for a signed-out visitor — correct per the visibility design, but a
+      merchandising decision the office is now free to make by mistake.
+    - The nested `toCollection` in `brands.js` and the one in `collections.js` are different
+      mappers with the same name and different shapes; both needed the field.
+  - Context:
+    - Public read models: `src/catalogue/brands.js` (`BRAND_COLUMNS`, `listBrands`,
+      `getBrandBySlug`), `src/catalogue/collections.js` (`collectionSelect`, `listCollections`).
+    - The back-office counterparts that already used the same clause:
+      `listFeaturedBrands`/`listFeaturedCollections` in `src/catalogue/admin-brands.js`.
+    - Architecture: `_bmad-output/planning-artifacts/architecture.md` § "Featured ordering".
+- **Needs human verification:**
+  - Nothing renders these fields yet. Once US-006/US-007 land, a human should confirm the homepage
+    hero and the `/brands` "in focus" strip look exactly as they do today, and decide whether a
+    featured collection from a trade-only house belongs in the hero at all (it will show an empty
+    grid to a signed-out visitor).
   - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
     be started.)
 ---

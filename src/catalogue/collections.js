@@ -39,6 +39,7 @@ const collectionSelect = (includeTradeOnly) => `
          c.name,
          c.description,
          c.image_url,
+         c.featured_rank,
          ${visibleProductCount(includeTradeOnly)},
          b.slug AS brand_slug,
          b.name AS brand_name,
@@ -54,6 +55,7 @@ const toCollection = (row) =>
     name: row.name,
     description: row.description,
     image_url: row.image_url,
+    featured_rank: row.featured_rank,
     product_count: row.product_count,
     brand: Object.freeze({
       slug: row.brand_slug,
@@ -63,7 +65,18 @@ const toCollection = (row) =>
   })
 
 /**
- * Lists live collections, optionally narrowed to one house.
+ * Lists live collections, optionally narrowed to one house: the featured ones
+ * in the office's order, then the rest by house and collection name.
+ *
+ * The featured ones lead ACROSS houses, not within each — the homepage's hero
+ * is one list the office ordered, and grouping by house first would scatter it.
+ * `featured_rank ASC NULLS LAST` then the existing house/name/id tail keeps the
+ * unfeatured majority exactly where it was and stays deterministic when two
+ * collections share a rank, which is why the column carries no unique index.
+ *
+ * The order is the same for every viewer: a collection belonging to a house
+ * closed to the public is still listed (only its `product_count` drops to 0),
+ * so featuring one cannot leave a gap a consumer would have to fill.
  *
  * An unknown brand slug yields an empty list rather than an error: this mirrors
  * the product listing's filter behaviour, where a filter that matches nothing is
@@ -80,7 +93,7 @@ export const listCollections = async (
   const scoped = brandSlug ? `AND b.slug = $1` : ''
   const { rows } = await pool.query(
     `${collectionSelect(includeTradeOnly)} ${scoped}
-     ORDER BY b.name ASC, c.name ASC, c.id ASC`,
+     ORDER BY c.featured_rank ASC NULLS LAST, b.name ASC, c.name ASC, c.id ASC`,
     brandSlug ? [brandSlug] : []
   )
   return rows.map(toCollection)

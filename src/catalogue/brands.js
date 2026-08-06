@@ -8,6 +8,18 @@
 // /brands for everyone signed out. `trade_only` rides along on the shape so the
 // storefront can label the house and offer the trade application where its grid
 // would otherwise read as an empty collection.
+//
+// Featured houses lead the list. `featured_rank ASC NULLS LAST, name ASC,
+// id ASC` is deterministic even when two houses share a rank, which is why the
+// column carries no unique index — a reorder never has to avoid a collision.
+// The rank rides along on the shape so /brands can draw its "in focus" strip
+// from the office's own choice instead of re-deriving one from is_international
+// and a design count.
+//
+// The ordering is the SAME for every viewer: a house closed to the public
+// (`trade_only`) is still listed, flagged, so featuring one cannot punch a hole
+// in the strip — a consumer takes the first N featured rows it is given and
+// never indexes by rank.
 
 const BRAND_COLUMNS = `
   slug,
@@ -17,7 +29,8 @@ const BRAND_COLUMNS = `
   is_international,
   trade_only,
   story,
-  website_url
+  website_url,
+  featured_rank
 `
 
 const toBrand = (row) =>
@@ -30,12 +43,16 @@ const toBrand = (row) =>
     trade_only: row.trade_only,
     story: row.story,
     website_url: row.website_url,
+    featured_rank: row.featured_rank,
   })
 
-const toCollection = (row) => Object.freeze({ slug: row.slug, name: row.name })
+const toCollection = (row) =>
+  Object.freeze({ slug: row.slug, name: row.name, featured_rank: row.featured_rank })
 
 /**
- * Lists all brands, alphabetically.
+ * Lists all brands: the featured ones in the office's order, then the rest
+ * alphabetically.
+ *
  * @param {import('pg').Pool} pool
  * @returns {Promise<object[]>}
  */
@@ -43,7 +60,7 @@ export const listBrands = async (pool) => {
   const { rows } = await pool.query(
     `SELECT ${BRAND_COLUMNS} FROM brands
       WHERE archived_at IS NULL
-      ORDER BY name ASC, id ASC`
+      ORDER BY featured_rank ASC NULLS LAST, name ASC, id ASC`
   )
   return rows.map(toBrand)
 }
@@ -65,9 +82,9 @@ export const getBrandBySlug = async (pool, slug) => {
   }
 
   const { rows: collections } = await pool.query(
-    `SELECT slug, name FROM collections
+    `SELECT slug, name, featured_rank FROM collections
      WHERE brand_id = $1 AND archived_at IS NULL
-     ORDER BY name ASC, id ASC`,
+     ORDER BY featured_rank ASC NULLS LAST, name ASC, id ASC`,
     [brandRow.id]
   )
 

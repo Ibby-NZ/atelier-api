@@ -101,7 +101,7 @@ epics:
     stories:
       US-001: done      # Migration: featured_rank on brands and collections
       US-002: done      # Admin patch support and whole-list reorder endpoints
-      US-003: pending   # Public read-model ordering
+      US-003: done      # Public read-model ordering
       US-004: pending   # Seed test: featured survives a reseed
       US-005: pending   # CRM featured panel
       US-006: pending   # Storefront homepage reads featured

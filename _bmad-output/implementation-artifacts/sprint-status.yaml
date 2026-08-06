@@ -9,14 +9,14 @@ epics:
   w1-foundations:
     name: "W1 Foundations"
     branch: aug6/w1-foundations
-    status: in_progress
+    status: done
     stories:
       US-001: done      # Lifecycle registry and deleteOrExplain
       US-002: done      # setArchived replaces the eight duplicated archive helpers
       US-003: done      # Registry safety tests
       US-004: done      # CRM list kit: list.js, useAdminList, Pagination
       US-005: done      # CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
-      US-006: pending   # CI workflows for all three repos
+      US-006: done      # CI workflows for all three repos
   w2-crud:
     name: "W2 CRUD completion"
     branch: aug6/w2-crud

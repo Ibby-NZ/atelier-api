@@ -269,3 +269,40 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   Escape closes it, focus starts on Cancel, the backdrop click cancels, and a real 409 (delete a
   house that has products) shows the blocker lines with Archive instead.
 ---
+
+## 2026-08-06T01:15:05Z - W1-US-006 - CI workflows for all three repos
+
+- `.github/workflows/ci.yml` in each repo. All three: `on.pull_request.branches: [august-6th-updates]`,
+  `permissions: contents: read`, `actions/checkout@v4` + `actions/setup-node@v4` (node 22, npm cache),
+  `npm ci`, then that repo's real gates. No workflow runs a typecheck; each says in a comment why,
+  because the story templates keep re-adding one.
+  - api: a `postgres:14` service container with a `pg_isready` healthcheck, `DATABASE_URL` and a
+    throwaway 32-character `COOKIE_SECRET`; runs `npm run lint` then `npm test`.
+  - crm: `npm test` then `npm run build`. No lint step — there is no ESLint in that repo, which is
+    exactly why build is a gate and not a release step.
+  - storefront: `npm run lint`, `npm test`, `npm run build`.
+- Gates (all nine, all 0): api `npm run lint` + `npm test` (39 files, 656 tests) · crm `npm test`
+  (32 files, 389 tests) + `npm run build` · storefront `npm run lint` + `npm test` (108) + `npm run build`.
+- **Learnings:**
+  - **`npm ci` cannot be verified from a worktree on this machine.** Every worktree's `node_modules`
+    is a SYMLINK to the main checkout, so running `npm ci` would delete and rebuild the shared tree
+    and break every other loop. The install step is therefore unverified locally by construction —
+    the first PR run is what proves it. All three repos do have a committed `package-lock.json`,
+    which is the precondition `npm ci` needs.
+  - **Node 22, not 20.** Two independent reasons: `node --test "src/**/*.test.js"` (the storefront's
+    runner) needs >= 21 for glob patterns and on an older runtime silently matches NO files and
+    reports a green run over zero tests; and node-pg-migrate `require()`s the ESM migration files,
+    which is only unflagged from 22.12. `setup-node` with `'22'` resolves to the newest 22.x.
+  - **The Postgres service needs the healthcheck.** Without `--health-cmd pg_isready` the first
+    migration can race the server's startup, and the connection-refused that follows reads as a code
+    fault rather than a timing one. Image pinned to `postgres:14` to match what the team develops
+    against — a newer server would let a query through CI that fails in production.
+  - The storefront build needs **no API and no database**: `src/lib/api.js` `safeFetch` exists so a
+    build-time fetch cannot fail the build, and EmDash's SQLite state under `data/` is gitignored and
+    created on demand. Verified by building here with no `data/` directory present.
+  - `permissions: contents: read` at the workflow level is the enforceable form of "no workflow can
+    push to main/master" — a job token with read-only contents cannot push, tag or open a release.
+- **Needs human verification:** the first pull request into `august-6th-updates` is the proof. Nothing
+  about a GitHub Actions runner can be exercised from this machine — in particular the `npm ci` step
+  and the Postgres service container.
+---

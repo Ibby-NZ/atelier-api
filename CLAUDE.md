@@ -666,3 +666,54 @@ migrations.
   `showrooms`**, plus `trade_accounts` by `legacy_customer_name` prefix. `sample_id` is RESTRICT, so
   deleting a sample 23503s inside cleanup while a loan points at it. A `trade_accounts` fixture
   needs a literal uuid for `legacy_account_guid` and a `legacy_customer_name`.
+
+### `sample_orders` (`migrations/1786852800000_samples-orders.js`)
+
+- **The showroom-stocking lifecycle, independent of the loan register.** A loan is a sample Atelier
+  already owns leaving the library; a sample order is material that does not exist here yet being
+  requested from a house. Nothing joins them — an order that reaches `received` may or may not ever
+  become a barcoded `samples` row, and that is the office's decision, not the schema's.
+- **`status` is CHECK-constrained to
+  `requested|ordered|in_transit|received|displayed|cancelled`, default `requested`** (inline
+  `check:`, so Postgres names it `sample_orders_status_check`). The vocabulary belongs in the
+  schema because every list is a status tab and free text would make the CRM's tabs a guess.
+- **The state MACHINE is deliberately NOT in the schema.** A CHECK sees one row at a time and
+  cannot see which state a row is moving FROM, so it can hold the vocabulary and never the
+  transitions; `ALLOWED_TRANSITIONS` + `requireStatus` live in the module the CRM mirrors. Nor is
+  there a CHECK tying `status = 'cancelled'` to `cancelled_at IS NOT NULL` — a back-dated
+  correction has to stay possible.
+- **Each transition has its OWN timestamp column**, and that is the table's reason to exist:
+  `requested_at` (NOT NULL, default `now()`) plus nullable `ordered_at`, `in_transit_at`,
+  `received_at`, `displayed_at`, `cancelled_at`. `status` answers "where is it now"; the stamps
+  answer "when did it move", which is what a showroom chasing a house actually asks ("ordered three
+  weeks ago, still not shipped"). A single `status_changed_at` is overwritten by the next move and
+  loses every earlier one. A NULL stamp reads as "has not been there" without consulting `status`,
+  so no reader needs a CASE over the status to date a transition. `requested_at` is defaulted
+  rather than derived from `created_at`, the same posture as `sample_loans.out_at`, so an order
+  recorded after the fact carries the day it was raised.
+- **`showroom_id` is NOT NULL + RESTRICT here while `samples.showroom_id` is SET NULL, and the
+  asymmetry is the point.** A sample with no home is still a sample on a shelf; an order with no
+  destination is a request nobody can fulfil, so it may not be created without a showroom and the
+  showroom may not be deleted out from under it. `colourway_id` is RESTRICT and NULLABLE exactly as
+  on `samples` (plenty of requests name material the catalogue does not hold — often *why* it is
+  being ordered — and `label` identifies those); `supplier_id` is SET NULL, because who it was
+  ordered from is history that must survive the supplier record being tidied away.
+- **There is no quantity column, deliberately.** The row is one requested item, nothing derives a
+  figure from it, and a count on a samples table is the first thing a later reader mistakes for
+  stock. Three hangers is three rows or a note until somebody ratifies a line grain.
+- **`archived_at` IS here**, unlike `sample_loans`: the delete policy refuses a hard delete of any
+  order past `requested`/`cancelled`, so archiving is the only way a finished order leaves the CRM
+  list. `sample_orders_archived_at_live_idx` is partial on the live rows, like every other
+  archivable table here.
+- **Fixture cleanup order gains a third shape.** `sample_orders` goes before `showrooms` (RESTRICT)
+  AND before `brands` (its `colourway_id` is RESTRICT, so it stops a brand cascade dead just as
+  `samples.colourway_id` does). A suite touching both lifecycles deletes `sample_orders` +
+  `sample_loans` → `samples` → `brands` → `suppliers` → `showrooms`. Because `showroom_id` is NOT
+  NULL, every fixture order hangs off a showroom and the whole table cleans with
+  `WHERE showroom_id IN (SELECT id FROM showrooms WHERE name LIKE $1)` — no prefix column of its
+  own is needed.
+- **A prefix cleanup must match every name the suite WRITES.** `test/samples-loans.test.js` renamed
+  a `trade_accounts` fixture to `${PREFIX} Name Ltd` while cleaning on `${PREFIX}-%`, so the row
+  survived the run and its literal `legacy_account_guid` 23505'd on the next one — the suite passed
+  exactly once per database. The pattern is anchored on `${PREFIX}%` now. Any fixture carrying a
+  literal unique value (a uuid, a guid) has this failure mode.

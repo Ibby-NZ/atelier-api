@@ -32,6 +32,19 @@ Story-specific detail belongs in the per-story entries below, not here.
 - **`rethrowConflict` is EXPORTED from `src/catalogue/admin-brands.js` and is the house 23505 -> 409
   mapper for the whole API.** An unrecognised `error.constraint` degrades the MESSAGE and never the
   status, so a domain that has no message table yet can already prove its duplicate answers 409.
+- **A prefix cleanup must match every name the suite WRITES, not just the ones it inserts.** A test
+  that renames a fixture (`${PREFIX} Name` → `${PREFIX} Name Ltd`) leaks the row past a
+  hyphen-anchored `${PREFIX}-%` pattern, and a fixture carrying a LITERAL unique value (a uuid, a
+  guid) then 23505s on the next run — so the suite passes exactly once per database and fails for
+  every later iteration on a checkout nobody touched. Anchor the pattern on `${PREFIX}%` (no
+  separator) or make every written name carry the separator. This is why the DATABASE is state a
+  Ralph iteration inherits: a green suite on a fresh database says nothing about the fifth run.
+- **A test suite failing before you have written a line is proved pre-existing by finding its
+  CAUSE, not by re-running it.** Query the fixture rows the failing assertion collides with — a
+  leaked row whose name predates your change settles it in one query, where a bisect by moving
+  files aside costs a 30 s suite run and, for a migration, leaves `pgmigrations` naming a file that
+  is no longer on disk. `psql` is denied at the tool level; `node -e` with `require('dotenv')` +
+  `require('pg')` against `process.env.DATABASE_URL` is the way to look at `atelier_w4`.
 - **`src/seed/legacy-import.js`'s `LEGACY_TABLES` is the canonical declaration of what every
   `legacy_*` table holds**, so "no legacy table gained a column" is a real assertion: compare
   `information_schema.columns` against the map plus `imported_at`. One pre-existing exception —
@@ -150,5 +163,78 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
 - **Needs human verification:** none — schema only, no screen and no route. A human should confirm
   that recording a borrower as a free-text `holder_name` plus an optional trade-account link is
   what the counter actually does, before US-006 draws the check-out form on it.
+---
+
+## 2026-08-06T18:34:00Z - W4-US-003 - Migration: sample_orders
+
+- Created `sample_orders`, the samples domain's SECOND and independent lifecycle: `showroom_id`
+  (NOT NULL, RESTRICT), `colourway_id` (nullable, RESTRICT), `supplier_id` (nullable, SET NULL),
+  `label`, `status` (CHECK `requested|ordered|in_transit|received|displayed|cancelled`, default
+  `requested`), one timestamp column per transition (`requested_at` NOT NULL default now(), plus
+  `ordered_at`/`in_transit_at`/`received_at`/`displayed_at`/`cancelled_at`, all nullable), `notes`,
+  timestamps and `archived_at`. Five indexes: the three FKs, `status`, and a partial
+  `sample_orders_archived_at_live_idx` on the live rows.
+- Also fixed a latent fixture leak in `test/samples-loans.test.js` (its `trade_accounts` cleanup
+  pattern could not match the row its own rename test creates), which is why the suite failed on a
+  checkout nobody had touched. See the two new `## Codebase Patterns` entries.
+- Repos and files changed: atelier-api only —
+  `migrations/1786852800000_samples-orders.js` (new), `test/samples-orders.test.js` (new, 15
+  tests), `test/samples-loans.test.js` (one-line cleanup pattern fix), plus the bookkeeping
+  (`prd.json`, `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `npm run migrate` twice -> second run "No migrations to run!";
+  `( cd atelier-api && npm run lint && npm test )` -> 0 (54 files, 1212 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the two entries added to
+    `## Codebase Patterns` above — a prefix cleanup must match every name a suite WRITES (a rename
+    that drops the separator leaks a row carrying a literal uuid, so the suite passes once per
+    database), and a pre-existing failure is proved by finding its cause with a `node -e` query
+    rather than by moving files aside (`psql` is denied; moving an APPLIED migration aside also
+    leaves `pgmigrations` naming a file that is gone).
+  - Gotchas:
+    - **`showroom_id` is NOT NULL + RESTRICT here while `samples.showroom_id` is SET NULL, and the
+      asymmetry is deliberate.** A sample with no home is still a sample on a shelf; an ORDER with
+      no destination is a request nobody can fulfil. Consequence for the fixtures: every sample
+      order hangs off a showroom, so a suite can clean the whole table with
+      `WHERE showroom_id IN (SELECT id FROM showrooms WHERE name LIKE $1)` and needs no prefix
+      column of its own.
+    - **Cleanup order gains a THIRD shape**: `sample_orders` must go before `showrooms` (RESTRICT)
+      AND before `brands` (its `colourway_id` is RESTRICT, so it stops a brand cascade dead exactly
+      as `samples.colourway_id` does). A suite touching both lifecycles deletes
+      `sample_orders` + `sample_loans` -> `samples` -> `brands` -> `suppliers` -> `showrooms`.
+    - **The six transition stamps are the table's reason to exist and must not be collapsed.** One
+      `status_changed_at` is overwritten by the next move; `status` answers "where is it now" and
+      the stamps answer "when did it move", which is what a showroom chasing a house asks. A NULL
+      stamp is readable as "has not been there" without consulting `status`, so US-004/US-007 need
+      no CASE over the status to date a transition.
+    - **The state MACHINE is not in the schema and must not be added there.** A CHECK sees one row
+      at a time and cannot see which state a row is moving FROM, so it can hold the vocabulary and
+      never the transitions — `ALLOWED_TRANSITIONS` is US-007's, in a module the CRM mirrors. There
+      is deliberately also no CHECK tying `status = 'cancelled'` to `cancelled_at IS NOT NULL`: a
+      back-dated correction must stay possible.
+    - **There is no quantity column, deliberately.** The row is one requested item; nothing derives
+      a figure from it, and the first number on a samples table is what a later reader mistakes for
+      stock. If the office needs "three hangers" that is three rows or a note, until somebody
+      ratifies a line grain.
+    - `archived_at` IS here (unlike `sample_loans`, which is append-only history): US-007 refuses a
+      hard delete of anything past `requested`/`cancelled`, so archiving is the only way a finished
+      order leaves the CRM list.
+  - Context:
+    - The spec is `_bmad-output/planning-artifacts/architecture.md` § *Samples domain* ("Showroom
+      stocking — `showrooms` + `sample_orders` advancing requested -> ordered -> in_transit ->
+      received -> displayed | cancelled") and the delete-policy table above it, whose `sample order`
+      row is "409 unless requested/cancelled".
+    - The inline `check:` is emitted unnamed and Postgres auto-names it `sample_orders_status_check`
+      — the name the `rejects.toThrow(...)` anchors on and the name US-007's `rethrowConflict`-style
+      mapping would key on.
+    - **`src/lifecycle/registry.js` is STILL not in this workstream's allowed files** and now has
+      three probes owing to it, not two: `sample` -> `sample_loans`, the open-loan guard on
+      `sample loan`, and `sample order` -> the requested/cancelled guard (plus a `samples` probe on
+      `product`/`colourway`). Same ownership question US-001 and US-002 flagged (E2 owns lifecycle);
+      do not edit the registry silently.
+- **Needs human verification:** none — schema only, no screen and no route. A human should confirm
+  that a sample order is one requested item with no quantity, and that `displayed` is the office's
+  own word for "it is on the shelf in the showroom", before US-007 draws the lifecycle on it.
 ---
 

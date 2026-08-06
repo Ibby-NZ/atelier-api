@@ -66,7 +66,12 @@ const cleanup = async (pool) => {
     [`${PREFIX}-%`]
   )
   await pool.query(`DELETE FROM samples WHERE barcode LIKE $1`, [`${PREFIX}-%`])
-  await pool.query(`DELETE FROM trade_accounts WHERE legacy_customer_name LIKE $1`, [`${PREFIX}-%`])
+  // No hyphen in this pattern, deliberately: the rename test leaves the account
+  // called `${PREFIX} Kedgley Architects Ltd`, which a `${PREFIX}-%` pattern
+  // never matches. The row then survives the run and its literal
+  // `legacy_account_guid` 23505s on the next one, so the suite could only pass
+  // once per database.
+  await pool.query(`DELETE FROM trade_accounts WHERE legacy_customer_name LIKE $1`, [`${PREFIX}%`])
 }
 
 describe('sample loans schema migration', () => {

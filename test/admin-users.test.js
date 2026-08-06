@@ -504,182 +504,6 @@ describe('back-office users admin', () => {
     })
   })
 
-  describe('DELETE /admin/users/:id', () => {
-    const userExists = async (id) => {
-      const { rows } = await pool.query('SELECT 1 FROM users WHERE id = $1', [id])
-      return rows.length === 1
-    }
-
-    it('deletes an account that never transacted', async () => {
-      const id = await insertUser(pool, { local: 'mistyped', name: 'Mistyped Signup' })
-
-      const response = await inject('DELETE', `/admin/users/${id}`, backofficeCookie)
-      expect(response.statusCode).toBe(200)
-      expect(response.json()).toEqual({ deleted: { entity: 'user', id } })
-
-      // Gone from the table, not merely hidden from the list — archiving is the
-      // other endpoint.
-      expect(await userExists(id)).toBe(false)
-    })
-
-    it('refuses an account with orders, naming the count', async () => {
-      const id = await insertUser(pool, { local: 'shopped' })
-      await insertOrder(pool, id, 'ORD-1')
-
-      const response = await inject('DELETE', `/admin/users/${id}`, backofficeCookie)
-      expect(response.statusCode).toBe(409)
-      const body = response.json()
-      expect(body.blockers).toEqual([
-        { relation: 'orders', label: 'orders', count: 1, capped: false },
-      ])
-      expect(body.message).toContain('1 orders')
-      expect(body.archivable).toBe(true)
-
-      // The whole point of probing first: orders.user_id is SET NULL, so an
-      // unprobed delete would succeed and quietly turn this history into
-      // anonymous guest orders carrying no guest_email.
-      expect(await userExists(id)).toBe(true)
-      const { rows } = await pool.query(
-        'SELECT user_id FROM orders WHERE order_number = $1',
-        [`${FIXTURE_TAG}-ORD-1`]
-      )
-      expect(rows[0].user_id).toBe(id)
-    })
-
-    it('refuses an account with a trade application', async () => {
-      const id = await insertUser(pool, { local: 'applicant', role: 'trade' })
-      await insertTradeApplication(pool, id)
-
-      const response = await inject('DELETE', `/admin/users/${id}`, backofficeCookie)
-      expect(response.statusCode).toBe(409)
-      expect(response.json().blockers).toEqual([
-        {
-          relation: 'trade_applications',
-          label: 'trade applications',
-          count: 1,
-          capped: false,
-        },
-      ])
-      expect(await userExists(id)).toBe(true)
-    })
-
-    it('refuses an account with a contact enquiry', async () => {
-      const id = await insertUser(pool, { local: 'enquirer' })
-      await insertEnquiry(pool, id, 'enquirer-msg')
-
-      const response = await inject('DELETE', `/admin/users/${id}`, backofficeCookie)
-      expect(response.statusCode).toBe(409)
-      expect(response.json().blockers).toEqual([
-        {
-          relation: 'contact_enquiries',
-          label: 'contact enquiries',
-          count: 1,
-          capped: false,
-        },
-      ])
-      expect(await userExists(id)).toBe(true)
-    })
-
-    it('reports every blocker in one refusal, not the first one it hits', async () => {
-      const id = await insertUser(pool, { local: 'everything', role: 'trade' })
-      await insertOrder(pool, id, 'ORD-A')
-      await insertOrder(pool, id, 'ORD-B')
-      await insertTradeApplication(pool, id)
-      await insertEnquiry(pool, id, 'everything-msg')
-
-      const response = await inject('DELETE', `/admin/users/${id}`, backofficeCookie)
-      expect(response.statusCode).toBe(409)
-      const body = response.json()
-      expect(body.blockers.map((blocker) => blocker.relation)).toEqual([
-        'orders',
-        'trade_applications',
-        'contact_enquiries',
-      ])
-      expect(body.message).toContain('2 orders')
-      expect(body.message).toContain('1 trade applications')
-      expect(body.message).toContain('1 contact enquiries')
-    })
-
-    it('refuses a self-delete with 403, not 409', async () => {
-      const response = await inject('DELETE', `/admin/users/${bossId}`, backofficeCookie)
-      expect(response.statusCode).toBe(403)
-      const body = response.json()
-      // Nothing references the row; the caller is simply not allowed. So there
-      // are no blockers to list, and "archive it instead" is still true.
-      expect(body.blockers).toEqual([])
-      expect(body.archivable).toBe(true)
-      expect(body.message).toContain('your own account')
-      expect(await userExists(bossId)).toBe(true)
-    })
-
-    it('lets a trade-account grant cascade rather than block', async () => {
-      const id = await insertUser(pool, { local: 'granted', role: 'trade', tradeApproved: true })
-      const accountId = await insertTradeAccountGrant(pool, id, 'ACC-1')
-
-      const response = await inject('DELETE', `/admin/users/${id}`, backofficeCookie)
-      expect(response.statusCode).toBe(200)
-
-      // trade_account_users is an access grant, not a business record: it goes
-      // with the login (CASCADE) and carries no probe. The company itself stays.
-      const { rows: grants } = await pool.query(
-        'SELECT 1 FROM trade_account_users WHERE user_id = $1',
-        [id]
-      )
-      expect(grants).toHaveLength(0)
-      const { rows: accounts } = await pool.query(
-        'SELECT 1 FROM trade_accounts WHERE id = $1',
-        [accountId]
-      )
-      expect(accounts).toHaveLength(1)
-    })
-
-    it('does not let a link this account made block it', async () => {
-      const staffId = await insertUser(pool, { local: 'linker', role: 'backoffice' })
-      const { rows } = await pool.query(
-        `INSERT INTO trade_accounts (legacy_account_guid, legacy_customer_name, linked_by_user_id)
-              VALUES (gen_random_uuid(), $1, $2)
-           RETURNING id`,
-        [`${FIXTURE_TAG}-ACC-2`, staffId]
-      )
-
-      const response = await inject('DELETE', `/admin/users/${staffId}`, backofficeCookie)
-      expect(response.statusCode).toBe(200)
-
-      // linked_by_user_id is SET NULL and unprobed on purpose: the link outlives
-      // whoever made it, it just stops naming them.
-      const { rows: after } = await pool.query(
-        'SELECT linked_by_user_id FROM trade_accounts WHERE id = $1',
-        [rows[0].id]
-      )
-      expect(after[0].linked_by_user_id).toBeNull()
-    })
-
-    it('deletes an already-archived account', async () => {
-      const id = await insertUser(pool, { local: 'archived-then-deleted' })
-      await inject('POST', `/admin/users/${id}/archive`, backofficeCookie)
-
-      const response = await inject('DELETE', `/admin/users/${id}`, backofficeCookie)
-      expect(response.statusCode).toBe(200)
-      expect(await userExists(id)).toBe(false)
-    })
-
-    it('returns 404 with no blockers for an unknown id', async () => {
-      const response = await inject('DELETE', '/admin/users/99999999', backofficeCookie)
-      expect(response.statusCode).toBe(404)
-      expect(response.json().blockers).toEqual([])
-    })
-
-    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
-      const id = await insertUser(pool, { local: 'protected' })
-
-      expect((await inject('DELETE', `/admin/users/${id}`, null)).statusCode).toBe(401)
-      expect(await userExists(id)).toBe(true)
-
-      expect((await inject('DELETE', `/admin/users/${id}`, customerCookie)).statusCode).toBe(403)
-      expect(await userExists(id)).toBe(true)
-    })
-  })
-
   // Hard delete. Every FK out of `users` is SET NULL or CASCADE, so the database
   // refuses nothing — a bare DELETE reports success while turning an order
   // history into anonymous guest orders with no guest_email. The registry's
@@ -719,6 +543,14 @@ describe('back-office users admin', () => {
       // alternative that does not destroy the history.
       expect(body.archivable).toBe(true)
       expect(await stillExists(id)).toBe(true)
+      // And the order still names its buyer. This is the assertion that would
+      // fail if the probe were dropped: the FK is SET NULL, so a bare delete
+      // reports 200 while silently orphaning the row.
+      const { rows } = await pool.query(
+        'SELECT user_id FROM orders WHERE order_number = $1',
+        [`${FIXTURE_TAG}-buyer-1`]
+      )
+      expect(rows[0].user_id).toBe(id)
     })
 
     it('refuses with 409 when the account has a trade application', async () => {
@@ -759,15 +591,25 @@ describe('back-office users admin', () => {
     // record must report both — reporting only the first would send staff round
     // the loop once per relation.
     it('names every blocking relation at once', async () => {
-      const id = await insertUser(pool, { local: 'entangled' })
+      const id = await insertUser(pool, { local: 'entangled', role: 'trade' })
       await insertOrder(pool, id, 'entangled-1')
+      await insertOrder(pool, id, 'entangled-2')
+      await insertTradeApplication(pool, id)
       await insertEnquiry(pool, id, 'entangled-enquiry')
 
       const response = await inject('DELETE', `/admin/users/${id}`, backofficeCookie)
       expect(response.statusCode).toBe(409)
-      const relations = response.json().blockers.map((b) => b.relation)
-      expect(relations).toContain('orders')
-      expect(relations).toContain('contact_enquiries')
+      const body = response.json()
+      expect(body.blockers.map((b) => b.relation)).toEqual([
+        'orders',
+        'trade_applications',
+        'contact_enquiries',
+      ])
+      // Each count is the relation's own, not a total — the message is what the
+      // CRM dialog shows verbatim.
+      expect(body.message).toContain('2 orders')
+      expect(body.message).toContain('1 trade applications')
+      expect(body.message).toContain('1 contact enquiries')
     })
 
     // trade_account_users is an access grant, not a business record: the FK is
@@ -792,12 +634,40 @@ describe('back-office users admin', () => {
       expect(account.rows).toHaveLength(1)
     })
 
+    // The other edge out of trade_accounts is SET NULL and deliberately
+    // unprobed: the link outlives whoever made it, it just stops naming them.
+    // Probing it would make every staff account undeletable the moment it did
+    // any back-office work.
+    it('is not blocked by a trade account this staff member linked', async () => {
+      const staffId = await insertUser(pool, { local: 'linker', role: 'backoffice' })
+      const { rows } = await pool.query(
+        `INSERT INTO trade_accounts (legacy_account_guid, legacy_customer_name, linked_by_user_id)
+              VALUES (gen_random_uuid(), $1, $2)
+           RETURNING id`,
+        [`${FIXTURE_TAG}-linked`, staffId]
+      )
+
+      const response = await inject('DELETE', `/admin/users/${staffId}`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+
+      const after = await pool.query(
+        'SELECT linked_by_user_id FROM trade_accounts WHERE id = $1',
+        [rows[0].id]
+      )
+      expect(after.rows[0].linked_by_user_id).toBeNull()
+    })
+
     // 403, not 409: nothing references the row, the caller simply may not. The
     // guard reads ctx.user, which the route fills from request.user.
     it('refuses a self-delete with 403', async () => {
       const response = await inject('DELETE', `/admin/users/${bossId}`, backofficeCookie)
       expect(response.statusCode).toBe(403)
-      expect(response.json().message).toContain('your own account')
+      const body = response.json()
+      expect(body.message).toContain('your own account')
+      // No blockers to list, and archiving is still on the table — the dialog
+      // reads the same two fields whichever refusal it got.
+      expect(body.blockers).toEqual([])
+      expect(body.archivable).toBe(true)
       expect(await stillExists(bossId)).toBe(true)
     })
 

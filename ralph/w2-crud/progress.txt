@@ -70,6 +70,15 @@ Story-specific detail belongs in the per-story entries below, not here.
   it is explicit about who owns what; treat an omission there as permission and an entry there as a
   wall. Epic 2's "Owns these files" line says "other Wave 2 epics must not touch them" — a protection
   list, not an exhaustive statement of W2's surface.
+- **Check `git log --oneline` the moment the worktree behaves oddly — two iterations can be live in
+  it at once.** It happened on US-004: a second run committed the story while this one was writing
+  it. The tells are all cheap to spot and all mean the same thing — an `Edit` refused with "File has
+  been modified since read" on a file you had not touched, a path *disappearing* from `git status`
+  mid-task (it was committed underneath you), `prd.json` already reading `passes: true` with a
+  timestamp you did not write. When it happens: do NOT `git checkout -- <file>` anything you did not
+  personally write (it discards their in-flight work), stage by explicit pathspec rather than `-A`,
+  and gate the commit on the single test file you touched — a full-suite result is uninterpretable
+  while someone else has source files open.
 - **A mid-transaction race is reproducible deterministically by wrapping the pool, not by timing.**
   `deleteOrExplain` only uses `connect()`/`query()`/`release()`, so `{ connect: async () => ({
   query, release }) }` around a real client can run arbitrary work on another connection when a
@@ -501,3 +510,61 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   DELETE preflight from the CRM at :5273, which `app.inject()` cannot prove.
 ---
 
+
+## 2026-08-06T15:34:00Z - W2-US-004 - DELETE for user (follow-up: concurrent-iteration collision)
+
+- **This iteration started US-004 and found, mid-flight, that a SECOND iteration was running in the
+  same worktree and committed the story underneath it** (`009e62e`, complete and green). Nothing was
+  duplicated into the tree: the two DELETE describe blocks that briefly coexisted in
+  `test/admin-users.test.js` were reconciled down to the committed one, and the four `CLAUDE.md`
+  bullets written here were reverted after checking them line by line against the three the commit
+  had already landed. What remains is the genuinely additive residue, kept because it strengthens
+  the committed tests rather than restating them.
+- Repos and files changed: `atelier-api` only — `test/admin-users.test.js` (+1 test, 3 sharpened
+  assertions), `CLAUDE.md` (+1 bullet). No bookkeeping flip: `prd.json`, `sprint-status.yaml` and the
+  US-004 progress entry were all written by `009e62e` and are correct as they stand.
+- Gates: `npm run lint` -> 0, `npx vitest run test/admin-users.test.js` -> 0 (39 tests). The FULL
+  suite was green at 700 tests before this commit; it was NOT re-run afterwards because the other
+  iteration has `src/catalogue/admin-brands.js` open for US-005, so a full run would be measuring
+  its half-finished work, not this change.
+- **What the four additions assert**, none of which the committed block covered:
+  - The orders refusal now checks `orders.user_id` is *still* the deleted-would-be user. Every other
+    assertion in that test passes just as well against a delete that never ran; this is the only one
+    that fails if the probe is removed, because the FK is SET NULL and the damage is otherwise
+    invisible.
+  - `names every blocking relation at once` now exercises all THREE probes (it covered orders +
+    enquiries) and asserts the per-relation counts inside `message` — `2 orders, 1 trade
+    applications, 1 contact enquiries`. A UNION ALL that mis-joined its counts would still have
+    passed a relation-names-only assertion.
+  - A new test for `trade_accounts.linked_by_user_id`: a staff account that linked a trade client
+    still deletes, and the column goes null. That edge is SET NULL and carries no probe; nothing
+    else in the suite would notice if a future story added one, and the symptom would be that no
+    back-office login can ever be deleted again.
+  - The self-delete 403 now asserts `blockers: []` and `archivable: true`. The CRM dialog reads
+    those two fields on every refusal regardless of status, so a 403 that omitted them would render
+    an empty dialog with no "Archive instead".
+- **Learnings:**
+  - Pattern (process, and the important one): **two Ralph iterations were live in one worktree at
+    once.** The symptoms are diagnostic and worth recognising early — an `Edit` failing with "File
+    has been modified since read" on a file nothing in this iteration had touched; `git status`
+    showing a file *dropping out* of the modified list mid-task (it was committed underneath you);
+    `prd.json` already reading `passes: true` with a timestamp you did not write. `git log --oneline`
+    settles it in one command. Promoted to `## Codebase Patterns`.
+  - Gotcha: when this happens, `git checkout -- <file>` is NOT a safe revert — it discards whatever
+    the other iteration has in flight for that path. Scope every recovery to paths you personally
+    wrote, and stage by explicit pathspec (`git add <file>`), never `-A` or `-a`.
+  - Gotcha: do not re-run the full suite to gate a commit while another iteration has source files
+    open — a red result is ambiguous between your change and theirs, and a green one is luck. Gate
+    on the test file you touched and say so.
+  - Context: US-004's real entry is the one above this, written by `009e62e`. The registry entry it
+    consumes is `src/lifecycle/registry.js` (`user`, `userGuard` + three probes).
+- **Needs human verification:** **the worktree concurrency itself — this is the item that matters.**
+  Two agents sharing `/Users/verumoffice/atelier-worktrees/w2-crud` will eventually interleave a
+  half-written file into a commit; US-004 survived only because the collision was on a test file and
+  was noticed. Also still uncommitted and NOT authored by this iteration:
+  `ralph/w2-crud/CLAUDE.md`, whose MAY-touch list has been widened to add `admin-users.js`,
+  `src/routes/contact.js`, `src/users/admin-users.js` and `src/pricing/admin-price-lists.js`. It was
+  left unstaged deliberately — it is an edit to the operating instructions, which no story owns — but
+  it needs a human to either commit it or explain it, since US-003 and US-004 both relied on it.
+  Carried forward from US-002/003: a real cross-origin DELETE preflight from the CRM at :5273.
+---

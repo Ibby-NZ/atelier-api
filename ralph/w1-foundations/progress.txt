@@ -185,3 +185,46 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
     explicit `"entity.relation"` key for the same reason.
 - **Needs human verification:** none — this story is tests only.
 ---
+
+## 2026-08-06T01:15:05Z - W1-US-004 - CRM list kit: list.js, useAdminList, Pagination
+
+- Three files under `atelier-crm/src/admin/`, each with a `.test.js` sibling. No screen consumes them
+  yet — W2 onward wires them in, and CRM screen files are outside this workstream's ownership.
+  - `list.js` — pure: `buildListQuery`, `listPath`, `pageCount`, `clampPage`, `readList`,
+    `DEFAULT_LIMIT` (25).
+  - `useAdminList.js` — `{ path, key, limit, filters }` -> `{ rows, total, page, setPage,
+    totalPages, status, error, reload }`, plus the exported pure `pageAfterLoad`.
+  - `Pagination.jsx` — `{ page, totalPages, total, unit, onPage, busy }`, null when
+    `totalPages <= 1`.
+- Gates: `npm test` -> 0 (29 files, 364 tests; was 334, +30), `npm run build` -> 0.
+  API gates re-run unchanged (656 tests) since the bookkeeping commit touches that repo too.
+- **Learnings:**
+  - **A hook-free function component CAN be tested in this repo.** There is no jsdom, but a component
+    with no hooks is just a function returning an element tree — call it and walk `props.children`.
+    `Pagination.test.js` does exactly that and covers the real rules (which page Next targets, which
+    button is dead at each end). This is a genuinely new option beside the house
+    "rules in a .js, dumb .jsx" convention, and it only holds while the component stays hook-free.
+  - **Two hook invariants have no runtime surface here, so they are asserted against the SOURCE**
+    (`readFileSync` on the module, same technique as the API's call-site scan): the effect's
+    dependency arrays must contain no `filters` identifier, and the load must carry an `active` flag
+    with two `if (!active) return` guards. Both regressions (an infinite refetch loop, a stale
+    response landing last) are invisible without a renderer.
+  - **A kit file no screen imports is still compile-checked** — because its `.test.js` sibling
+    imports it, and vitest transforms through the same Vite/react pipeline. `npm run build` alone
+    would tree-shake an unimported module away, so a new kit file without a test sibling is
+    genuinely unchecked in this repo.
+  - `buildListQuery` keeps `0` and `false` and drops only null/undefined/'' — dropping `false` would
+    silently swallow a filter where false is a real answer. A flag that should vanish when off is
+    passed as `flag || null`, which is documented on the function.
+  - `readList` falls back to `rows.length` when there is no `meta.total`: `/admin/brands` and
+    `/admin/inventory` return the whole list unpaged, and reporting `total: 0` above a full table is
+    how a shared reader gets that wrong.
+  - `pageAfterLoad` must return null when the target equals the current page, or `setPage` re-runs
+    the effect forever. It also steps to the new LAST page, not always page 1.
+  - Existing paginator copies to replace when W2 touches those screens: `AdminPriceListItems.jsx`,
+    `ClientsList.jsx`, `PriceLists.jsx`, `Reserves.jsx`, `SalesOrdersList.jsx`. This story
+    deliberately did not edit them — they are screens, owned by later workstreams.
+- **Needs human verification:** none yet — nothing renders this kit. The first screen W2 wires up
+  needs a human to eyeball the paginator against the existing ones (`/admin/price-list-items` is the
+  closest visual reference).
+---

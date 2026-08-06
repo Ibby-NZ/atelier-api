@@ -573,6 +573,77 @@ const WORKSTREAMS = [
     ],
   },
   {
+    slug: 'w10-pricing-template',
+    wsId: 'W10',
+    name: 'Pricing template',
+    epic: 'Epic 10',
+    db: 'atelier_w10',
+    repos: [API],
+    goal:
+      'One universal pricing template for every supplier going forward: v2 as a strict superset ' +
+      'of the existing 14 columns, versioned by its header row so v1 drops keep importing forever.',
+    requires: 'nothing — runs in Wave 1 alongside W1; the file footprints are disjoint',
+    blocks: 'W8 (its rate output is emitted in this template shape)',
+    allowed: [
+      'atelier-api: `scripts/lib/price-template.js`, `scripts/convert-price-lists.js`, ' +
+        '`migrations/*price-list-template*`, `src/seed/price-lists.js`, ' +
+        '`src/seed/import-price-lists.js`, `src/routes/admin-price-lists.js` (vocabulary + new ' +
+        'columns only), `src/pricing/admin-price-lists.js` (column whitelist only), ' +
+        '`test/price-template.test.js`, `test/price-lists.test.js`, `test/converters.test.js`',
+      'atelier-api: `CLAUDE.md` under a `## Pricing template` heading',
+    ],
+    forbidden: [
+      '**`src/seed/data/price-lists.json` — NEVER regenerate it in this workstream.** The committed ' +
+        '8 MB file must stay byte-identical; a data refresh is a separate commit touching only that file.',
+      '`scripts/convert-d365-exports.js` and `scripts/convert-colour-files.js` — the latter is W8',
+      'Any route or module outside the price-list ones listed above',
+      'Anything in atelier-crm or atelier-storefront',
+    ],
+    stories: [
+      story('US-001', 'Migration: price_list_items v2 columns', 'As the office, I want the template to carry brand, pattern match and duty percent, so that the fields the client asked for have a home.', [API], [
+        'Adds brand_name text, pattern_match text, duty_percent numeric(6,3), template_version text NOT NULL DEFAULT v1',
+        'brand_name is TEXT and deliberately NOT a foreign key to brands — supplier names do not reliably match the 41 houses and a broken FK would fail whole imports over a naming difference',
+        'Widens the freight_class CHECK to a single uppercase letter (^[A-Z]$) and adds the same for duty_class',
+        'Those sets today encode a guess about a broker table we do not have; the first B from the broker would otherwise reject the client own file as a bug in ours',
+        'No placeholder duty or freight VALUE is written anywhere — the letters stay raw and uninterpreted',
+        'Re-running the migration is a no-op',
+      ]),
+      story('US-002', 'Template registry with v1 moved verbatim', 'As a maintainer, I want the accepted headers declared in one place, so that adding v3 is one entry.', [API], [
+        'scripts/lib/price-template.js exports TEMPLATES as a frozen array of { version, header, map }',
+        'THE HEADER ROW IS THE VERSION — no version column, no preamble line, no marker cell. A version column can be misdeclared by deleting a column; a header mismatch fails loudly',
+        'matchTemplate normalises labels (lowercase, collapsed whitespace) and matches EXACTLY on length and labels; first match wins',
+        'No match produces the existing loud error, now listing every accepted header',
+        'mapV1 is the current normaliseRow MOVED, not rewritten — same emitted key order, same cleanMeasure/round4/generalFormat calls',
+      ]),
+      story('US-003', 'v2 mapping and the omit-on-v1 rule', 'As the platform, I want v2 files to import without disturbing a single v1 row.', [API], [
+        'v2 appends Supplier, Brand, Pattern Match and Duty Percent to the 14 v1 columns, in that order',
+        'A Supplier cell WINS over the filename, removing the most fragile input in the pipeline',
+        'v2-only fields are OMITTED ENTIRELY on v1 rows, never written as null — writing null would grow all 19.5k committed records and make the next regeneration a total diff',
+        'A comment states that reason at the emit site, or someone will tidy it into explicit nulls',
+        'npm run convert:pricing still produces a byte-identical src/seed/data/price-lists.json',
+      ]),
+      story('US-004', 'Importer accepts the v2 fields', 'As the platform, I want v2 rows to land with their new columns.', [API], [
+        'validatePriceListItems accepts and validates the four new fields before any SQL',
+        'template_version uses COALESCE — unnest binds an explicit NULL for a missing key, which DEFEATS the column DEFAULT and would write NULL into a NOT NULL column',
+        'The upsert key stays (supplier, category, code)',
+        'A v1 import is unchanged; a re-import is still how new season rates land',
+      ]),
+      story('US-005', 'Shared vocabulary module', 'As a maintainer, I want the enum vocabularies in one place, because they are currently duplicated by hand in at least three.', [API], [
+        'Item type, pack type and currency vocabularies live in price-template.js and are imported by the converter, src/seed/price-lists.js and src/routes/admin-price-lists.js',
+        'Pack type gains p/hide and p/panel — both already exist in the DB CHECK with no template rows yet',
+        'Currency accepts ISO codes as INPUT ALIASES only; the stored value set is NOT widened',
+        'A comment lists all four places that must change in lockstep to add a currency: the DB CHECK, CURRENCIES, CURRENCY_MAP and CURRENCY_ENUM',
+        'Added aliases can only ADD successful mappings — verify against the corpus that no existing row uses them, so the committed JSON is untouched',
+      ]),
+      story('US-006', 'Byte-pin unit test and regeneration tripwire', 'As a reviewer, I want converter drift caught without regenerating 8 MB.', [API], [
+        'A test asserts dumps(mapV1(sampleRow)) equals a hardcoded string — a unit-level byte pin catching key-order or float-format drift',
+        'A tripwire test asserts the first item of the committed price-lists.json carries NONE of the four v2 keys, so a buggy v2 mapper that regenerated the file fails immediately',
+        'CLAUDE.md is updated: v1 output is byte-pinned and the Python-faithful float formatting stays because the 19.5k committed rows were produced by it; v2 rows are new output pinned to the Node implementation',
+        'CLAUDE.md records that regenerating price-lists.json happens in its own commit, converter unchanged',
+      ]),
+    ],
+  },
+  {
     slug: 'w8-colour-files',
     readOnlyIncoming: 'colour-files',
     wsId: 'W8',
@@ -583,7 +654,7 @@ const WORKSTREAMS = [
     goal:
       'Import the 18 supplier colour spreadsheets into the colourway catalogue, with 2026 rates ' +
       'as a secondary output.',
-    requires: 'nothing — runs in Wave 1 alongside W1; the file footprints are disjoint',
+    requires: 'W10 Pricing template merged — its rate output is emitted in that template shape',
     blocks: 'nothing',
     allowed: [
       'atelier-api: `scripts/convert-colour-files.js`, `scripts/lib/colour-adapters/**`, ' +

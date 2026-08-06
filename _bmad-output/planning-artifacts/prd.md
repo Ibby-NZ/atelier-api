@@ -161,6 +161,20 @@ Numbered in reserved blocks so late additions do not renumber.
 - **FR-96** The source directory is treated as read-only.
 - **FR-97…FR-99** Reporting of unmapped rows, unsupported files and per-file summaries.
 
+### W10 Pricing template — FR-105…FR-114
+- **FR-105** One universal template, v2, a strict superset of the existing 14 columns in the same order.
+- **FR-106** Appends Supplier, Brand, Pattern Match and Duty Percent.
+- **FR-107** A Supplier cell wins over the filename, removing the pipeline's most fragile input.
+- **FR-108** Brand is text and deliberately not a foreign key.
+- **FR-109** Pattern Match unjams the pattern text currently embedded in `vertical_repeat`.
+- **FR-110** The header row is the version; v1 files import forever and v3 costs one registry entry.
+- **FR-111** `duty_class`/`freight_class` accept any single uppercase letter, raw and uninterpreted.
+  No placeholder duty or freight value is written.
+- **FR-112** v2-only fields are omitted on v1 rows, so the committed 19.5k-row JSON stays byte-identical.
+- **FR-113** Enum vocabularies live in one module consumed by the converter, seed, routes and migration.
+- **FR-114** A unit-level byte pin and a regeneration tripwire catch converter drift without
+  regenerating 8 MB.
+
 ### W9 Scanner spike — FR-100…FR-104
 - **FR-100** A written comparison of off-the-shelf, PWA and native scanning options.
 - **FR-101** A recommendation with the conditions under which it holds.

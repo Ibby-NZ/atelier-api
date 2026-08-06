@@ -1,7 +1,7 @@
 {
   "project": "Atelier — August 6th updates — W8 Colour files",
   "branchName": "aug6/w8-colour-files",
-  "description": "Import the 18 supplier colour spreadsheets into the colourway catalogue, with 2026 rates as a secondary output.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 8)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: nothing — runs in Wave 1 alongside W1; the file footprints are disjoint\nBlocks: nothing",
+  "description": "Import the 18 supplier colour spreadsheets into the colourway catalogue, with 2026 rates as a secondary output.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 8)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: W10 Pricing template merged — its rate output is emitted in that template shape\nBlocks: nothing",
   "userStories": [
     {
       "id": "US-001",

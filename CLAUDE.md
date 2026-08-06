@@ -329,3 +329,38 @@ Shipping-rate CRUD — `GET|POST /admin/shipping-rates`, `PATCH|DELETE /admin/sh
 - **`DELETE` of the last tier for a zone is a 409 from the registry guard, and the refusal is `archivable: false`.** A zone with no tiers makes `getShippingQuote` answer 400 "unknown zone", which stops checkout for every shopper in it; `shipping_rates` has no `archived_at` column, so the dialog must not offer "Archive instead" — the only way out is to add a replacement tier first, which is what `shippingRateGuard`'s message says. The guard holds on the *last remaining* tier, so emptying a zone one delete at a time is refused at the final one.
 - `threshold_qty` is `numeric(12,2)`, so pg returns `'30.00'`; every read here goes through `toShippingRate`, which coerces it. A hand-rolled query would put a string into the CRM's number input.
 - Guarded by 22 tests in `test/shipping.test.js`. The file has **no `beforeEach`** and its bulk-PUT tests mutate the shared fixture zone in order, so the CRUD block owns two zones of its own and rebuilds them per test. Every fixture zone name must end in `Test Zone` — `deleteTestData` cleans by `zone LIKE '%Test Zone'` and would leave anything else behind.
+
+Inventory create and delete — `POST /admin/inventory`, `DELETE /admin/inventory/:colourwayId`.
+
+- **The pair is one feature: a stock row is deleted to take a colourway out of circulation, and
+  created to put it back.** `createColourway` already makes a row (qty 0), so the only way to reach
+  a stockless colourway is the delete this story adds — which is why the create had to arrive with
+  it rather than after it.
+- **`unit` is derived, never accepted, and that is a correctness rule rather than a validation
+  one.** It is what every quantity on the row *means*, so a client-chosen unit does not produce a
+  row a check could reject — it silently redenominates 40 metres as 40 units. The column is absent
+  from the route schema (Ajv's `removeAdditional` strips a `unit` a client sends rather than 400ing
+  it) and `createInventory` reads it from the colourway's product through `unitFor`, now **exported**
+  from `src/catalogue/admin-products.js` instead of copied. One map, two callers: a second copy
+  would eventually disagree about a colourway created through one path and re-stocked through the
+  other.
+- **An existing row is a 409, never an upsert.** The row carries staff-corrected counts and a live
+  `qty_reserved` the order state machine depends on, so a create that overwrote them with its
+  defaults would zero live stock and release a reservation while answering 200. Same posture as the
+  shipping `POST` beside its bulk `PUT`. An unknown colourway is a 422 (a business rule, like an
+  unknown `brand_id` on a product create); the pre-insert lookup is a nicety and the FK is the rule,
+  so a colourway deleted in between raises 23503 and the catch answers with the same 422.
+- **Create is the one inventory route keyed on a body field rather than `:colourwayId`** — there is
+  no row to address yet, and the colourway is what the create is choosing.
+- **The delete's guard refuses `qty_reserved > 0` with 409 and `archivable: false`.** `inventory`
+  has no `archived_at`, so the CRM dialog must not offer "Archive instead" (the same shape as a
+  shipping tier); the way out is to ship or decline the open orders, which releases the reservation
+  and makes the delete succeed. Deleting a reserved row would leave the order state machine's
+  release `UPDATE ... FROM order_lines ... WHERE i.colourway_id = ol.colourway_id` matching nothing
+  forever — no error, just a reservation that can never be released.
+- **A delete must not take the colourway with it.** The CASCADE runs colourway -> inventory and
+  never the reverse; a test asserts the SKU is still in the catalogue afterwards, because the
+  failure mode is silent and destroys catalogue data rather than stock data.
+- **Search a fixture by its namespaced SKU, not by a colour or design name.** `test/admin-inventory.test.js`
+  shares the database with the seeded catalogue, and `?q=Jade` matches two seeded colourways as well
+  as the fixture. The older `?q=Velvet` / `?q=Sky` assertions are unique only by luck.

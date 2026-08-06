@@ -6,17 +6,21 @@
 // correction path staff reach for when reality and the ledger disagree —
 // receiving a delivery, writing off shrinkage, or fixing a mis-typed count.
 //
-// Two rules shape it:
+// Three rules shape it:
 //   - qty_available and qty_reserved are both editable (receiving, shrinkage, a
 //     manual reservation override), but neither may go below zero.
 //   - reserved <= available is deliberately NOT enforced: a short backorder
 //     legitimately reserves more than is on hand, so clamping the two together
 //     would corrupt that committed demand.
+//   - `unit` is derived from the colourway's product type and is never accepted
+//     from a caller. It is what every quantity here means, so a client-chosen
+//     unit would silently redenominate a whole stock row.
 //
 // pg returns numeric columns as strings ('60.00'); every quantity is coerced
 // with Number() before it leaves this module so callers never do string maths.
 
 import { buildUpdate } from '../catalogue/admin-brands.js'
+import { unitFor } from '../catalogue/admin-products.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -117,6 +121,69 @@ export const getInventory = async (pool, colourwayId) => {
     [colourwayId]
   )
   return rows[0] ? toInventory(rows[0]) : null
+}
+
+/**
+ * Create the stock row for a colourway. `createColourway` already makes one, so
+ * this is the restore path: deleting a stock row is how a colourway is taken out
+ * of circulation, and without a create it could never sell again.
+ *
+ * `unit` comes from the colourway's product type via the catalogue's `unitFor`
+ * and is never read from `input` — the route schema does not list it either, so
+ * a client that sends one has it stripped rather than honoured. Quantities
+ * default to 0 and go through the same >= 0 gate as a PATCH.
+ *
+ * An unknown colourway is a 422 (a business rule, like an unknown brand_id on a
+ * product create) and an existing row is a 409 from the unique constraint, never
+ * an upsert: the row already carries staff-corrected quantities, and silently
+ * overwriting them with the create's defaults would zero live stock.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ colourway_id: number, qty_available?: number, qty_reserved?: number }} input
+ * @returns {Promise<object>}
+ */
+export const createInventory = async (pool, input) => {
+  assertQuantities(input)
+  const colourwayId = input.colourway_id
+  const { rows } = await pool.query(
+    `SELECT p.product_type
+       FROM colourways c
+       JOIN products p ON p.id = c.product_id
+      WHERE c.id = $1`,
+    [colourwayId]
+  )
+  if (!rows[0]) {
+    throw httpError(422, `Unknown colourway ${colourwayId}.`)
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO inventory (colourway_id, qty_available, qty_reserved, unit)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        colourwayId,
+        input.qty_available ?? 0,
+        input.qty_reserved ?? 0,
+        unitFor(rows[0].product_type),
+      ]
+    )
+  } catch (error) {
+    // colourway_id is the table's only unique constraint, so an unrecognised
+    // name still means the same collision (the rethrowConflict posture).
+    if (error?.code === '23505') {
+      throw httpError(
+        409,
+        `Colourway ${colourwayId} already has a stock row. Edit that row instead.`
+      )
+    }
+    // The colourway was deleted between the lookup and the insert. Same answer
+    // as never having existed — the lookup is a nicety, the FK is the rule.
+    if (error?.code === '23503') {
+      throw httpError(422, `Unknown colourway ${colourwayId}.`)
+    }
+    throw error
+  }
+  return getInventory(pool, colourwayId)
 }
 
 /**

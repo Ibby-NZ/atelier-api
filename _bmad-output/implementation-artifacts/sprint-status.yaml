@@ -40,7 +40,7 @@ epics:
       US-005: done      # Missing admin reads: brand, collection, price-list item by id
       US-006: done      # Colourway list and detail endpoints
       US-007: done      # Shipping-rate CRUD with the last-tier guard
-      US-008: pending   # Inventory create and delete
+      US-008: done      # Inventory create and delete
       US-009: pending   # Delete on the products and houses screens
       US-010: pending   # Standalone AdminCollections screen
       US-011: pending   # AdminShipping screen

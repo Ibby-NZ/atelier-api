@@ -128,6 +128,19 @@ Story-specific detail belongs in the per-story entries below, not here.
   table so" and upserting is its whole point; a create is a statement that the row is new, so a
   collision is a mistyped key, and silently overwriting a live row hides it. Same table, two write
   paths, deliberately different conflict behaviour.
+- **A fixture is only namespaced by its SKU/slug/email, never by its human-readable name — so
+  search for it by the namespaced value.** The test database holds the seeded catalogue as well as
+  the fixtures, and a colour or design name is exactly the kind of word the real catalogue also
+  uses: `?q=Jade` returned the fixture plus two seeded rows, while `?q=Velvet` in the same file
+  happens to be unique today and will stop being so the moment the colour files land. Assert on
+  `q=<the prefixed SKU>`, or on `.toContain`, never on an exact array of everything a display name
+  matches. Same family as US-006's rule about an unfiltered `meta.total`.
+- **A value the API derives rather than accepts must be derived from ONE exported map.** `unit` is
+  computed by `unitFor` in `src/catalogue/admin-products.js` and now imported by the inventory
+  admin instead of being copied; two maps would eventually disagree about a colourway created
+  through one path and re-stocked through the other, and the disagreement would be a silently
+  redenominated quantity rather than an error. Export the helper (which carries the 422), not the
+  object.
 - **A mid-transaction race is reproducible deterministically by wrapping the pool, not by timing.**
   `deleteOrExplain` only uses `connect()`/`query()`/`release()`, so `{ connect: async () => ({
   query, release }) }` around a real client can run arbitrary work on another connection when a
@@ -814,4 +827,80 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   `describeBlockers` sees an empty list either way), and a rate typed in dollars must reach the API
   as whole cents. Plus the standing cross-origin DELETE preflight from the CRM at :5273, which
   `app.inject()` cannot prove.
+---
+
+## 2026-08-06T16:01:40Z - W2-US-008 - Inventory create and delete
+
+- **Implemented.** `POST /admin/inventory` (201, `unit` derived from the colourway's product type
+  and never accepted from the body) and `DELETE /admin/inventory/:colourwayId` (through
+  `deleteOrExplain`, whose `inventory` guard refuses a row with `qty_reserved > 0`). The two
+  together are the story's actual user need: deleting a stock row is how a colourway is taken out
+  of circulation, and without a create it could never sell again. As with US-001..004 and US-007
+  the registry entry already existed — W1's `inventory` entry carries `inventoryGuard`,
+  `idColumn: 'colourway_id'` and `archivable: false` — so the delete half was one route.
+- Repos and files changed: `atelier-api` only —
+  `src/catalogue/admin-products.js` (`unitFor` exported, +JSDoc),
+  `src/inventory/admin-inventory.js` (+`createInventory`, +1 import, header note),
+  `src/routes/admin-inventory.js` (+2 routes, +1 schema, +1 import, header note),
+  `test/admin-inventory.test.js` (+14 tests in two describe blocks, +2 stockless fixtures,
+  +`stockRowFor` helper), `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 766 tests passed; 752 before —
+  `test/admin-inventory.test.js` 11 -> 25).
+- **`unit` is the whole point of the create, and it is derived rather than validated.** It is what
+  every quantity on the row *means*, so a client-chosen unit does not produce a bad row that a
+  check could catch — it silently redenominates 40 metres as 40 units and nothing downstream can
+  tell. The column is therefore absent from the route schema (Ajv's `removeAdditional` strips a
+  `unit` a client sends) and the module reads it from the product row via `unitFor`, which is now
+  exported from `src/catalogue/admin-products.js` rather than copied. One test posts
+  `{ colourway_id: <a finished good>, unit: 'metres' }` and asserts the row comes back `units`,
+  which is the criterion "unit is never accepted from the client" stated as behaviour.
+- **The 409 on an existing row is a refusal to upsert, and the test asserts the quantities survive
+  it.** A stock row carries staff-corrected counts and a live `qty_reserved` the order state
+  machine depends on; a create that overwrote them with its defaults would zero live stock and drop
+  a reservation, with a 200 to say so. Same posture as US-007's `POST` beside the bulk `PUT`.
+- **What the tests assert**, against the acceptance criteria:
+  - *Create.* 201 with the joined display shape; `metres` for a fabric and `units` for a finished
+    good; opening quantities accepted and returned as **numbers** (`numeric(12,2)` gives `'40.00'`);
+    the new row immediately listable and patchable; 422 unknown colourway (message names the id);
+    409 on an existing row with `{ available: 60, reserved: 5 }` proved unchanged; 400 for a missing
+    `colourway_id` and for a negative quantity, with no row created; 401/403 with no row created.
+  - *Delete.* 200 `{ deleted: { entity: 'inventory', id: <colourwayId> } }` and the row gone from
+    the table and the list, **while the colourway survives** — the CASCADE runs colourway ->
+    inventory and never the reverse, so a delete that took the SKU with it would be catastrophic and
+    silent. The reserved-stock 409 with `blockers: []`, `archivable: false` and the reserved count
+    in the message. A refuse-then-release-then-delete sequence, because a row whose reservation has
+    been shipped or declined must become deletable or nothing could ever be removed after its first
+    sale. 404 for a colourway with no stock row. 401/403 with the row still present.
+  - *Round trip.* Delete then re-create: 201, and the unit is **re-derived** from the product rather
+    than remembered from the old row.
+- **Learnings:**
+  - Pattern: the fixture-name-vs-seeded-catalogue collision (search by the namespaced SKU, not by a
+    display name) and the one-exported-map rule for a derived column — both promoted to
+    `## Codebase Patterns` above.
+  - Gotcha: `?q=Jade` in this file returned the fixture **plus two seeded rows** (`MC-MAD-02`,
+    `MAN-1005`). `?q=Velvet` and `?q=Sky` in the pre-existing tests are unique only by luck and are
+    the same bug waiting for a bigger catalogue.
+  - Gotcha: `assertQuantities` already iterates `INVENTORY_UPDATE_COLUMNS` with `Object.hasOwn`, so
+    it covers the create's optional `qty_available`/`qty_reserved` unchanged — the create needed no
+    second validator. It is belt-and-braces either way: the route schema's `minimum: 0` makes a
+    negative body a 400 before the module sees it.
+  - Gotcha: the existence lookup before the INSERT is a nicety, not the rule — the FK is. A
+    colourway deleted in between raises 23503, which the catch answers with the same 422 as "never
+    existed", so the two paths cannot disagree.
+  - Gotcha: `inventoryFor` in this test file destructures `rows[0]` and throws on a missing row, so
+    every assertion about *absence* goes through the new `stockRowFor`, which returns null.
+  - Context: the guard is `inventoryGuard` in `src/lifecycle/registry.js` (~line 50) and the entry
+    is `inventory` (~line 260) — `idColumn: 'colourway_id'` (the table has both an `id` PK and a
+    unique `colourway_id`, and every caller addresses stock by colourway). `UNIT_BY_PRODUCT_TYPE` /
+    `unitFor` are `src/catalogue/admin-products.js` ~line 28; `createColourway` (~474) is the other
+    caller and the reason a colourway normally already has a stock row.
+- **Needs human verification:** no screen calls either route yet. Carry forward to **W2-US-012**
+  (delete wired into the stock screen): the reserved-stock 409 must render as a readable refusal
+  with **no** "Archive instead" button (`archivable: false`, same as the shipping tiers), and the
+  stock screen needs a create affordance for a colourway with no row — after a delete, that
+  colourway vanishes from `GET /admin/inventory` entirely, so the screen must reach it through the
+  colourway list (US-006's `GET /admin/colourways`) or the row is unrecoverable from the UI. Plus
+  the standing cross-origin DELETE preflight from the CRM at :5273, which `app.inject()` cannot
+  prove.
 ---

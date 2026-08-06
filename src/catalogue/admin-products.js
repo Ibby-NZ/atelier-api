@@ -30,7 +30,16 @@ const UNIT_BY_PRODUCT_TYPE = Object.freeze({
   finished_good: 'units',
 })
 
-const unitFor = (productType) => {
+/**
+ * The stock unit a colourway of this product type is measured in. Exported so
+ * the inventory admin derives it from the same map rather than its own copy —
+ * `unit` is never accepted from a client, and two maps would eventually disagree
+ * about which one a colourway created by the other path should have used.
+ *
+ * @param {string} productType
+ * @returns {string}
+ */
+export const unitFor = (productType) => {
   if (!Object.hasOwn(UNIT_BY_PRODUCT_TYPE, productType)) {
     throw httpError(422, `Unknown product type "${productType}".`)
   }

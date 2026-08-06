@@ -13,7 +13,7 @@ epics:
     stories:
       US-001: done      # Lifecycle registry and deleteOrExplain
       US-002: done      # setArchived replaces the eight duplicated archive helpers
-      US-003: pending   # Registry safety tests
+      US-003: done      # Registry safety tests
       US-004: pending   # CRM list kit: list.js, useAdminList, Pagination
       US-005: pending   # CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
       US-006: pending   # CI workflows for all three repos

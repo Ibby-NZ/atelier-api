@@ -142,3 +142,46 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
 - **Needs human verification:** none. Behaviour is unchanged by construction; the existing
   archive/restore suites are the evidence.
 ---
+
+## 2026-08-06T01:15:05Z - W1-US-003 - Registry safety tests
+
+- `test/lifecycle-registry.test.js` (new, 79 tests). Four groups:
+  1. **Shape**, parameterised over every entity and every probe: probe sql matches
+     `/^SELECT 1 FROM [a-z_ ]/`, its placeholders are exactly `['$1']`, it contains no `;`; relation
+     names, entity names, tables and id columns match `/^[a-z][a-z0-9_]*$/`; relations are unique per
+     entity; the whole registry is frozen down to each probe object.
+  2. **`assertEntity` actually bites** — 14 synthetic malformed entries (uppercase table, a table
+     name carrying a quote, `$2`, a second placeholder, `DELETE` in place of the select, a spaced
+     relation, a duplicated relation, a string guard, …), each asserted to throw. The real registry is
+     validated at import time, so a bad entry cannot be observed any other way; without these the
+     validator could be entirely decorative and nothing would notice.
+  3. **Schema agreement**, against the live database: every declared `table.idColumn` exists in
+     `information_schema.columns`, and `archivable` agrees exactly with whether the table has an
+     `archived_at` column (both directions).
+  4. **No caller derives an entity name from a request** — reads every `.js` under `src/` except
+     `src/lifecycle/` and `src/seed/data/`, matches every `deleteOrExplain(`/`setArchived(` call and
+     asserts the second argument is a single-quoted literal that is a registry key.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 656 tests; was 577, +79).
+- **Learnings:**
+  - **The call-site scan needs its own "did I find anything" assertion.** A regex that silently
+    matches nothing passes every per-site assertion vacuously, so the suite would go green the day a
+    refactor renamed the function. `expect(callSites.length).toBeGreaterThanOrEqual(8)` is the guard.
+    Verified the negative separately: `request.params.entity` and a bare identifier both fail the
+    literal test, `'brand'` passes.
+  - `src/lifecycle/` is excluded from that scan deliberately — the module's own parameter is named
+    `entityName`, and it defines the contract rather than consuming it. The exclusion is by directory
+    prefix, so W2's route files are covered the moment they exist.
+  - **The registry is not an authorisation boundary.** `requireEntity` throwing on an unknown name
+    proves nothing about safety: `'brand'` and `'user'` are both known, so a path-derived name would
+    still let a client choose which table is written to. That is why the test demands a literal, not
+    merely a valid name.
+  - `archivable` is asserted in BOTH directions against `information_schema`. One direction would let
+    a new entity claim `archivable: true` on a table with no `archived_at`, and the CRM would offer
+    "Archive instead" on a blocked delete that then 500s.
+  - `readdirSync(dir, { recursive: true })` returns paths relative to `dir`, so the prefix filters
+    read `file.startsWith('lifecycle/')` — not an absolute path check.
+  - `it.each(Object.entries(...))` names the case from the first tuple element, which is why the
+    entity name is the first element and the entity object the second; the probe cases build an
+    explicit `"entity.relation"` key for the same reason.
+- **Needs human verification:** none — this story is tests only.
+---

@@ -34,6 +34,20 @@ Story-specific detail belongs in the per-story entries below, not here.
 - **`npm test -- <file>` and `npx vitest` are both blocked at the tool level here; `npm test` is
   not.** Budget for the whole suite (~33 s, 52 files) on every check rather than trying to narrow
   it — the narrowing attempt costs a denied call and tells you nothing.
+- **A 4xx that has to carry structured detail must be RETURNED, never thrown.** Fastify's error
+  serializer emits exactly `{ statusCode, error, message }` and drops every custom property, so a
+  thrown error cannot carry `errors`/`blockers`/counts. `reply.code(422); return { ... }` is the
+  house shape (`src/routes/orders.js` does it, `src/lifecycle/` returns its refusals for the same
+  reason). `Object.assign(new Error(m), { statusCode })` stays correct for a message-only refusal.
+- **A route that takes an uploaded FILE registers its own content-type parser inside its plugin.**
+  `app.addContentTypeParser([...types], { parseAs: 'buffer', bodyLimit }, (req, body, done) =>
+  done(null, body))` — parsers are ENCAPSULATED to the plugin scope, so no other route's body
+  handling changes (same posture as the Stripe webhook and `admin-legacy-import.js`). There is no
+  multipart parser in this API and adding one is a dependency, so the client posts raw bytes. Set
+  `bodyLimit` on BOTH the parser and the route; Fastify's default is 1 MB. Do NOT register
+  `text/plain` or `application/json` — the root instance already parses both, and re-registering an
+  inherited type throws at boot. The consequence: a caller posting JSON to a file route arrives with
+  an OBJECT body, so the handler must check `Buffer.isBuffer` rather than assume bytes.
 - **Ajv applies a querystring `default` only when the key is ABSENT.** `?brand=` sends the empty
   string, which is present, so it meets the `pattern` instead and 400s. That is the right answer
   for an export (the caller asked for a house and named none) and the opposite of the CRM list
@@ -121,5 +135,64 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   `http://localhost:3001/admin/product-sheet/export.csv?brand=atelier-textiles-nz` — open it in
   Excel and confirm it opens as five columns with an empty Category, and that a design named
   `=cut to order` shows as text rather than evaluating.
+---
+
+## 2026-08-06T18:38:28+12:00 - W6-US-003 - Re-import parse and validate
+- `POST /admin/product-sheet/validate` (backoffice-only) takes the filled-in sheet back as the raw
+  file and reports what WOULD happen. It writes nothing at all — US-004 applies. `parseProductSheet`
+  (pure) and `validateProductSheet` (one read query) live in `src/products/product-sheet.js`, beside
+  the export that wrote the file, so the header contract has exactly one definition.
+- Contract: a structural failure is 400 (not a Buffer, empty file, a header this API never wrote);
+  row-level failures are 422 `{ message, errors: [{ row, message }], error_count, summary }`; a clean
+  sheet is 200 `{ summary: { rows, skipped, repeats, unchanged, changed }, changes }`. When there are
+  no errors the file balances: `rows === skipped + repeats + unchanged + changed`.
+- Rules: the row number in every message is `csvRows`'s own line number, so it counts the header and
+  points at the line Excel shows. A blank Category is `skipped` (the row nobody touched). A category
+  is trimmed and lower-cased before matching the shared `CATEGORIES` set. A repeated Product ID
+  saying the same thing collapses (`repeats`); saying two different things is an error naming both
+  rows. An id that matches no product, or matches an archived one, is reported — never resolved
+  through the House/Design cells beside it. Blank lines are ignored. A header line ending in a stray
+  comma is accepted (trailing EMPTY header cells are dropped, as in the pricing pipeline). The
+  upload is deliberately NOT brand-scoped: `products.id` is unique across the catalogue.
+- Repos and files changed: atelier-api — `src/products/product-sheet.js` (import half added),
+  `src/routes/admin-product-sheet.js` (content-type parser + the validate route),
+  `test/product-sheet.test.js` (+21 tests), `CLAUDE.md` (`## Category export`),
+  `ralph/w6-category-export/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` (atelier-api) -> 0, `npm test` (atelier-api) -> 0 (52 files, 1206 tests),
+  `npm test` (atelier-crm) -> 0 (37 files, 567 tests), `npm run build` (atelier-crm) -> 0.
+- **Learnings:**
+  - A 4xx carrying structured detail must be RETURNED through `reply.code(...)`, not thrown —
+    Fastify's serializer drops custom error properties. Promoted to Codebase Patterns.
+  - An upload route registers its own `parseAs: 'buffer'` content-type parser inside its plugin
+    scope, and must then check `Buffer.isBuffer(request.body)`: the ROOT instance still parses
+    `application/json` and `text/plain`, so a caller using either arrives with a parsed object or a
+    string and `decodeText` would throw a TypeError (a 500) on it. Promoted to Codebase Patterns.
+  - `products.id` is int4, so a typed-in digit string past 2147483647 reaches the `ANY($1::int[])`
+    cast and surfaces as a 500 from Postgres. It is refused in the parser as what it is — not a
+    Product ID — which is the general shape: range-check anything that will be cast to `int` before
+    it reaches SQL.
+  - Two suites in one test file may each own an app + fixtures, and that is cheaper than sharing
+    them: `/auth/register`'s 10-per-15-min bucket is per app INSTANCE and per route, so a second
+    `buildApp()` starts with a fresh bucket. Vitest runs suites in a file sequentially, so the two
+    `beforeAll`s cannot interleave — they only need different fixture prefixes and email domains
+    (`sheet-test-` / `sheet-import-test-`; note the second is NOT matched by the first's
+    `LIKE 'sheet-test-%'` cleanup).
+  - `decodeText` is proved end to end rather than in isolation: the unmatched-row error quotes the
+    file's own Design cell, so the cp1252 test (`é` = 0xE9, `’` = 0x92 — the second byte is what
+    distinguishes cp1252 from latin-1) asserts a decoded name coming back out of an HTTP response.
+  - Do not write a literal U+FEFF into source to strip a BOM — it is invisible in the file and in
+    every diff. `String.fromCharCode(0xfeff)` + `startsWith` says the same thing visibly.
+  - Context: the header contract, the parser and the matcher are all in
+    `src/products/product-sheet.js`; the vocabulary is `CATEGORIES` in `scripts/lib/price-template.js`
+    (imported, never retyped — `products.category` and `price_list_items.category` are one set);
+    `validateProductSheet` returns an `updates` array that is deliberately NOT served, and is the
+    seam US-004 applies.
+- **Needs human verification:** no screen exists yet (US-005 builds the panel), so a person should
+  drive the round trip once by hand from a signed-in back-office session: download
+  `/admin/product-sheet/export.csv?brand=<house>`, open it in Excel, type a category into a few
+  rows, save as "CSV (Comma delimited)" — which is cp1252 on Windows — and POST the file to
+  `/admin/product-sheet/validate` with `content-type: text/csv`. Confirm the counts match what they
+  typed and that the categories in the database are unchanged afterwards.
 ---
 

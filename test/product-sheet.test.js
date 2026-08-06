@@ -7,6 +7,9 @@ import { csvCell, csvRow, csvDocument, csvRows } from '../src/lib/csv-text.js'
 import {
   DEFAULT_BRAND_SLUG,
   PRODUCT_SHEET_HEADER,
+  PRODUCT_CATEGORIES,
+  MAX_REPORTED_ERRORS,
+  parseProductSheet,
   productSheetFilename,
   toProductSheetCsv,
 } from '../src/products/product-sheet.js'
@@ -362,5 +365,423 @@ describe('GET /admin/product-sheet/export.csv', () => {
       backofficeCookie
     )
     expect(second.body).toBe(first.body)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The import half.
+// ---------------------------------------------------------------------------
+
+const HEADER_LINE = 'Product ID,House,Collection,Design,Category'
+
+// The int4 ceiling: a legal Product ID that no `products` row will ever carry,
+// so a row quoting it is unmatched rather than merely unlucky.
+const UNMATCHED_ID = 2147483647
+
+/** A sheet as staff would post it back: the contract header plus data lines. */
+const sheetCsv = (lines) => `${[HEADER_LINE, ...lines].join('\r\n')}\r\n`
+
+const utf8 = (text) => Buffer.from(text, 'utf8')
+
+// A file saved by Excel on Windows: cp1252, declaring nothing. `é` is 0xE9 —
+// invalid UTF-8 on its own — and `’` is 0x92, which is cp1252-specific (latin-1
+// decodes that byte to a control character), so the pair proves the sniff
+// reached cp1252 rather than merely surviving.
+const WINDOWS_DESIGN = 'Café ’25'
+const windows1252 = (text) =>
+  Buffer.from(
+    [...text].map((char) => {
+      const code = char.charCodeAt(0)
+      if (code === 0x2019) return 0x92
+      if (code > 0xff) throw new Error(`no cp1252 byte for ${char}`)
+      return code
+    })
+  )
+
+describe('product sheet — parsing a filled-in sheet', () => {
+  it('reads the Product ID and the Category, and counts the untouched rows', () => {
+    const parsed = parseProductSheet(
+      utf8(sheetCsv(['41,A House,,Atlas,fabric', '42,A House,,Bramble,', '43,A House,,Cirrus,wallpaper']))
+    )
+    expect(parsed.errors).toEqual([])
+    expect(parsed.rows).toBe(3)
+    expect(parsed.skipped).toBe(1)
+    expect(parsed.entries).toEqual([
+      { row: 2, id: 41, design: 'Atlas', category: 'fabric' },
+      { row: 4, id: 43, design: 'Cirrus', category: 'wallpaper' },
+    ])
+  })
+
+  it('parses a file saved by Excel on Windows (cp1252)', () => {
+    const parsed = parseProductSheet(
+      windows1252(sheetCsv([`41,A House,,${WINDOWS_DESIGN},trimming`]))
+    )
+    expect(parsed.errors).toEqual([])
+    expect(parsed.entries).toEqual([
+      { row: 2, id: 41, design: WINDOWS_DESIGN, category: 'trimming' },
+    ])
+  })
+
+  it('tolerates the BOM Excel writes for a UTF-8 CSV', () => {
+    const parsed = parseProductSheet(
+      Buffer.concat([
+        Buffer.from([0xef, 0xbb, 0xbf]),
+        utf8(sheetCsv(['41,A House,,Atlas,fabric'])),
+      ])
+    )
+    expect(parsed.errors).toEqual([])
+    expect(parsed.entries).toHaveLength(1)
+  })
+
+  it('tolerates a header line ending in a stray comma, and blank lines between rows', () => {
+    const parsed = parseProductSheet(
+      utf8(`${HEADER_LINE},\r\n41,A House,,Atlas,fabric\r\n\r\n43,A House,,Cirrus,fabric\r\n`)
+    )
+    expect(parsed.errors).toEqual([])
+    // The blank line is not a row anybody typed, so it is neither counted nor
+    // reported.
+    expect(parsed.rows).toBe(2)
+    expect(parsed.entries.map((entry) => entry.row)).toEqual([2, 4])
+  })
+
+  it('accepts the vocabulary however the office capitalised it', () => {
+    for (const category of PRODUCT_CATEGORIES) {
+      const typed = ` ${category.toUpperCase()} `
+      const parsed = parseProductSheet(utf8(sheetCsv([`41,A House,,Atlas,${typed}`])))
+      expect(parsed.errors).toEqual([])
+      expect(parsed.entries[0].category).toBe(category)
+    }
+  })
+
+  it('reports an unknown category with its row number and the legal values', () => {
+    const parsed = parseProductSheet(
+      utf8(sheetCsv(['41,A House,,Atlas,fabric', '42,A House,,Bramble,curtain']))
+    )
+    expect(parsed.entries).toHaveLength(1)
+    expect(parsed.errors).toHaveLength(1)
+    // Row 3 is the second data row: the line number counts the header.
+    expect(parsed.errors[0].row).toBe(3)
+    expect(parsed.errors[0].message).toContain('"curtain"')
+    for (const category of PRODUCT_CATEGORIES) {
+      expect(parsed.errors[0].message).toContain(category)
+    }
+  })
+
+  it('reports a Product ID that is not one, rather than guessing at the row', () => {
+    const parsed = parseProductSheet(
+      utf8(
+        sheetCsv([
+          'Atlas,A House,,Atlas,fabric',
+          ',A House,,Bramble,fabric',
+          // Past the int4 ceiling: it would otherwise surface as a 500 from the
+          // int[] cast rather than as the typo it is.
+          '99999999999,A House,,Cirrus,fabric',
+        ])
+      )
+    )
+    expect(parsed.entries).toEqual([])
+    expect(parsed.errors.map((error) => error.row)).toEqual([2, 3, 4])
+    expect(parsed.errors[0].message).toContain('is not a Product ID')
+  })
+
+  it('reports a row with the wrong number of columns', () => {
+    const parsed = parseProductSheet(utf8(sheetCsv(['41,A House,,fabric'])))
+    expect(parsed.errors).toEqual([
+      { row: 2, message: '4 columns, expected 5.' },
+    ])
+  })
+
+  it('collapses a repeated row and refuses a contradicting one', () => {
+    const parsed = parseProductSheet(
+      utf8(
+        sheetCsv([
+          '41,A House,,Atlas,fabric',
+          '41,A House,,Atlas,fabric',
+          '42,A House,,Bramble,wallpaper',
+          '42,A House,,Bramble,trimming',
+        ])
+      )
+    )
+    expect(parsed.repeats).toBe(1)
+    expect(parsed.errors).toHaveLength(1)
+    expect(parsed.errors[0].row).toBe(5)
+    expect(parsed.errors[0].message).toContain('row 4')
+    // The contradicted product keeps the first statement; nothing here chooses
+    // between them, and the row error is what stops the file being applied.
+    expect(parsed.entries).toEqual([
+      { row: 2, id: 41, design: 'Atlas', category: 'fabric' },
+      { row: 4, id: 42, design: 'Bramble', category: 'wallpaper' },
+    ])
+  })
+
+  it('does not treat a blank Category as a contradiction', () => {
+    const parsed = parseProductSheet(
+      utf8(sheetCsv(['41,A House,,Atlas,', '41,A House,,Atlas,fabric']))
+    )
+    expect(parsed.errors).toEqual([])
+    expect(parsed.skipped).toBe(1)
+    expect(parsed.entries).toHaveLength(1)
+  })
+
+  it('400s a file that is not a product sheet at all', () => {
+    const cases = [
+      utf8(''),
+      utf8('Product ID,House,Design,Category\r\n41,A House,Atlas,fabric\r\n'),
+      utf8('Product ID,House,Collection,Design\r\n41,A House,,Atlas\r\n'),
+      utf8('name,qty\r\nAtlas,3\r\n'),
+    ]
+    for (const bytes of cases) {
+      expect(() => parseProductSheet(bytes)).toThrow(
+        expect.objectContaining({ statusCode: 400 })
+      )
+    }
+  })
+
+  it('400s a body that is not a file', () => {
+    expect(() => parseProductSheet({ rows: [] })).toThrow(
+      expect.objectContaining({ statusCode: 400 })
+    )
+  })
+})
+
+describe('POST /admin/product-sheet/validate', () => {
+  const PREFIX_IN = 'sheet-import-test'
+  const DOMAIN_IN = 'sheet-import-test.example.com'
+  const SLUG_IN = {
+    house: `${PREFIX_IN}-house`,
+    plain: `${PREFIX_IN}-plain`,
+    already: `${PREFIX_IN}-already`,
+    archived: `${PREFIX_IN}-archived`,
+  }
+
+  let pool
+  let app
+  let backofficeCookie
+  let customerCookie
+  let ids
+
+  const cleanup = async () => {
+    await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX_IN}-%`])
+    await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${DOMAIN_IN}`])
+  }
+
+  const post = (payload, cookie, contentType = 'text/csv') =>
+    app.inject({
+      method: 'POST',
+      url: '/admin/product-sheet/validate',
+      headers: {
+        ...(cookie ? { cookie } : {}),
+        ...(contentType ? { 'content-type': contentType } : {}),
+      },
+      payload,
+    })
+
+  const categoryOf = async (slug) => {
+    const { rows } = await pool.query('SELECT category FROM products WHERE slug = $1', [slug])
+    return rows[0].category
+  }
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    pool = createPool(config.databaseUrl)
+    await runner({
+      databaseUrl: config.databaseUrl,
+      dir: 'migrations',
+      direction: 'up',
+      migrationsTable: 'pgmigrations',
+      log: () => {},
+    })
+    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+    await app.ready()
+
+    await cleanup()
+
+    const { rows: brands } = await pool.query(
+      `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story)
+       VALUES ('Import Test House', $1, 'New Zealand', 'NZD', false, false, 'A test house.')
+       RETURNING id`,
+      [SLUG_IN.house]
+    )
+    const brandId = brands[0].id
+
+    // Uncategorised — the ordinary case, and what every product looked like the
+    // day the column landed.
+    await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website)
+       VALUES ($1, 'Atlas', $2, 'fabric', 'NZD', true)`,
+      [brandId, SLUG_IN.plain]
+    )
+    // Already carrying the value the sheet will state: the "unchanged" count.
+    await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website, category)
+       VALUES ($1, 'Bramble', $2, 'fabric', 'NZD', true, 'fabric')`,
+      [brandId, SLUG_IN.already]
+    )
+    // Out of the catalogue, so off the sheet.
+    await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website, archived_at)
+       VALUES ($1, 'Cirrus', $2, 'fabric', 'NZD', true, now())`,
+      [brandId, SLUG_IN.archived]
+    )
+
+    const { rows: products } = await pool.query(
+      'SELECT slug, id FROM products WHERE slug LIKE $1',
+      [`${PREFIX_IN}-%`]
+    )
+    ids = Object.fromEntries(products.map((row) => [row.slug, row.id]))
+
+    // Registered ONCE: /auth/register is 10 per 15 min per IP. This suite has
+    // its own app instance, so it has its own limiter store.
+    const boss = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: `boss@${DOMAIN_IN}`, password: PASSWORD, name: 'Boss' },
+    })
+    backofficeCookie = sessionCookieFrom(boss)
+    await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [
+      `boss@${DOMAIN_IN}`,
+    ])
+
+    const shopper = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: `shopper@${DOMAIN_IN}`, password: PASSWORD },
+    })
+    customerCookie = sessionCookieFrom(shopper)
+  })
+
+  afterAll(async () => {
+    await cleanup()
+    await app.close()
+    await pool.end()
+  })
+
+  it('refuses an anonymous caller and a customer', async () => {
+    const csv = utf8(sheetCsv([`${ids[SLUG_IN.plain]},Import Test House,,Atlas,fabric`]))
+    expect((await post(csv)).statusCode).toBe(401)
+    expect((await post(csv, customerCookie)).statusCode).toBe(403)
+  })
+
+  it('400s a body posted as JSON rather than as the file', async () => {
+    const response = await post({ rows: [] }, backofficeCookie, 'application/json')
+    expect(response.statusCode).toBe(400)
+    expect(response.json().message).toContain('text/csv')
+  })
+
+  it('reports the counts and previews what would change', async () => {
+    const response = await post(
+      utf8(
+        sheetCsv([
+          `${ids[SLUG_IN.plain]},Import Test House,,Atlas,wallpaper`,
+          `${ids[SLUG_IN.already]},Import Test House,,Bramble,fabric`,
+          `${ids[SLUG_IN.plain]},Import Test House,,Atlas,wallpaper`,
+          `${ids[SLUG_IN.already]},Import Test House,,Bramble,`,
+        ])
+      ),
+      backofficeCookie
+    )
+    expect(response.statusCode).toBe(200)
+    const { summary, changes } = response.json()
+    expect(summary).toEqual({ rows: 4, skipped: 1, repeats: 1, unchanged: 1, changed: 1 })
+    // Every row of the file is accounted for.
+    expect(summary.rows).toBe(
+      summary.skipped + summary.repeats + summary.unchanged + summary.changed
+    )
+    expect(changes).toEqual([
+      { row: 2, id: ids[SLUG_IN.plain], design: 'Atlas', from: null, to: 'wallpaper' },
+    ])
+  })
+
+  it('writes nothing — a validated sheet is still only a report', async () => {
+    const response = await post(
+      utf8(sheetCsv([`${ids[SLUG_IN.plain]},Import Test House,,Atlas,trimming`])),
+      backofficeCookie
+    )
+    expect(response.statusCode).toBe(200)
+    expect(response.json().summary.changed).toBe(1)
+    expect(await categoryOf(SLUG_IN.plain)).toBeNull()
+    expect(await categoryOf(SLUG_IN.already)).toBe('fabric')
+  })
+
+  it('reports an unmatched key rather than guessing at the House and Design beside it', async () => {
+    const response = await post(
+      utf8(
+        sheetCsv([
+          `${ids[SLUG_IN.plain]},Import Test House,,Atlas,fabric`,
+          `${UNMATCHED_ID},Import Test House,,${WINDOWS_DESIGN},fabric`,
+        ])
+      ),
+      backofficeCookie
+    )
+    expect(response.statusCode).toBe(422)
+    const body = response.json()
+    expect(body.error_count).toBe(1)
+    expect(body.errors[0].row).toBe(3)
+    expect(body.errors[0].message).toContain(`No product with ID ${UNMATCHED_ID}`)
+    // The Design cell is quoted so a person can find the row, and is the only
+    // place the file's own encoding surfaces in the report.
+    expect(body.errors[0].message).toContain(WINDOWS_DESIGN)
+  })
+
+  it('refuses a row against an archived product, which is not on the sheet', async () => {
+    const response = await post(
+      utf8(sheetCsv([`${ids[SLUG_IN.archived]},Import Test House,,Cirrus,fabric`])),
+      backofficeCookie
+    )
+    expect(response.statusCode).toBe(422)
+    expect(response.json().errors[0].message).toContain('archived')
+  })
+
+  it('writes nothing when a row fails, including the rows that were fine', async () => {
+    const response = await post(
+      utf8(
+        sheetCsv([
+          `${ids[SLUG_IN.plain]},Import Test House,,Atlas,fabric`,
+          `${UNMATCHED_ID},Import Test House,,Nowhere,fabric`,
+        ])
+      ),
+      backofficeCookie
+    )
+    expect(response.statusCode).toBe(422)
+    expect(await categoryOf(SLUG_IN.plain)).toBeNull()
+  })
+
+  it('caps the reported errors and states how many there really were', async () => {
+    const broken = Array.from(
+      { length: MAX_REPORTED_ERRORS + 10 },
+      (unused, at) => `${ids[SLUG_IN.plain]},Import Test House,,Atlas,curtain-${at}`
+    )
+    const response = await post(utf8(sheetCsv(broken)), backofficeCookie)
+    expect(response.statusCode).toBe(422)
+    const body = response.json()
+    expect(body.error_count).toBe(MAX_REPORTED_ERRORS + 10)
+    expect(body.errors).toHaveLength(MAX_REPORTED_ERRORS)
+    expect(body.message).toContain('Nothing has been written')
+  })
+
+  it('reads back the file it exported, filled in', async () => {
+    const exported = await app.inject({
+      method: 'GET',
+      url: `/admin/product-sheet/export.csv?brand=${SLUG_IN.house}`,
+      headers: { cookie: backofficeCookie },
+    })
+    expect(exported.statusCode).toBe(200)
+
+    const [header, ...dataRows] = [...csvRows(exported.body)]
+    const filled = csvDocument([
+      header[1],
+      ...dataRows.map(([, fields]) => [...fields.slice(0, 4), 'accessory']),
+    ])
+
+    const response = await post(utf8(filled), backofficeCookie)
+    expect(response.statusCode).toBe(200)
+    // Two live products: one uncategorised, one already `fabric`.
+    expect(response.json().summary).toEqual({
+      rows: 2,
+      skipped: 0,
+      repeats: 0,
+      unchanged: 0,
+      changed: 2,
+    })
   })
 })

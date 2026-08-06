@@ -22,9 +22,9 @@ epics:
     branch: aug6/w2-crud
     status: pending
     stories:
-      US-001: pending   # DELETE for brand and collection
-      US-002: pending   # DELETE for product and colourway
-      US-003: pending   # DELETE for price-list item and contact enquiry
+      US-001: blocked   # DELETE for brand and collection — waits on W1 US-001 (src/lifecycle)
+      US-002: blocked   # DELETE for product and colourway — waits on W1 US-001 (src/lifecycle)
+      US-003: blocked   # DELETE for price-list item and contact enquiry — waits on W1 US-001 (src/lifecycle); contact files unallocated
       US-004: pending   # DELETE for user with the self-delete guard
       US-005: pending   # Missing admin reads: brand, collection, price-list item by id
       US-006: pending   # Colourway list and detail endpoints

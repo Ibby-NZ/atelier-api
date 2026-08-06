@@ -5,11 +5,209 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- (nothing yet — the first iteration adds to this)
+- **This branch does not contain W1.** `aug6/w2-crud` is cut from `main` plus the Ralph scaffold
+  (`38868e1`), not from `august-6th-updates`. So none of W1's deliverables exist here:
+  `atelier-api/src/lifecycle/` is absent entirely, and `atelier-crm/src/admin/` holds only
+  `drafts.js`, `orderFlow.js`, `parts.jsx`, `stock.js` — no `list.js`, `useAdminList.js`,
+  `Pagination.jsx`, `ConfirmDialog.jsx`, `deleteFlow.js`, `useCrudScreen.js`, and `src/lib/api.js`
+  has no `apiDelete`. Verify with a `ls`/grep before assuming otherwise; do not author those files,
+  they belong to W1.
+- **Which W2 stories that gates.** Every story whose deliverable is a DELETE (US-001..004, and the
+  delete half of US-007/US-008) needs `deleteOrExplain`/`replyDelete` + a registry entry; every CRM
+  story (US-009..012) needs `useCrudScreen`/`Pagination`/`apiDelete`. The read-only stories
+  (US-005 admin reads by id, US-006 colourway list/detail) have **no** W1 dependency and are
+  implementable on this branch today.
+- Story pick order is by `priority`, so a blocked low-priority story does not stop the loop — it is
+  marked BLOCKED and the next iteration moves down the list.
+- **A story's file footprint is the ROUTE file plus the DOMAIN module it calls.** `src/routes/*` is
+  thin by house rule, so the logic always lands in `src/<domain>/`. Owning `admin-price-lists.js`
+  the route says nothing about `src/pricing/admin-price-lists.js` the module. Check both against the
+  MAY-touch list before starting, and check each entity separately when a story names two.
+- **Re-verify a shared blocker; do not inherit it from this log.** A previous entry recording
+  "dependency absent" is a statement about the branch at that moment, and another workstream can
+  land it in between. Two commands settle it in seconds — `ls atelier-api/src` for `lifecycle/`,
+  `ls atelier-crm/src/admin` for the CRUD kit — and they are cheaper than either blocking a story
+  that has become implementable or building on one that has not arrived.
 
 ---
 
 ## Story log
 
 Appended by each iteration, newest last. Never rewrite an existing entry.
+
+## 2026-08-06T02:21:34Z - W2-US-001 - DELETE for brand and collection - BLOCKED
+
+- **Blocked on a missing cross-workstream dependency, not on a failing gate.** No code was written,
+  so nothing was reverted; the commit carries bookkeeping only.
+- **What the story needs.** epics.md names it "Registry entries + DELETE routes for brand and
+  collection", and architecture.md § *Shared lifecycle module* specifies the whole mechanism —
+  a frozen registry entry per entity (`table`, `idColumn`, `archivable`, `guard`, dependency probes
+  `{ relation, label, sql }`), `deleteOrExplain(pool, entityName, id, ctx)` returning
+  `{ deleted:false, status, blockers[] }` rather than throwing (Fastify's error serializer drops
+  custom properties, so a thrown error cannot carry `blockers`), and `replyDelete(reply, result)`.
+  All of it lives in `atelier-api/src/lifecycle/`.
+- **Why that cannot be done here.** `src/lifecycle/**` is on W2's MUST NOT TOUCH list — it is W1's
+  (W1 US-001 "Lifecycle registry and deleteOrExplain", still `pending` in sprint-status.yaml) — and
+  it is not present on this branch to consume either.
+- **Verification run** (no gate command failed; the blocker is structural):
+
+      $ ls /Users/verumoffice/atelier-worktrees/w2-crud/atelier-api/src/lifecycle
+      ls: /Users/verumoffice/atelier-worktrees/w2-crud/atelier-api/src/lifecycle: No such file or directory
+
+      $ grep -rn 'setArchived|deleteOrExplain|replyDelete' atelier-api/src
+      No matches found
+
+      $ grep -rn 'useCrudScreen|useAdminList|deleteFlow|ConfirmDialog|apiDelete' atelier-crm/src
+      No files found
+
+      $ git -C atelier-api log --oneline -4
+      38868e1 chore(api): make workstream setup a script, not a block to paste
+      6049be9 chore(api): ignore node_modules as a symlink too
+      ed14f9d chore(api): BMAD planning artefacts and the nine-workstream Ralph scaffold
+      536a0fd chore(api): install BMAD Method v6.10.0 (bmm module, claude-code)
+
+- **The alternative was rejected deliberately.** prd.json's four acceptance criteria could be met by
+  hand-rolling probe-then-delete inside `src/catalogue/admin-brands.js` (a file W2 does own). That
+  would pass the gates and be wrong: it duplicates the module W1 is building, conflicts with it at
+  merge, and breaks architecture.md's single-registry invariant tests. Ralph's Step 6 names exactly
+  this case — "a conflict with another workstream's file ownership … is BLOCKED. Do not decide it
+  yourself."
+- Repos and files changed: `atelier-api` bookkeeping only — `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `ralph/w2-crud/BLOCKED.md`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: not run — no source file was modified.
+- **Learnings:**
+  - Pattern: check for the dependency's *files* before starting a story whose epic line says
+    "Requires: W<n> merged". A merged-in prerequisite is visible as directories, not as a git note.
+  - Gotcha: W2's whole DELETE surface (US-001..004, and the delete halves of US-007/US-008) plus
+    every CRM story (US-009..012) share this one dependency. Unblocking W1 unblocks all of them at
+    once; blocking them one iteration at a time is correct but slow. US-005 and US-006 are the two
+    stories that need nothing from W1.
+  - Context: the spec for the missing module is architecture.md §§ *Shared lifecycle module*,
+    *Delete policy* (the per-entity blocker/guard table) and *CRM CRUD kit*.
+- **Needs human verification:** none — no behaviour changed. A human must decide how to satisfy the
+  W1 dependency; see `ralph/w2-crud/BLOCKED.md`.
+---
+
+## 2026-08-06T02:24:25Z - W2-US-002 - DELETE for product and colourway - BLOCKED
+
+- **Same structural blocker as US-001, re-verified on this branch rather than inherited from that
+  entry.** No code was written, so nothing was reverted; the commit carries bookkeeping only.
+- **What the story needs.** epics.md Epic 2 names it "Registry entries + DELETE routes for product
+  and colourway" — so the deliverable is literally two entries in W1's registry plus two thin
+  handlers. architecture.md § *Delete policy* gives the two rows: **product** blocks on order lines
+  via colourways, samples and non-zero inventory; **colourway** blocks on order lines (RESTRICT),
+  samples and non-zero inventory. § *Shared lifecycle module* gives the mechanism — the frozen
+  registry entry, `deleteOrExplain` returning `{ deleted:false, status, blockers[] }` instead of
+  throwing, `replyDelete`, and the BEGIN → `FOR UPDATE` → guard → probe → DELETE → COMMIT order with
+  the 23503 catch as a backstop. All of it lives in `atelier-api/src/lifecycle/`.
+- **Why that cannot be done here.** `src/lifecycle/**` is on W2's MUST NOT TOUCH list (W1 owns it;
+  W1 US-001 "Lifecycle registry and deleteOrExplain" is still `pending` in sprint-status.yaml) and
+  it is not present on this branch to consume either.
+- **Verification run this iteration** (no gate command failed; the blocker is structural):
+
+      $ ls atelier-api/src
+      account  admin  app.js  auth  catalogue  checkout  config.js  contact  db.js  email
+      inventory  legacy  orders  pricing  routes  seed  server.js  shipping  trade-accounts
+      users  webhooks
+      # no `lifecycle`
+
+      $ grep -rn "deleteOrExplain|replyDelete|setArchived|from '.*lifecycle" atelier-api/src
+      No matches found
+
+      $ grep -n "app.delete|.delete\(" atelier-api/src/routes/*.js
+      atelier-api/src/routes/admin-trade-accounts.js:156:  app.delete(
+      # the only DELETE route in the API; it predates the registry and is not a model for this story
+
+      $ ls atelier-crm/src/admin
+      drafts.js  drafts.test.js  orderFlow.js  orderFlow.test.js  parts.jsx  stock.js  stock.test.js
+
+- **US-002 is a strictly worse candidate for hand-rolling than US-001 was.** Its acceptance criteria
+  name the `order_lines` RESTRICT backstop explicitly ("a test that proves the 23503 backstop
+  produces the same 409 shape"), and "the same 409 shape" is by definition the shape
+  `deleteOrExplain` returns. Reproducing it inside `src/catalogue/admin-products.js` would fix that
+  shape in a second place, so W1's later version and this one would then have to be kept in step by
+  hand. Ralph Step 6 covers it: a conflict with another workstream's file ownership is BLOCKED.
+- Repos and files changed: `atelier-api` bookkeeping only — `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `ralph/w2-crud/BLOCKED.md`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: not run — no source file was modified.
+- **Learnings:**
+  - Pattern: re-check a shared dependency's files every iteration instead of trusting the previous
+    BLOCKED entry — added to `## Codebase Patterns` above.
+  - Gotcha: `src/routes/admin-trade-accounts.js:156` is the API's only existing `app.delete`. It is
+    a plain unlink of a `trade_account_users` grant with no probes, so copying its shape into a
+    catalogue delete would produce a route that silently destroys children. It is not the pattern
+    this epic is asking for.
+  - Context: the two rows this story implements are in architecture.md § *Delete policy*
+    (product, colourway); the machinery is § *Shared lifecycle module*.
+- **Needs human verification:** none — no behaviour changed. The decision is the same one US-001
+  raised; see `ralph/w2-crud/BLOCKED.md`.
+---
+
+## 2026-08-06T02:28:17Z - W2-US-003 - DELETE for price-list item and contact enquiry - BLOCKED
+
+- **Two independent ownership blockers, both re-verified on the branch this iteration.** No code was
+  written, so nothing was reverted; the commit carries bookkeeping only.
+- **Blocker 1 — the delete mechanism is W1's.** architecture.md § *Delete policy* lists both
+  entities as registry rows (`price-list item`: no blockers, no guard, "copy must warn a re-import
+  recreates it"; `contact enquiry`: no blockers, no guard), and § *Shared lifecycle module* makes
+  `deleteOrExplain` + `replyDelete` + the frozen registry entry the only sanctioned delete path.
+  All of it lives in `atelier-api/src/lifecycle/`, which is on W2's MUST NOT TOUCH list and is still
+  absent here (W1 US-001 `pending` in sprint-status.yaml).
+- **Blocker 2 — the contact-enquiry half is not W2's surface.** Contact enquiries live in
+  `src/contact/contact.js` + `src/routes/contact.js`. Neither appears on W2's MAY-touch list, and
+  neither appears in epics.md Epic 2's "Owns these files" (`src/routes/admin-catalogue.js`,
+  `admin-inventory.js`, `admin-orders.js`, `admin-price-lists.js` only). A grep of epics.md for
+  `contact|enquir` returns exactly one line — the US-003 row itself — so **no epic owns those
+  files**. That is a planning gap a human must close, not a call this loop can make.
+- **Verification run this iteration** (no gate command failed; both blockers are structural):
+
+      $ ls atelier-api/src
+      account admin app.js auth catalogue checkout config.js contact db.js email
+      inventory legacy orders pricing routes seed server.js shipping trade-accounts
+      users webhooks
+      # no `lifecycle`
+
+      $ grep -rn "deleteOrExplain\|replyDelete\|setArchived" atelier-api/src
+      # no matches
+
+      $ ls atelier-crm/src/admin
+      drafts.js  drafts.test.js  orderFlow.js  orderFlow.test.js  parts.jsx  stock.js  stock.test.js
+
+      $ grep -n "W1-US-001\|lifecycle" _bmad-output/implementation-artifacts/sprint-status.yaml
+      14:      US-001: pending   # Lifecycle registry and deleteOrExplain
+
+      $ grep -in "contact\|enquir" _bmad-output/planning-artifacts/epics.md
+      52:| US-003 | DELETE for price-list item and contact enquiry | api |
+
+- **US-003 is the WEAKEST of the four delete stories' cases for blocking, and it was still the right
+  call.** Unlike US-001/US-002 it has no probes, no guard and no 409 shape to duplicate — a
+  hand-rolled `DELETE … RETURNING id` producing architecture.md's `200 { deleted: { entity, id } }`
+  would be ~6 lines and would convert to `replyDelete(reply, await deleteOrExplain(...))` at merge
+  with an unchanged external contract. What still blocks it is blocker 2: half the story is in files
+  no workstream owns, and writing there is exactly the cross-workstream conflict Step 6 reserves for
+  a human. Recorded so the next reader does not re-derive it: if the human picks option (b) or (c)
+  in BLOCKED.md, US-003 is the cheapest of the four to unblock.
+- Repos and files changed: `atelier-api` bookkeeping only — `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `ralph/w2-crud/BLOCKED.md`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: not run — no source file was modified.
+- **Learnings:**
+  - Pattern: a story's file footprint is the union of the ROUTE file and the DOMAIN module it calls
+    (`src/routes/*` is thin by house rule, so logic cannot live there). Check both against the
+    MAY-touch list before starting — `admin-price-lists.js` being owned says nothing about
+    `src/pricing/admin-price-lists.js`, and a story naming two entities can straddle the boundary.
+    Added to `## Codebase Patterns`.
+  - Gotcha: both entities ALREADY have archive/restore (`POST /admin/price-list-items/:id/archive`
+    + `/restore`, `POST /admin/contact-enquiries/:id/archive` + `/restore`) via
+    `setPriceListItemArchived` / `setEnquiryArchived`. US-003 adds hard DELETE alongside them; it is
+    not a rename of the existing soft delete. W1 US-002 will also fold those two helpers into
+    `setArchived`, so touching them now collides twice over.
+  - Context: price-list admin is `src/routes/admin-price-lists.js` (182 lines) +
+    `src/pricing/admin-price-lists.js` (335); contact is `src/routes/contact.js` (121) +
+    `src/contact/contact.js` (110). `ENQUIRY_COLUMNS` is the single SELECT list for enquiry reads.
+- **Needs human verification:** none — no behaviour changed. The planning gap (who owns
+  `src/contact/**`) is new and needs an answer; see `ralph/w2-crud/BLOCKED.md`.
+---
 

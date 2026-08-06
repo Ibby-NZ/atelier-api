@@ -48,15 +48,15 @@ epics:
   w3-suppliers:
     name: "W3 Suppliers"
     branch: aug6/w3-suppliers
-    status: pending
+    status: in_progress
     stories:
-      US-001: pending   # Migration: suppliers, aliases and the two FK columns
-      US-002: pending   # Migration: supplier brand terms and discount tiers
-      US-003: pending   # Migration: products.category
-      US-004: pending   # Supplier read models and admin module
-      US-005: pending   # Supplier routes including DELETE
-      US-006: pending   # Backfill suppliers from existing data
-      US-007: pending   # AdminSuppliers CRM screen
+      US-001: done      # Migration: suppliers, aliases and the two FK columns
+      US-002: done      # Migration: supplier brand terms and discount tiers
+      US-003: done      # Migration: products.category
+      US-004: done      # Supplier read models and admin module
+      US-005: done      # Supplier routes including DELETE
+      US-006: done      # Backfill suppliers from existing data
+      US-007: done      # AdminSuppliers CRM screen
   w4-samples:
     name: "W4 Samples"
     branch: aug6/w4-samples

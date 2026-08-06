@@ -5,11 +5,538 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- (nothing yet — the first iteration adds to this)
+- **Migration timestamps**: latest pre-W3 migration is `1786248000000_trade-accounts.js`. W3 starts at
+  `1786334400000` and steps by 86400000 per story, so concurrent workstreams do not collide on a name.
+- **`npm run migrate` twice is the no-op proof**: the second run prints "No migrations to run!". The
+  programmatic runner (`runner({ databaseUrl, dir: 'migrations', direction: 'up', migrationsTable:
+  'pgmigrations', log: () => {} })`) returns `[]` — that is the assertion every schema test makes.
+- **Migration test template** is `test/schema.test.js` / `test/commerce-schema.test.js`: run migrations in
+  `beforeAll`, `createPool`, assert `information_schema.tables`, assert the re-run is `[]`, then one
+  `rejects.toThrow(/<constraint_name>/)` per invariant. Constraint names are what the assertions match, so
+  they are part of the contract (`suppliers_name_key`, `suppliers_discount_method_check`).
+- **Partial-index house style**: archivable tables get `<table>_archived_at_live_idx` with
+  `where: 'archived_at IS NULL'`; an optional-but-unique column gets `unique: true` +
+  `where: '<col> IS NOT NULL'` so NULLs stay repeatable.
+- **Fixture cleanup order is FK order.** Delete `price_list_items` (SET NULL) and `brands` (RESTRICT)
+  before `suppliers`, or the supplier delete 23503s inside cleanup and every later test sees leftovers.
+- **`brands` is served to anonymous visitors** — a schema test asserting no `brands` column matches
+  `/wholesale|landed|duty|freight|cost|margin|markup|discount|credit_limit|payment_terms/` is cheap and is
+  the same vocabulary `test/price-list-exposure.test.js` polices at the response layer.
+- **Any `brands` fixture needs `trade_only = false`**, including one created purely to exercise an FK —
+  the column is `NOT NULL DEFAULT true`.
+- **pg parses `numeric[]` into JS NUMBERS but a scalar `numeric` into a STRING.** The house rule
+  "coerce numeric with `Number()`" is about the scalar case only; an array column arrives already
+  numeric, so a test asserting `['0.4000']` fails against `[0.4]`. Code that reads both shapes must
+  coerce defensively rather than assume either.
+- **A CHECK constraint cannot contain a subquery**, so per-element validation of an array column is
+  impossible in SQL. What IS expressible is an ordinary immutable function call —
+  `array_position(col, NULL) IS NULL` catches a NULL element (which would otherwise null the whole
+  computed result). Element ranges have to be enforced in the module that reads them.
+- **A "must be exactly one of these two columns" invariant is a plain CHECK**, e.g.
+  `a IS NULL OR cardinality(b) = 0`. Cheaper and more durable than a precedence rule each reader
+  re-implements, and it fails at write time where the typo is.
+- **An inline column `check:` is auto-named `<table>_<column>_check` by Postgres**, whether it is
+  written in a `createTable` column or an `addColumns` one — node-pg-migrate emits an unnamed
+  `CHECK (...)` and the server names it. So a `rejects.toThrow(/<table>_<column>_check/)` assertion
+  works without an explicit `addConstraint`, and `pg_get_constraintdef(oid)` finds it by that name.
+- **Two tables that must share a vocabulary should be asserted against EACH OTHER, not against a
+  literal.** `pg_get_constraintdef` renders an IN list as `= ANY (ARRAY['x'::text, …])`, so the
+  allowed values parse straight back out with `/'([^']+)'::text/g`. A drift between two such CHECKs
+  never throws — it just stops matching — so nothing else would catch it.
+- **Adding a column to a read model's whitelist is INERT unless the route's schema also lists it.**
+  Fastify's Ajv runs `removeAdditional: true`, so a key absent from the route's `properties` is
+  stripped from the body/querystring before the handler sees it. `FILTER_COLUMNS`
+  (`src/catalogue/products.js`) and `PRODUCT_UPDATE_COLUMNS` (`src/catalogue/admin-products.js`)
+  are each gated by a schema in a route file — `src/routes/catalogue.js` and
+  `src/routes/admin-catalogue.js` respectively. Both edits are needed or neither is worth making.
+- **The admin module template is `src/pricing/admin-price-lists.js`**, and every back-office read
+  model in this repo is the same five parts: `DEFAULT_PAGE`/`DEFAULT_LIMIT`/`MAX_LIMIT`, a private
+  `httpError`, a `rethrowConflict` keyed on `error.constraint`, a frozen `*_UPDATE_COLUMNS` fed to
+  `buildUpdate`, and a `to<Entity>` mapper returning a frozen object. The list returns
+  `{ <plural>, total }` — the ROUTE builds the meta envelope, never the module.
+- **A local `escapeLike` is duplicated per module on purpose** (`admin-users.js`,
+  `admin-price-lists.js`, and now `admin-suppliers.js`). It always pairs with an explicit
+  `ESCAPE '\'` in the SQL — the clause is not optional, and the term is otherwise a wildcard.
+- **`Number(null)` is 0, which reads as "free" for any rate column.** Every nullable numeric a read
+  model coerces needs `value == null ? null : Number(value)`; the blanket "coerce with `Number()`"
+  rule silently turns "no discount recorded" into "100% off".
+- **An exposure test asserts BOTH directions or it rots.** A suite that only asserts a field is
+  absent from `/catalogue/*` keeps passing after the admin read model quietly stops returning it.
+  Pair every absence assertion with one that the back-office model DOES carry the field, and scan
+  the raw response BODY for the fixture's secret values as well as its keys — a renamed column
+  passes a key scan while still shipping the value.
+- **Use the bare table name, not an alias, when a query needs a correlated EXISTS.** An unqualified
+  `*_COLUMNS` projection constant is only valid while the statement has no alias, so
+  `FROM suppliers ... WHERE supplier_aliases.supplier_id = suppliers.id` keeps one constant usable
+  in the SELECT, the INSERT RETURNING and the UPDATE RETURNING alike.
+- **`test/suppliers-terms.test.js`'s source scan is a plain `source.includes(table)`, so a COMMENT
+  naming `supplier_brand_terms` outside `src/suppliers/` fails it** — the scan cannot tell prose
+  from a join. Describe those tables by role ("the per-brand commercial terms") anywhere else.
+- **Fastify validates the body BEFORE the preHandler runs**, so a guard test that posts a body the
+  schema rejects gets a 400 and proves nothing about the guard. Send a valid body where the route
+  takes one and none where it does not; `app.inject` with a payload on GET/DELETE is also its own
+  hazard (an empty JSON body is `FST_ERR_CTP_EMPTY_JSON_BODY`).
+- **A route-level enum duplicating a database CHECK is the house pattern** (`CATEGORY_ENUM` in
+  `admin-price-lists.js`), because without it a bad value reaches the CHECK and a 23514 surfaces as
+  a 500 rather than a 400. Export the enum and assert it against the live `pg_get_constraintdef`,
+  or the boundary copy and the database drift with nothing raising.
+- **A DELETE refusal is a RETURN VALUE, and the route must pipe it through `replyDelete`.** Fastify's
+  error serializer emits `{ statusCode, error, message }` and drops every custom property, so a
+  thrown error cannot carry `blockers` or `archivable` — the two fields the CRM dialog needs.
+- **A registry probe is needed most where the FK is SET NULL, not where it is RESTRICT.** RESTRICT at
+  least refuses; SET NULL succeeds, reports 200 and silently unlinks every child. Both edges out of
+  a new entity need a probe, and the SET NULL one is the load-bearing half.
+- **Split any backfill/import into a PURE planner and a thin apply layer, and make its sources
+  injectable.** The planner takes the sources plus whatever the database already holds and emits
+  desired state keyed by NAME; the apply layer resolves names to ids. That is what lets the
+  real-corpus assertions run with zero writes to the SHARED test database, while the SQL is
+  exercised against small prefixed fixtures with an injected source — without it a test run
+  creates the real production rows and every later suite sees them.
+- **"Re-running changes nothing" is a per-statement guard, not a hope.** `ON CONFLICT (k) DO UPDATE
+  SET c = COALESCE(t.c, EXCLUDED.c), … WHERE (t.c, …) IS DISTINCT FROM (COALESCE(t.c, EXCLUDED.c),
+  …)` fills only NULLs AND does nothing when there is nothing to fill, so `updated_at` does not
+  creep on every run. Build the SET list and the row comparison from ONE frozen column constant so
+  they cannot drift. `RETURNING id, (xmax = 0) AS inserted` then separates a created row from an
+  enriched one — but with that WHERE an untouched conflicting row returns nothing at all, so ids
+  for the rest need a second `WHERE name = ANY($1::text[])`.
+- **An array column that differs per row cannot go through `unnest`** (the arrays would have to be
+  ragged), so a table with one forces a row-at-a-time insert loop. Fine at a couple of dozen rows;
+  it is not an optimisation someone should collapse.
+- **Distinct display names can slugify to the same slug** (`C & C Milano` and `C&C Milano` are both
+  `c-c-milano`), which is a 23505 mid-transaction. Any code generating slugs in bulk must detect
+  the collision against both the planned and the stored slugs and report it, the same way an
+  unsluggable name is reported rather than defaulted.
+- **(CRM) `useCrudScreen` IS the screen's plumbing.** It composes `useAdminList`, `useToast`,
+  `useMutation` and the delete flow and returns four NAMESPACES — `list`, `toast`, `mutation`,
+  `remove`. Spread `remove.dialog` onto `<ConfirmDialog />`, read `list.rows`/`list.status`/
+  `list.error`, and keep only filter state, the open row and the drafts in the screen. Pass an
+  `archive` action for any entity with a RESTRICT blocker, or the refusal dialog explains the
+  blockage and offers no way forward.
+- **(CRM) A boolean filter opts OUT by being `flag || null`, never `false`.** `buildListQuery`
+  drops null; `include_archived=false` is a different request for no reason.
+- **(CRM) The screen's field whitelist must mirror the API's frozen update columns exactly.**
+  Ajv's `removeAdditional` STRIPS an unknown body key instead of rejecting it, so a field the form
+  offers and the PATCH schema does not name saves nothing — silently, under a green toast. No
+  cross-repo import is possible, so the test hardcodes the API list as a boundary copy.
+- **(CRM) Mask a cost per VALUE, not per row, and carry it as a flag on the formatter's return.**
+  A value stating the METHOD ("2 discount tiers") is safe for a login without the capability; one
+  quoting a RATE is not. Any surrounding prose that repeats the figure needs a rate-free twin, or
+  a masked headline sits above a note reading "x0.36 net" and hides nothing.
 
 ---
 
 ## Story log
 
 Appended by each iteration, newest last. Never rewrite an existing entry.
+
+## 2026-08-06T03:10:15Z - W3-US-001 - Migration: suppliers, aliases and the two FK columns
+- Implemented `migrations/1786334400000_suppliers.js`: `suppliers` (unique `name`, unique `slug`,
+  `short_code`, `d365_token`, `country`, `currency`, `agent`, `incoterm`, `po_email`,
+  `discount_method` CHECK IN ('averaged','per-brand'), `created_at`, `updated_at`, `archived_at`),
+  `supplier_aliases` (supplier CASCADE, unique on `lower(btrim(alias))`), `brands.supplier_id`
+  ON DELETE RESTRICT and `price_list_items.supplier_id` ON DELETE SET NULL beside the retained
+  free-text `price_list_items.supplier`.
+- Indexes: `suppliers_archived_at_live_idx` (partial, live rows only), partial unique
+  `suppliers_d365_token_unique` and `suppliers_short_code_unique`, plus FK indexes on
+  `supplier_aliases.supplier_id`, `brands.supplier_id`, `price_list_items.supplier_id`.
+- `currency` is deliberately NULLABLE: the AC is "invoicing currency, not the country default", and a
+  NOT NULL would force a guess from `country` at create time — exactly the mistake. US-006 fills it
+  from the price list, where every row already carries the currency it was quoted in.
+- NO cost column was added to `brands` — it gains one integer FK and nothing else.
+- Repos and files changed: atelier-api — `migrations/1786334400000_suppliers.js` (new),
+  `test/suppliers-schema.test.js` (new, 12 tests), `CLAUDE.md` (## Suppliers), `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run migrate` (twice, second run "No migrations to run!") -> 0, `npm run lint` -> 0,
+  `npm test` -> 0 (40 files, 668 tests passed).
+- **Learnings:**
+  - `pgm.createIndex(table, "lower(btrim(col))", { name, unique: true })` is how a normalised unique key
+    is expressed here — the same shape `1786248000000_trade-accounts.js` uses for the legacy name indexes.
+  - Gotcha: an alias uniqueness test needs TWO suppliers, or the insert conflicts on nothing meaningful;
+    and the assertion must match the INDEX name, not a constraint name — a unique index raises
+    `supplier_aliases_alias_lower_unique`, there is no `_key` suffix.
+  - Gotcha: a RESTRICT violation surfaces as pg code `23503` with a message naming the CONSTRAINT
+    (`brands_supplier_id_fkey`); assert on `.code`, which is stable, rather than on the text.
+  - Context: supplier vocabulary comes from `src/seed/data/suppliers.js` (`method: 'averaged' |
+    'per-brand'`, `currency`, `agent`, `incoterm`, `poEmail`) and the alias spellings from
+    `SUPPLIER_OVERRIDES` in `scripts/convert-price-lists.js` (JV, JV DESIGN LICENSE, JWALL, C&C MILANO)
+    — both are what US-006 backfills from.
+  - Context: `d365_token` is the supplier token embedded in D365 item codes (`F3518-003 23PF` → `PF`);
+    it identifies the SUPPLIER, not the brand, per `docs/d365-export-analysis.md`.
+- **Needs human verification:** none — schema only, no screen and no endpoint. The columns become
+  visible in the AdminJS panel at `/panel` (it introspects every table with a primary key), which a
+  human may want to glance at once the CRM screen lands in US-007.
+---
+
+## 2026-08-06T15:22:40Z - W3-US-002 - Migration: supplier brand terms and discount tiers
+- Implemented `migrations/1786420800000_suppliers-brand-terms.js`: `supplier_brand_terms`
+  (supplier CASCADE, brand CASCADE + UNIQUE, `discount` numeric(6,4), `discount_chain`
+  numeric(6,4)[] NOT NULL DEFAULT '{}', `markup`, `indicative`, `note`, timestamps) and
+  `supplier_discount_tiers` (terms CASCADE, `label`, `pct`, `is_fallback`).
+- Constraints: `supplier_brand_terms_discount_range_check` (0 <= discount < 1),
+  `_markup_check` (> 0), `_chain_not_null_check` (`array_position(discount_chain, NULL) IS NULL`),
+  `_discount_shape_check` (`discount IS NULL OR cardinality(discount_chain) = 0` — a row may carry a
+  flat rate OR a chain, never both). Tiers: `_pct_check`, unique
+  `supplier_discount_tiers_label_unique (term_id, lower(btrim(label)))` and partial unique
+  `supplier_discount_tiers_fallback_unique (term_id) WHERE is_fallback`.
+- `src/suppliers/discount-chain.js` (new, pure): `chainMultiplier`, `applyDiscountChain`,
+  `resolveTermsChain`. The chain is multiplicative — `{0.4, 0.4}` is x0.36 — and the module is what
+  the "not -80%" assertion runs through. `resolveTermsChain` reproduces the seed snapshot's
+  precedence (chain, then category-matched tier with the `is_fallback` tier as the catch-all, then
+  the flat rate).
+- Repos and files changed: atelier-api — `migrations/1786420800000_suppliers-brand-terms.js` (new),
+  `src/suppliers/discount-chain.js` (new), `test/suppliers-terms.test.js` (new, 19 tests),
+  `CLAUDE.md` (## Suppliers), `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run migrate` (twice, second run "No migrations to run!") -> 0, `npm run lint` -> 0,
+  `npm test` -> 0 (41 files, 687 tests passed).
+- **Learnings:**
+  - pg parses `numeric[]` into JS numbers while a scalar `numeric` comes back as a string — the two
+    shapes of the same column family arrive as different types. Cost one red test here.
+  - A CHECK cannot hold a subquery, so array ELEMENT ranges cannot be enforced in SQL; a NULL
+    element can, via `array_position`. Range checking moved into the module that reads the column.
+  - Gotcha: the allowed-paths glob for this workstream is `migrations/*suppliers*` — note the
+    plural. A migration named `supplier-brand-terms` would fall outside it; the file is
+    `suppliers-brand-terms.js` for that reason alone.
+  - Gotcha: `npm test -- <file>` is refused by the tool permission layer in this harness. Run the
+    whole suite (`npm test`, ~25 s) instead of trying to narrow it.
+  - Pattern: the "never joined into a client-facing read model" criterion is testable as a source
+    scan — walk `src/**/*.js` (skipping the vendored `src/seed/data/`), collect every file naming
+    the table, assert the set is a subset of the owning domain. Same posture as
+    `test/lifecycle-registry.test.js`'s literal scan, and it fails the moment someone adds the join
+    rather than waiting for a response-layer assertion to notice.
+  - Context: the terms vocabulary is entirely derivable from `src/seed/data/suppliers.js` (JV's
+    three labelled tiers, five sister brands at a flat 0.5, JV Fabrics' `discountChain: [0.4, 0.4]`,
+    Fabricut's per-brand `markup` 2.0-2.5) and `src/seed/data/discounts.js` `resolveDiscount`, whose
+    precedence `resolveTermsChain` mirrors. Those files are VENDORED snapshots — the new module is a
+    deliberate re-implementation in `src/suppliers/`, not an import, so a re-copy of `data/` cannot
+    change API behaviour.
+  - Context: no row is written by this story. US-006's backfill is what populates both tables.
+- **Needs human verification:** none — schema plus a pure module, no screen and no endpoint. The two
+  tables will appear in the AdminJS panel at `/panel` only if a future story registers them as
+  resources; they are not registered here, deliberately (they are cost-bearing).
+---
+
+## 2026-08-06T15:24:30Z - W3-US-003 - Migration: products.category
+- Implemented `migrations/1786507200000_product-category.js`: one nullable `text` column on
+  `products` carrying the inline check `category IN ('fabric','wallpaper','trimming','accessory')`
+  — byte-identical to the `price_list_items.category` check from `1785110400000_price-list-items.js`,
+  so the catalogue and the rate ledger share one axis. No index (four values over a table of
+  hundreds is not selective, and the joins this unblocks are aggregate).
+- Nullable is the AC and the right call: every existing product is uncategorised, not wrong. A
+  NOT NULL would need a default, the only available default is `fabric`, and that would assert a
+  category for rows nobody has looked at while reading as populated. Epic 6's spreadsheet round trip
+  is what fills it in.
+- `category` is NOT `product_type`. `product_type` is `fabric | finished_good`, drives the
+  colourway's inventory unit (metres vs units) and is create-only for that reason; `category` is the
+  merchandising axis the rates are filed by, and a wallpaper is a `finished_good`. A test asserts
+  the two coexist independently so a later reader cannot collapse them.
+- **Scope note — no read-model wiring was added, deliberately.** The workstream's allowed-paths list
+  grants `src/catalogue/products.js` FILTER_COLUMNS and the product update whitelist, but both are
+  gated by a route schema in a file W3 must NOT touch (`src/routes/catalogue.js` `listQuerySchema`,
+  and `src/routes/admin-catalogue.js` — owned by W2). Fastify's Ajv strips a key absent from the
+  schema, so either edit alone is dead code. The story's ACs are schema-only, and Epic 6 US-004
+  ("apply the validated categories in one transaction") owns the write path.
+- Repos and files changed: atelier-api — `migrations/1786507200000_product-category.js` (new),
+  `test/suppliers-product-category.test.js` (new, 7 tests), `CLAUDE.md` (## Suppliers),
+  `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run migrate` (twice, second run "No migrations to run!") -> 0, `npm run lint` -> 0,
+  `npm test` -> 0 (42 files, 694 tests passed).
+- **Learnings:**
+  - An inline column `check:` is emitted unnamed by node-pg-migrate (`ADD "category" text CHECK
+    (...)`), and Postgres auto-names it `<table>_<column>_check`. That is why the existing
+    `suppliers_discount_method_check` assertion works with no `addConstraint`, and it holds for
+    `addColumns` as well as `createTable`.
+  - Pattern: to prove two tables share a vocabulary, compare their live CHECK definitions to each
+    OTHER via `pg_get_constraintdef(oid)` rather than to a hardcoded list. Postgres rewrites `IN`
+    to `= ANY (ARRAY['x'::text, …])`, so `/'([^']+)'::text/g` recovers the values. A drift between
+    the two sets never raises — it silently stops joining — so no other assertion would catch it.
+  - Gotcha: `psql` is refused by the tool permission layer in this harness (as is `npm test --
+    <file>`, per US-002). Read schema facts back through a vitest assertion or the migration's own
+    echoed SQL, not through an ad-hoc client.
+  - Gotcha for whoever wires category into an endpoint: adding it to `FILTER_COLUMNS` or
+    `PRODUCT_UPDATE_COLUMNS` does nothing on its own. `removeAdditional: true` strips it upstream
+    unless the route's schema `properties` names it too, and both route files belong to other
+    workstreams.
+  - Context: the four-value vocabulary originates in `scripts/convert-price-lists.js` (item type ->
+    category) and is pinned by `migrations/1785110400000_price-list-items.js`. Widening it later is
+    a one-line migration — on BOTH tables, or the two sides stop matching.
+- **Needs human verification:** none — one nullable column, no screen and no endpoint. The column
+  appears in the AdminJS panel at `/panel` (it introspects `products`, an editable resource) as a
+  free-text field with no dropdown; a human may want to glance at it, and note that the panel will
+  surface the raw CHECK violation rather than a friendly message if someone types a fifth value.
+---
+
+## 2026-08-06T15:33:10Z - W3-US-004 - Supplier read models and admin module
+- Implemented `src/suppliers/admin-suppliers.js`: `listSuppliers` (free-text `q`,
+  `includeArchived`, page/limit with `MAX_LIMIT` clamp, returns `{ suppliers, total }`),
+  `getSupplier` (the row plus its `aliases`, the `brands` it invoices and each house's terms),
+  `createSupplier` (slug derived server-side from the name, never accepted) and `updateSupplier`
+  (frozen `SUPPLIER_UPDATE_COLUMNS` through `buildUpdate`). Plus
+  `src/suppliers/supplier-terms.js`: `listSupplierBrandTerms`, which batch-loads the tiers for
+  every terms row in ONE query and resolves each row's net multiplier through the existing
+  `discount-chain.js`.
+- The list search reaches `supplier_aliases` via a correlated EXISTS. Staff look a house up by
+  whichever spelling is in front of them ('JWALL', 'C&C MILANO'), and those live only as aliases —
+  a name-only search would answer "no such supplier" for the spellings the price lists actually use.
+- `slug` is server-generated on create and NOT recomputed on rename: it is the stable key the
+  US-006 backfill and any later import address a supplier by, and a rename is a correction rather
+  than a new supplier. `discount_method` is in the update whitelist but its vocabulary is the
+  database's CHECK, not a JS list, so the two can never drift.
+- **Scope note — no route, no registry entry, deliberately.** `src/routes/admin-suppliers.js` and
+  the `supplier` entry in `src/lifecycle/registry.js` are US-005's (the DELETE story is what makes
+  the registry load-bearing, and `setArchived` cannot reach an entity that is not in it). Nothing
+  in US-004's ACs needs either: `include_archived` is a read filter, not an archive write.
+- Repos and files changed: atelier-api — `src/suppliers/admin-suppliers.js` (new),
+  `src/suppliers/supplier-terms.js` (new), `test/suppliers-admin.test.js` (new, 38 tests),
+  `CLAUDE.md` (## Suppliers), `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (43 files, 732 tests passed; was 42/694).
+- **Learnings:**
+  - Pattern: every back-office admin module here is the same five parts (limits, `httpError`,
+    `rethrowConflict` keyed on `error.constraint`, a frozen update whitelist, a frozen mapper) and
+    returns `{ <plural>, total }` so the ROUTE owns the meta envelope. `admin-price-lists.js` is
+    the template to copy.
+  - Pattern: an exposure test must assert both directions. Absence from `/catalogue/*` alone keeps
+    passing once the admin model stops returning the field; pairing it with "the back-office model
+    DOES carry these keys" is what keeps the assertion about exposure rather than about nothing.
+    Scan the raw BODY for the fixture's secret VALUES too — a renamed column passes a key scan.
+  - Gotcha: `Number(null)` is 0. On a discount or markup column that reads as "free"/"sell at
+    cost", so every nullable numeric needs `value == null ? null : Number(value)`. The house
+    "coerce numeric with `Number()`" rule is about a value that is known to be present.
+  - Gotcha: `rethrowConflict` is called from the `catch` of `updateSupplier`, which also throws its
+    own 404 from inside the `try`. That is deliberate and matches `updatePriceListItem` — a
+    non-23505 error is rethrown untouched, so the 404 survives. Do not "tidy" the 404 out of the
+    try block; it needs the same UPDATE's `rows.length`.
+  - Gotcha: a table alias breaks an unqualified `*_COLUMNS` projection constant. The list query
+    uses `FROM suppliers` with `supplier_aliases.supplier_id = suppliers.id` in the EXISTS so one
+    constant serves the SELECT, the INSERT RETURNING and the UPDATE RETURNING.
+  - Gotcha: `${PREFIX}` cleanup must delete `brands` before `suppliers` — `brands.supplier_id` is
+    RESTRICT, so the supplier delete 23503s inside cleanup and every later test sees leftovers.
+    `supplier_brand_terms` needs no line of its own: it CASCADEs from both sides.
+  - Context: the supplier vocabulary and the four unique constraints that produce a 409
+    (`suppliers_name_key`, `suppliers_slug_key`, `suppliers_d365_token_unique`,
+    `suppliers_short_code_unique`) come from `migrations/1786334400000_suppliers.js`; the terms
+    shapes from `migrations/1786420800000_suppliers-brand-terms.js`.
+- **Needs human verification:** none yet — module + tests only, no endpoint and no screen, so
+  nothing is reachable from a browser. The CRM screen that renders these fields lands in US-007
+  and is what a person must eyeball (specifically that the cost fields honour `CAPS.FINANCE_VIEW`
+  masking). The tables remain unregistered in the AdminJS panel at `/panel`, deliberately.
+---
+
+## 2026-08-06T15:42:10Z - W3-US-005 - Supplier routes including DELETE
+- Implemented `src/routes/admin-suppliers.js`: `GET|POST /admin/suppliers`,
+  `GET|PATCH|DELETE /admin/suppliers/:id`, `POST /admin/suppliers/:id/archive|restore`. Every one
+  is `requireRole('backoffice')`; the guard test is parameterised over the whole surface so a route
+  added later without one fails. Registered in `src/app.js` beside the other `/admin/*` plugins.
+- Added the `supplier` entry to `src/lifecycle/registry.js` (the file's own header invites the
+  owning workstream to add it): `table: 'suppliers'`, `archivable: true`, two probes —
+  `brands` ("houses") and `price_list_items` ("price-list items"). No guard: nothing about a
+  supplier is "you may not", only "something still points at this".
+- Added `setSupplierArchived` to `src/suppliers/admin-suppliers.js` (delegates to the shared
+  `setArchived`, `extraSets: ['updated_at = now()']`). It is what a blocked DELETE's
+  `archivable: true` promises: a supplier that still invoices a house can never be hard-deleted,
+  so without an archive the only way to retire one would be to unlink its houses — destroying who
+  invoiced them.
+- Registered `brands_supplier_id_fkey` in `CONSTRAINT_BLOCKERS` (`src/lifecycle/delete.js`). It is
+  the SECOND RESTRICT edge in the schema (the first is `order_lines_colourway_id_fkey`), and
+  delete.js's own comment anticipated exactly this. Without it a lost race reports the generic
+  "related records" instead of "houses"; the status was already right either way.
+- `DISCOUNT_METHOD_ENUM` is exported from the route file and asserted against the live
+  `suppliers_discount_method_check` definition, so the boundary copy cannot drift from the CHECK.
+- Repos and files changed: atelier-api — `src/routes/admin-suppliers.js` (new),
+  `test/suppliers-routes.test.js` (new, 39 tests), `src/lifecycle/registry.js`,
+  `src/lifecycle/delete.js`, `src/suppliers/admin-suppliers.js`, `src/app.js`, `CLAUDE.md`
+  (## Suppliers), `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (44 files, 779 tests passed; was 43/732 — the new
+  file adds 39 and the registry entry adds 8 parameterised cases to
+  `test/lifecycle-registry.test.js`). CRM untouched, but its gates were run anyway:
+  `npm test` -> 0 (32 files, 389 tests), `npm run build` -> 0.
+- **Learnings:**
+  - Pattern: `price_list_items.supplier_id` being SET NULL is why the probe matters more than the
+    RESTRICT edge. RESTRICT at least refuses; SET NULL returns 200 and unlinks the whole rate
+    ledger in silence. A new lifecycle entity needs a probe per edge, and the SET NULL one is the
+    load-bearing half.
+  - Pattern: a route-level enum mirroring a database CHECK is correct here (a 23514 would otherwise
+    be a 500), but it can drift — export it and assert it against `pg_get_constraintdef`. Same
+    instrument US-003 used to pin `products.category` against `price_list_items.category`.
+  - Gotcha: `test/suppliers-terms.test.js`'s ownership scan is `source.includes(table)`, so a
+    COMMENT in `src/lifecycle/registry.js` mentioning `supplier_brand_terms` failed the suite. It
+    cannot distinguish prose from a join. Describe those tables by role outside `src/suppliers/`.
+  - Gotcha: Fastify runs body validation BEFORE the preHandler, so a parameterised guard test that
+    sends one body to every route gets 400s from the ones whose schema rejects it and proves
+    nothing. Carry the payload per route, and send none on GET/DELETE.
+  - Gotcha: `deleteOrExplain` refusals are RETURN VALUES. Piping them through `replyDelete` is not
+    stylistic — a thrown error loses `blockers` and `archivable` to Fastify's serializer.
+  - Context: `src/app.js` and `src/lifecycle/registry.js` are outside this workstream's enumerated
+    file list but are not on the forbidden list, and registry.js's header explicitly says the
+    supplier entry belongs to the workstream that creates the table. Both edits are additive and
+    touch no other workstream's lines.
+  - Context: this is the FIRST route in the API wired to `deleteOrExplain`. W2-US-001..004 add the
+    brand/collection/product/colourway/price-list-item/user DELETE routes against the same helper —
+    expect that shape (`replyDelete(reply, await deleteOrExplain(pool, '<literal>', id, { user }))`)
+    to repeat, and the CRM's `describeBlockers` to consume `blockers` + `archivable` from all of
+    them.
+- **Needs human verification:** none reachable from a browser yet — no CRM screen calls these
+  routes until US-007, which is where a person must eyeball (a) that a blocked delete keeps the
+  confirm dialog open and renders "2 houses, 3 price-list items" with an "Archive instead" button,
+  and (b) that the cost fields honour `CAPS.FINANCE_VIEW` masking. `suppliers` is still NOT
+  registered as an AdminJS panel resource, so `/panel` shows nothing new.
+---
+
+## 2026-08-06T15:58:40Z - W3-US-006 - Backfill suppliers from existing data
+- Implemented `npm run backfill:suppliers`: `src/seed/backfill-suppliers.js` (CLI) ->
+  `src/suppliers/backfill.js` (one transaction, all the SQL) -> `src/suppliers/backfill-plan.js`
+  (pure planner, no DB). Sources are exactly the two the AC names: `SELECT DISTINCT
+  price_list_items.supplier` (40 filename-derived spellings, grouped with their item count and
+  currencies) and the vendored `src/seed/data/suppliers.js` (9 houses with country, invoicing
+  currency, agent, incoterm, PO email, discount method, short code).
+- It populates `suppliers`, `supplier_aliases` (the four `SUPPLIER_OVERRIDES` prefixes),
+  `price_list_items.supplier_id` (name then alias), `brands.supplier_id` and
+  `supplier_brand_terms`/`supplier_discount_tiers` — the last two being what US-002's entry
+  deferred to this story. Against the real corpus: 42 suppliers, 4 aliases, 40 name matches,
+  15 house links, 6 terms rows, 0 tiers.
+- **Match, then report — never guess.** Two spellings become one supplier only by an exact
+  `lower(btrim(name))` match or by an alias, and NAME BEATS ALIAS. So `Jannelli Volpi` (the rate
+  ledger, 2,516 rows) and `Janelli Volpi` (the snapshot, which holds JV's three tiers and the
+  {0.4,0.4} chain) are BOTH created and the pair is reported. Collapsing them here would attach a
+  discount to a spelling on a resemblance, and a wrong discount is a wrong landed cost on every
+  metre. The human merge is: add the alias to the survivor, DELETE the duplicate (SET NULL keeps
+  the rates), re-run — which then re-points 2,516 rows and does not recreate the duplicate.
+- Currency comes from the PRICE LIST, never the snapshot and never the country (US-001's own note
+  said the backfill would fill it from there). Manuel Canovas is the live disagreement: every rate
+  on file was quoted GBP, the snapshot says EUR — the rates win and the conflict is reported. A
+  name quoting two currencies is left NULL rather than resolved.
+- Write policy: `price_list_items.supplier_id` is derived and has no screen, so it is re-pointed
+  whenever the resolved supplier differs; `suppliers` columns and `brands.supplier_id` are
+  staff-curated and are filled ONLY where NULL (the `brands.website_url` COALESCE posture).
+- **Scope note.** No brand row and no supplier row is invented from a name only one source knows.
+  The snapshot's seven JV houses are not in `brands` at all (`Armani` vs the catalogue's
+  `Armani Casa`, `Missoni` vs `Missoni Home`, and five that were never catalogued), so they are
+  reported and `supplier_discount_tiers`/`discount_chain` stay empty on a real run today. The six
+  terms rows that do land are Fabricut's retail markups.
+- Repos and files changed: atelier-api — `src/suppliers/backfill-plan.js` (new),
+  `src/suppliers/backfill.js` (new), `src/seed/backfill-suppliers.js` (new),
+  `test/suppliers-backfill.test.js` (new, 23 tests), `package.json` (one `scripts` line —
+  `backfill:suppliers`; no dependency touched), `CLAUDE.md` (## Suppliers),
+  `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (45 files, 802 tests passed; was 44/779).
+- **Learnings:**
+  - Pattern: split a backfill into a PURE planner and a thin apply layer. The planner takes the
+    sources plus whatever the database already holds and emits desired state keyed by NAME; the
+    apply layer resolves names to ids. That is what lets the real-corpus assertions (19.5k rates,
+    the two unmatched spellings, the currency conflict) run with zero writes to the shared test
+    database, while the SQL is exercised against small prefixed fixtures with an INJECTED
+    snapshot — otherwise a test run creates the nine real houses and every later suite sees them.
+  - Pattern: "re-running changes nothing" is a per-statement guard, not a hope. `ON CONFLICT (k)
+    DO UPDATE SET c = COALESCE(t.c, EXCLUDED.c), ... WHERE (t.c, ...) IS DISTINCT FROM
+    (COALESCE(t.c, EXCLUDED.c), ...)` fills only NULLs AND does nothing when there is nothing to
+    fill, so `updated_at` does not creep on every run. Build both the SET list and the row
+    comparison from one frozen column constant so they cannot drift.
+  - Pattern: `RETURNING id, (xmax = 0) AS inserted` separates a created row from an updated one in
+    a single upsert. With the WHERE above, an untouched conflicting row returns NOTHING, so the
+    ids for the rest have to be read back with a second `WHERE name = ANY($1::text[])`.
+  - Gotcha: a row-per-item array column cannot go through `unnest` (the arrays would have to be
+    ragged), so `discount_chain` forces the terms insert to be a row-at-a-time loop. Fine at
+    two dozen rows; do not "optimise" it into a single statement.
+  - Gotcha: `existingSuppliers`/`existingAliases` build one index and the SUPPLIER NAME must win
+    over an alias, per the AC's own "matching name then alias". Consequence a reader will trip on:
+    adding an alias alone does NOT merge two live supplier rows — the duplicate has to go first.
+  - Gotcha: a planner that only plans what a source names will not enrich an existing supplier no
+    source mentions. That is correct, but it means a plan's `suppliers` list is not "every
+    supplier in the database" and a test asserting otherwise is wrong (cost one red test here).
+  - Gotcha: two spellings can slugify to the same slug (`C & C Milano` and `C&C Milano` are both
+    `c-c-milano`), which would be a 23505 on `suppliers_slug_key` mid-transaction. Detect it in the
+    planner, skip the second and report the pair; an unsluggable name (punctuation only) takes the
+    same path rather than defaulting a slug.
+  - Context: the snapshot's catch-all tier is the literal `'All other collections'` in
+    `resolveDiscount` (`src/seed/data/discounts.js`). The backfill translates it into `is_fallback`,
+    which is exactly why the string never has to reach the schema.
+  - Context: `price_list_items.supplier` is a filename prefix, so many of the 40 values are BRANDS
+    (`Altagamma`, `S Harris`, `Jane Churchill`, `Kieffer`). A row is still created per distinct
+    name — the story is "nobody retypes 40 names" — and merging is the CRM's job.
+- **Needs human verification:** two things, neither of which any test can cover. (a) Run the real
+  sequence on a database that has the rates — `npm run migrate && npm run seed && npm run
+  import:pricing && npm run backfill:suppliers` — and read the printed report: the
+  `Jannelli Volpi` / `Janelli Volpi` pair and the seven uncatalogued JV houses are decisions for
+  the office, not defects. (b) The US-007 CRM screen is where a person must eyeball that the
+  backfilled aliases, linked houses and terms render, and that the cost fields honour
+  `CAPS.FINANCE_VIEW` masking. `suppliers` is still NOT an AdminJS panel resource, so `/panel`
+  shows nothing new.
+---
+
+## 2026-08-06T16:12:30Z - W3-US-007 - AdminSuppliers CRM screen
+- Implemented `atelier-crm/src/screens/AdminSuppliers.jsx` (`/admin/suppliers`), the FIRST screen in
+  this repo to compose the whole W1 kit: `useCrudScreen` (which owns `useAdminList` + the delete
+  flow), `<Pagination>` and `<ConfirmDialog {...remove.dialog} />`. Search (name, alias, short code,
+  country), Show archived, create, inline edit through `drafts.js`, Archive/Restore, and Delete with
+  the blocked-dialog explanation.
+- `atelier-crm/src/screens/adminSuppliers.js` (new, pure) holds every rule — `SUPPLIERS_PATH`/
+  `supplierPath`, `archiveVerb`/`archivePath`, the frozen `SUPPLIER_FIELDS` (mirroring the API's
+  `SUPPLIER_UPDATE_COLUMNS`), `supplierFilters`, and `termsSummary` — with
+  `adminSuppliers.test.js` (23 tests) beside it. The `.jsx` is layout only: this repo has no jsdom,
+  so a component cannot be rendered in a test.
+- `suppliersTabs` added to `src/components/sectionTabs.jsx` ("Supplier master" `/suppliers` →
+  "Manage suppliers" `/admin/suppliers`). The demo `Suppliers.jsx` is byte-for-byte untouched and is
+  reachable from the strip on the live screen; the SideNav item gained
+  `match: ['/suppliers', '/admin/suppliers']` so the nav does not go dark on the new tab.
+- FINANCE_VIEW masking is per VALUE, not per row (`termsSummary`'s `rateFree`): "2 discount tiers"
+  and "Supplier default" state the METHOD and survive the mask; a quoted rate is replaced by
+  `MaskedFigure`, and the chain's note ("Compounded — x0.36 net") has a rate-free `maskedNote` twin,
+  because dropping the figure alone would leave the sentence lying. Same rule the demo screen
+  already applies. Terms are read-only — the API has no write path for them.
+- Repos and files changed: atelier-crm — `src/screens/AdminSuppliers.jsx` (new),
+  `src/screens/adminSuppliers.js` (new), `src/screens/adminSuppliers.test.js` (new),
+  `src/components/sectionTabs.jsx`, `src/App.jsx`, `src/components/layout.jsx`, `CLAUDE.md`
+  (## Suppliers); atelier-api — `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml` (bookkeeping only, no code).
+- Gates: `npm test` (crm) -> 0 (33 files, 412 tests; was 32/389), `npm run build` (crm) -> 0.
+  atelier-api was not touched but its gates were run anyway: `npm run lint` -> 0, `npm test` -> 0
+  (45 files, 802 tests).
+- **Learnings:**
+  - Pattern: `useCrudScreen` is the whole screen in one call — it composes `useAdminList`, the
+    toast, `useMutation` and the delete dialog, and returns four NAMESPACES (`list`, `toast`,
+    `mutation`, `remove`). Spread `remove.dialog` straight onto `<ConfirmDialog />` and read the
+    list through `list.rows`/`list.status`/`list.error`; the screen keeps only its own filter
+    state, the open row and the drafts.
+  - Pattern: pass an `archive` action to `useCrudScreen` for any entity whose blockers include a
+    RESTRICT edge. Without it the refusal dialog says what is blocking and offers no way forward —
+    "Archive instead" only appears when the API said `archivable: true` AND the screen supplied the
+    action.
+  - Pattern: a boolean filter opts OUT by being `flag || null`, not `false`. `buildListQuery` drops
+    null; sending `include_archived=false` is a different request for no reason.
+  - Pattern (masking): make the unit of masking the VALUE, not the row, and carry it as a flag on
+    the formatter's return (`rateFree`) rather than deciding at the call site. Pair it with a
+    `maskedNote` wherever the surrounding prose quotes the same figure — a masked headline above a
+    note reading "x0.36 net" hides nothing. A test asserting `rateFree` implies no `[%x]` in the
+    value is what keeps it honest.
+  - Gotcha: the CRM screen's field whitelist must mirror the API's frozen update columns exactly.
+    Ajv's `removeAdditional` STRIPS an unknown key rather than rejecting it, so a field the screen
+    offers and the API does not accept saves nothing, silently, with a green toast. The test
+    hardcodes the API list as a boundary copy (no cross-repo import is possible).
+  - Gotcha: `src/App.jsx` and `src/components/layout.jsx` are outside this workstream's enumerated
+    CRM file list but are not on the forbidden list, and a screen with no route is unreachable —
+    both edits are one additive line each (a `<Route>` and the nav `match` array) and touch no
+    other workstream's lines. Same judgement US-005 made for `src/app.js` in the API.
+  - Context: the API shapes this screen reads are `GET /admin/suppliers` →
+    `{ suppliers, meta: { total, page, limit } }` and `GET /admin/suppliers/:id` → `{ supplier }`
+    with `aliases`, `brands` (each carrying `terms`), and each terms row carrying `net_multiplier`,
+    `net_source`, `net_label` and `invalid_reason`. The CRM never evaluates a chain — the API's
+    `src/suppliers/discount-chain.js` is the only evaluator, and {0.4,0.4} is x0.36, not -80%.
+  - Context: on a real database today the detail panel is mostly empty — the backfill links 15
+    houses and lands 6 terms rows (Fabricut's markups), and JV's tiers and chain belong to houses
+    that were never catalogued. That is the data, not a broken screen.
+- **Needs human verification:** the whole screen, since nothing here can be rendered in a test
+  (no jsdom, no e2e harness in this repo). Specifically, at
+  `http://localhost:5273/#/admin/suppliers` signed in as a seeded staff login: (a) the tab strip
+  moves between the demo Supplier master and the live screen and the SideNav stays lit on both;
+  (b) a delete blocked by houses/price-list items keeps the dialog OPEN, lists "2 houses, 3
+  price-list items" and offers "Archive instead"; (c) expanding a row loads its aliases, houses and
+  terms, and the terms figures render (x0.36 for a chain, "N discount tiers" with the tier rates
+  below); (d) the FINANCE_VIEW mask — every CRM login maps to the demo `director` capability set
+  today, so a person must temporarily sign in as a non-finance demo login (or flip
+  `STAFF_ROLE_MAP`) to see the masked state at all.
+---
 

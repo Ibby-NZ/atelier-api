@@ -173,8 +173,8 @@
         "atelier-crm"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T04:25:04Z"
     },
     {
       "id": "US-011",

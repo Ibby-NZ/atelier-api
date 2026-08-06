@@ -176,6 +176,30 @@ Story-specific detail belongs in the per-story entries below, not here.
   destructive thing on a row; with a real Delete beside it, two red buttons claim the reversible
   action is as grave as the irreversible one. Archive/Restore becomes neutral on every screen that
   gains a Delete.
+- **A CRM screen holding a SECOND list is usually a screen that has not been written yet.** The
+  tell is exactly the workaround `useCrudScreen` forces: a combined `reload` and a hand-rolled
+  `useMutation`, because the kit binds `mutation` to *its* list. AdminBrands carried collections
+  that way; splitting them out gave them a filter, a create form, a Delete and a detail read, and
+  left AdminBrands taking `crud.mutation` straight from the kit. Read the "second list keeps its own
+  useMutation" rule as a description of a debt, not a pattern to copy.
+- **A child whose key is unique per PARENT must never be identified by that key once it is listed
+  across all parents.** A collection slug is unique per house (`collections_brand_id_slug_unique`),
+  and so is its display name in practice — the seed strips the house prefix off the vendored titles,
+  so a catalogue-wide list genuinely shows several "Cappuccino"s. React keys and every path stay on
+  `id`, the parent becomes a column, and anything naming a row to a person names the parent with it
+  (`describeCollection` → `Cappuccino (Pierre Frey)`), because the delete dialog's "Delete
+  “Cappuccino”?" is otherwise a question three houses can answer. Same rule for any future
+  cross-parent list of a per-parent-unique child.
+- **A filter another screen LINKS INTO belongs in the URL, not in `useState`.** `useSearchParams` is
+  the whole implementation (`const brandFilter = searchParams.get('brand_id') ?? ''`), and it fixes
+  two things state cannot: a link clicked while the target screen is already mounted does not
+  remount it, so state would silently ignore it; and the back button would not undo the filter. The
+  kit needs no change — `filters` is rebuilt each render and `useAdminList` keys on the serialised
+  query.
+- **A source-scan assertion must not match the file's own prose.** `expect(source).not.toContain(
+  'useMutation')` failed on a comment *explaining* when a screen calls `useMutation` — the scan sees
+  comments. Assert the positive (`toContain('crud.mutation')`) where the negative would be tripped by
+  a sentence, and keep negative scans to symbols a screen would never merely discuss.
 
 ---
 
@@ -1021,4 +1045,93 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   stray Enter cannot delete; (5) the standing item carried from US-001..008 — a **real
   cross-origin DELETE preflight from the CRM at :5273**, which `app.inject()` cannot prove and
   which is the one thing that would make every delete here fail while curl passes.
+---
+
+## 2026-08-06T04:25:04Z - W2-US-010 - Standalone AdminCollections screen
+
+- **Implemented.** `/admin/collections` is a screen of its own: a house filter, a create form, an
+  expandable editor over `GET /admin/collections/:id`, Archive/Restore and Delete through
+  `useCrudScreen`. AdminBrands loses the collections panel entirely and each house row links through
+  to it with the filter pre-applied. The API half needed no change — `GET|POST /admin/collections`,
+  `GET /admin/collections/:id` (US-005), `PATCH`, archive/restore and `DELETE` (US-001) all already
+  existed; this story is the screen that finally calls the by-id read, which until now had no
+  consumer.
+- Repos and files changed: `atelier-crm` only —
+  `src/screens/AdminCollections.jsx` (new, 487 lines),
+  `src/screens/adminCatalogue.js` (+`collectionListFilters`, +`collectionsPath`,
+  +`describeCollection`, `productListFilters` re-expressed over a shared `brandScopedFilters`),
+  `src/screens/adminCatalogue.test.js` (+16 tests),
+  `src/screens/AdminBrands.jsx` (683 -> 515: collections panel, second list, `COLLECTION_FIELDS`,
+  four collection handlers and its own `useMutation` all removed; row link added),
+  `src/App.jsx` (+1 route, +1 import), `src/components/sectionTabs.jsx` (+1 catalogue tab),
+  `src/components/layout.jsx` (Catalogue nav `match` gains `/admin/collections`),
+  `CLAUDE.md` (`## CRUD completion`, plus two stale lines that named AdminBrands as the collection
+  editor). `atelier-api` carries the bookkeeping only — `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm test` -> 0 (33 files, 419 tests passed; 403 before), `npm run build` -> 0.
+- **The move is the story, so what the tests hold is where the panel now is — and where it is not.**
+  With no jsdom a source scan is the only test a `.jsx` can have here, so `COLLECTION_FIELDS` is
+  asserted present in AdminCollections and **absent** from AdminBrands; AdminBrands is asserted to
+  contain no `/admin/collections` path and no `collectionDrafts`, and to use `crud.mutation`; and
+  AdminCollections joins the existing three-screens loop that proves the delete flow is the kit's
+  (`useCrudScreen`, `ConfirmDialog`, `remove.ask`, `archiveInsteadPath` present; `apiDelete`,
+  `attemptDelete`, `describeBlockers`, `deleteDialog`, `role="dialog"`, `Pagination` absent).
+- **Criterion 4 — "a collection slug is unique per brand, never globally" — is a real hazard here,
+  not a formality.** It was harmless while collections were nested under their house; a
+  catalogue-wide list is exactly where it bites, and the seed makes it certain rather than
+  theoretical: `collectionDisplayName` strips the house prefix off the vendored titles, so several
+  houses ship a plain "Cappuccino". Three answers, each tested: rows are keyed by `id`
+  (`key={collection.id}`, and the scan asserts `key={collection.slug}` appears nowhere), the house is
+  the first column and a read-only field in the editor, and `describeCollection` renders
+  `Cappuccino (Pierre Frey)` for the delete dialog's title and every toast. Without the last one the
+  dialog asks "Delete “Cappuccino”?" and a staff member with the list filtered to "All houses" cannot
+  tell which row is about to go.
+- **The house filter lives in the URL.** `collectionsPath(brand)` is
+  `/admin/collections?brand_id=<id>` and the screen reads it with `useSearchParams` rather than
+  seeding `useState` from it — a link clicked while this screen is already mounted does not remount
+  it, so state would ignore the second click, and the back button would not undo a filter change.
+- **AdminBrands got smaller in the way that matters.** Removing the second list removed the reason it
+  had to build a combined `reload` and call `useMutation` itself, so it now destructures
+  `crud.mutation`; the "a screen with a second list keeps its own `useMutation`" rule US-009 recorded
+  is a description of a debt, and this story paid it. What replaced the panel is two links: one on
+  the row's sub-line (beside the country) and one beside Save house in the editor. The row's name is
+  a `<button>` that expands the editor, so the `<Link>` is its sibling rather than nested — a control
+  inside a control.
+- **Learnings:**
+  - Patterns: a second list is an unwritten screen; a per-parent-unique key must not identify a row
+    in a cross-parent list; a linked-into filter belongs in the URL; a negative source scan must not
+    match the file's own prose. All four promoted to `## Codebase Patterns` above.
+  - Gotcha: the first version of the "houses only" test asserted `not.toContain('useMutation')` and
+    failed against a **comment** explaining when a screen calls it. A source scan reads comments;
+    prefer the positive assertion wherever prose could trip the negative.
+  - Gotcha: `GET /admin/collections` returns no `product_count` — only the by-id read does — so the
+    count that tells staff a Delete will be refused is available on the expanded row and nowhere
+    else. Do not add a per-row count by fetching the detail for every row; that is the pre-flight the
+    kit forbids, once per row.
+  - Gotcha: `PATCH /admin/collections/:id` accepts name/description/image_url only. `brand_id` is
+    create-only, so the editor shows the house as `readOnlyInput` and the create form keeps its own
+    `CREATE_ONLY_FIELDS` — the same split AdminProducts makes for `brand_id`/`product_type`.
+  - Gotcha: the CRM already has a **demo** `/collections` screen in the brand world (`Collections.jsx`,
+    localStorage-backed). The live one is `/admin/collections`; the two are different screens in
+    different layouts and neither should be edited in mistake for the other.
+  - Gotcha: `AdminProducts` also fetches `/admin/collections` — for its collection `<select>`, not as
+    a list — and is untouched by this story. It reads the same endpoint, so the two must not diverge
+    on filters: the select deliberately fetches unfiltered and narrows per house in memory.
+  - Context: the screen is `src/screens/AdminCollections.jsx`, its pure half is
+    `src/screens/adminCatalogue.js` (now serving all three catalogue screens), and the read models
+    behind it are `listAdminCollections` / `getAdminCollection` in the API's
+    `src/catalogue/admin-brands.js`.
+- **Needs human verification:** **the new screen, in a browser — the whole contract is visual and
+  there is no e2e harness or `dev-browser` on this machine.** Specifically: (1) Houses → a house
+  row's "Collections" link lands on `/admin/collections` with that house selected in the filter, and
+  the back button returns to Houses; (2) clicking a second house's link while already on Collections
+  changes the filter (this is the bug `useState` would have had); (3) Delete on a collection holding
+  products keeps the dialog open, names the count, and offers **Archive instead** — and the dialog
+  title reads "Cappuccino (Pierre Frey)" rather than a bare name; (4) with the filter on "All
+  houses", two same-named collections from different houses are distinguishable in the list, in the
+  dialog and in the toast; (5) create a collection whose name matches one that already exists under
+  a DIFFERENT house — it must succeed (the slug is per-house), while the same name under the same
+  house is a 409; (6) the Catalogue tab strip shows four tabs and the SideNav stays lit on
+  Collections. Carried forward from US-001..009: a real cross-origin DELETE preflight from the CRM at
+  :5273, which `app.inject()` cannot prove.
 ---

@@ -88,8 +88,8 @@
         "atelier-crm"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T19:05:00Z"
     }
   ]
 }

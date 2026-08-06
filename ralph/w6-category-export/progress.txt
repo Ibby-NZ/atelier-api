@@ -56,6 +56,25 @@ Story-specific detail belongs in the per-story entries below, not here.
   case, so the lock is an option on the shared function, not a second copy of it. Lock in a
   deterministic order (`ORDER BY id`) or two concurrent callers with overlapping row sets deadlock
   instead of queueing.
+- **The CRM's `apiFetch` cannot fetch a FILE.** It parses JSON and returns null for every other
+  content type, so a CSV read through it arrives as nothing at all. `apiDownload(path)` (appended to
+  `src/lib/api.js`) is the sibling: same base URL, same `credentials: 'include'`, same ApiError
+  contract — so a 404's own sentence still reaches the screen — returning `{ blob, disposition }`.
+  Saving it is a temporary `<a download>` off `URL.createObjectURL`, revoked a tick later (revoking
+  in the same tick cancels the save in some browsers).
+- **`Content-Disposition` is invisible to a cross-origin caller.** It is not a CORS-safelisted
+  response header, and the API names it in no `Access-Control-Expose-Headers`, so CRM :5273 → API
+  :3001 reads it as null every time. Any download helper therefore needs a filename rule of its own
+  or the office saves a file called "download"; mirror the API's naming (built from a slug, never
+  from free text that could carry a quote or a CR) rather than exposing the header.
+- **A CRM screen's shared registrations are additive, exactly like the API's `src/app.js`.** A
+  screen no `<Route>` in `App.jsx` names is dead code, and a route no `sectionTabs.jsx` tab reaches
+  is a screen nobody can find — and `layout.jsx`'s SideNav `match` array must list it too or the nav
+  goes dark on the new tab. Three lists, one appended entry each, never a reorder: every workstream
+  adding a screen edits the same three lines.
+- **A React effect keyed on an array built during render never settles.** `brandOptions(rows)` has a
+  new identity every render, so key the effect on the ROWS the list returned — the same rule
+  `useAdminList` states about its `filters` object, in a new place.
 - **Ajv applies a querystring `default` only when the key is ABSENT.** `?brand=` sends the empty
   string, which is present, so it meets the `pattern` instead and 400s. That is the right answer
   for an export (the caller asked for a house and named none) and the opposite of the CRM list
@@ -255,3 +274,49 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   carry the categories in the CRM — then POST it a third time and confirm `applied` is 0.
 ---
 
+## 2026-08-06T19:05:00Z - W6-US-005 - CRM export and import panel
+- `AdminProductSheet` (`/admin/product-sheet`, Catalogue → Categories) is the office's end of the
+  round trip: a house selector plus Download, then a file input that CHECKS the filled-in sheet on
+  choose and shows the report, with Apply appearing only once the dry run comes back clean. The
+  brand selector is what makes the generalisation visible — one sheet shape, any house, and the
+  hint says so beside the filename the download will save under.
+- Repos and files changed: atelier-crm — `src/screens/adminProductSheet.js` (new, pure),
+  `src/screens/adminProductSheet.test.js` (new, 36 tests), `src/screens/AdminProductSheet.jsx`
+  (new), `src/lib/api.js` (`apiDownload` appended), `src/App.jsx` (one import + one Route),
+  `src/components/sectionTabs.jsx` (one `catalogueTabs` entry), `src/components/layout.jsx` (one
+  slug in the Catalogue `match` array), `CLAUDE.md` (`## Category export`). atelier-api —
+  `ralph/w6-category-export/{prd.json,progress.txt,PR-BODY.md}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` (atelier-api) -> 0, `npm test` (atelier-api) -> 0 (52 files, 1216 tests),
+  `npm test` (atelier-crm) -> 0 (38 files, 603 tests), `npm run build` (atelier-crm) -> 0.
+- **Learnings:**
+  - **`apiFetch` cannot fetch a file**: it parses JSON and returns null for every other content
+    type, so a CSV read through it arrives as nothing at all. `apiDownload(path)` is the appended
+    sibling, returning `{ blob, disposition }` with the same base URL, credentials and ApiError
+    contract. Promoted to Codebase Patterns.
+  - **`Content-Disposition` is invisible cross-origin** — it is not CORS-safelisted and the API
+    does not name it in `Access-Control-Expose-Headers` — so a download helper needs a fallback
+    name or the office saves a file called "download". Promoted to Codebase Patterns.
+  - The CRM's shared registration files take the same additive rule the API's `src/app.js` does:
+    a screen no `<Route>` names is dead code, and a route no tab reaches is a screen nobody can
+    find. `App.jsx`, `catalogueTabs` and the SideNav `match` array each took exactly one appended
+    entry — never a reorder — because every workstream adding a screen edits the same three lists.
+    `CLAUDE.md` already states the `match` half: omit it and the nav goes dark on the new tab.
+  - A load effect must be keyed on the ROWS the list returned, never on an array derived during
+    render (`brandOptions(rows)` has a new identity every time and an effect keyed on it never
+    settles) — the same rule `useAdminList` states about its `filters` object.
+  - The screen deliberately holds no parser: `adminProductSheet.test.js` scans the `.jsx` for
+    `FileReader`/`csvRows` and asserts their absence, because a second opinion about what is in the
+    sheet is a second implementation of the API's parser and the two drift the first time either
+    changes. Only the mistakes the API answers *less readably* than it could are pre-checked — an
+    `.xlsx` upload, which the API can only report as a broken header row.
+  - Context: every rule is in `src/screens/adminProductSheet.js` (paths, the slug guard, the
+    content type, `fileProblem`, `filenameFrom`, `refusalFrom`, `canApply`, the count wording) with
+    its test beside it; the `.jsx` is layout, per the no-jsdom convention.
+- **Needs human verification:** the whole round trip, in a browser, signed in as back office at
+  `http://localhost:5273/#/admin/product-sheet` — pick a house, Download, confirm the file opens in
+  Excel as five columns with Category empty, type a category into a few rows, save as "CSV (Comma
+  delimited)", choose it in section 2 and read the report, press Apply, then confirm the categories
+  on `/admin/products`. Also worth eyeballing: a deliberately broken row (a misspelt category) shows
+  its row number and no Apply button, and an `.xlsx` chosen by mistake is refused by name.
+---

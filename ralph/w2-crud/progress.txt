@@ -147,6 +147,35 @@ Story-specific detail belongs in the per-story entries below, not here.
   chosen statement is about to execute. That is how the 23503 backstop gets exercised against the
   real database instead of a stub that just throws the error code. Applies to any check-then-write
   in this codebase.
+- **`useCrudScreen` replaces a CRM screen's list fetch, its `status`/`loadError` pair and its
+  `useToast` — but NOT its `useMutation` when the screen holds a SECOND list.** The kit binds
+  `mutation` to *its* list's reload, so a screen like AdminBrands (houses + collections) or
+  AdminProducts (list + an expanded detail read) builds a combined `reload` and calls `useMutation`
+  itself with `crud.toast.flash`, leaving `crud.mutation` unused. Everything else comes from the
+  kit: `crud.list.rows/status/error/total`, `crud.remove.ask(row)` on the button, and
+  `<ConfirmDialog {...crud.remove.dialog} />` at the foot of the screen. A screen must not import
+  `apiDelete`, `attemptDelete`, `describeBlockers` or `deleteDialog`.
+- **The dialog's "Archive instead" ALWAYS archives; it is not the row's Archive/Restore toggle.**
+  It appears only on a *refused* delete, so pointing it at the toggle would answer the refusal by
+  restoring an already-archived row — putting it back on the website in response to a request to
+  remove it. Keep them as two functions (`archiveTogglePath` / `archiveInsteadPath`), not one with
+  a flag. And `useCrudScreen` shows the button only when `archive !== null` AND the API said
+  `archivable`, so an archivable entity whose screen forgets the option renders a Cancel-only 409.
+- **An unpaged admin endpoint must be given a limit ABOVE its row count, never the kit's default
+  25.** `/admin/brands` and `/admin/products` return the whole list with no `meta` (`readList`
+  falls back to the row count) and declare no `page` param, which Fastify's Ajv silently strips
+  rather than rejecting — so a `totalPages` of 2 would advertise a page that can never be fetched.
+  Check whether the endpoint actually pages before wiring a screen: `meta` in the envelope is the
+  tell, and `MAX_LIMIT` in the module is the second.
+- **With no jsdom, an acceptance criterion about how a SCREEN is composed is provable only by
+  reading the file.** "Uses `useCrudScreen`", "adds no bespoke dialog or paginator" and "does not
+  re-implement the flow" are all `readFileSync(new URL('./Screen.jsx', import.meta.url))` plus
+  `toContain`/`not.toContain` — the idiom `src/admin/useCrudScreen.test.js` already uses on the kit.
+  It is the only test of a `.jsx` this repo can have, and it costs nothing.
+- **Only the permanent verb is drawn `tone="danger"`.** Archive was red while it was the most
+  destructive thing on a row; with a real Delete beside it, two red buttons claim the reversible
+  action is as grave as the irreversible one. Archive/Restore becomes neutral on every screen that
+  gains a Delete.
 
 ---
 
@@ -903,4 +932,93 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   colourway list (US-006's `GET /admin/colourways`) or the row is unrecoverable from the UI. Plus
   the standing cross-origin DELETE preflight from the CRM at :5273, which `app.inject()` cannot
   prove.
+---
+
+## 2026-08-06T04:13:11Z - W2-US-009 - Delete on the products and houses screens
+
+- **Implemented.** `AdminBrands` (houses) and `AdminProducts` (products) are the CRM's first two
+  consumers of W1's `useCrudScreen`. Each row gains a Delete button that opens the shared
+  `ConfirmDialog`; a 409 keeps that dialog open, renders the API's sentence plus one line per
+  blocker, drops the confirm button and offers **Archive instead**. Both screens' hand-rolled list
+  fetch, `status`/`loadError` pair and `useToast` are gone — the kit supplies all of it. No
+  paginator and no dialog of their own were added; a source scan asserts that, because with no
+  jsdom it is the only way to test a `.jsx` here.
+- Repos and files changed: `atelier-crm` only —
+  `src/screens/adminCatalogue.js` (new, the pure half: `CATALOGUE_LIST_LIMIT`,
+  `brandListFilters`, `productListFilters`, `archiveTogglePath`, `archiveInsteadPath`),
+  `src/screens/adminCatalogue.test.js` (new, 14 tests),
+  `src/screens/AdminBrands.jsx`, `src/screens/AdminProducts.jsx`,
+  `CLAUDE.md` (new `## CRUD completion` section, plus the one stale line under "Rules the forms
+  must honour" that said removal is *never* DELETE).
+- Gates: `npm test` -> 0 (33 files, 403 tests passed; 389 before), `npm run build` -> 0.
+- **The API half of this story was already finished and needed no change**, which is what made it a
+  screen story: `DELETE /admin/brands/:id` (US-001) and `DELETE /admin/products/:id` (US-002) both
+  exist, and W1's kit already had `attemptDelete`, `describeBlockers`, `deleteDialog`,
+  `ConfirmDialog` and `useCrudScreen`. What was missing was purely the wiring, and the wiring has
+  exactly three moving parts: `crud.remove.ask(row)` on the button, `<ConfirmDialog
+  {...crud.remove.dialog} />` at the foot of the screen, and an `archive` option — without which
+  `canArchive` is false and a refusal renders with Cancel as its only button.
+- **Two rules earned their own functions rather than an inline template string.**
+  `archiveInsteadPath` (always `/archive`) is deliberately not `archiveTogglePath` (which flips to
+  `/restore` for an archived row): the dialog's escape hatch is offered on a *refused* delete, so
+  reusing the toggle would answer "you cannot delete this archived house" by restoring it to the
+  public website. And `productListFilters` returns `null` — not `''` — for an unchosen house,
+  because `buildListQuery` drops null and would otherwise send `brand_id=`, which the endpoint's
+  integer schema answers with a 400 that kills the whole list rather than one filter.
+- **`CATALOGUE_LIST_LIMIT` is a limit that exists to avoid a pager, not to page.** Neither endpoint
+  pages: both return every row with no `meta`, and neither declares a `page` param — Fastify's Ajv
+  strips it rather than 400ing, so `useAdminList` sending `page`/`limit` is harmless but the kit's
+  default limit of 25 would compute `totalPages: 2` over the 41 seeded houses. A page that can
+  never be fetched is worse than no pager, so the limit sits above any plausible row count and
+  `totalPages` stays 1.
+- **The open editor now closes when its row leaves the list.** AdminBrands already did this;
+  AdminProducts did not, and after a delete its `openId` would have pointed at a row that no longer
+  exists — the next mutation's reload re-reads `/admin/products/:id` and reports a 404 the staff
+  member cannot act on. The same effect covers archiving with "Show archived" off.
+- **What the 14 new tests assert:** each filter helper through `buildListQuery` (empty when unset,
+  `brand_id=7&include_archived=true` when both are set, a numeric brand id as well as a string);
+  `pageCount(41, CATALOGUE_LIST_LIMIT) === 1` against `pageCount(41, 25) === 2`, which is the
+  reason the constant exists; the toggle path flipping and the "Archive instead" path refusing to;
+  and, for both screens, that the source contains `useCrudScreen`/`ConfirmDialog`/`remove.ask`/
+  `archiveInsteadPath` and contains none of `apiDelete`, `attemptDelete`, `describeBlockers`,
+  `deleteDialog`, `role="dialog"`, `Pagination` or `Previous`.
+- **Learnings:**
+  - Patterns: what `useCrudScreen` replaces and what it does NOT (a second list keeps its own
+    `useMutation`); "Archive instead" always archives; an unpaged endpoint needs a limit above its
+    row count; a source scan is the only test a `.jsx` can have here; only the permanent verb is
+    `tone="danger"`. All five promoted to `## Codebase Patterns` above.
+  - Gotcha: `useCrudScreen` computes `canArchive` from the **identity of the `archive` option**,
+    which is an input — so a screen cannot decide per-row whether to offer the button. An archived
+    house whose delete is refused therefore still shows "Archive instead", which re-stamps
+    `archived_at`. Harmless, and the alternative (mirroring the dialog's target into screen state
+    one render early) buys a copy fix for a state-sync bug; left as is deliberately.
+  - Gotcha: `useAdminList` keeps the previous rows while a refetch is in flight and only replaces
+    them on success, so the "close the editor when its row leaves the list" effect must also gate on
+    `status === 'ready'` — otherwise it would fire against the empty initial `rows` and close an
+    editor the user had just opened.
+  - Gotcha: the CRM's `npm test` is vitest over pure logic and `npm run build` is the **only**
+    compile check in the repo (there is no ESLint), so an unused import left behind by a refactor —
+    `useToast`, `messageOf` — surfaces nowhere at all. Grep the file for every symbol you stopped
+    using before committing.
+  - Gotcha: `DELETE /admin/colourways/:id` (US-002) still has **no UI**. Colourways are rendered
+    from the product detail read, not from a list, and `useCrudScreen` binds one entity per screen —
+    so a second delete flow on AdminProducts would mean composing `attemptDelete`/`deleteDialog`
+    by hand. Out of this story's criteria (the epic line is "products and houses screens"), and
+    `GET /admin/colourways` exists for whoever gives them a screen.
+  - Context: the kit is `src/admin/useCrudScreen.js` (four namespaces), `deleteFlow.js` (the copy
+    and `describeBlockers`), `ConfirmDialog.jsx`, `useAdminList.js` and `list.js`. The screens'
+    pure half is now `src/screens/adminCatalogue.js`, beside `clientAccounts.js`/`clientView.js`.
+    Collection delete belongs to US-010, which moves the collections panel out of AdminBrands
+    entirely.
+- **Needs human verification:** **both screens, in a browser — this is the story whose whole
+  contract is visual, and there is no e2e harness or `dev-browser` on this machine.** Specifically:
+  (1) Houses → Delete on a house holding products: the dialog must stay open showing "3 products,
+  1 collection" style lines with **no** Delete button and an **Archive instead** button;
+  (2) Houses → Delete on an empty house: gone from the list, toast reads "<name> deleted.";
+  (3) Products → Delete on a product with an order line: the 409 must render the blocker labels
+  W1 writes ("colourways holding stock", "units of stock on hand") and honour `capped` — a "1+"
+  must not read as "1"; (4) Escape and a backdrop click both cancel, and focus lands on Cancel so a
+  stray Enter cannot delete; (5) the standing item carried from US-001..008 — a **real
+  cross-origin DELETE preflight from the CRM at :5273**, which `app.inject()` cannot prove and
+  which is the one thing that would make every delete here fail while curl passes.
 ---

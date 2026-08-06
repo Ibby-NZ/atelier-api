@@ -16,8 +16,10 @@ import {
   PRODUCT_PERFORMANCE_COLUMNS,
   PRODUCT_PERFORMANCE_TITLE,
   COVERAGE_NOTE,
-  MAX_ROW_LIMIT,
 } from '../src/reports/product-performance.js'
+import { MAX_ROW_LIMIT } from '../src/reports/limits.js'
+import { STOCK_COLUMNS, STOCK_TITLE } from '../src/reports/stock.js'
+import { NOT_INVOICED_COLUMNS, NOT_INVOICED_TITLE } from '../src/reports/not-invoiced.js'
 import { buildApp } from '../src/app.js'
 
 // Fixtures are prefix-namespaced and cleaned up by prefix, like every other suite
@@ -1121,5 +1123,516 @@ describe('W5-US-006 — server-side CSV export', () => {
   // rather than relying on a screen's footnote.
   it('states its coverage in the file, not only in the payload', () => {
     expect(csv.body).toContain(COVERAGE_NOTE)
+  })
+})
+
+// W5-US-007 — the two reports the CRM's fixtures only pretend to show, against
+// live rows. What each one DECLARES is unit-tested in test/report-filters.test.js;
+// this is the half only Postgres can answer — that the stock query reads
+// inventory and the invoice queue reads orders, and that both narrow and export
+// through the shared layers.
+//
+// Both exports are fetched ONCE in beforeAll: the export bucket is 10/min, so a
+// per-test download would spend it and surface as a 429 in an unrelated
+// assertion.
+describe('W5-US-007 — stock and not-invoiced', () => {
+  let pool
+  let app
+  let backofficeCookie
+  let customerCookie
+  let stockCsv
+  let queueCsv
+
+  const STOCK_PATH = '/admin/reports/stock'
+  const QUEUE_PATH = '/admin/reports/not-invoiced'
+  const SCOPE_QUERY = HOUSES.map((slug) => `brand=${slug}`).join('&')
+
+  const CLIENT_NAME = `${PREFIX} Client Co`
+  const CLIENT_EMAIL = `${PREFIX}-invoice-client@example.test`
+  const GOODS_SKU = `${PREFIX}-SKU-GD`
+  const RETIRED_SKU = `${PREFIX}-SKU-RET`
+
+  const request = (path, query = '', cookie = backofficeCookie) =>
+    app.inject({
+      method: 'GET',
+      url: `${path}?${SCOPE_QUERY}${query}`,
+      headers: cookie ? { cookie } : {},
+    })
+
+  const payloadOf = async (path, query = '') => JSON.parse((await request(path, query)).body)
+
+  const sessionCookieFrom = (response) => {
+    const setCookie = response.headers['set-cookie']
+    const header = Array.isArray(setCookie) ? setCookie[0] : setCookie
+    return header.split(';')[0]
+  }
+
+  const rowBySku = (report, sku) => report.rows.find((row) => row.sku === sku)
+  const orderNumbersOf = (report) => report.rows.map((row) => row.order_number)
+
+  // `created_at` is timestamptz and the fixture writes wall-clock times, so what
+  // an instant reads as depends on the session's timezone. Comparing against the
+  // row the database actually holds is the only assertion that survives a
+  // machine set to something other than the one this was written on.
+  const placedAtOf = (suffix) =>
+    pool
+      .query('SELECT created_at FROM orders WHERE order_number = $1', [
+        `${ORDER_PREFIX}-${suffix}`,
+      ])
+      .then(({ rows }) => new Date(rows[0].created_at).toISOString())
+
+  const colourwayIdBySku = (sku) =>
+    pool
+      .query('SELECT id FROM colourways WHERE sku = $1', [sku])
+      .then(({ rows }) => rows[0].id)
+
+  const stock = (colourwayId, available, reserved, unit) =>
+    pool.query(
+      `INSERT INTO inventory (colourway_id, qty_available, qty_reserved, unit)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (colourway_id) DO UPDATE
+          SET qty_available = EXCLUDED.qty_available,
+              qty_reserved = EXCLUDED.qty_reserved,
+              unit = EXCLUDED.unit`,
+      [colourwayId, available, reserved, unit]
+    )
+
+  const orderWithLines = async (suffix, kind, status, createdAt, options, lines) => {
+    const { rows } = await pool.query(
+      `INSERT INTO orders (order_number, kind, status, guest_email, user_id, xero_invoice_ref, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)
+       RETURNING id`,
+      [
+        `${ORDER_PREFIX}-${suffix}`,
+        kind,
+        status,
+        options.userId ? null : `${PREFIX}@example.test`,
+        options.userId ?? null,
+        options.invoiceRef ?? null,
+        createdAt,
+      ]
+    )
+    for (const [colourwayId, qty] of lines) {
+      await pool.query(
+        `INSERT INTO order_lines (order_id, colourway_id, qty, unit_price_cents)
+         VALUES ($1, $2, $3, 0)`,
+        [rows[0].id, colourwayId, qty]
+      )
+    }
+  }
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    await runMigrations(config.databaseUrl)
+    pool = createPool(config.databaseUrl)
+    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+    await app.ready()
+
+    await cleanReports(pool)
+    await cleanup(pool)
+
+    const boss = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: `${PREFIX}-stock-boss@example.test`, password: PASSWORD, name: 'Boss' },
+    })
+    backofficeCookie = sessionCookieFrom(boss)
+    await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [
+      `${PREFIX}-stock-boss@example.test`,
+    ])
+
+    const shopper = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: `${PREFIX}-stock-shopper@example.test`, password: PASSWORD },
+    })
+    customerCookie = sessionCookieFrom(shopper)
+
+    const fixture = await insertFixture(pool)
+    const otherColourway = await colourwayIdBySku(`${PREFIX}-SKU-3`)
+
+    // A finished good, so the population holds two units and the totals row has
+    // to decline to add them.
+    const { rows: goodsRows } = await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website)
+       VALUES ($1, $2, $3, 'finished_good', 'NZD', true) RETURNING id`,
+      [fixture.houseId, `${PREFIX} Cushion`, `${PREFIX}-cushion`]
+    )
+    const { rows: goodsColourway } = await pool.query(
+      `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Ivory', $2) RETURNING id`,
+      [goodsRows[0].id, GOODS_SKU]
+    )
+
+    // An archived design with stock still on the shelf: archiving is a catalogue
+    // decision, not a stock movement.
+    const { rows: retiredRows } = await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website, archived_at)
+       VALUES ($1, $2, $3, 'fabric', 'NZD', false, now()) RETURNING id`,
+      [fixture.houseId, `${PREFIX} Retired`, `${PREFIX}-retired`]
+    )
+    const { rows: retiredColourway } = await pool.query(
+      `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Ash', $2) RETURNING id`,
+      [retiredRows[0].id, RETIRED_SKU]
+    )
+
+    await stock(fixture.design, '12.50', '2.50', 'metres')
+    // Nothing on hand and nothing allocated: an inventory row, but not a holding.
+    await stock(fixture.loose, '0.00', '0.00', 'metres')
+    // Allocated past what is on hand — a backorder reserves stock that has not
+    // arrived, so available is legitimately negative.
+    await stock(otherColourway, '6.00', '8.00', 'metres')
+    await stock(goodsColourway[0].id, '4.00', '0.00', 'units')
+    await stock(retiredColourway[0].id, '9.00', '0.00', 'metres')
+
+    const { rows: clientRows } = await pool.query(
+      `INSERT INTO users (email, password_hash, name, role)
+       VALUES ($1, 'not-a-real-hash', $2, 'trade') RETURNING id`,
+      [CLIENT_EMAIL, CLIENT_NAME]
+    )
+
+    // Confirmed AND invoiced: the one order the queue must not show.
+    await orderWithLines(
+      'INVD',
+      'order_request',
+      'confirmed',
+      '2026-03-10 09:00:00',
+      { invoiceRef: 'XERO-4471' },
+      [[fixture.design, '1.00']]
+    )
+    // Confirmed, no reference — the queue's oldest entry.
+    await orderWithLines('BAK', 'backorder_request', 'confirmed', '2026-03-12 09:00:00', {}, [
+      [fixture.design, '2.00'],
+    ])
+    // Placed by an account rather than a guest, and spanning both units.
+    await orderWithLines(
+      'ACC',
+      'order_request',
+      'requested',
+      '2026-03-14 09:00:00',
+      { userId: clientRows[0].id },
+      [
+        [fixture.design, '1.00'],
+        [goodsColourway[0].id, '1.00'],
+      ]
+    )
+
+    // A date filter the stock report cannot honour, so the file has to say so.
+    stockCsv = await request(`${STOCK_PATH}/export.csv`, '&from=2026-01-01')
+    queueCsv = await request(`${QUEUE_PATH}/export.csv`)
+  })
+
+  afterAll(async () => {
+    await cleanReports(pool)
+    await cleanup(pool)
+    await pool.query(`DELETE FROM users WHERE email = $1`, [CLIENT_EMAIL])
+    await app.close()
+    await pool.end()
+  })
+
+  describe('access', () => {
+    it('refuses an anonymous caller with 401 on both reports', async () => {
+      expect((await request(STOCK_PATH, '', null)).statusCode).toBe(401)
+      expect((await request(QUEUE_PATH, '', null)).statusCode).toBe(401)
+    })
+
+    it('refuses a customer with 403 on both reports', async () => {
+      expect((await request(STOCK_PATH, '', customerCookie)).statusCode).toBe(403)
+      expect((await request(QUEUE_PATH, '', customerCookie)).statusCode).toBe(403)
+    })
+
+    // Both are unbounded aggregates, so both opt into the limiter like the
+    // report routes beside them.
+    it('meters both, and meters their exports more tightly', async () => {
+      const table = await request(STOCK_PATH)
+
+      expect(table.headers['x-ratelimit-limit']).toBeDefined()
+      expect(Number(stockCsv.headers['x-ratelimit-limit'])).toBeLessThan(
+        Number(table.headers['x-ratelimit-limit'])
+      )
+    })
+  })
+
+  describe('the stock report', () => {
+    it('reads live inventory, one row per held colourway', async () => {
+      const report = await payloadOf(STOCK_PATH)
+
+      expect(report.report).toBe('stock')
+      expect(report.title).toBe(STOCK_TITLE)
+      expect(report.columns).toEqual(STOCK_COLUMNS.map((column) => ({ ...column })))
+      expect(rowBySku(report, `${PREFIX}-SKU-1`)).toEqual({
+        sku: `${PREFIX}-SKU-1`,
+        brand_name: `${PREFIX} House`,
+        product_name: `${PREFIX} Design`,
+        colourway_name: 'Ivory',
+        unit: 'metres',
+        on_hand: 12.5,
+        allocated: 2.5,
+        available: 10,
+      })
+    })
+
+    // Atelier runs an indent model, so most colourways carry a row at zero and
+    // listing them would bury the handful of real holdings.
+    it('leaves out a colourway with nothing on hand and nothing allocated', async () => {
+      const report = await payloadOf(STOCK_PATH)
+
+      expect(rowBySku(report, `${PREFIX}-SKU-2`)).toBeUndefined()
+      expect(report.meta.rows_total).toBe(4)
+    })
+
+    // Archiving is a catalogue decision, not a stock movement.
+    it('still reports the stock of an archived design', async () => {
+      const report = await payloadOf(STOCK_PATH)
+
+      expect(rowBySku(report, RETIRED_SKU)).toMatchObject({ on_hand: 9, available: 9 })
+    })
+
+    // A backorder request reserves stock that has not arrived. Clamping this at
+    // zero would hide exactly what the report exists to surface.
+    it('reports an over-allocated colourway as negative and counts it', async () => {
+      const report = await payloadOf(STOCK_PATH)
+
+      expect(rowBySku(report, `${PREFIX}-SKU-3`)).toMatchObject({
+        on_hand: 6,
+        allocated: 8,
+        available: -2,
+      })
+      expect(report.meta.over_allocated).toBe(1)
+    })
+
+    // Metres and units do not add, the same rule product performance applies to
+    // a mixed-currency value.
+    it('omits the quantities from the totals row while the population is mixed', async () => {
+      const report = await payloadOf(STOCK_PATH)
+
+      expect(report.meta.mixed_units).toBe(true)
+      expect([...report.meta.units].sort()).toEqual(['metres', 'units'])
+      expect(report.totals).toEqual({ sku: 'All holdings', brand_name: 'All houses' })
+    })
+
+    it('adds them once a filter leaves one unit in the population', async () => {
+      const report = await payloadOf(STOCK_PATH, '&product_type=fabric')
+
+      expect(report.meta.mixed_units).toBe(false)
+      expect(report.totals).toMatchObject({
+        unit: 'metres',
+        on_hand: 27.5,
+        allocated: 10.5,
+        available: 17,
+      })
+    })
+
+    it('narrows to one house through the shared filter layer', async () => {
+      const report = await payloadOf(STOCK_PATH, '')
+      const narrowed = JSON.parse(
+        (
+          await app.inject({
+            method: 'GET',
+            url: `${STOCK_PATH}?brand=${PREFIX}-other`,
+            headers: { cookie: backofficeCookie },
+          })
+        ).body
+      )
+
+      expect(report.rows.length).toBe(4)
+      expect(narrowed.rows.map((row) => row.sku)).toEqual([`${PREFIX}-SKU-3`])
+    })
+
+    // The report is a snapshot and has no `orders` in its FROM, so a date range
+    // or a lifecycle filter is a question it cannot answer. Ignoring it must
+    // never be silent: `meta.filters` feeds the CSV's own notes.
+    it('names the filters it could not honour and keeps them out of meta.filters', async () => {
+      const report = await payloadOf(STOCK_PATH, '&from=2026-01-01&status=paid')
+
+      expect(report.meta.ignored_filters).toEqual(['from', 'status'])
+      expect(Object.keys(report.meta.filters)).toEqual(['brand'])
+    })
+
+    it('states that it is a snapshot carrying no valuation', async () => {
+      const report = await payloadOf(STOCK_PATH)
+
+      expect(report.meta.coverage.source).toBe('live inventory')
+      expect(report.meta.coverage.valuation).toMatch(/no landed cost source/)
+      expect(new Date(report.meta.coverage.as_at).toISOString()).toBe(report.meta.coverage.as_at)
+    })
+
+    // Totals cover the population, never the page that survived the limit.
+    it('admits a truncated table while still totalling everything', async () => {
+      const report = await payloadOf(STOCK_PATH, '&limit=1&product_type=fabric')
+
+      expect(report.rows).toHaveLength(1)
+      expect(report.meta.truncated).toBe(true)
+      expect(report.meta.rows_total).toBe(3)
+      expect(report.totals.on_hand).toBe(27.5)
+    })
+
+    // Masking runs over every report here, and this one declares no finance
+    // column — so it removes nothing and says so.
+    it('is served whole to a back-office login with no finance grant', async () => {
+      const report = await payloadOf(STOCK_PATH)
+
+      expect(report.meta.masked_columns).toEqual([])
+      expect(report.columns).toHaveLength(STOCK_COLUMNS.length)
+    })
+  })
+
+  describe('the not-invoiced report', () => {
+    it('reads live orders that carry no Xero reference, oldest first', async () => {
+      const report = await payloadOf(QUEUE_PATH)
+
+      expect(report.report).toBe('not-invoiced')
+      expect(report.title).toBe(NOT_INVOICED_TITLE)
+      expect(report.columns).toEqual(NOT_INVOICED_COLUMNS.map((column) => ({ ...column })))
+      expect(orderNumbersOf(report)).toEqual([
+        `${ORDER_PREFIX}-BAK`,
+        `${ORDER_PREFIX}-ACC`,
+        `${ORDER_PREFIX}-ACC`,
+        `${ORDER_PREFIX}-SHP`,
+        `${ORDER_PREFIX}-REQ`,
+      ])
+    })
+
+    it('leaves out an order that has already been invoiced', async () => {
+      const report = await payloadOf(QUEUE_PATH)
+
+      expect(orderNumbersOf(report)).not.toContain(`${ORDER_PREFIX}-INVD`)
+    })
+
+    // A card checkout is paid at Stripe and is never invoiced through this
+    // platform; a declined order is awaiting nothing; an archived one is out of
+    // the office's own lists.
+    it('leaves out card checkouts, declined orders and archived ones', async () => {
+      const numbers = orderNumbersOf(await payloadOf(QUEUE_PATH))
+
+      for (const suffix of ['CHK', 'OTH', 'ARC', 'DEC']) {
+        expect(numbers).not.toContain(`${ORDER_PREFIX}-${suffix}`)
+      }
+    })
+
+    // The kinds are the report's DEFINITION, not an overridable default, so
+    // asking for checkouts intersects to nothing rather than opening it up — and
+    // the payload still states which kinds it is of.
+    it('answers a kind=checkout filter with no rows, still stating its population', async () => {
+      const report = await payloadOf(QUEUE_PATH, '&kind=checkout')
+
+      expect(report.rows).toEqual([])
+      expect([...report.meta.kinds]).toEqual(['order_request', 'backorder_request'])
+    })
+
+    // The lifecycle window is a default, and a status filter replaces it.
+    it('narrows to one stage through the shared filter layer', async () => {
+      const report = await payloadOf(QUEUE_PATH, '&status=confirmed')
+
+      expect(orderNumbersOf(report)).toEqual([`${ORDER_PREFIX}-BAK`])
+      expect([...report.meta.statuses]).toEqual(['confirmed'])
+    })
+
+    it('names the account that placed the order, and the guest email otherwise', async () => {
+      const report = await payloadOf(QUEUE_PATH)
+      const account = report.rows.find((row) => row.order_number === `${ORDER_PREFIX}-ACC`)
+      const guest = report.rows.find((row) => row.order_number === `${ORDER_PREFIX}-SHP`)
+
+      expect(account.client).toBe(CLIENT_NAME)
+      expect(guest.client).toBe(`${PREFIX}@example.test`)
+    })
+
+    it('carries the line, its quantity and the colourway’s current holding', async () => {
+      const report = await payloadOf(QUEUE_PATH)
+      const line = report.rows.find((row) => row.order_number === `${ORDER_PREFIX}-BAK`)
+
+      expect(line).toMatchObject({
+        status: 'confirmed',
+        kind: 'backorder_request',
+        brand_name: `${PREFIX} House`,
+        product_name: `${PREFIX} Design`,
+        sku: `${PREFIX}-SKU-1`,
+        product_type: 'fabric',
+        qty: 2,
+        on_hand: 12.5,
+      })
+      expect(new Date(line.placed_at).toISOString()).toBe(await placedAtOf('BAK'))
+    })
+
+    // Every line in this population carries no price, which is why the report
+    // has no money column at all rather than a column of zeros.
+    it('counts the lines that carry no price, and states no value anywhere', async () => {
+      const report = await payloadOf(QUEUE_PATH)
+
+      expect(report.meta.lines).toBe(5)
+      expect(report.meta.unpriced_lines).toBe(5)
+      expect(report.meta.orders).toBe(4)
+      expect(JSON.stringify(report)).not.toContain('value_cents')
+    })
+
+    // on_hand is one colourway's snapshot repeated on every line that mentions
+    // it, so a column of them does not sum to anything.
+    it('totals the quantity only while the population is one unit, and never the holding', async () => {
+      const mixed = await payloadOf(QUEUE_PATH)
+      const fabric = await payloadOf(QUEUE_PATH, '&product_type=fabric')
+
+      expect(mixed.meta.mixed_units).toBe(true)
+      expect(mixed.totals).toEqual({ order_number: 'All orders', product_name: 'All lines' })
+      expect(fabric.totals).toMatchObject({ product_type: 'fabric', qty: 11 })
+      expect(fabric.totals.on_hand).toBeUndefined()
+    })
+
+    it('states the window the rows came from and the one that was asked for', async () => {
+      const report = await payloadOf(QUEUE_PATH, '&from=2026-03-01')
+
+      // The oldest row in the population, which is the confirmed backorder.
+      expect(report.meta.coverage.from).toBe(await placedAtOf('BAK'))
+      expect(report.meta.coverage.requested_from).toBe('2026-03-01')
+      expect(report.meta.coverage.requested_to).toBeNull()
+    })
+  })
+
+  describe('both exports', () => {
+    it('serve a CSV attachment named after the report', () => {
+      expect(stockCsv.statusCode).toBe(200)
+      expect(queueCsv.statusCode).toBe(200)
+      expect(stockCsv.headers['content-disposition']).toBe(
+        'attachment; filename="atelier-stock.csv"'
+      )
+      expect(queueCsv.headers['content-disposition']).toBe(
+        'attachment; filename="atelier-not-invoiced.csv"'
+      )
+    })
+
+    it('take their header from the report’s own columns', () => {
+      expect(stockCsv.body.split('\r\n')[0]).toBe(
+        STOCK_COLUMNS.map((column) => column.label).join(',')
+      )
+      expect(queueCsv.body.split('\r\n')[0]).toBe(
+        NOT_INVOICED_COLUMNS.map((column) => column.label).join(',')
+      )
+    })
+
+    it('carry every row rather than the table’s page', async () => {
+      const page = await payloadOf(STOCK_PATH, '&limit=1')
+      const lines = stockCsv.body.split('\r\n')
+
+      expect(page.rows).toHaveLength(1)
+      // Header, four holdings, the totals row, then the notes block.
+      expect(lines.slice(1, lines.indexOf('') - 1)).toHaveLength(4)
+    })
+
+    it('state their coverage in the file, not only in the payload', () => {
+      expect(stockCsv.body).toMatch(/no landed cost/i)
+      expect(queueCsv.body).toContain('Card checkouts')
+    })
+
+    // A filter the report could not honour narrowed nothing, and a reader who
+    // typed one would otherwise take the file as having been filtered by it.
+    it('name a filter the stock snapshot could not honour', () => {
+      expect(stockCsv.body).toContain('Filters ignored,from')
+      expect(queueCsv.body).not.toContain('Filters ignored')
+    })
+
+    // A negative quantity meets the formula guard: csvCell neutralises a leading
+    // `-`, so Excel shows the cell as text. That is the guard working as designed
+    // and is widened in src/lib/csv.js or not at all.
+    it('neutralise a negative available, because a leading - is a formula lead-in', () => {
+      expect(stockCsv.body).toContain("'-2")
+    })
   })
 })

@@ -35,6 +35,14 @@ import { FILTER_COLUMNS, REPORT_FILTER_NAMES, buildReportFilters } from './filte
 // and carries no amount — and `requested` / `declined` are not sales at all.
 export const REVENUE_STATUSES = Object.freeze(['paid', 'shipped'])
 
+// A report that asks a question about a different part of the lifecycle states
+// its own set instead (US-007's not-invoiced covers every live status, because
+// an order is awaiting an invoice from the moment it is placed). It is a
+// DEFAULT like REVENUE_STATUSES is: a `status` filter still replaces it, and a
+// report that declines the filter has no way to be asked for something else.
+const defaultStatuses = (statuses) =>
+  statuses === undefined ? REVENUE_STATUSES : statuses
+
 // The CTE's name, so a report and its export cannot spell it differently.
 export const SCOPE_NAME = 'scope'
 
@@ -54,6 +62,15 @@ const LIVE_ORDER_LINES = Object.freeze({
     kind: 'o.kind',
     status: 'o.status',
     created_at: 'o.created_at',
+    // Who the order is for and whether it has been billed. The three of them
+    // are what makes an invoice queue answerable out of this one population
+    // (src/reports/not-invoiced.js) rather than out of a second join tree that
+    // a future D365 source would then have to be unioned into twice.
+    // `user_id` is null on a guest order and `guest_email` on an account one,
+    // so a client name is a COALESCE of the two and never a join alone.
+    user_id: 'o.user_id',
+    guest_email: 'o.guest_email',
+    invoice_ref: 'o.xero_invoice_ref',
     line_id: 'ol.id',
     colourway_id: 'ol.colourway_id',
     sku: 'c.sku',
@@ -158,13 +175,18 @@ const selectFor = (source, conditions) => {
  * copied, never mutated. The result is used as `WITH ${cte} SELECT … FROM
  * scope`, so a report never restates the population.
  *
+ * `statuses` is the default lifecycle window, defaulting to REVENUE_STATUSES —
+ * a report about a different part of the lifecycle declares its own rather than
+ * building a second join tree.
+ *
  * @param {object} [filters] output of parseReportFilters
- * @param {{ params?: unknown[] }} [options]
+ * @param {{ params?: unknown[], statuses?: readonly string[] }} [options]
  * @returns {{ cte: string, params: unknown[] }}
  */
-export const buildRevenueScope = (filters = {}, { params = [] } = {}) => {
+export const buildRevenueScope = (filters = {}, { params = [], statuses } = {}) => {
   let bound = [...params]
   const selects = []
+  const population = defaultStatuses(statuses)
 
   for (const source of SOURCES) {
     const conditions = [...source.conditions]
@@ -173,7 +195,7 @@ export const buildRevenueScope = (filters = {}, { params = [] } = {}) => {
     // with it: an intersection would answer `status=requested` with zero rows,
     // which reads as "no trade" rather than "not in the default population".
     if (source.statusColumn && filters.status === undefined) {
-      bound = [...bound, [...REVENUE_STATUSES]]
+      bound = [...bound, [...population]]
       conditions.push(`${source.statusColumn} = ANY($${bound.length}::text[])`)
     }
 

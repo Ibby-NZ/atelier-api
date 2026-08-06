@@ -203,6 +203,38 @@ const CLAUSES = Object.freeze({
 })
 
 /**
+ * Split supplied filters into the ones a report can honour and the ones it
+ * cannot.
+ *
+ * A report declines a filter by leaving it out of `names` — the stock report is
+ * a snapshot with no `orders` in its FROM, so a date range there is a question
+ * it has no way to answer. Declining is deliberately not a 400: the CRM drives
+ * every report from ONE filter bar, so a date range left in the bar would
+ * otherwise refuse the report the moment it was selected. What it must never be
+ * is silent — an ignored filter that still appeared in `meta.filters` would be
+ * echoed into the CSV's own notes as if it had narrowed the file.
+ *
+ * @param {object} [filters] output of parseReportFilters
+ * @param {readonly string[]} [names] the filters this report honours
+ * @returns {{ honoured: Readonly<object>, ignored: readonly string[] }}
+ */
+export const partitionFilters = (filters = {}, names = REPORT_FILTER_NAMES) => {
+  const honoured = {}
+  const ignored = []
+
+  for (const name of REPORT_FILTER_NAMES) {
+    if (filters[name] === undefined || filters[name] === null) continue
+    if (names.includes(name)) {
+      honoured[name] = filters[name]
+    } else {
+      ignored.push(name)
+    }
+  }
+
+  return { honoured: Object.freeze(honoured), ignored: Object.freeze(ignored) }
+}
+
+/**
  * Turns parsed filters into WHERE fragments and bound params.
  *
  * `params` lets a report append its filters to placeholders it has already

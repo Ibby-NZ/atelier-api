@@ -103,6 +103,15 @@ const notesOf = (report) => {
   const meta = report?.meta ?? {}
   const notes = [[], ['Report', report?.title ?? report?.report], ['Filters', filterSummary(meta.filters)]]
 
+  // A filter the report could not honour (a date range on the stock snapshot,
+  // say) narrowed nothing, so it is absent from `Filters` above — and a reader
+  // who typed one would take that as the file having been filtered by it. Named
+  // here for the same reason the withheld columns are.
+  const ignored = meta.ignored_filters ?? []
+  if (ignored.length > 0) {
+    notes.push(['Filters ignored', ignored.join(', ')])
+  }
+
   if (meta.coverage?.note) {
     notes.push(['Coverage', meta.coverage.note])
   }

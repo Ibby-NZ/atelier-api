@@ -33,11 +33,10 @@ import {
   reportCsvFilename,
   REPORT_CSV_CONTENT_TYPE,
 } from '../reports/export.js'
-import {
-  productPerformanceReport,
-  DEFAULT_ROW_LIMIT,
-  MAX_ROW_LIMIT,
-} from '../reports/product-performance.js'
+import { productPerformanceReport } from '../reports/product-performance.js'
+import { stockReport } from '../reports/stock.js'
+import { notInvoicedReport } from '../reports/not-invoiced.js'
+import { DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT } from '../reports/limits.js'
 
 // Generous for a screen that re-reads on every filter change, tight enough that
 // a loop hammering a full-ledger aggregate is stopped.
@@ -163,5 +162,9 @@ export const adminReportRoutes = async (app, { pool }) => {
     )
   }
 
+  // One line per report, table and file alike. A report that could not be
+  // registered this way would be one whose export did not share its builder.
   registerReport('/admin/reports/product-performance', productPerformanceReport)
+  registerReport('/admin/reports/stock', stockReport)
+  registerReport('/admin/reports/not-invoiced', notInvoicedReport)
 }

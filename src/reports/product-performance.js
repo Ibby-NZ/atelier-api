@@ -30,6 +30,7 @@
 
 import { defineColumns } from './access.js'
 import { buildRevenueScope, SCOPE_NAME } from './revenue-lines.js'
+import { clampLimit, DEFAULT_ROW_LIMIT } from './limits.js'
 
 export const PRODUCT_PERFORMANCE = 'product-performance'
 export const PRODUCT_PERFORMANCE_TITLE = 'Product performance by house and design'
@@ -69,11 +70,6 @@ export const TOTALS_LABELS = Object.freeze({
   brand_name: 'All houses',
   product_name: 'All designs',
 })
-
-// The table's default page of rows. `limit: null` asks for every row and is what
-// US-006's export passes — an export must never be the current page.
-export const DEFAULT_ROW_LIMIT = 200
-export const MAX_ROW_LIMIT = 1000
 
 const rowsSql = (cte, limitPlaceholder) => `WITH ${cte}
    SELECT brand_name,
@@ -124,16 +120,6 @@ const toRow = (row) =>
   })
 
 const isoOr = (value) => (value ? new Date(value).toISOString() : null)
-
-// A limit of null means every row (the export). Anything else is clamped, the
-// same posture listRevenueLines takes — the route's schema is what turns an
-// over-large limit into a 400 rather than a silent clamp.
-const clampLimit = (limit) => {
-  if (limit === null) return null
-  const requested = Number(limit)
-  if (!Number.isFinite(requested)) return DEFAULT_ROW_LIMIT
-  return Math.min(Math.max(1, Math.trunc(requested)), MAX_ROW_LIMIT)
-}
 
 /**
  * The totals row. The quantity is deliberately absent (metres and units do not

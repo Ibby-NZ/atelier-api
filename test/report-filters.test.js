@@ -29,6 +29,7 @@ import {
   ORDER_STATUSES,
   parseReportFilters,
   buildReportFilters,
+  partitionFilters,
 } from '../src/reports/filters.js'
 import { reportAccess, defineColumns, maskReport } from '../src/reports/access.js'
 import {
@@ -41,9 +42,22 @@ import {
   PRODUCT_PERFORMANCE_COLUMNS,
   COVERAGE_NOTE,
   TOTALS_LABELS,
-  DEFAULT_ROW_LIMIT,
-  MAX_ROW_LIMIT,
 } from '../src/reports/product-performance.js'
+import { DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT, clampLimit } from '../src/reports/limits.js'
+import {
+  STOCK,
+  STOCK_COLUMNS,
+  STOCK_FILTERS,
+  STOCK_COVERAGE_NOTE,
+  STOCK_TOTALS_LABELS,
+} from '../src/reports/stock.js'
+import {
+  NOT_INVOICED,
+  NOT_INVOICED_COLUMNS,
+  NOT_INVOICED_STATUSES,
+  NOT_INVOICED_COVERAGE_NOTE,
+  INVOICEABLE_KINDS,
+} from '../src/reports/not-invoiced.js'
 import {
   REVENUE_STATUSES,
   SCOPE_NAME,
@@ -930,5 +944,241 @@ describe('the report CSV writer', () => {
   // the rows' own keys would vary per row.
   it('refuses a report that declares no columns', () => {
     expect(() => toReportCsv({ report: 'empty', columns: [] })).toThrow(/declares no columns/)
+  })
+})
+
+// W5-US-007 — the two live-data reports. Their SQL is measured against real rows
+// in test/admin-reports.test.js; what is provable without a database is what each
+// one DECLARES: which filters it can honour, which columns it has, which
+// population it is of, and what its file says about all three.
+describe('W5-US-007 — stock and not-invoiced, declared', () => {
+  describe('the shared row limit', () => {
+    // Three reports spend these now. A per-report copy is how one of them would
+    // quietly start answering with a different page than its neighbours.
+    it('defaults a table to a page and caps it', () => {
+      expect(clampLimit(undefined)).toBe(DEFAULT_ROW_LIMIT)
+      expect(clampLimit(MAX_ROW_LIMIT + 500)).toBe(MAX_ROW_LIMIT)
+      expect(clampLimit(0)).toBe(1)
+      expect(clampLimit(25)).toBe(25)
+    })
+
+    // The export's contract, and the one value the table route's schema cannot
+    // produce — which is what makes "the export is not the current page" true.
+    it('passes null through as every row', () => {
+      expect(clampLimit(null)).toBeNull()
+    })
+  })
+
+  describe('partitionFilters', () => {
+    const supplied = parseReportFilters({
+      from: '2026-01-01',
+      brand: 'pierre-frey',
+      status: 'paid',
+    })
+
+    it('keeps what a report can honour and names what it cannot', () => {
+      const { honoured, ignored } = partitionFilters(supplied, STOCK_FILTERS)
+
+      expect(honoured).toEqual({ brand: ['pierre-frey'] })
+      expect([...ignored]).toEqual(['from', 'status'])
+    })
+
+    it('honours everything when a report declines nothing', () => {
+      const { honoured, ignored } = partitionFilters(supplied)
+
+      expect(Object.keys(honoured).sort()).toEqual(['brand', 'from', 'status'])
+      expect([...ignored]).toEqual([])
+    })
+
+    it('freezes both halves, so neither can be widened after the fact', () => {
+      const { honoured, ignored } = partitionFilters(supplied, STOCK_FILTERS)
+
+      expect(Object.isFrozen(honoured)).toBe(true)
+      expect(Object.isFrozen(ignored)).toBe(true)
+    })
+
+    it('reports nothing ignored when nothing was supplied', () => {
+      expect(partitionFilters({}, STOCK_FILTERS).ignored).toEqual([])
+    })
+  })
+
+  describe('the stock report’s declaration', () => {
+    it('names itself something filename-safe', () => {
+      expect(reportCsvFilename({ report: STOCK })).toBe('atelier-stock.csv')
+    })
+
+    it('declares the holding, its allocation and what is left of it', () => {
+      expect(STOCK_COLUMNS.map((column) => column.key)).toEqual([
+        'sku',
+        'brand_name',
+        'product_name',
+        'colourway_name',
+        'unit',
+        'on_hand',
+        'allocated',
+        'available',
+      ])
+    })
+
+    // Nothing in this schema holds a landed cost, and the only cost data Atelier
+    // has keys on a supplier code that may not be joined to a colourway — so the
+    // honest report carries no valuation and therefore no finance column.
+    // Masking removes nothing from it, which US-008 has to know.
+    it('declares no finance column, because it states no cost', () => {
+      expect(STOCK_COLUMNS.some((column) => column.finance)).toBe(false)
+      expect(STOCK_COLUMNS.some((column) => column.kind === 'money')).toBe(false)
+    })
+
+    it('says in the payload that it carries no valuation, rather than leaving a gap', () => {
+      expect(STOCK_COVERAGE_NOTE).toMatch(/no landed cost/i)
+      expect(STOCK_COVERAGE_NOTE).toMatch(/A1/)
+    })
+
+    // Its FROM starts at `inventory` and has no `orders` in it, so a lifecycle
+    // filter there would be a broken query rather than a narrowing.
+    it('honours only the filters whose columns it has', () => {
+      expect([...STOCK_FILTERS]).toEqual(['brand', 'product_type', 'collection'])
+      for (const name of STOCK_FILTERS) {
+        expect(REPORT_FILTER_NAMES).toContain(name)
+      }
+    })
+
+    it('builds clauses for the three it honours, and refuses a name nobody declared', () => {
+      const filters = parseReportFilters({ brand: 'pierre-frey', product_type: 'fabric' })
+      const built = buildReportFilters(filters, { names: STOCK_FILTERS })
+
+      expect(built.where).toBe('b.slug = ANY($1::text[]) AND p.product_type = $2')
+      expect(() => buildReportFilters(filters, { names: ['invented'] })).toThrow(
+        /Unknown report filter/
+      )
+    })
+
+    it('labels its totals row without putting a figure in the label', () => {
+      expect(STOCK_TOTALS_LABELS).toEqual({ sku: 'All holdings', brand_name: 'All houses' })
+      expect(Object.isFrozen(STOCK_TOTALS_LABELS)).toBe(true)
+    })
+  })
+
+  describe('the not-invoiced report’s declaration', () => {
+    it('names itself something filename-safe', () => {
+      expect(reportCsvFilename({ report: NOT_INVOICED })).toBe('atelier-not-invoiced.csv')
+    })
+
+    it('declares the order, the line and the stock behind it', () => {
+      expect(NOT_INVOICED_COLUMNS.map((column) => column.key)).toEqual([
+        'order_number',
+        'placed_at',
+        'status',
+        'kind',
+        'client',
+        'brand_name',
+        'product_name',
+        'sku',
+        'product_type',
+        'qty',
+        'on_hand',
+      ])
+    })
+
+    // A request line is created at unit_price_cents = 0 and nothing on this
+    // platform ever fills it in, so a "Value" column would be a column of zeros
+    // under a money heading — a wrong figure to every human who reads it.
+    it('states no money at all, and says why in its coverage note', () => {
+      expect(NOT_INVOICED_COLUMNS.some((column) => column.kind === 'money')).toBe(false)
+      expect(NOT_INVOICED_COLUMNS.some((column) => column.finance)).toBe(false)
+      expect(NOT_INVOICED_COVERAGE_NOTE).toMatch(/never what it is worth/)
+    })
+
+    // An order is awaiting an invoice from the moment it is placed, so the
+    // revenue scope's paid/shipped default is the wrong window for it.
+    it('covers every live status and not the declined one', () => {
+      expect([...NOT_INVOICED_STATUSES]).toEqual(['requested', 'confirmed', 'paid', 'shipped'])
+      expect(NOT_INVOICED_STATUSES).not.toContain('declined')
+      for (const status of NOT_INVOICED_STATUSES) {
+        expect(ORDER_STATUSES).toContain(status)
+      }
+    })
+
+    // A definition of the report, not an overridable default: a card checkout is
+    // paid at Stripe and is never invoiced through this platform, so counting one
+    // would report every web sale as an unbilled receivable.
+    it('covers the invoiceable kinds only, and says so in the note', () => {
+      expect([...INVOICEABLE_KINDS]).toEqual(['order_request', 'backorder_request'])
+      expect(INVOICEABLE_KINDS).not.toContain('checkout')
+      for (const kind of INVOICEABLE_KINDS) {
+        expect(ORDER_KINDS).toContain(kind)
+      }
+      expect(NOT_INVOICED_COVERAGE_NOTE).toMatch(/Card checkouts/)
+    })
+  })
+
+  // The scope's lifecycle window is a DEFAULT like the revenue one, so a report
+  // states its own rather than growing a second join tree — and a status filter
+  // still replaces whichever default is in play.
+  describe('the scope’s declarable population', () => {
+    it('binds the revenue statuses when a report states none', () => {
+      expect(buildRevenueScope({}).params).toEqual([[...REVENUE_STATUSES]])
+    })
+
+    it('binds a report’s own statuses when it states them', () => {
+      const { cte, params } = buildRevenueScope({}, { statuses: NOT_INVOICED_STATUSES })
+
+      expect(params).toEqual([[...NOT_INVOICED_STATUSES]])
+      expect(cte).toContain('o.status = ANY($1::text[])')
+    })
+
+    it('lets a status filter replace a report’s own default, never intersect it', () => {
+      const filters = parseReportFilters({ status: 'confirmed' })
+      const { cte, params } = buildRevenueScope(filters, { statuses: NOT_INVOICED_STATUSES })
+
+      expect(params).toEqual(['confirmed'])
+      expect(cte).not.toContain('ANY($1::text[])')
+    })
+
+    // The three columns the invoice queue reads out of the shared population,
+    // rather than out of a second join tree a future D365 source would then have
+    // to be unioned into twice.
+    it('carries the order’s customer and its invoice reference', () => {
+      for (const name of ['user_id', 'guest_email', 'invoice_ref']) {
+        expect(SCOPE_COLUMNS).toContain(name)
+      }
+      expect(buildRevenueScope({}).cte).toContain('o.xero_invoice_ref AS invoice_ref')
+    })
+  })
+
+  // A filter the report could not honour narrowed nothing, so it is absent from
+  // `Filters` — and a reader who typed one would take that as the file having
+  // been filtered by it.
+  describe('what a report with ignored filters exports', () => {
+    const COLUMNS = defineColumns([{ key: 'sku', label: 'SKU' }])
+
+    const report = (meta) =>
+      Object.freeze({
+        report: 'stock',
+        title: 'Stock holdings by colourway',
+        columns: COLUMNS,
+        rows: [{ sku: 'AT-1' }],
+        totals: null,
+        meta: { masked_columns: [], ...meta },
+      })
+
+    it('names the filters it could not honour, under the ones it did', () => {
+      const csv = toReportCsv(
+        report({ filters: { brand: ['pierre-frey'] }, ignored_filters: ['from', 'status'] })
+      )
+
+      expect(csv).toContain('Filters,brand=pierre-frey')
+      expect(csv).toContain('Filters ignored,"from, status"')
+    })
+
+    it('omits the line entirely when every filter was honoured', () => {
+      expect(toReportCsv(report({ filters: {}, ignored_filters: [] }))).not.toContain(
+        'Filters ignored'
+      )
+    })
+
+    it('omits it for a report that has no opinion about ignored filters', () => {
+      expect(toReportCsv(report({ filters: {} }))).not.toContain('Filters ignored')
+    })
   })
 })

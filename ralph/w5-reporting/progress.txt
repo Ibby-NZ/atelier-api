@@ -103,6 +103,33 @@ Story-specific detail belongs in the per-story entries below, not here.
   against it.** The export bucket is 10/min, so a per-test request would spend it and the failure
   would surface as a 429 in an unrelated assertion. Count the requests a block makes, the way
   `beforeAll` registration already counts the 10-per-15-min register bucket.
+- **A column whose data source does not exist is OMITTED and the omission is STATED — a placeholder
+  is never written.** The CRM's R-10 fixture shows "Landed /m" and "Value"; no table in this schema
+  holds a landed cost, and the only cost data Atelier has (`price_list_items`) keys on a supplier
+  code CLAUDE.md forbids joining to a colourway, with A1 (the cost source) still open. So
+  `src/reports/stock.js` carries no valuation at all and says why in `meta.coverage.valuation` and
+  in its CSV notes. Same rule that keeps `duty_percent` NULL until a real file states one: a
+  placeholder is indistinguishable from a figure somebody quoted.
+- **A DEFAULT is overridable by a filter; a DEFINITION intersects with it.** The revenue scope's
+  paid/shipped window is a default, so `status=requested` REPLACES it. The not-invoiced report's
+  "card checkouts are never invoiced through this platform" is a definition, so `kind=checkout`
+  intersects to zero rows rather than opening the population back up — and the payload states
+  `meta.kinds` so the empty answer is legible. Decide which of the two a rule is before wiring it:
+  a definition that behaved like a default would report every web sale as an unbilled receivable.
+- **A report that cannot honour a filter must say so in the payload, never ignore it silently.**
+  `partitionFilters(filters, names)` (`src/reports/filters.js`) splits supplied filters into
+  `meta.filters` and `meta.ignored_filters`, and `src/reports/export.js` writes a `Filters ignored`
+  note. Declining is not a 400 because the CRM drives every report from ONE filter bar — a date
+  range left in the bar would otherwise refuse the stock report the moment it was selected — but an
+  ignored filter echoed into `meta.filters` would be read from the CSV as one that had narrowed it.
+- **A snapshot report states `as_at`; a range report states the window it observed.** `inventory`
+  holds current quantities and no history, so "stock as at last month" is unanswerable here and the
+  date filters are the ones the stock report declines. Any future report over a table with no
+  history inherits both halves of that.
+- **A figure that is one row's snapshot repeated across many is ABSENT from a totals row**, the
+  same rule as metres-plus-units and mixed currency. The invoice queue carries `on_hand` per line
+  and several lines can name one colourway, so a column of them sums to a number that exists
+  nowhere. The three cases now share one posture: the totals row simply has no such key.
 - **`src/routes/*.js` body schemas are OUTSIDE this workstream's file list, so a new writable
   column is inert over HTTP until its route file's owner adds the property.** Ajv runs
   `removeAdditional: true`, so an unlisted key is silently STRIPPED, not 400'd — the PATCH
@@ -442,4 +469,91 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   notes. One product decision for a human: whether the office wants the date range in the download
   FILENAME (today it is always `atelier-product-performance.csv`, so two exports of different
   windows overwrite each other in a Downloads folder).
+---
+
+## 2026-08-06T19:30:00Z - W5-US-007 - Stock and not-invoiced reports
+- Two new report modules and two new pairs of routes. `src/reports/stock.js` reads live
+  `inventory` outwards through the catalogue (SKU, House, Design, Colourway, Unit, On hand,
+  Allocated, Available), lists only rows with a holding or an allocation, keeps an archived
+  design's stock, reports a negative `available` where a backorder has over-allocated, and
+  honours only `brand`/`product_type`/`collection` — it has no `orders` in its FROM, so the
+  lifecycle and date filters are DECLINED and named in `meta.ignored_filters`.
+  `src/reports/not-invoiced.js` selects out of the revenue scope with its own lifecycle window
+  (`requested`/`confirmed`/`paid`/`shipped`) and reports every live order line carrying no
+  `xero_invoice_ref`, oldest first, with the client, the line and the colourway's current holding.
+  Both register through the existing `registerReport(path, build)`, so each got its table and its
+  `export.csv` off one builder and one line.
+  Supporting, all additive: `src/reports/limits.js` (new) now owns `DEFAULT_ROW_LIMIT`,
+  `MAX_ROW_LIMIT` and `clampLimit` for all three reports and the route schema;
+  `src/reports/filters.js` gained the pure `partitionFilters`; `src/reports/revenue-lines.js`
+  gained three scope columns (`user_id`, `guest_email`, `invoice_ref`) and a `statuses` option;
+  `src/reports/export.js` gained the `Filters ignored` note line.
+- Repos and files changed: atelier-api — `src/reports/stock.js` (new),
+  `src/reports/not-invoiced.js` (new), `src/reports/limits.js` (new), `src/reports/filters.js`,
+  `src/reports/revenue-lines.js`, `src/reports/export.js`, `src/reports/product-performance.js`
+  (limits moved out), `src/routes/admin-reports.js` (+2 registerReport lines),
+  `test/report-filters.test.js` (+29 pure tests), `test/admin-reports.test.js` (+26 route tests),
+  `ralph/w5-reporting/prd.json`, `ralph/w5-reporting/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`, `CLAUDE.md`. atelier-crm — untouched.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (53 files, 1386 tests); CRM baseline run untouched:
+  `npm test` -> 0 (567), `npm run build` -> 0.
+- **Learnings:**
+  - Five general ones promoted to Codebase Patterns above: a column with no data source is omitted
+    and the omission stated; a default is overridable while a definition intersects; a declined
+    filter is declared rather than ignored; a snapshot states `as_at`; a per-row snapshot is absent
+    from the totals row.
+  - **NOTHING IN THIS SCHEMA HOLDS A LANDED COST, so neither of these reports has a `finance`
+    column and masking still deletes nothing anywhere in Epic 5.** `products`, `colourways` and
+    `inventory` carry no cost; `price_list_items.wholesale_rate` is the only cost data and its
+    `(supplier, category, code)` key has no path to a colourway (CLAUDE.md § Legacy D365 staging
+    forbids joining a supplier colour code to `price_list_items.code`, and `products` carries no
+    supplier code at all). A1 is open. This is the one thing a human should decide before US-008
+    ships, because the CRM's `REPORT_POLICY.stock` masks 'Landed /m' and 'Value' and those columns
+    now have no live source to mask.
+  - **The not-invoiced report cannot state a value, and that is a property of the platform.**
+    Request-kind lines are inserted at `unit_price_cents = 0` (`src/orders/order-request.js`),
+    `orders.subtotal/shipping/total_cents` are inserted at 0 with them, `PATCH /admin/orders/:id`
+    edits quantities only, and the invoice amount is typed into Xero by hand at confirm (FR-8
+    forbids calling Xero). So a "Value" column would be a column of zeros under a money heading.
+    `meta.unpriced_lines` is what states it instead. If the client ever wants the figure, the
+    change is a price on the confirm path, not a report.
+  - **Card checkouts are excluded from the invoice queue by DEFINITION.** They are paid at Stripe
+    and their `xero_invoice_ref` is null forever, so including them would list every web sale as an
+    unbilled receivable. `INVOICEABLE_KINDS` is the frozen statement of that and `meta.kinds`
+    carries it into the payload.
+  - Gotcha for the next report: `buildRevenueScope(filters, { statuses })` is how a report states
+    its own lifecycle window. It is applied per SOURCE against that source's own `statusColumn`, so
+    it survives the D365 union seam; a report that instead injected raw SQL conditions into the CTE
+    would break the first source that lacks the column it named.
+  - Gotcha: `inventory.qty_available - qty_reserved` is legitimately NEGATIVE for an over-allocated
+    colourway, and this is the first report to emit a negative number of any kind. `csvCell`
+    neutralises a leading `-`, so the CSV writes `'-2.00` and Excel shows it as text. That is the
+    formula guard working as designed — widen it in `src/lib/csv.js` or not at all. A test asserts
+    the neutralisation rather than working around it.
+  - Gotcha: `created_at` is `timestamptz` and the fixtures write wall-clock times, so a test
+    asserting on an ISO string is asserting on the session's timezone. Two assertions failed on
+    exactly that (`2026-03-12 09:00` came back as `2026-03-11T20:00:00.000Z` under NZ). Compare
+    against the row the database actually holds, never against a transcribed literal.
+  - Gotcha: `COALESCE(array_agg(DISTINCT x), '{}')` needs its `FILTER (WHERE x IS NOT NULL)` or a
+    nullable column puts a null INTO the array, which then reads as a second unit/type and silently
+    switches the totals row off.
+  - Context: `src/reports/` now holds `filters.js`, `limits.js`, `revenue-lines.js`, `access.js`,
+    `product-performance.js`, `stock.js`, `not-invoiced.js` and `export.js`;
+    `src/routes/admin-reports.js` serves six routes off three `registerReport` calls. Only US-008
+    is left — `report_access` on `/auth/me` and the CRM consuming these endpoints. `catalogue.js`,
+    named in architecture.md § Reporting's file list, has no story in this PRD and was not written.
+  - Test context: the US-007 block builds its own app (fresh rate-limit buckets), registers two
+    logins in `beforeAll`, reuses the shared `insertFixture` population and adds to it — a finished
+    good (so the totals row has two units to decline), an archived design with stock, an INVOICED
+    confirmed order, a confirmed backorder, and an order placed by an ACCOUNT rather than a guest.
+    Both exports are fetched once in `beforeAll` against the 10/min bucket.
+- **Needs human verification:** no browser check is possible here (no e2e harness on this machine)
+  and no CRM screen reads these endpoints until US-008. What a person with a back-office login
+  should eyeball once: `GET /admin/reports/stock` and its `export.csv` — that the holdings list
+  reads the way the office expects and that the "Filters ignored" note under the table is clear —
+  and `GET /admin/reports/not-invoiced`, that the queue is the set of orders the office would
+  actually chase. On `atelier_w5` the live population is the test fixtures alone.
+  Two decisions for a human, both flagged above: whether the stock report is acceptable WITHOUT a
+  valuation until A1 (the cost source) is settled, and whether the invoice queue should carry a
+  value at all given that request lines never receive a price on this platform.
 ---

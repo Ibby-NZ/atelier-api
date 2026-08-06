@@ -76,7 +76,7 @@ epics:
     branch: aug6/w5-reporting
     status: pending
     stories:
-      US-001: pending   # Extract the hardened CSV writer to src/lib/csv.js
+      US-001: done      # Extract the hardened CSV writer to src/lib/csv.js
       US-002: pending   # Migration: reporting index and finance access
       US-003: pending   # Report filter layer
       US-004: pending   # Revenue scope CTE and the masking module

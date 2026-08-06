@@ -92,6 +92,25 @@ Story-specific detail belongs in the per-story entries below, not here.
   (`include_archived`), never on the by-id read. The same applies to the children a detail read
   embeds — `getAdminProduct` returns every colourway, archived included, each carrying its own
   `archived_at` for the screen to style.
+- **A paginated admin list is a settled shape — copy it, do not redesign it.** Module exports
+  `DEFAULT_PAGE`/`DEFAULT_LIMIT`/`MAX_LIMIT` and a `list…` returning `{ items, total }`; the route
+  imports the three constants, spends them as schema `default`/`maximum`, and builds the envelope
+  `{ <plural>: items, meta: { total, page, limit } }`. `MAX_LIMIT` as the schema `maximum` is what
+  makes an over-large `limit` a 400 rather than a silent clamp. The CRM's `readList(body, key)`
+  takes the array's key as an argument precisely because this API has no single one, so `items` vs
+  `colourways` is a free choice — match the sibling routes in the same file.
+- **A LIST filters `archived_at`; a by-id read never does.** The two halves of the same rule: the
+  list hides archived rows behind `include_archived`, and the detail read returns them, because the
+  restore screen reads a row back after archiving it. What a list must NOT do is filter on a
+  *parent's* archive flag — archiving a product does not archive its colourways, so a list that
+  hid them would disagree with the product detail (which returns every child) about which rows
+  exist.
+- **A standalone list of a child entity has to carry its parents' names, or the screen is unusable.**
+  A colourway row is a SKU, a colour name and an id; nothing on it says which design or house it
+  belongs to, and the entire point of browsing it outside its parent is not knowing that already.
+  The pattern is a second `…_CONTEXT_COLUMNS` + `…_CONTEXT_FROM` pair beside the narrow select, fed
+  to the mapper's `extra` argument — so the rows embedded in a parent's detail read keep the narrow
+  shape (they already sit under their parent) and only the standalone reads pay for the joins.
 - **A mid-transaction race is reproducible deterministically by wrapping the pool, not by timing.**
   `deleteOrExplain` only uses `connect()`/`query()`/`release()`, so `{ connect: async () => ({
   query, release }) }` around a real client can run arbitrary work on another connection when a
@@ -641,4 +660,69 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   `product_count`. Plus the standing cross-origin check `app.inject()` cannot prove — though these are
   GETs, which the default CORS `methods` already allowed, so they are not at risk the way the DELETEs
   were.
+---
+
+## 2026-08-06T03:45:18Z - W2-US-006 - Colourway list and detail endpoints
+
+- **Implemented.** `GET /admin/colourways` — paginated, filterable by `product_id`, `brand_id`, `q`
+  and `include_archived` — and `GET /admin/colourways/:id`, which wires the previously-private
+  `getAdminColourway`. Both are backoffice-only. The list is the SKU-level browse: colourways were
+  reachable only through their product, and a staff member holding a SKU off a sample tag does not
+  know which design it belongs to.
+- Repos and files changed: `atelier-api` only —
+  `src/catalogue/admin-products.js` (+`listAdminColourways`, `getAdminColourway` exported and
+  widened, +`DEFAULT_PAGE`/`DEFAULT_LIMIT`/`MAX_LIMIT`, `COLOURWAY_SELECT` split into
+  `COLOURWAY_COLUMNS` + a context select, `toColourway` gains `extra`, one `map` call site fixed),
+  `src/routes/admin-catalogue.js` (+2 routes, +1 query schema, +5 imports),
+  `test/admin-catalogue.test.js` (+14 tests in two describe blocks),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 730 tests passed; 716 before —
+  `test/admin-catalogue.test.js` 103 -> 117).
+- **The list row is not a colourway row, and that is the design decision of the story.** A bare
+  colourway carries `id`, `product_id`, `name`, `sku` and its stock snapshot — nothing that names
+  the design or the house — so a standalone screen would show a wall of SKUs and send staff back to
+  the product page to identify each one. The list and the by-id read therefore join products and
+  brands and add `product_name`, `product_slug`, `product_type`, `brand_id`, `brand_name` through
+  the mapper's `extra` argument. The colourways *embedded* in `GET /admin/products/:id` deliberately
+  keep the narrow shape: they already sit under their parent, so repeating its name on every child
+  would be noise. One test asserts the detail read and the list row are `toEqual` — one CRM renderer
+  serves both, which is the property that keeps them from drifting.
+- **What else the tests assert:** paging partitions rather than truncates (three colourways at
+  `limit=2` give `[a, b]` then `[c]`, `meta.total` 3 on both pages — the pager divides by it);
+  `limit=500` is a 400, because `MAX_LIMIT` is the schema `maximum` and a silent clamp would lie
+  about what was returned; each filter in isolation; `q` reaching the SKU, the colour name and the
+  design name; a literal `%` in a search term matching one row rather than the whole house; an
+  archived colourway hidden until `include_archived=true` and then carrying `archived_at`; the
+  colourways of an **archived product** still listed; 404 with `error: 'Not Found'` on an unknown
+  id; the archived row returned by the by-id read rather than 404'd; 401 anonymous and 403 customer
+  on both routes.
+- **Learnings:**
+  - Pattern: the settled paginated-admin-list shape, the LIST-filters/detail-does-not rule (and its
+    corollary about a *parent's* archive flag), and the context-columns pair for a standalone child
+    list — all three promoted to `## Codebase Patterns` above.
+  - Gotcha: every assertion in the list block scopes itself with `brand_id` or `product_id`. This
+    list spans the whole catalogue, so an unfiltered `meta.total` counts every seeded colourway in
+    `atelier_w2` as well as the fixtures — a test asserting `total` on an unfiltered read passes
+    today and breaks the first time someone runs `npm run seed` against the test database.
+  - Gotcha: `toColourway` growing its `extra` argument is the same trap `toBrand`/`toCollection` hit
+    in US-005 — `getAdminProduct` did `colourways.map(toColourway)`, which would have passed the
+    array index as `extra`. `{ ...0 }` is `{}`, so the bug is invisible until `extra` is used for
+    something a number satisfies. Converted to `map((child) => toColourway(child))` in the same
+    edit. Grep for `map(to` before adding a second parameter to any mapper here.
+  - Gotcha: the count query shares `COLOURWAY_CONTEXT_FROM` with the row query, which means it
+    carries the `LEFT JOIN inventory`. That is safe only because `inventory.colourway_id` is UNIQUE —
+    a join that could multiply rows would silently inflate `meta.total` while the rows looked right.
+  - Context: the read models are `src/catalogue/admin-products.js` (`listAdminColourways` and
+    `getAdminColourway`, beside `listAdminProducts`/`getAdminProduct`); the paginated sibling this
+    copies is `listPriceListItems` in `src/pricing/admin-price-lists.js` and its route in
+    `src/routes/admin-price-lists.js`. `escapeLike` is duplicated per module by house convention
+    (`products.js` and `admin-price-lists.js` each carry their own) rather than shared.
+- **Needs human verification:** no screen calls either route yet — there is no colourways screen in
+  the CRM and none is in Epic 2's story list, so these are consumed by W2-US-009's product screen and
+  by whatever browses SKUs later. Worth eyeballing when a screen does arrive: that the pager reads
+  sensibly at `DEFAULT_LIMIT` 50 against a real seeded catalogue, and that the `q` box searching the
+  design name (not just the SKU) is what staff expect. Carried forward from US-001..005: a real
+  cross-origin preflight from the CRM at :5273, which `app.inject()` cannot prove — these two are
+  GETs, which the default CORS `methods` already allowed, so they are not at the DELETEs' risk.
 ---

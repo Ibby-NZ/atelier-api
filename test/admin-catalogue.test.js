@@ -1223,6 +1223,244 @@ describe('back-office catalogue admin', () => {
     })
   })
 
+  // The SKU-level browse. Every assertion here scopes itself with brand_id or
+  // product_id: this list spans the whole catalogue, so an unfiltered
+  // `meta.total` counts every seeded colourway in the database too.
+  describe('GET /admin/colourways', () => {
+    const skusFrom = (response) =>
+      response.json().colourways.map((colourway) => colourway.sku)
+
+    const listColourways = (query) =>
+      inject('GET', `/admin/colourways?${query}`, backofficeCookie)
+
+    it('carries the design and house on every row, with the stock snapshot', async () => {
+      const brand = await createBrandFixture('Swatch House')
+      const product = await createProductFixture(brand.id, { name: 'Atlas' })
+      const colourway = await createColourwayFixture(product.id, {
+        name: 'Ivory',
+        sku: `${PREFIX}-ivory`,
+        hex_tones: ['#AABBCC'],
+      })
+
+      const response = await listColourways(`brand_id=${brand.id}`)
+      expect(response.statusCode).toBe(200)
+
+      const body = response.json()
+      expect(body.meta).toEqual({ total: 1, page: 1, limit: 50 })
+      // Without the parent context the screen shows a bare SKU and a colour
+      // name, which is precisely what sending staff back to the product page to
+      // identify it looks like.
+      expect(body.colourways[0]).toMatchObject({
+        id: colourway.id,
+        product_id: product.id,
+        name: 'Ivory',
+        sku: `${PREFIX}-ivory`,
+        hex_tones: ['#AABBCC'],
+        product_name: 'Atlas',
+        product_slug: product.slug,
+        product_type: 'fabric',
+        brand_id: brand.id,
+        brand_name: brandName('Swatch House'),
+      })
+      expect(body.colourways[0].inventory.unit).toBe('metres')
+    })
+
+    // Paging is the story: this is the largest table in the catalogue, so the
+    // pages must partition the result set rather than merely truncate it.
+    it('pages in a stable order, with no row on two pages', async () => {
+      const brand = await createBrandFixture('Paged House')
+      const product = await createProductFixture(brand.id)
+      await createColourwayFixture(product.id, { name: 'Alpha', sku: `${PREFIX}-a` })
+      await createColourwayFixture(product.id, { name: 'Bravo', sku: `${PREFIX}-b` })
+      await createColourwayFixture(product.id, { name: 'Charlie', sku: `${PREFIX}-c` })
+
+      const first = await listColourways(`brand_id=${brand.id}&limit=2`)
+      expect(first.json().meta).toEqual({ total: 3, page: 1, limit: 2 })
+      expect(skusFrom(first)).toEqual([`${PREFIX}-a`, `${PREFIX}-b`])
+
+      const second = await listColourways(`brand_id=${brand.id}&limit=2&page=2`)
+      // total is the filtered total, not the page size — the CRM divides by it
+      // to draw the pager.
+      expect(second.json().meta).toEqual({ total: 3, page: 2, limit: 2 })
+      expect(skusFrom(second)).toEqual([`${PREFIX}-c`])
+    })
+
+    it('rejects a limit above the maximum with 400', async () => {
+      const response = await listColourways('limit=500')
+      expect(response.statusCode).toBe(400)
+    })
+
+    it('filters by product_id', async () => {
+      const brand = await createBrandFixture('Two Designs')
+      const atlas = await createProductFixture(brand.id, { name: 'Atlas' })
+      const orion = await createProductFixture(brand.id, { name: 'Orion' })
+      await createColourwayFixture(atlas.id, { sku: `${PREFIX}-atlas-1` })
+      await createColourwayFixture(orion.id, { sku: `${PREFIX}-orion-1` })
+
+      const response = await listColourways(`product_id=${atlas.id}`)
+      expect(skusFrom(response)).toEqual([`${PREFIX}-atlas-1`])
+    })
+
+    it('filters by brand_id', async () => {
+      const mine = await createBrandFixture('Mine')
+      const theirs = await createBrandFixture('Theirs')
+      const ours = await createProductFixture(mine.id)
+      const others = await createProductFixture(theirs.id)
+      await createColourwayFixture(ours.id, { sku: `${PREFIX}-mine-1` })
+      await createColourwayFixture(others.id, { sku: `${PREFIX}-theirs-1` })
+
+      const response = await listColourways(`brand_id=${mine.id}`)
+      expect(skusFrom(response)).toEqual([`${PREFIX}-mine-1`])
+    })
+
+    // Three ways staff arrive at a colourway: the code off a sample tag, the
+    // colour name off an invoice, and the design name they were told over the
+    // phone.
+    it('searches the sku, the colour name and the design name', async () => {
+      const brand = await createBrandFixture('Search House')
+      const atlas = await createProductFixture(brand.id, { name: 'Atlas' })
+      const orion = await createProductFixture(brand.id, { name: 'Orion' })
+      await createColourwayFixture(atlas.id, { name: 'Ivory', sku: `${PREFIX}-ivory` })
+      await createColourwayFixture(orion.id, { name: 'Slate', sku: `${PREFIX}-slate` })
+
+      const bySku = await listColourways(`brand_id=${brand.id}&q=${PREFIX}-slate`)
+      expect(skusFrom(bySku)).toEqual([`${PREFIX}-slate`])
+
+      const byColour = await listColourways(`brand_id=${brand.id}&q=ivory`)
+      expect(skusFrom(byColour)).toEqual([`${PREFIX}-ivory`])
+
+      const byDesign = await listColourways(`brand_id=${brand.id}&q=Orion`)
+      expect(skusFrom(byDesign)).toEqual([`${PREFIX}-slate`])
+    })
+
+    // A supplier code carrying a percent is not a wildcard. Without the escape
+    // this term matches every colourway in the house.
+    it('treats a percent in the search term as a literal', async () => {
+      const brand = await createBrandFixture('Percent House')
+      const product = await createProductFixture(brand.id)
+      await createColourwayFixture(product.id, { sku: `${PREFIX}-100%-linen` })
+      await createColourwayFixture(product.id, { sku: `${PREFIX}-plain` })
+
+      const response = await listColourways(
+        `brand_id=${brand.id}&q=${encodeURIComponent('100%')}`
+      )
+      expect(skusFrom(response)).toEqual([`${PREFIX}-100%-linen`])
+    })
+
+    it('hides archived colourways until include_archived is set', async () => {
+      const brand = await createBrandFixture('Archive House')
+      const product = await createProductFixture(brand.id)
+      const live = await createColourwayFixture(product.id, { sku: `${PREFIX}-live` })
+      const gone = await createColourwayFixture(product.id, {
+        name: 'Zed',
+        sku: `${PREFIX}-gone`,
+      })
+      await inject('POST', `/admin/colourways/${gone.id}/archive`, backofficeCookie)
+
+      const working = await listColourways(`brand_id=${brand.id}`)
+      expect(skusFrom(working)).toEqual([live.sku])
+      expect(working.json().meta.total).toBe(1)
+
+      const all = await listColourways(`brand_id=${brand.id}&include_archived=true`)
+      expect(skusFrom(all)).toEqual([live.sku, gone.sku])
+      const archived = all
+        .json()
+        .colourways.find((colourway) => colourway.id === gone.id)
+      expect(archived.archived_at).not.toBeNull()
+    })
+
+    // Archiving a product does not archive its colourways, so they stay in the
+    // working list — the same rows the product detail still returns. A filter on
+    // the parent here would make the two screens disagree about what exists.
+    it('keeps the colourways of an archived product', async () => {
+      const brand = await createBrandFixture('Retired Design')
+      const product = await createProductFixture(brand.id)
+      await createColourwayFixture(product.id, { sku: `${PREFIX}-orphan` })
+      await inject('POST', `/admin/products/${product.id}/archive`, backofficeCookie)
+
+      const response = await listColourways(`brand_id=${brand.id}`)
+      expect(skusFrom(response)).toEqual([`${PREFIX}-orphan`])
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      expect((await inject('GET', '/admin/colourways', null)).statusCode).toBe(401)
+      expect((await inject('GET', '/admin/colourways', customerCookie)).statusCode).toBe(
+        403
+      )
+    })
+  })
+
+  describe('GET /admin/colourways/:id', () => {
+    it('returns the same row the list does, so one renderer serves both', async () => {
+      const brand = await createBrandFixture('Detail House')
+      const product = await createProductFixture(brand.id, { name: 'Atlas' })
+      const created = await createColourwayFixture(product.id, {
+        name: 'Ivory',
+        sku: `${PREFIX}-ivory`,
+        hex_tones: ['#AABBCC'],
+      })
+
+      const response = await inject(
+        'GET',
+        `/admin/colourways/${created.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      const detail = response.json().colourway
+      expect(detail).toMatchObject({
+        id: created.id,
+        product_id: product.id,
+        sku: `${PREFIX}-ivory`,
+        product_name: 'Atlas',
+        brand_name: brandName('Detail House'),
+      })
+      // pg hands numeric back as a string — coerce, as every caller must.
+      expect(Number(detail.inventory.qty_available)).toBe(0)
+      expect(detail.inventory.unit).toBe('metres')
+
+      const listed = (
+        await inject('GET', `/admin/colourways?brand_id=${brand.id}`, backofficeCookie)
+      ).json().colourways[0]
+      expect(detail).toEqual(listed)
+    })
+
+    // A by-id admin read never filters on archived_at: the caller already knows
+    // the row exists, and a 404 here reads as "someone deleted it".
+    it('returns an archived colourway rather than 404', async () => {
+      const brand = await createBrandFixture('Detail House')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      await inject('POST', `/admin/colourways/${colourway.id}/archive`, backofficeCookie)
+
+      const response = await inject(
+        'GET',
+        `/admin/colourways/${colourway.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().colourway.archived_at).not.toBeNull()
+    })
+
+    it('returns 404 for an unknown colourway id', async () => {
+      const response = await inject('GET', '/admin/colourways/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+      expect(response.json().error).toBe('Not Found')
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      const brand = await createBrandFixture('Detail House')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      expect(
+        (await inject('GET', `/admin/colourways/${colourway.id}`, null)).statusCode
+      ).toBe(401)
+      expect(
+        (await inject('GET', `/admin/colourways/${colourway.id}`, customerCookie))
+          .statusCode
+      ).toBe(403)
+    })
+  })
+
   // Hard delete, wired to the lifecycle registry. The point of these tests is
   // the refusal: every child edge out of brands and collections is CASCADE or
   // SET NULL, so a bare `DELETE FROM brands` returns success while destroying

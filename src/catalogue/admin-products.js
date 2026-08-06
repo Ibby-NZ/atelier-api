@@ -12,6 +12,13 @@
 import { slugFrom, rethrowConflict, buildUpdate } from './admin-brands.js'
 import { setArchived } from '../lifecycle/archive.js'
 
+// Colourways are the largest catalogue table (one row per SKU, ~19k designs
+// once the colour files land), so the standalone list is the only admin
+// catalogue read that pages. Same numbers as the price-list ledger.
+export const DEFAULT_PAGE = 1
+export const DEFAULT_LIMIT = 50
+export const MAX_LIMIT = 200
+
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
 
@@ -110,7 +117,9 @@ const toProduct = (row, extra) =>
 
 // The inventory snapshot is read-only here — quantities move through the order
 // state machine (src/orders/admin-orders.js), never through catalogue edits.
-const toColourway = (row) =>
+// `extra` carries the parent context a standalone read adds (same shape as
+// toProduct's): a bare `rows.map(toColourway)` would hand it the array index.
+const toColourway = (row, extra) =>
   Object.freeze({
     id: row.id,
     product_id: row.product_id,
@@ -127,12 +136,84 @@ const toColourway = (row) =>
             qty_reserved: row.qty_reserved,
             unit: row.unit,
           }),
+    ...extra,
   })
 
-const COLOURWAY_SELECT = `SELECT c.id, c.product_id, c.name, c.sku, c.hex_tones, c.image_url,
-              c.archived_at, i.qty_available, i.qty_reserved, i.unit
+const COLOURWAY_COLUMNS = `c.id, c.product_id, c.name, c.sku, c.hex_tones, c.image_url,
+              c.archived_at, i.qty_available, i.qty_reserved, i.unit`
+
+const COLOURWAY_SELECT = `SELECT ${COLOURWAY_COLUMNS}
          FROM colourways c
          LEFT JOIN inventory i ON i.colourway_id = c.id`
+
+// A colourway read on its own has to say which design and house the SKU belongs
+// to — that is the whole point of browsing colourways without opening their
+// product. The colourways embedded in a product detail already sit under theirs,
+// so they keep the narrower shape above.
+const COLOURWAY_CONTEXT_COLUMNS = `p.name AS product_name,
+              p.slug AS product_slug,
+              p.product_type,
+              p.brand_id,
+              b.name AS brand_name`
+
+// Both joins are inner: product_id and brand_id are NOT NULL, so a colourway
+// always has both. inventory stays a LEFT JOIN and cannot multiply rows —
+// colourway_id is unique on it — which is what lets the count query share this.
+const COLOURWAY_CONTEXT_FROM = `FROM colourways c
+         LEFT JOIN inventory i ON i.colourway_id = c.id
+         JOIN products p ON p.id = c.product_id
+         JOIN brands b ON b.id = p.brand_id`
+
+const colourwayContext = (row) => ({
+  product_name: row.product_name,
+  product_slug: row.product_slug,
+  product_type: row.product_type,
+  brand_id: row.brand_id,
+  brand_name: row.brand_name,
+})
+
+// Escape the LIKE wildcards so a search for "100%" matches a literal percent
+// rather than everything. Pairs with the ESCAPE '\' clause in the SQL.
+const escapeLike = (value) => value.replace(/[\\%_]/g, (char) => `\\${char}`)
+
+// WHERE fragments + bound params for the colourway list. Filter names are
+// trusted column references; filter *values* always flow through $n placeholders.
+const buildColourwayWhere = ({ productId, brandId, q, includeArchived }) => {
+  const clauses = []
+  const params = []
+
+  // The colourway's OWN archive flag, never its product's: archiving a product
+  // does not archive its colourways, and hiding them here would make this list
+  // disagree with the product detail about which SKUs exist.
+  if (!includeArchived) {
+    clauses.push('c.archived_at IS NULL')
+  }
+  if (productId) {
+    params.push(productId)
+    clauses.push(`c.product_id = $${params.length}`)
+  }
+  if (brandId) {
+    params.push(brandId)
+    clauses.push(`p.brand_id = $${params.length}`)
+  }
+
+  const term = typeof q === 'string' ? q.trim() : ''
+  if (term) {
+    params.push(`%${escapeLike(term)}%`)
+    const i = params.length
+    // The design name is in here because staff name a colourway by its product
+    // ("Atlas in Ivory"); the house is a filter, not a search term, or one
+    // maison's name would return several thousand rows.
+    clauses.push(`(
+      c.sku ILIKE $${i} ESCAPE '\\'
+      OR c.name ILIKE $${i} ESCAPE '\\'
+      OR p.name ILIKE $${i} ESCAPE '\\'
+    )`)
+  }
+
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+  return { where, params }
+}
 
 // pg maps a raw JS array to a Postgres array literal, not jsonb — hex_tones has
 // to be stringified on the way in (same rule as the seed).
@@ -195,12 +276,75 @@ export const getAdminProduct = async (db, id) => {
     `${COLOURWAY_SELECT} WHERE c.product_id = $1 ORDER BY c.name ASC, c.id ASC`,
     [id]
   )
-  return toProduct(row, { colourways: colourways.map(toColourway) })
+  return toProduct(row, { colourways: colourways.map((child) => toColourway(child)) })
 }
 
-const getAdminColourway = async (db, id) => {
-  const { rows } = await db.query(`${COLOURWAY_SELECT} WHERE c.id = $1`, [id])
-  return rows[0] ? toColourway(rows[0]) : null
+/**
+ * Filtered, paginated colourways across the whole catalogue — the SKU-level
+ * browse, so a colour can be found without knowing which design it belongs to.
+ * `q` is a free-text ILIKE over SKU, colour name and design name. Returns
+ * { items, total }; the route builds the meta envelope. Ordered house, design,
+ * colour, id for a stable page-to-page walk.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{
+ *   productId?: number,
+ *   brandId?: number,
+ *   q?: string,
+ *   includeArchived?: boolean,
+ *   page?: number,
+ *   limit?: number,
+ * }} [options]
+ * @returns {Promise<{ items: object[], total: number }>}
+ */
+export const listAdminColourways = async (
+  pool,
+  { productId, brandId, q, includeArchived = false, page, limit } = {}
+) => {
+  const safePage = Number.isInteger(page) && page > 0 ? page : DEFAULT_PAGE
+  const safeLimit =
+    Number.isInteger(limit) && limit > 0 ? Math.min(limit, MAX_LIMIT) : DEFAULT_LIMIT
+  const offset = (safePage - 1) * safeLimit
+
+  const { where, params } = buildColourwayWhere({ productId, brandId, q, includeArchived })
+
+  const countResult = await pool.query(
+    `SELECT count(*)::int AS total ${COLOURWAY_CONTEXT_FROM} ${where}`,
+    params
+  )
+  const total = countResult.rows[0].total
+
+  const { rows } = await pool.query(
+    `SELECT ${COLOURWAY_COLUMNS},
+            ${COLOURWAY_CONTEXT_COLUMNS}
+       ${COLOURWAY_CONTEXT_FROM}
+       ${where}
+      ORDER BY b.name ASC, p.name ASC, c.name ASC, c.id ASC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, safeLimit, offset]
+  )
+
+  return { items: rows.map((row) => toColourway(row, colourwayContext(row))), total }
+}
+
+/**
+ * One colourway by id with its stock snapshot and parent context, or null when
+ * the id is unknown. No archived filter: this is what the CRM re-reads after a
+ * write, including the archive it just made.
+ *
+ * @param {import('pg').Pool|import('pg').PoolClient} db
+ * @param {number} id
+ * @returns {Promise<object|null>}
+ */
+export const getAdminColourway = async (db, id) => {
+  const { rows } = await db.query(
+    `SELECT ${COLOURWAY_COLUMNS},
+            ${COLOURWAY_CONTEXT_COLUMNS}
+       ${COLOURWAY_CONTEXT_FROM}
+      WHERE c.id = $1`,
+    [id]
+  )
+  return rows[0] ? toColourway(rows[0], colourwayContext(rows[0])) : null
 }
 
 const loadBrand = async (db, brandId) => {

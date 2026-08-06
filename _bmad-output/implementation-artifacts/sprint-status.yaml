@@ -38,7 +38,7 @@ epics:
       US-003: done      # DELETE for price-list item and contact enquiry
       US-004: done      # DELETE for user with the self-delete guard
       US-005: done      # Missing admin reads: brand, collection, price-list item by id
-      US-006: pending   # Colourway list and detail endpoints
+      US-006: done      # Colourway list and detail endpoints
       US-007: pending   # Shipping-rate CRUD with the last-tier guard
       US-008: pending   # Inventory create and delete
       US-009: pending   # Delete on the products and houses screens

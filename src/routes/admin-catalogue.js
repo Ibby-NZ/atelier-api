@@ -36,9 +36,14 @@ import {
   createProduct,
   updateProduct,
   setProductArchived,
+  listAdminColourways,
+  getAdminColourway,
   createColourway,
   updateColourway,
   setColourwayArchived,
+  DEFAULT_PAGE,
+  DEFAULT_LIMIT,
+  MAX_LIMIT,
 } from '../catalogue/admin-products.js'
 
 // Shared property shapes. Nullable variants let a PATCH clear an optional field
@@ -172,6 +177,22 @@ const productPatchSchema = {
   properties: {
     ...productDetailProps,
     show_on_website: { type: 'boolean' },
+  },
+}
+
+// Colourways are the only catalogue list that pages: one row per SKU makes this
+// the largest table in the catalogue, so an unpaged read would be unusable long
+// before the colour files land.
+const colourwayQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    product_id: { type: 'integer', minimum: 1 },
+    brand_id: { type: 'integer', minimum: 1 },
+    q: { type: 'string', maxLength: 200 },
+    include_archived: { type: 'boolean', default: false },
+    page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
+    limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
   },
 }
 
@@ -334,6 +355,42 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
     async (request) => ({
       product: await updateProduct(pool, request.params.id, request.body),
     })
+  )
+
+  // The SKU-level browse. Colourways are reachable through their product, but a
+  // staff member holding a SKU does not know which design it belongs to — so
+  // this list carries the design and house on every row, and pages.
+  app.get(
+    '/admin/colourways',
+    { preHandler: backoffice, schema: { querystring: colourwayQuerySchema } },
+    async (request) => {
+      const { product_id, brand_id, q, include_archived, page, limit } = request.query
+      const { items, total } = await listAdminColourways(pool, {
+        productId: product_id,
+        brandId: brand_id,
+        q,
+        includeArchived: include_archived,
+        page,
+        limit,
+      })
+      return { colourways: items, meta: { total, page, limit } }
+    }
+  )
+
+  app.get(
+    '/admin/colourways/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const colourway = await getAdminColourway(pool, request.params.id)
+      if (!colourway) {
+        reply.code(404)
+        return {
+          error: 'Not Found',
+          message: `Colourway ${request.params.id} not found.`,
+        }
+      }
+      return { colourway }
+    }
   )
 
   // Nested under the product: the handler needs the parent both to 404 on an

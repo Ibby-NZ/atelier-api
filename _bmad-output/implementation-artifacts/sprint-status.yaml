@@ -54,7 +54,7 @@ epics:
       US-002: done      # Migration: supplier brand terms and discount tiers
       US-003: done      # Migration: products.category
       US-004: done      # Supplier read models and admin module
-      US-005: pending   # Supplier routes including DELETE
+      US-005: done      # Supplier routes including DELETE
       US-006: pending   # Backfill suppliers from existing data
       US-007: pending   # AdminSuppliers CRM screen
   w4-samples:

@@ -26,6 +26,7 @@
 //     `country` is the exact mistake the column exists to prevent.
 
 import { buildUpdate, slugFrom } from '../catalogue/admin-brands.js'
+import { setArchived } from '../lifecycle/archive.js'
 import { listSupplierBrandTerms } from './supplier-terms.js'
 
 export const DEFAULT_PAGE = 1
@@ -288,4 +289,26 @@ export const updateSupplier = async (pool, id, input) => {
   } catch (error) {
     return rethrowConflict(error)
   }
+}
+
+/**
+ * Soft-archive (archived=true) or restore (archived=false) a supplier, stamping
+ * updated_at. Returns the fresh row, or null when the id is unknown.
+ *
+ * This is the alternative a blocked DELETE offers: a supplier that still
+ * invoices a house can never be removed (`brands.supplier_id` is RESTRICT), so
+ * without an archive the only way to retire one would be to unlink its houses
+ * first — which destroys who invoiced them.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {boolean} archived
+ * @returns {Promise<object|null>}
+ */
+export const setSupplierArchived = async (pool, id, archived) => {
+  const row = await setArchived(pool, 'supplier', id, archived, {
+    extraSets: ['updated_at = now()'],
+    returning: SUPPLIER_COLUMNS,
+  })
+  return row ? toSupplier(row) : null
 }

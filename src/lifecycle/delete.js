@@ -49,13 +49,21 @@ const STATUS_TEXT = Object.freeze({
   409: 'Conflict',
 })
 
-// Only a RESTRICT foreign key can raise 23503 here; today that is exactly one
-// edge. An unknown constraint degrades the *detail*, never the status — the same
-// posture as rethrowConflict's handling of an unrecognised 23505.
+// Only a RESTRICT foreign key can raise 23503 here; today that is exactly two
+// edges. An unknown constraint degrades the *detail*, never the status — the
+// same posture as rethrowConflict's handling of an unrecognised 23505.
 const CONSTRAINT_BLOCKERS = Object.freeze({
   order_lines_colourway_id_fkey: Object.freeze({
     relation: 'order_lines',
     label: 'order lines',
+  }),
+  // A house pointing at a supplier is a live commercial relationship, so the FK
+  // refuses rather than unlinking it. The `supplier` probe normally reports this
+  // first; the entry is what keeps a lost race saying "houses" rather than the
+  // generic fallback.
+  brands_supplier_id_fkey: Object.freeze({
+    relation: 'brands',
+    label: 'houses',
   }),
 })
 

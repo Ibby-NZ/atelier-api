@@ -24,8 +24,8 @@
 // its house. Archiving is not deletion, and skipping archived rows would let a
 // delete quietly destroy the archive.
 //
-// Entities whose tables do not exist yet (suppliers, samples, sample orders and
-// sample loans) are added by the workstreams that create them. Every entry is
+// Entities whose tables do not exist yet (samples, sample orders and sample
+// loans) are added by the workstreams that create them. Every entry is
 // validated at import time by `assertEntity` below, so a malformed probe cannot
 // reach production — the server refuses to boot instead.
 
@@ -275,6 +275,30 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     label: 'price-list item',
     archivable: true,
     probes: [],
+  },
+
+  // The two edges out of suppliers disagree, and only one of them would ever
+  // raise: `brands.supplier_id` is RESTRICT (a house pointing at a supplier is a
+  // live commercial relationship), `price_list_items.supplier_id` is SET NULL —
+  // so without the second probe, deleting a supplier silently unlinks its whole
+  // rate ledger and reports success. The per-brand commercial terms need no
+  // probe: they CASCADE from both sides, and a terms row does not outlive the
+  // relationship it describes. (Naming those tables here would also trip the
+  // source scan in test/suppliers-terms.test.js, which keeps them inside
+  // src/suppliers/.)
+  supplier: {
+    table: 'suppliers',
+    idColumn: 'id',
+    label: 'supplier',
+    archivable: true,
+    probes: [
+      probe('brands', 'houses', 'SELECT 1 FROM brands WHERE supplier_id = $1'),
+      probe(
+        'price_list_items',
+        'price-list items',
+        'SELECT 1 FROM price_list_items WHERE supplier_id = $1'
+      ),
+    ],
   },
 
   // Three SET NULL edges out of users, all of them commercial record: orders

@@ -69,6 +69,23 @@ Story-specific detail belongs in the per-story entries below, not here.
   `*_COLUMNS` projection constant is only valid while the statement has no alias, so
   `FROM suppliers ... WHERE supplier_aliases.supplier_id = suppliers.id` keeps one constant usable
   in the SELECT, the INSERT RETURNING and the UPDATE RETURNING alike.
+- **`test/suppliers-terms.test.js`'s source scan is a plain `source.includes(table)`, so a COMMENT
+  naming `supplier_brand_terms` outside `src/suppliers/` fails it** — the scan cannot tell prose
+  from a join. Describe those tables by role ("the per-brand commercial terms") anywhere else.
+- **Fastify validates the body BEFORE the preHandler runs**, so a guard test that posts a body the
+  schema rejects gets a 400 and proves nothing about the guard. Send a valid body where the route
+  takes one and none where it does not; `app.inject` with a payload on GET/DELETE is also its own
+  hazard (an empty JSON body is `FST_ERR_CTP_EMPTY_JSON_BODY`).
+- **A route-level enum duplicating a database CHECK is the house pattern** (`CATEGORY_ENUM` in
+  `admin-price-lists.js`), because without it a bad value reaches the CHECK and a 23514 surfaces as
+  a 500 rather than a 400. Export the enum and assert it against the live `pg_get_constraintdef`,
+  or the boundary copy and the database drift with nothing raising.
+- **A DELETE refusal is a RETURN VALUE, and the route must pipe it through `replyDelete`.** Fastify's
+  error serializer emits `{ statusCode, error, message }` and drops every custom property, so a
+  thrown error cannot carry `blockers` or `archivable` — the two fields the CRM dialog needs.
+- **A registry probe is needed most where the FK is SET NULL, not where it is RESTRICT.** RESTRICT at
+  least refuses; SET NULL succeeds, reports 200 and silently unlinks every child. Both edges out of
+  a new entity need a probe, and the SET NULL one is the load-bearing half.
 
 ---
 
@@ -269,5 +286,66 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   nothing is reachable from a browser. The CRM screen that renders these fields lands in US-007
   and is what a person must eyeball (specifically that the cost fields honour `CAPS.FINANCE_VIEW`
   masking). The tables remain unregistered in the AdminJS panel at `/panel`, deliberately.
+---
+
+## 2026-08-06T15:42:10Z - W3-US-005 - Supplier routes including DELETE
+- Implemented `src/routes/admin-suppliers.js`: `GET|POST /admin/suppliers`,
+  `GET|PATCH|DELETE /admin/suppliers/:id`, `POST /admin/suppliers/:id/archive|restore`. Every one
+  is `requireRole('backoffice')`; the guard test is parameterised over the whole surface so a route
+  added later without one fails. Registered in `src/app.js` beside the other `/admin/*` plugins.
+- Added the `supplier` entry to `src/lifecycle/registry.js` (the file's own header invites the
+  owning workstream to add it): `table: 'suppliers'`, `archivable: true`, two probes —
+  `brands` ("houses") and `price_list_items` ("price-list items"). No guard: nothing about a
+  supplier is "you may not", only "something still points at this".
+- Added `setSupplierArchived` to `src/suppliers/admin-suppliers.js` (delegates to the shared
+  `setArchived`, `extraSets: ['updated_at = now()']`). It is what a blocked DELETE's
+  `archivable: true` promises: a supplier that still invoices a house can never be hard-deleted,
+  so without an archive the only way to retire one would be to unlink its houses — destroying who
+  invoiced them.
+- Registered `brands_supplier_id_fkey` in `CONSTRAINT_BLOCKERS` (`src/lifecycle/delete.js`). It is
+  the SECOND RESTRICT edge in the schema (the first is `order_lines_colourway_id_fkey`), and
+  delete.js's own comment anticipated exactly this. Without it a lost race reports the generic
+  "related records" instead of "houses"; the status was already right either way.
+- `DISCOUNT_METHOD_ENUM` is exported from the route file and asserted against the live
+  `suppliers_discount_method_check` definition, so the boundary copy cannot drift from the CHECK.
+- Repos and files changed: atelier-api — `src/routes/admin-suppliers.js` (new),
+  `test/suppliers-routes.test.js` (new, 39 tests), `src/lifecycle/registry.js`,
+  `src/lifecycle/delete.js`, `src/suppliers/admin-suppliers.js`, `src/app.js`, `CLAUDE.md`
+  (## Suppliers), `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (44 files, 779 tests passed; was 43/732 — the new
+  file adds 39 and the registry entry adds 8 parameterised cases to
+  `test/lifecycle-registry.test.js`). CRM untouched, but its gates were run anyway:
+  `npm test` -> 0 (32 files, 389 tests), `npm run build` -> 0.
+- **Learnings:**
+  - Pattern: `price_list_items.supplier_id` being SET NULL is why the probe matters more than the
+    RESTRICT edge. RESTRICT at least refuses; SET NULL returns 200 and unlinks the whole rate
+    ledger in silence. A new lifecycle entity needs a probe per edge, and the SET NULL one is the
+    load-bearing half.
+  - Pattern: a route-level enum mirroring a database CHECK is correct here (a 23514 would otherwise
+    be a 500), but it can drift — export it and assert it against `pg_get_constraintdef`. Same
+    instrument US-003 used to pin `products.category` against `price_list_items.category`.
+  - Gotcha: `test/suppliers-terms.test.js`'s ownership scan is `source.includes(table)`, so a
+    COMMENT in `src/lifecycle/registry.js` mentioning `supplier_brand_terms` failed the suite. It
+    cannot distinguish prose from a join. Describe those tables by role outside `src/suppliers/`.
+  - Gotcha: Fastify runs body validation BEFORE the preHandler, so a parameterised guard test that
+    sends one body to every route gets 400s from the ones whose schema rejects it and proves
+    nothing. Carry the payload per route, and send none on GET/DELETE.
+  - Gotcha: `deleteOrExplain` refusals are RETURN VALUES. Piping them through `replyDelete` is not
+    stylistic — a thrown error loses `blockers` and `archivable` to Fastify's serializer.
+  - Context: `src/app.js` and `src/lifecycle/registry.js` are outside this workstream's enumerated
+    file list but are not on the forbidden list, and registry.js's header explicitly says the
+    supplier entry belongs to the workstream that creates the table. Both edits are additive and
+    touch no other workstream's lines.
+  - Context: this is the FIRST route in the API wired to `deleteOrExplain`. W2-US-001..004 add the
+    brand/collection/product/colourway/price-list-item/user DELETE routes against the same helper —
+    expect that shape (`replyDelete(reply, await deleteOrExplain(pool, '<literal>', id, { user }))`)
+    to repeat, and the CRM's `describeBlockers` to consume `blockers` + `archivable` from all of
+    them.
+- **Needs human verification:** none reachable from a browser yet — no CRM screen calls these
+  routes until US-007, which is where a person must eyeball (a) that a blocked delete keeps the
+  confirm dialog open and renders "2 houses, 3 price-list items" with an "Archive instead" button,
+  and (b) that the cost fields honour `CAPS.FINANCE_VIEW` masking. `suppliers` is still NOT
+  registered as an AdminJS panel resource, so `/panel` shows nothing new.
 ---
 

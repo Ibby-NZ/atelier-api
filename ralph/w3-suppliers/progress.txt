@@ -5,11 +5,67 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- (nothing yet — the first iteration adds to this)
+- **Migration timestamps**: latest pre-W3 migration is `1786248000000_trade-accounts.js`. W3 starts at
+  `1786334400000` and steps by 86400000 per story, so concurrent workstreams do not collide on a name.
+- **`npm run migrate` twice is the no-op proof**: the second run prints "No migrations to run!". The
+  programmatic runner (`runner({ databaseUrl, dir: 'migrations', direction: 'up', migrationsTable:
+  'pgmigrations', log: () => {} })`) returns `[]` — that is the assertion every schema test makes.
+- **Migration test template** is `test/schema.test.js` / `test/commerce-schema.test.js`: run migrations in
+  `beforeAll`, `createPool`, assert `information_schema.tables`, assert the re-run is `[]`, then one
+  `rejects.toThrow(/<constraint_name>/)` per invariant. Constraint names are what the assertions match, so
+  they are part of the contract (`suppliers_name_key`, `suppliers_discount_method_check`).
+- **Partial-index house style**: archivable tables get `<table>_archived_at_live_idx` with
+  `where: 'archived_at IS NULL'`; an optional-but-unique column gets `unique: true` +
+  `where: '<col> IS NOT NULL'` so NULLs stay repeatable.
+- **Fixture cleanup order is FK order.** Delete `price_list_items` (SET NULL) and `brands` (RESTRICT)
+  before `suppliers`, or the supplier delete 23503s inside cleanup and every later test sees leftovers.
+- **`brands` is served to anonymous visitors** — a schema test asserting no `brands` column matches
+  `/wholesale|landed|duty|freight|cost|margin|markup|discount|credit_limit|payment_terms/` is cheap and is
+  the same vocabulary `test/price-list-exposure.test.js` polices at the response layer.
+- **Any `brands` fixture needs `trade_only = false`**, including one created purely to exercise an FK —
+  the column is `NOT NULL DEFAULT true`.
 
 ---
 
 ## Story log
 
 Appended by each iteration, newest last. Never rewrite an existing entry.
+
+## 2026-08-06T03:10:15Z - W3-US-001 - Migration: suppliers, aliases and the two FK columns
+- Implemented `migrations/1786334400000_suppliers.js`: `suppliers` (unique `name`, unique `slug`,
+  `short_code`, `d365_token`, `country`, `currency`, `agent`, `incoterm`, `po_email`,
+  `discount_method` CHECK IN ('averaged','per-brand'), `created_at`, `updated_at`, `archived_at`),
+  `supplier_aliases` (supplier CASCADE, unique on `lower(btrim(alias))`), `brands.supplier_id`
+  ON DELETE RESTRICT and `price_list_items.supplier_id` ON DELETE SET NULL beside the retained
+  free-text `price_list_items.supplier`.
+- Indexes: `suppliers_archived_at_live_idx` (partial, live rows only), partial unique
+  `suppliers_d365_token_unique` and `suppliers_short_code_unique`, plus FK indexes on
+  `supplier_aliases.supplier_id`, `brands.supplier_id`, `price_list_items.supplier_id`.
+- `currency` is deliberately NULLABLE: the AC is "invoicing currency, not the country default", and a
+  NOT NULL would force a guess from `country` at create time — exactly the mistake. US-006 fills it
+  from the price list, where every row already carries the currency it was quoted in.
+- NO cost column was added to `brands` — it gains one integer FK and nothing else.
+- Repos and files changed: atelier-api — `migrations/1786334400000_suppliers.js` (new),
+  `test/suppliers-schema.test.js` (new, 12 tests), `CLAUDE.md` (## Suppliers), `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run migrate` (twice, second run "No migrations to run!") -> 0, `npm run lint` -> 0,
+  `npm test` -> 0 (40 files, 668 tests passed).
+- **Learnings:**
+  - `pgm.createIndex(table, "lower(btrim(col))", { name, unique: true })` is how a normalised unique key
+    is expressed here — the same shape `1786248000000_trade-accounts.js` uses for the legacy name indexes.
+  - Gotcha: an alias uniqueness test needs TWO suppliers, or the insert conflicts on nothing meaningful;
+    and the assertion must match the INDEX name, not a constraint name — a unique index raises
+    `supplier_aliases_alias_lower_unique`, there is no `_key` suffix.
+  - Gotcha: a RESTRICT violation surfaces as pg code `23503` with a message naming the CONSTRAINT
+    (`brands_supplier_id_fkey`); assert on `.code`, which is stable, rather than on the text.
+  - Context: supplier vocabulary comes from `src/seed/data/suppliers.js` (`method: 'averaged' |
+    'per-brand'`, `currency`, `agent`, `incoterm`, `poEmail`) and the alias spellings from
+    `SUPPLIER_OVERRIDES` in `scripts/convert-price-lists.js` (JV, JV DESIGN LICENSE, JWALL, C&C MILANO)
+    — both are what US-006 backfills from.
+  - Context: `d365_token` is the supplier token embedded in D365 item codes (`F3518-003 23PF` → `PF`);
+    it identifies the SUPPLIER, not the brand, per `docs/d365-export-analysis.md`.
+- **Needs human verification:** none — schema only, no screen and no endpoint. The columns become
+  visible in the AdminJS panel at `/panel` (it introspects every table with a primary key), which a
+  human may want to glance at once the CRM screen lands in US-007.
+---
 

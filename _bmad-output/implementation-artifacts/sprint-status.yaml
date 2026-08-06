@@ -111,7 +111,7 @@ epics:
     branch: aug6/w8-colour-files
     status: pending
     stories:
-      US-001: pending   # Adapter registry and the row-extraction harness
+      US-001: done      # Adapter registry and the row-extraction harness
       US-002: pending   # Adapters for the single-sheet, single-brand files
       US-003: pending   # Adapters for the multi-sheet and multi-brand files
       US-004: pending   # Normalised output, loud failure, per-file summary

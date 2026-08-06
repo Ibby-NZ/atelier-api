@@ -5,7 +5,25 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- (nothing yet — the first iteration adds to this)
+- **A worksheet is addressed by NAME, never by `sheet<N>.xml`.** The number in the filename is the
+  order the sheets were CREATED in, not the order they appear in, and one file in this corpus
+  (C&C Milano) has a single sheet called `sheet.xml` with no number at all. Resolve
+  `xl/workbook.xml` -> `xl/_rels/workbook.xml.rels` by relationship id. A rels `Target` may be
+  relative to `xl/` (`worksheets/sheet1.xml`) or absolute from the package root
+  (`/xl/worksheets/sheet.xml`) — handle both.
+- **The `x:` namespace prefix is not a D365 quirk.** CLAUDE.md records it for D365's `<x:row>`;
+  C&C Milano's supplier-written workbook root is `<x:workbook>` too. Anything scanning
+  SpreadsheetML by tag name must resolve the prefix via `namespacePrefix()` first. Matching a bare
+  tag name silently finds nothing, which reads as "empty workbook", not as a parser bug. The same
+  applies to the ATTRIBUTE prefix: `r:id` comes from `xmlns:r="…/relationships"`, so resolve it
+  from the declaration rather than assuming the letter.
+- **`scripts/lib/` is dependency-free by design and stays that way.** `zip.js` + `xml.js` +
+  `xlsx.js` are enough to read any of these workbooks; `node_modules` is a symlink to the main
+  checkout, so adding a package corrupts every other worktree on this machine.
+- **`incoming/` is gitignored, so no test may read it.** Build a real xlsx in memory instead: a
+  genuine deflated zip (`deflateRawSync`) of genuine SpreadsheetML. `test/converters.test.js`
+  already had the `buildZip` helper; `test/colour-files.test.js` carries its own copy because the
+  converters test is another workstream's file.
 
 ---
 
@@ -13,3 +31,71 @@ Story-specific detail belongs in the per-story entries below, not here.
 
 Appended by each iteration, newest last. Never rewrite an existing entry.
 
+## 2026-08-06T16:05:00Z - W8-US-001 - Adapter registry and the row-extraction harness
+
+- **What was implemented**
+  - `scripts/lib/colour-sheet.js` — the shared row-extraction harness. Resolves sheet name -> zip
+    path, yields dense rows, and LOCATES THE HEADER ROW BY MATCHING LABELS within a bounded scan
+    window (`HEADER_SCAN_LIMIT = 250`). The adapter's column map IS the label set the header is
+    recognised by, so the map and the recognition rule cannot disagree. `select(cells)` returns the
+    declared fields of a row, trimmed.
+  - `scripts/lib/colour-adapters/index.js` — the registry keyed by filename prefix, with
+    `assertAdapter`/`assertRegistry` running at import over every entry, `selectAdapter` (pure,
+    longest-prefix-wins) and `matchAdapter`. An entry may declare itself `unsupported` with a
+    reason — deliberately distinct from an unknown filename.
+  - `scripts/convert-colour-files.js` + `npm run convert:colour` — the harness driver. Walks the
+    drop directory, resolves an adapter per file, opens every declared sheet and reports
+    `file:sheet: header row N, M data row(s)`. A DECLARED refusal is reported and is not fatal; an
+    UNKNOWN file is listed on stderr and exits 1. It writes no output file — the normalised write
+    is US-004's, and the header comment says so.
+  - `test/colour-files.test.js` — 22 tests, no database, no fixtures on disk.
+- **Repos and files changed** — atelier-api only:
+  `scripts/lib/colour-sheet.js` (new), `scripts/lib/colour-adapters/index.js` (new),
+  `scripts/convert-colour-files.js` (new), `test/colour-files.test.js` (new),
+  `package.json` (scripts only), `CLAUDE.md` (new `## Colour files` section).
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 771 tests, 22 new).
+- **Learnings:**
+  - Patterns (general ones are also in `## Codebase Patterns` above):
+    - The registry deliberately separates DECLARED-unsupported from UNKNOWN. A declared refusal is
+      a decision someone recorded (the de Le Cuona PDF, US-003); an unknown filename is a drop
+      nobody has looked at and must fail the run, because a skipped file looks exactly like a file
+      that imported cleanly.
+    - `selectAdapter(adapters, filename)` takes the registry as an argument and `matchAdapter`
+      binds it to `ADAPTERS`. That is what let the longest-prefix rule be tested while the registry
+      is still empty — the alternative (re-implementing the rule in the test) asserts nothing.
+    - A duplicated label is only an error on a row that OTHERWISE matches. Checking earlier would
+      make any preamble row carrying two blank-ish repeats abort the file.
+  - Gotchas for the next iteration:
+    - **Measured header rows, so no adapter has to rediscover them:** C&C Milano/Listino 1,
+      Colefax/Export Prices 1, JV/(all ten sheets) 1, Jean Monro/JM 1, Jim Thompson 2026/CODE LIST
+      1, Maria Flora/Foglio1 1, Pierre Frey 1; Jim Thompson SS'26/FABRIC 2, Liberty/Sheet1 2,
+      Madeaux/UK Export 2; Perennials WC/ALL SKUS 3; Perennials Fabrics/Fabrics 4;
+      Vervain/All Colors 77, Clarence House/All Colors 98, S Harris 104, Trend 105, Stroheim 106.
+      Clarence House's *Pattern Only* sheet is 102. Row numbers count `<row>` elements from 1 — a
+      position in the file, not the spreadsheet's row label.
+    - **`sheetRows` skips no rows but omits empty cells**, so a data row can be SHORTER than the
+      header. `select` reads an absent cell as `''`, never `undefined` — do not `.trim()` a raw
+      `cells[i]` yourself.
+    - The five US houses (Clarence House, S Harris, Stroheim, Trend, Vervain) are the same layout
+      with the same terms preamble and a `Pattern Only` + `All Colors` sheet pair. `All Colors` is
+      the colourway sheet; `Pattern Only` has no colour column at all. That is one adapter shape
+      reused five times in US-003, not five adapters.
+    - Jean Monro's `JM` sheet has THREE sheets (JM/NH/RSC) and the header labels differ between
+      them (`PRICE 2026` vs `Price 2026`, and the `name`/`DESCRIPTION` columns swap position).
+      Label matching is case- and whitespace-insensitive, so `PRICE 2026` covers both; the column
+      ORDER difference is why the map must be by label and never by index.
+    - Jim Thompson's FABRIC sheet repeats `H`, `V`, `CM.` and `IN.` in its header. Declaring one of
+      those as a column will throw "header carries … more than once" — by design. Use the
+      unambiguous labels (`ARTICLE CODE`, `ARTICLE NAME`, `BRAND`, the priced column).
+    - `.DS_Store` is present in `incoming/colour-files/`; the converter filters dot-prefixed names.
+    - `incoming/` IS populated in this worktree (unlike `incoming/pricing-templates/`, which
+      CLAUDE.md notes exists only in the main checkout), so `node scripts/convert-colour-files.js`
+      runs here. It still must never be written to.
+  - Context: harness `scripts/lib/colour-sheet.js`; registry `scripts/lib/colour-adapters/index.js`;
+    driver `scripts/convert-colour-files.js`; tests `test/colour-files.test.js`. The architecture
+    section is `_bmad-output/planning-artifacts/architecture.md` "## Colour files".
+- **Needs human verification:** none — no screen, no route and no database table is touched by this
+  story. The one thing worth a human eye is the console output of
+  `npm run convert:colour`, which today lists all 18 drops as unsupported (no adapter is registered
+  yet) and exits 1. That is the intended state until US-002/US-003 land.
+---

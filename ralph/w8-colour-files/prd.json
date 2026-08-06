@@ -18,8 +18,8 @@
         "atelier-api"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T16:05:00Z"
     },
     {
       "id": "US-002",

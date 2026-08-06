@@ -24,6 +24,22 @@ Story-specific detail belongs in the per-story entries below, not here.
   genuine deflated zip (`deflateRawSync`) of genuine SpreadsheetML. `test/converters.test.js`
   already had the `buildZip` helper; `test/colour-files.test.js` carries its own copy because the
   converters test is another workstream's file.
+- **A supplier's own spelling of a house is not the catalogue's, and the file must never invent
+  one.** "Mariaflora" is `Maria Flora`, "Liberty" is `Liberty London`, and the same trap is already
+  recorded for the price lists ("Colefax & Fowler" vs "Colefax and Fowler"). Map the ones you can
+  evidence in a declared alias table, pass an unknown spelling through raw, and let the import
+  report it — a house created silently is the one outcome nobody can undo.
+- **The price list is the corpus that identifies an unlabelled code prefix.** `src/seed/data/
+  price-lists.json` holds 19.5k rows across 40 suppliers with their `code` and `product_range`, so
+  a mystery token can be looked up rather than guessed: `NH-AFTERALLTOO` in there under supplier
+  "Nicky Haslam" is what identified the `NH` sheet of the Jean Monro workbook. When nothing in it
+  matches, that is an answer too — emit the token and let a human name the house.
+- **Verify a derivation against the file's own redundancy before shipping it.** Several of these
+  sheets decompose a value into extra columns they then leave blank further down (Jean Monro splits
+  its item codes across three unlabelled cells for the first 102 rows of one sheet and none of the
+  last 50). Deriving the value and diffing it against those cells over the whole file turns "this
+  regex looks right" into a measurement — and the rows where the file stopped filling them in are
+  exactly the rows the derivation exists for.
 
 ---
 
@@ -98,4 +114,81 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   story. The one thing worth a human eye is the console output of
   `npm run convert:colour`, which today lists all 18 drops as unsupported (no adapter is registered
   yet) and exits 1. That is the intended state until US-002/US-003 land.
+---
+
+## 2026-08-06T04:20:44Z - W8-US-002 - Adapters for the single-sheet, single-brand files
+
+- **What was implemented**
+  - `scripts/lib/colour-adapters/records.js` — the colourway record and the reader over it.
+    A record is `{ brand, design, designCode, colourCode, colourName }`; a sheet declares its
+    columns and, where the layout needs it, a `row` mapper returning one record, several, or none.
+    `sheetColourways` skips a blank row and a row that repeats the header (a general rule: every
+    declared cell equalling its own label), and rethrows a mapper's error carrying
+    `file:sheet:row`.
+  - Six adapters over five files, all six named in the story: `jean-monro.js` (3 sheets, 3
+    houses), `madeaux.js`, `liberty.js` (2 overlapping sheets), `maria-flora.js` (2 houses in one
+    sheet), `perennials.js` (the fabrics and wallcoverings drops).
+  - `colour-adapters/index.js` — registers them; `assertSheet` now also requires a `brand`, checks
+    `row` is a function, and — for a sheet with NO mapper — that every declared column is a record
+    field and that `design`/`colourCode`/`colourName` are all present.
+  - `scripts/lib/colour-sheet.js` — one-word fix: `openSheet` read `spec.sheet` while the registry
+    declared `spec.name`, so a registry spec could never open its sheet. US-001's own tests passed
+    because they hand-wrote `{ sheet }`; the driver would have thrown on the first real adapter.
+  - `scripts/convert-colour-files.js` — reports `N row(s) -> M colourway(s)` per sheet and a total.
+- **Repos and files changed** — atelier-api only:
+  `scripts/lib/colour-adapters/{records,jean-monro,madeaux,liberty,maria-flora,perennials}.js`
+  (new), `scripts/lib/colour-adapters/index.js`, `scripts/lib/colour-sheet.js`,
+  `scripts/convert-colour-files.js`, `test/colour-files.test.js` (22 -> 39 tests), `CLAUDE.md`.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 788 tests).
+- **Corpus result** (`node scripts/convert-colour-files.js`, 4,918 colourways, exits 1 because
+  US-003's twelve files are still unknown, which is the intended state):
+  JM 321, NH 152, RSC 87, Liberty "Sheet1 (2)" 557 + "Sheet1" 720, Madeaux 150 rows -> 452,
+  Maria Flora 1441, Perennials Fabrics 867 + Trims 101, Perennials Wallcoverings 220.
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - The four fields the story asks for are not enough on their own: a fifth, `designCode`, is
+      what the supplier's PRICE list keys on (Maria Flora's pattern number, Perennials' quality,
+      `NH-AFTERALLTOO`), so US-005 would have had to re-read every file without it. It is NOT the
+      colour code and neither may be joined to `price_list_items.code`.
+    - One row is not one colourway. Madeaux prints one row per design and names that design's
+      colours inside a cell, so a mapper returns an ARRAY — which is why the reader normalises one
+      result or many rather than assuming a 1:1 row mapping.
+  - Gotchas for the next iteration:
+    - **Jean Monro is not one house.** JM is Jean Monro, NH is Nicky Haslam (identified from the
+      price list's own `NH-…` codes) and **RSC is unidentified** — no price list carries an `RSC-`
+      code and nothing in the repo names it. The adapter emits the token `RSC` so US-006 reports it
+      as an unknown house. A human must name it before those 87 colourways can be imported.
+    - **Perennials has no brand row in the catalogue at all** (41 brands, none of them Perennials),
+      and neither has Nicky Haslam. Expect US-006 to report both.
+    - The three Jean Monro sheets disagree about what their columns MEAN — `name` is the design on
+      JM and the colour on NH and RSC — which is the sharpest case yet for the column map being by
+      label per sheet and never shared.
+    - **`Trims ` has a trailing space in its real sheet name.** A sheet is addressed by name, so
+      the adapter declares the space. Do not "tidy" it.
+    - Perennials Wallcoverings reprints all four of its type sheets in `ALL SKUS` (41+23+75+81=220,
+      exactly), so only `ALL SKUS` is declared. The fabrics file is the opposite: `Fabrics` and
+      `Trims ` are disjoint and both are read.
+    - **Liberty's two sheets overlap without either containing the other** — 54 codes only in
+      "Sheet1 (2)", 217 only in "Sheet1". Reading one drops between 50 and 200 colourways; reading
+      both means US-004 must dedupe, and the two sheets price differently ("PRICE £ EX VAT" vs
+      "DISTRIBUTOR PRICE"), which US-005 has to decide between.
+    - **Maria Flora repeats 73 of its 1,441 rows** — the same (brand, product, colour code) appears
+      twice, e.g. BoujeeVelvet at rows 149-152 and again at 1320-1323. US-004/US-006 need a dedupe
+      rule; it is not a parsing fault.
+    - Both Liberty sheets and Madeaux repeat their header mid-sheet. `openSheet` matches the FIRST
+      header, so every later copy arrives as a data row — handled once in the reader, not per
+      adapter.
+  - Context: the reader is `scripts/lib/colour-adapters/records.js`, one module per layout family
+    beside it, the registry `index.js`, the harness `scripts/lib/colour-sheet.js`, tests
+    `test/colour-files.test.js`.
+- **Needs human verification:** no screen, route or table is touched. Three data questions a person
+  must settle before US-006 writes anything:
+  1. **What house is Jean Monro's `RSC` sheet?** 87 colourways (BERNARDO PAISLEY, OTTOLINE, KANPUR,
+     THE HARE) are filed under the token until someone names it.
+  2. **Nicky Haslam's design names are derived from the item code** ("AFTERALLTOO", "WINTER-WHEAT",
+     "ODBALCONY-STRIPE") because that sheet has no design column — the price list spells the same
+     design "AFTER ALL TOO". Eyeball a dozen against the supplier's own list.
+  3. **Maria Flora's colour code is the colour's alone** ("11"), with the pattern number kept
+     separately as `designCode` ("60656"); nothing joins them, because the supplier never wrote a
+     separator. Confirm that is the SKU shape the office wants.
 ---

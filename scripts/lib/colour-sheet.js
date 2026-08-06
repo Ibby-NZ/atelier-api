@@ -137,15 +137,15 @@ const matchHeader = (cells, wanted, seen, context) => {
 /**
  * Open one declared sheet: locate its header, then hand back the rows under it.
  *
- * `spec` is an adapter's sheet declaration — `{ sheet, columns }`, optionally
+ * `spec` is an adapter's sheet declaration — `{ name, columns }`, optionally
  * `scanLimit`. `columns` maps the adapter's own field names onto the labels the
  * supplier printed, and that map is both the column map and the thing the
  * header is recognised by, so the two can never disagree.
  */
 export const openSheet = (workbook, spec) => {
   const { source, zip, strings, paths } = workbook
-  const context = `${source}:${spec.sheet}`
-  const path = paths.get(spec.sheet)
+  const context = `${source}:${spec.name}`
+  const path = paths.get(spec.name)
   if (path === undefined) {
     throw new Error(
       `${context}: no such sheet; the workbook has ${[...paths.keys()].map(quote).join(', ')}`,
@@ -178,7 +178,7 @@ export const openSheet = (workbook, spec) => {
 
   const columnAt = new Map([...byLabel].map(([label, field]) => [field, found.get(label)]))
   return Object.freeze({
-    name: spec.sheet,
+    name: spec.name,
     headerRow,
     columnAt,
     rows,

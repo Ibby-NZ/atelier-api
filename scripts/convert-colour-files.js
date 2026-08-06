@@ -8,10 +8,11 @@
  * labels the adapter declares. lib/colour-adapters/ is the registry that says
  * which layout a filename is.
  *
- * This is the harness driver. Turning the rows into normalised colourway
- * records and writing them lands in a later story (see ralph/w8-colour-files);
- * today the script proves every file is accounted for and every declared header
- * is found, and writes nothing.
+ * This is the harness driver. Writing the normalised records out, and the
+ * per-file summary that goes with a write, land in a later story (see
+ * ralph/w8-colour-files); today the script proves every file is accounted for,
+ * every declared header is found and every declared row maps, and it writes
+ * nothing.
  *
  * Usage: node scripts/convert-colour-files.js [input-dir]
  */
@@ -20,22 +21,32 @@ import { join, resolve, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openColourWorkbook } from './lib/colour-sheet.js'
 import { matchAdapter, registeredPrefixes } from './lib/colour-adapters/index.js'
+import { sheetColourways } from './lib/colour-adapters/records.js'
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DEFAULT_IN = join(REPO, 'incoming', 'colour-files')
 
-const isBlank = (cells) => !cells.some((cell) => String(cell).trim() !== '')
-
-/** One reading per declared sheet: where its header was, and how many rows follow. */
+/**
+ * One reading per declared sheet: where its header was, how many rows yielded
+ * and how many colourways they came to.
+ *
+ * The two counts differ on purpose. Madeaux prints one row per design and names
+ * its colours inside a cell, so a row there is worth several colourways; a
+ * banner or a repeated header is worth none and is not counted as a row.
+ */
 const readSheets = (path, adapter) => {
   const workbook = openColourWorkbook(readFileSync(path), basename(path))
   return adapter.sheets.map((spec) => {
     const sheet = workbook.open(spec)
+    let records = 0
     let rows = 0
-    for (const [, cells] of sheet.rows) {
-      if (!isBlank(cells)) rows += 1
+    let previous = 0
+    for (const [rowNumber] of sheetColourways(sheet, spec, workbook.source)) {
+      records += 1
+      if (rowNumber !== previous) rows += 1
+      previous = rowNumber
     }
-    return { sheet: sheet.name, headerRow: sheet.headerRow, rows }
+    return { sheet: sheet.name, headerRow: sheet.headerRow, rows, records }
   })
 }
 
@@ -49,6 +60,7 @@ const convert = (inputDir) => {
   const readings = []
   const declined = []
   const unknown = []
+  let colourways = 0
 
   for (const name of names) {
     const adapter = matchAdapter(name)
@@ -61,8 +73,9 @@ const convert = (inputDir) => {
       continue
     }
     for (const reading of readSheets(join(inputDir, name), adapter)) {
+      colourways += reading.records
       readings.push(`${name}:${reading.sheet}: header row ${reading.headerRow}, `
-        + `${reading.rows} data row(s)`)
+        + `${reading.rows} row(s) -> ${reading.records} colourway(s)`)
     }
   }
 
@@ -83,7 +96,8 @@ const convert = (inputDir) => {
     return
   }
 
-  process.stdout.write(`Read ${names.length} file(s) from ${inputDir}\n`)
+  process.stdout.write(`Read ${names.length} file(s) from ${inputDir}, `
+    + `${colourways} colourway(s)\n`)
 }
 
 const [inputDir = DEFAULT_IN] = process.argv.slice(2)

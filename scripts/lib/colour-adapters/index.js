@@ -18,27 +18,54 @@
  * several thousand rows into a file.
  */
 import { normaliseLabel } from '../colour-sheet.js'
+import { RECORD_FIELDS, REQUIRED_COLUMNS } from './records.js'
+import { JEAN_MONRO } from './jean-monro.js'
+import { LIBERTY } from './liberty.js'
+import { MADEAUX } from './madeaux.js'
+import { MARIA_FLORA } from './maria-flora.js'
+import { PERENNIALS_FABRICS, PERENNIALS_WALLCOVERINGS } from './perennials.js'
 
 const isText = (value) => typeof value === 'string' && value.trim() !== ''
 
 const assertSheet = (sheet, at) => {
   if (!isText(sheet?.name)) throw new Error(`${at}: every sheet needs a name`)
+  const where = `${at}: sheet "${sheet.name}"`
+  // Every sheet names the house it holds, even the one file whose rows carry a
+  // Brand column — that column is the row's override, not a reason to leave the
+  // sheet's own house unstated.
+  if (!isText(sheet.brand)) throw new Error(`${where} must name a brand`)
+  if (sheet.row !== undefined && typeof sheet.row !== 'function') {
+    throw new Error(`${where}: row must be a function`)
+  }
   const entries = Object.entries(sheet.columns ?? {})
-  if (entries.length === 0) throw new Error(`${at}: sheet "${sheet.name}" declares no columns`)
+  if (entries.length === 0) throw new Error(`${where} declares no columns`)
   const byLabel = new Map()
   for (const [field, label] of entries) {
-    if (!isText(label)) {
-      throw new Error(`${at}: sheet "${sheet.name}" column "${field}" has an empty label`)
-    }
+    if (!isText(label)) throw new Error(`${where} column "${field}" has an empty label`)
     const normalised = normaliseLabel(label)
     const earlier = byLabel.get(normalised)
     // Two fields onto one label is a typo far more often than an intention, and
     // it is invisible afterwards: both fields simply carry the same cell.
     if (earlier !== undefined) {
-      throw new Error(`${at}: sheet "${sheet.name}" columns "${earlier}" and "${field}" `
+      throw new Error(`${where} columns "${earlier}" and "${field}" `
         + `both declare "${normalised}"`)
     }
     byLabel.set(normalised, field)
+  }
+  // Without a `row` mapper the selected cells ARE the record, so the columns
+  // have to be the record's own fields and the three a colourway cannot be
+  // named without must all be there. A sheet WITH a mapper may select anything
+  // it likes (Jean Monro's RSC reads a description it never emits).
+  if (sheet.row !== undefined) return
+  const fields = entries.map(([field]) => field)
+  const foreign = fields.filter((field) => !RECORD_FIELDS.includes(field))
+  if (foreign.length > 0) {
+    throw new Error(`${where} has no row mapper, so column(s) `
+      + `"${foreign.join('", "')}" name nothing a record carries`)
+  }
+  const missing = REQUIRED_COLUMNS.filter((field) => !fields.includes(field))
+  if (missing.length > 0) {
+    throw new Error(`${where} has no row mapper and declares no "${missing.join('", "')}"`)
   }
 }
 
@@ -75,12 +102,18 @@ export const assertRegistry = (adapters) => {
   return adapters
 }
 
-// Adapters land here as US-002 (single-sheet, single-brand) and US-003
-// (multi-sheet, multi-brand, and the PDF's `unsupported` declaration) add them,
-// one module per layout family. Until then every drop is an unknown file and
-// the converter says so and exits non-zero, which is the honest state: nothing
-// has been mapped yet.
-export const ADAPTERS = assertRegistry(Object.freeze([]))
+// One module per layout family. The straightforward drops are here; the
+// multi-sheet, multi-brand files and the PDF's `unsupported` declaration land
+// alongside them. A drop nothing claims stays an unknown file and the converter
+// says so and exits non-zero — never a silent skip.
+export const ADAPTERS = assertRegistry(Object.freeze([
+  JEAN_MONRO,
+  LIBERTY,
+  MADEAUX,
+  MARIA_FLORA,
+  PERENNIALS_FABRICS,
+  PERENNIALS_WALLCOVERINGS,
+]))
 
 /**
  * The adapter in `adapters` claiming `filename`, or null.

@@ -377,19 +377,21 @@ const colourway = (fields) => ({
 /**
  * Every record ONE of an adapter's declared sheets yields, for the cases worth
  * pinning below its first three rows. The spec comes off the registry, so the
- * declaration under test is the one the converter uses.
+ * declaration under test is the one the converter uses — and a file whose other
+ * sheets are not in the fixture (Jannelli & Volpi declares nine) is read one
+ * sheet at a time through here.
  */
-const sheetRecords = (file, name, rows) => {
+const sheetRecords = (file, name, rows, flavour = 'excel') => {
   const spec = matchAdapter(file).sheets.find((sheet) => sheet.name === name)
-  const workbook = openColourWorkbook(buildWorkbook([{ name, rows }]), file)
+  const workbook = openColourWorkbook(buildWorkbook([{ name, rows }], flavour), file)
   return [...sheetColourways(workbook.open(spec), spec, file)].map(([, record]) => record)
 }
 
 /** The first `limit` records each declared sheet yields, keyed by sheet name. */
-const firstRecords = (file, sheets, limit = 3) => {
+const firstRecords = (file, sheets, limit = 3, flavour = 'excel') => {
   const adapter = matchAdapter(file)
   expect(adapter, `no adapter claims ${file}`).not.toBeNull()
-  const workbook = openColourWorkbook(buildWorkbook(sheets), file)
+  const workbook = openColourWorkbook(buildWorkbook(sheets, flavour), file)
   const found = new Map()
   for (const { sheet, record } of colourways(workbook, adapter)) {
     const seen = found.get(sheet) ?? []
@@ -732,6 +734,403 @@ describe('colour-adapters — Perennials', () => {
     expect(wallcoverings.sheets.map((spec) => spec.name)).toEqual(['ALL SKUS'])
     const fabrics = matchAdapter('Perennials Fabrics Price Guide_Spring26 _USA.xlsx')
     expect(fabrics.sheets.map((spec) => spec.name)).toEqual(['Fabrics', 'Trims '])
+  })
+})
+
+describe('colour-adapters — Colefax Group', () => {
+  const FILE = 'Colefax Group 2026 pricelist Colefax Larsen Manuel Canovas Jane Churchill.xlsx'
+  const HEADER = ['Brand', 'Stock-Number', 'Design', 'Colourway', 'General-Prod-Type']
+  const sheet = (rows) => [{ name: 'Export Prices', rows }]
+
+  it('files a row under the house its brand letter names, and splits the stock number', () => {
+    const found = firstRecords(FILE, sheet([
+      HEADER,
+      ['C', '01020/01', 'Bowood', 'Green/Grey', 'PRT'],
+      ['J', 'J0025-01', 'Asta', 'Oyster', 'WVE'],
+      ['L', 'L001W-01', 'Hoku WC', 'Natural', 'WPR'],
+      ['M', '01286/01', 'Pav de Bidaine', 'Original', 'PRT'],
+    ]), 4)
+    expect(found.get('Export Prices')).toEqual([
+      colourway({
+        brand: 'Colefax & Fowler',
+        design: 'Bowood',
+        designCode: '01020',
+        colourCode: '01020/01',
+        colourName: 'Green/Grey',
+      }),
+      colourway({
+        brand: 'Jane Churchill',
+        design: 'Asta',
+        designCode: 'J0025',
+        colourCode: 'J0025-01',
+        colourName: 'Oyster',
+      }),
+      colourway({
+        brand: 'Larsen',
+        design: 'Hoku WC',
+        designCode: 'L001W',
+        colourCode: 'L001W-01',
+        colourName: 'Natural',
+      }),
+      colourway({
+        brand: 'Manuel Canovas',
+        design: 'Pav de Bidaine',
+        designCode: '01286',
+        colourCode: '01286/01',
+        colourName: 'Original',
+      }),
+    ])
+  })
+
+  it('refuses a letter no house is declared for rather than inventing a brand', () => {
+    // A letter is a code, not a spelling, so it cannot pass through raw the way
+    // an unmapped house name does — that would file stock under a house "X".
+    expect(() => firstRecords(FILE, sheet([HEADER, ['X', 'X0001-01', 'Verdure', 'Blue', 'PRT']])))
+      .toThrow(/Export Prices:2: brand letter "X" is not one of C, J, L, M/)
+  })
+})
+
+describe('colour-adapters — Jannelli & Volpi', () => {
+  const FILE = 'JV_EXPORT DEALER_SET_TV8_1 JUN 2026_agg 19062026.xlsx'
+  const HEADER = ['BRAND', 'COLLECTION', 'FAM', 'ITEM', 'DESIGN', 'SALES UNIT']
+
+  it('carries the item code with no colour name, because the file names none', () => {
+    // 6570 and 6571 are two colourways of RIBBON GRASS and the file says
+    // nothing about how they differ. The price list agrees — it repeats the
+    // design as its description — so no colour name is invented here.
+    expect(sheetRecords(FILE, 'JANNELLI&VOLPI', [
+      HEADER,
+      ['JANNELLI&VOLPI', 'JV ALABASTER  ***COLLECTION***', 'J27', '6570', 'RIBBON GRASS', 'Roll'],
+      ['JANNELLI&VOLPI', 'JV ALABASTER  ***COLLECTION***', 'J27', '6571', 'RIBBON GRASS', 'Roll'],
+    ])).toEqual([
+      colourway({ brand: 'JANNELLI&VOLPI', design: 'RIBBON GRASS', colourCode: '6570' }),
+      colourway({ brand: 'JANNELLI&VOLPI', design: 'RIBBON GRASS', colourCode: '6571' }),
+    ])
+  })
+
+  it('spells the two houses the catalogue has, and leaves the six it has not', () => {
+    expect(sheetRecords(FILE, 'ARMANI CASA', [
+      HEADER,
+      ['ARMANI CASA', 'PRECIOUS FIBRES 1', 'GA1', '9000', 'NABUCCO', 'Linear meter'],
+    ])[0].brand).toBe('Armani Casa')
+    expect(sheetRecords(FILE, 'MISSONI', [
+      HEADER,
+      ['MISSONI WALLCOVERINGS', 'MISSONI HOME 1', 'M1A', '10000', 'ANEMONES', 'Roll'],
+    ])[0].brand).toBe('Missoni Home')
+    // Both spellings of one house are emitted as found: choosing between them
+    // is naming a house, and neither is in the catalogue to be named after.
+    expect(sheetRecords(FILE, 'DESIGN LICENCE', [
+      HEADER,
+      ['DESIGN LICENSE', 'COMPOSITION a tribute to Kandinsky', 'AD3', '24000', 'COMPOSIZIONE', 'Roll'],
+      ['DESIGN LICENCE', 'COMPOSITION a tribute to Kandinsky', 'AD3', '24001', 'COMPOSIZIONE', 'Roll'],
+    ]).map((record) => record.brand)).toEqual(['DESIGN LICENSE', 'DESIGN LICENCE'])
+  })
+
+  it('declines a sample and a substrate row, and fails a coded row with no design', () => {
+    // Sample books and cards carry item codes and design names like any other
+    // row; the sales unit is the only thing that distinguishes them.
+    expect(sheetRecords(FILE, 'ARMANI CASA', [
+      HEADER,
+      ['ARMANI CASA', 'PRECIOUS FIBERS 3', 'ZI2', 'CA700', 'SAMPLE CARD GA7 9700 w. 44 x h. 34', 'Card'],
+      ['ARMANI CASA', 'PRECIOUS FIBRES 1', 'GA1', '9001', 'FUKUE', 'Linear meter'],
+    ])).toEqual([colourway({ brand: 'Armani Casa', design: 'FUKUE', colourCode: '9001' })])
+    // The CO.DE sheet prices its substrates by the metre and gives them no item
+    // code at all — nothing can be filed under a code that is not there.
+    expect(sheetRecords(FILE, 'CO.DE', [
+      HEADER,
+      ['CO.DE', 'CO.DE 01|CO.DE 02| CO.DE 03| CO.DE 04', 'C1A', '', 'BASIC', 'Linear meter'],
+      ['CO.DE', 'FABULA', 'C1A', 'D0001', 'MELOGRANO', 'Roll'],
+    ])).toEqual([colourway({ brand: 'CO.DE', design: 'MELOGRANO', colourCode: 'D0001' })])
+    expect(() => sheetRecords(FILE, 'JWALL', [
+      HEADER,
+      ['JWALL', 'PRIMUS RELOADED ', 'W01', '50000', '', 'Roll'],
+    ])).toThrow(/JWALL:2: item "50000" names no design/)
+  })
+
+  it('declares the nine sheets that hold stock, not the accessories sheet', () => {
+    // ACCESSORIES is the tenth sheet and a different layout (ART,
+    // DESCRIPTION/USE AND CONSUMPTION) holding display and marketing items.
+    const names = matchAdapter(FILE).sheets.map((spec) => spec.name)
+    expect(names).toEqual([
+      'JANNELLI&VOLPI', 'ALTAGAMMA MODERN LIVING', 'JV Contract', 'DESIGN LICENCE', 'JWALL',
+      'ARMANI CASA', 'MISSONI', 'CO.DE', 'JV FABRICS',
+    ])
+    expect(names).not.toContain('ACCESSORIES')
+  })
+})
+
+describe('colour-adapters — Pierre Frey', () => {
+  const FILE = 'Pierre Frey DISTRIBUTOR - 2026 FABRIC  WPP IN DETAILS '
+    + '- Pierre Frey Boussac Fadini Borghi Le Manach Braquenie.xlsx'
+  const HEADER = ['Ref Pattern', 'Name', 'Ref SKU available', 'Name SKU available',
+    'Number of SKU available', 'Unit', 'Brand', 'Type of product']
+  const sheet = (rows) => [{ name: '2026-29-01-PF-FICHIER DETAILLE', rows }]
+
+  it('cuts the colour out of the SKU name and keeps the pattern reference', () => {
+    const found = firstRecords(FILE, sheet([
+      HEADER,
+      ['B063A', 'LES BLEUETS -', 'B063A001', 'LES BLEUETS FD CREME 1', '1', 'M', 'Braquenié', 'Tissu'],
+      ['B080A', 'LE GRAND CORAIL', 'B080A004', 'LE GRAND CORAIL BLEU BLC 04', '4', 'M', 'Braquenié', 'Tissu'],
+      ['B080A', 'LE GRAND CORAIL', 'B080A003', 'LE GRAND CORAIL JAUNE 3', '4', 'M', 'Braquenié', 'Tissu'],
+    ]))
+    expect(found.get('2026-29-01-PF-FICHIER DETAILLE')).toEqual([
+      // The design cell ends in the separator it would have joined a variant on.
+      colourway({
+        brand: 'Braquenié',
+        design: 'LES BLEUETS',
+        designCode: 'B063A',
+        colourCode: 'B063A001',
+        colourName: 'FD CREME 1',
+      }),
+      colourway({
+        brand: 'Braquenié',
+        design: 'LE GRAND CORAIL',
+        designCode: 'B080A',
+        colourCode: 'B080A004',
+        colourName: 'BLEU BLC 04',
+      }),
+      colourway({
+        brand: 'Braquenié',
+        design: 'LE GRAND CORAIL',
+        designCode: 'B080A',
+        colourCode: 'B080A003',
+        colourName: 'JAUNE 3',
+      }),
+    ])
+  })
+
+  it('keeps an abbreviated SKU name whole rather than cutting it at a guess', () => {
+    const found = firstRecords(FILE, sheet([
+      HEADER,
+      ['B080C', 'LE GRAND CORAIL - Rayure 2 chemins', 'B080C004', 'GR CORAIL RAY 2CH BLEU BL 4',
+        '2', 'M', 'Braquenié', 'Tissu'],
+      // The SKU name IS the design: the supplier named no colour, so neither
+      // does the record.
+      ['F3512', 'MADAME DE SEVIGNE', 'F3512001', 'MADAME DE SEVIGNE', '1', 'M', 'Pierre Frey', 'Tissu'],
+    ]))
+    expect(found.get('2026-29-01-PF-FICHIER DETAILLE').map((record) => record.colourName))
+      .toEqual(['GR CORAIL RAY 2CH BLEU BL 4', ''])
+  })
+
+  it('passes the house the catalogue has no row for through raw', () => {
+    const found = firstRecords(FILE, sheet([
+      HEADER,
+      ['L1688', 'EGLANTINES', 'L1688001', 'EGLANTINES ROUGE 1', '1', 'M', 'Le Manach', 'Tissu'],
+      ['B063A', 'LES BLEUETS -', 'B063A001', 'LES BLEUETS FD CREME 1', '1', 'M', 'Fadini Borghi', 'Tissu'],
+    ]))
+    expect(found.get('2026-29-01-PF-FICHIER DETAILLE').map((record) => record.brand))
+      .toEqual(['Le Manach', 'Fadini Borghi'])
+  })
+})
+
+describe('colour-adapters — Jim Thompson', () => {
+  const ANNUAL = 'Jim Thompson Export Price List_USD_2026.xlsx'
+  const SEASON = "Jim Thompson Export Price List_USD_2026 - SS'26.xlsx"
+
+  it('reads the code list of the annual drop, where the colour names live', () => {
+    const found = firstRecords(ANNUAL, [{
+      name: 'CODE LIST',
+      rows: [
+        ['NO.', 'BRAND', 'ARTICLE CODE', 'ARTICLE NAME', 'OFFICIAL COLOUR NAME', 'TYPE OF PRODUCT',
+          'YEAR OF LAUNCH', 'COLLECTION'],
+        ['1', 'JIM THOMPSON', 'JT013998001', 'WOODLAND VOYAGE', 'TERRACOTTA', 'FABRIC', '2026',
+          'ORIENTAL ODYSSEY'],
+        ['2', 'JIM THOMPSON', 'JT013998002', 'WOODLAND VOYAGE', 'SEPIA', 'FABRIC', '2026',
+          'ORIENTAL ODYSSEY'],
+        ['3', 'NO.9 THOMPSON', 'JT013999001', 'FOREST DREAMING', 'PEARL', 'FABRIC', '2026',
+          'ORIENTAL ODYSSEY'],
+      ],
+    }])
+    expect(found.get('CODE LIST')).toEqual([
+      colourway({
+        brand: 'Jim Thompson',
+        design: 'WOODLAND VOYAGE',
+        designCode: 'JT013998',
+        colourCode: 'JT013998001',
+        colourName: 'TERRACOTTA',
+      }),
+      colourway({
+        brand: 'Jim Thompson',
+        design: 'WOODLAND VOYAGE',
+        designCode: 'JT013998',
+        colourCode: 'JT013998002',
+        colourName: 'SEPIA',
+      }),
+      colourway({
+        brand: 'No.9 Thompson',
+        design: 'FOREST DREAMING',
+        designCode: 'JT013999',
+        colourCode: 'JT013999001',
+        colourName: 'PEARL',
+      }),
+    ])
+  })
+
+  it('reads the spring drop, whose code list orders the same labels differently', () => {
+    // ARTICLE NAME precedes ARTICLE CODE here and follows it in the annual —
+    // one column map by label serves both, an index map would swap them.
+    const found = firstRecords(SEASON, [{
+      name: 'CODE LIST 2026',
+      rows: [
+        ['NO.', 'BRAND', 'ARTICLE NAME', 'ARTICLE CODE', 'OFFICIAL COLOUR NAME', 'TYPE OF PRODUCT',
+          'YEAR OF LAUNCH', 'COLLECTION'],
+        ['1', 'JIM THOMPSON', 'WOODLAND VOYAGE', 'JT013998001', 'TERRACOTTA', 'FABRIC', '2026',
+          'ORIENTAL ODYSSEY'],
+        // Neither of these two houses is in the catalogue, so both stay as the
+        // file spells them.
+        ['22', 'BILL BENSLEY X JIM THOMPSON', 'WILD PANGOLIN', 'JT104021001', 'JUNGLE', 'FABRIC',
+          '2026', 'BILL BENSLEY'],
+        ['23', 'FOX LINTON', 'AVEBURY', 'FLTR0001003', 'CHALK', 'THROW', '2026', 'FOX LINTON'],
+      ],
+    }])
+    expect(found.get('CODE LIST 2026').map((record) => [record.brand, record.designCode])).toEqual([
+      ['Jim Thompson', 'JT013998'],
+      ['BILL BENSLEY X JIM THOMPSON', 'JT104021'],
+      ['FOX LINTON', 'FLTR0001'],
+    ])
+  })
+
+  it('claims each drop with its own adapter, the longer prefix winning', () => {
+    expect(matchAdapter(SEASON).sheets.map((spec) => spec.name)).toEqual(['CODE LIST 2026'])
+    expect(matchAdapter(ANNUAL).sheets.map((spec) => spec.name)).toEqual(['CODE LIST'])
+  })
+})
+
+describe('colour-adapters — the five Fabricut houses', () => {
+  const HEADER = ['BRAND', 'FABRIC NUMBER', 'PATTERN NAME', 'COLOR NAME', 'BOOK/COLLECTION NAME',
+    'PRODUCT CATEGORY']
+
+  it('finds a header a hundred rows under the terms, and splits the fabric number', () => {
+    const found = firstRecords('ClarenceHouse 2026 Price List.xlsx', [{
+      name: 'All Colors',
+      rows: [
+        ...PREAMBLE,
+        HEADER,
+        ['CLARENCE', '6978401', 'ABREO PIPING', 'AEGEAN', 'KALEIDOSCOPE TRIMMINGS', 'TRM'],
+        ['CLARENCE', '6978402', 'ABREO PIPING', 'ANTIQUE', 'KALEIDOSCOPE TRIMMINGS', 'TRM'],
+        ['CLARENCE', '6978403', 'ABREO PIPING', 'AQUA', 'KALEIDOSCOPE TRIMMINGS', 'TRM'],
+      ],
+    }])
+    const abreo = (colourCode, colourName) => colourway({
+      brand: 'Clarence House',
+      design: 'ABREO PIPING',
+      designCode: '69784',
+      colourCode,
+      colourName,
+    })
+    expect(found.get('All Colors')).toEqual([
+      abreo('6978401', 'AEGEAN'), abreo('6978402', 'ANTIQUE'), abreo('6978403', 'AQUA'),
+    ])
+  })
+
+  it('spells each house as the catalogue does, whatever the export writes', () => {
+    const first = (file, brand) => firstRecords(file, [{
+      name: 'All Colors',
+      rows: [HEADER, [brand, '2204201', 'A LA CARTE', 'PAINT', 'PARADIGM', 'FAB']],
+    }]).get('All Colors')[0].brand
+    expect(first('S Harris 2026 Price List.xlsx', 'S.HARRIS')).toBe('S. Harris')
+    expect(first('Stroheim 2026 Price List.xlsx', 'STROHEIM')).toBe('Stroheim')
+    expect(first('Trend 2026 Price List.xlsx', 'TREND')).toBe('Trend')
+    expect(first('Vervain 2026 Price List.xlsx', 'VERVAIN')).toBe('Vervain')
+    // A sixth spelling in a Fabricut export passes through for the import to
+    // report; the five files carry one house each today, but the house comes
+    // off the row so a mixed export cannot be misfiled.
+    expect(first('Trend 2026 Price List.xlsx', 'FABRICUT')).toBe('FABRICUT')
+  })
+
+  it('declares All Colors only — Pattern Only has no colour column at all', () => {
+    for (const file of ['ClarenceHouse 2026 Price List.xlsx', 'S Harris 2026 Price List.xlsx',
+      'Stroheim 2026 Price List.xlsx', 'Trend 2026 Price List.xlsx', 'Vervain 2026 Price List.xlsx']) {
+      expect(matchAdapter(file).sheets.map((spec) => spec.name)).toEqual(['All Colors'])
+    }
+  })
+})
+
+describe('colour-adapters — C & C Milano', () => {
+  const FILE = 'C&C Milano 2026 Pricelist.xlsx'
+  const HEADER = ['Tipo/type', 'Modello', 'Bar1', 'Col-1', 'Prezzo', 'InEsaurimento']
+  // Rows 2 to 4 of the real sheet translate the header rather than holding
+  // stock, and each prints its product type out where a data row numbers it.
+  const DICTIONARY = [
+    ['1 - Tessuti / Fabrics', 'Name', 'Item#', 'Description', 'Price',
+      '* During this year will be discontinued'],
+    ['2 - Carta / Wallpaper', 'Nom', 'Patron', 'Description', 'Prix',
+      '* Coleurs en voie de suppression'],
+    ['3 - Passamaneria / Trim', 'Produkt Name', 'Artikel', 'Beschreibung', 'Preis',
+      '* Auslaufende Farben'],
+  ]
+
+  it('reads the fabrics through the x:-prefixed workbook the supplier writes', () => {
+    const found = firstRecords(FILE, [{
+      name: 'Listino',
+      rows: [
+        HEADER,
+        ...DICTIONARY,
+        ['1', 'AGUILERA', '232119', 'Milk', '49', 'No'],
+        ['1', 'AGUILERA', '232120', 'Natural', '49', 'No'],
+        ['1', 'AGUILERA', '232121', 'Camel', '49', 'No'],
+      ],
+    }], 3, 'prefixed')
+    const aguilera = (colourCode, colourName) =>
+      colourway({ brand: 'C & C Milano', design: 'AGUILERA', colourCode, colourName })
+    expect(found.get('Listino')).toEqual([
+      aguilera('232119', 'Milk'), aguilera('232120', 'Natural'), aguilera('232121', 'Camel'),
+    ])
+  })
+
+  it('declines the sample cuttings, which are the only rows with no colour', () => {
+    expect(sheetRecords(FILE, 'Listino', [
+      HEADER,
+      ['0', 'Camp. AGUILERA', '232374', '', '15', 'No'],
+      ['2', 'ALBA', '231954', 'Ivory', '55', 'No'],
+    ], 'prefixed')).toEqual([
+      colourway({ brand: 'C & C Milano', design: 'ALBA', colourCode: '231954', colourName: 'Ivory' }),
+    ])
+  })
+
+  it('fails a stock row with no item number rather than filing it under nothing', () => {
+    expect(() => sheetRecords(FILE, 'Listino', [
+      HEADER,
+      ['1', 'AGUILERA', '', 'Milk', '49', 'No'],
+    ], 'prefixed')).toThrow(/Listino:2: type 1 row has no design or item number/)
+  })
+})
+
+describe('colour-adapters — the corpus', () => {
+  // The eighteen drops as the client named them. No test may read incoming/ —
+  // this asserts the registry claims each name, not that the file is there.
+  const CORPUS = Object.freeze([
+    'C&C Milano 2026 Pricelist.xlsx',
+    'ClarenceHouse 2026 Price List.xlsx',
+    'Colefax Group 2026 pricelist Colefax Larsen Manuel Canovas Jane Churchill.xlsx',
+    'JV_EXPORT DEALER_SET_TV8_1 JUN 2026_agg 19062026.xlsx',
+    'Jean Monro Ltd Distributor 2026.xlsx',
+    "Jim Thompson Export Price List_USD_2026 - SS'26.xlsx",
+    'Jim Thompson Export Price List_USD_2026.xlsx',
+    'Liberty All collections T3 GBP- 2026.xlsx',
+    'Madeaux UK Export price list.xlsx',
+    'Maria Flora - Filippo Uecher Atelier Textile CRM Textiles Wallcovering 07-26_Mariaflora.xlsx',
+    'Perennials Fabrics Price Guide_Spring26 _USA.xlsx',
+    'Perennials Wallcoverings Price Guide_Spring26_USA.xlsx',
+    'Pierre Frey DISTRIBUTOR - 2026 FABRIC  WPP IN DETAILS '
+      + '- Pierre Frey Boussac Fadini Borghi Le Manach Braquenie.xlsx',
+    'S Harris 2026 Price List.xlsx',
+    'Stroheim 2026 Price List.xlsx',
+    'Trend 2026 Price List.xlsx',
+    'Vervain 2026 Price List.xlsx',
+    'de Le Cuona March 2026 pricelist.pdf',
+  ])
+
+  it('claims every drop, so no file is left to fail the run as unknown', () => {
+    const unclaimed = CORPUS.filter((name) => matchAdapter(name) === null)
+    expect(unclaimed).toEqual([])
+  })
+
+  it('reports the PDF as a declared refusal, which is not the same as unknown', () => {
+    const pdf = matchAdapter('de Le Cuona March 2026 pricelist.pdf')
+    expect(pdf.unsupported).toMatch(/PDF/)
+    expect(pdf.sheets).toBeUndefined()
+    expect(matchAdapter('de Le Cuona March 2027 pricelist.xlsx')).toBe(pdf)
   })
 })
 

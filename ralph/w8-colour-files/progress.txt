@@ -34,6 +34,20 @@ Story-specific detail belongs in the per-story entries below, not here.
   a mystery token can be looked up rather than guessed: `NH-AFTERALLTOO` in there under supplier
   "Nicky Haslam" is what identified the `NH` sheet of the Jean Monro workbook. When nothing in it
   matches, that is an answer too — emit the token and let a human name the house.
+- **The price list also verifies a DERIVED code, not just an unlabelled one.** Nine of these files
+  print a colourway SKU that is the design's code plus a colour suffix (`F4613-01`, `6978401`,
+  `JT013998001`), and the design part is exactly what `price-lists.json` keys on. Splitting the SKU
+  and looking the prefix up in that supplier's own rows turns the split rule into a measurement:
+  Colefax 9,015 of 9,065, Jim Thompson 2,839 of 3,320 (the other 481 are Fox Linton, which has its
+  own supplier rows), the five Fabricut houses 97%+ each. A rule that cannot be measured this way
+  is a guess, and the corpus usually offers a way to measure.
+- **A row that is not stock is not the same as a row that failed to map.** Every large file carries
+  non-stock rows mixed into its stock sheets — sample books and colour cards (JV, 239 rows, told
+  apart only by the sales unit), sample cuttings (C&C Milano's 587 `Camp.` rows, told apart by a
+  type code), a translation dictionary (C&C Milano rows 2-4), a substrate price table (CO.DE, 45
+  rows with no item code). A mapper DECLINES those by a stated, measured property and THROWS on
+  anything else it cannot map. Importing them puts a sample book in the catalogue as a colourway;
+  throwing on them fails a file that is perfectly well formed.
 - **Verify a derivation against the file's own redundancy before shipping it.** Several of these
   sheets decompose a value into extra columns they then leave blank further down (Jean Monro splits
   its item codes across three unlabelled cells for the first 102 rows of one sheet and none of the
@@ -191,4 +205,86 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   3. **Maria Flora's colour code is the colour's alone** ("11"), with the pattern number kept
      separately as `designCode` ("60656"); nothing joins them, because the supplier never wrote a
      separator. Confirm that is the SKU shape the office wants.
+---
+
+## 2026-08-06T04:41:00Z - W8-US-003 - Adapters for the multi-sheet and multi-brand files
+
+- **What was implemented** — the twelve remaining drops, so the registry now claims all eighteen:
+  - `colour-adapters/colefax.js` — one sheet, four houses keyed by a single letter
+    (C/J/L/M). The letter->house map was MEASURED, not read off the filename: each letter's design
+    names were looked up in `price-lists.json` and C matches "Colefax & Fowler" on 678 of its 691
+    designs, J "Jane Churchill" 332/338, L "Larsen" 347/361, M "Manuel Canovas" 278/288 (no other
+    supplier scores above 42). An unknown letter THROWS — a letter is a code, not a spelling, so it
+    cannot pass through raw the way an unmapped house name does.
+  - `colour-adapters/jannelli-volpi.js` — nine declared sheets of ten, eight houses.
+  - `colour-adapters/pierre-frey.js` — one sheet, five houses, colour name cut out of the SKU name.
+  - `colour-adapters/jim-thompson.js` — two drops, each reading its own CODE LIST sheet.
+  - `colour-adapters/us-houses.js` — Clarence House, S. Harris, Stroheim, Trend and Vervain: five
+    files, one Fabricut layout, five different header rows (98/104/106/105/77).
+  - `colour-adapters/cc-milano.js` — the `x:`-prefixed workbook, its three dictionary rows and its
+    587 sample cuttings.
+  - `colour-adapters/de-le-cuona.js` — the PDF's declared refusal, with the reason and what to ask
+    the supplier for.
+  - `colour-adapters/index.js` — registers all twelve. No change to the harness or the reader was
+    needed: US-001 and US-002 already carried every mechanism these files need.
+- **Repos and files changed** — atelier-api only: `scripts/lib/colour-adapters/{colefax,
+  jannelli-volpi,pierre-frey,jim-thompson,us-houses,cc-milano,de-le-cuona}.js` (new),
+  `scripts/lib/colour-adapters/index.js`, `test/colour-files.test.js` (39 -> 59 tests), `CLAUDE.md`.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 808 tests).
+- **Corpus result** (`node scripts/convert-colour-files.js`, now exits 0): 18 files, **47,082
+  colourways**. New this story: Colefax 9,065, Pierre Frey 5,998, Trend 6,039, Stroheim 3,883,
+  S Harris 3,870, Jim Thompson 3,320 + 221, Clarence House 2,540, C&C Milano 1,686, Vervain 625,
+  and JV 4,917 across nine sheets (JANNELLI&VOLPI 2,663, ARMANI CASA 585, ALTAGAMMA 447, DESIGN
+  LICENCE 361, MISSONI 344, CO.DE 221, JWALL 215, JV FABRICS 81, JV Contract 0).
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - The one file that could have failed SILENTLY (C&C Milano's `x:` prefix and absolute
+      unnumbered sheet target) is now read end to end through a fixture in its own shape — the test
+      helpers take a `flavour` argument for exactly that. A parser bug that reads as "empty
+      workbook" needs a test in the real shape, not in the shape everything else uses.
+    - Five files, one layout, five header rows is the corpus's best argument for label matching;
+      the adapter for them is ONE module exporting five entries, not five modules.
+  - Gotchas for the next iteration:
+    - **Jannelli & Volpi names no colours at all.** `ITEM` is the colourway's code and `DESIGN` the
+      design's name; 6570 and 6571 are both "RIBBON GRASS" and nothing in the file says how they
+      differ. The price list agrees (it repeats the design as its description), so these 4,917
+      records carry an EMPTY `colourName` by design. US-004's summary and US-006's SKU shape both
+      have to cope with that; inventing "Colour 1" would be worse.
+    - **Six of JV's eight houses have no catalogue row** (Jannelli&Volpi itself, Altagamma, Design
+      Licence, JWall, CO.DE, JV Fabrics), and two of them are spelt two ways inside this one file
+      (`DESIGN LICENSE`/`DESIGN LICENCE`, `ALTAGAMMA`/`ALTAGAMMA MODERN LIVING`). Both spellings are
+      emitted as found — choosing between them is naming a house. Expect US-006 to report ~8 unknown
+      houses from this file alone, plus Le Manach (Pierre Frey), Fox Linton and BILL BENSLEY X JIM
+      THOMPSON (Jim Thompson), on top of RSC, Nicky Haslam and Perennials from US-002.
+    - **Jim Thompson's colour names are on a sheet of their own.** `FABRIC`/`WALLPAPER`/`THROWS` are
+      the priced sheets and name no colour; `CODE LIST` carries `OFFICIAL COLOUR NAME` and every one
+      of the 2,922 fabric and 392 wallpaper codes. US-005 has to JOIN the two, in this file at
+      least. Two throw codes (`FLTR0001003`, `FLTR0002003`) are in no code list at all.
+    - **The SS'26 drop is a strict subset of the annual one** — all 221 codes are in the annual with
+      identical colour names — so US-004 will see 221 exact duplicates that are not a bug. The two
+      drops also ORDER the same labels differently (code before name in one, after in the other).
+    - **Pierre Frey's colour name is a subtraction, and 318 rows resist it.** 5,680 of 5,998 SKU
+      names start with their own design name; 299 of those ARE the design (no colour named, so the
+      record carries none). The other 318 abbreviate the design instead of repeating it ("GR CORAIL
+      RAY 2CH BLEU BL 4" for "LE GRAND CORAIL - Rayure 2 chemins") and keep the SKU name whole. A
+      human should eyeball a dozen of those before they reach the catalogue.
+    - **C&C Milano's rows 2-4 are a dictionary, not data** — they translate the Italian header into
+      English, French and German, and are told apart only by the type cell spelling the type out
+      ("1 - Tessuti / Fabrics") where a data row numbers it ("1"). Type 0 is the 587 `Camp.` sample
+      cuttings, the only rows in that file with no colour.
+    - Colefax's stock number splits on a hyphen on most rows and a SLASH on 1,750 of them.
+    - `firstRecords` opens EVERY sheet an adapter declares, so a nine-sheet adapter cannot be tested
+      through it with a one-sheet fixture — use `sheetRecords`, which takes one spec.
+  - Context: one module per layout family in `scripts/lib/colour-adapters/`, registry `index.js`,
+    harness `scripts/lib/colour-sheet.js`, reader `records.js`, tests `test/colour-files.test.js`.
+- **Needs human verification:** no screen, route or table is touched. Four data questions for a
+  person, on top of US-002's three:
+  1. **Jannelli & Volpi's 4,917 colourways have no colour names.** Confirm the office is content to
+     hold them by item code alone, or ask JV for the colour list.
+  2. **Pierre Frey's 318 abbreviated SKU names** keep the whole name as the colour ("GR CORAIL RAY
+     2CH BLEU BL 4"). Eyeball a dozen against the supplier's own list.
+  3. **The six JV houses and Le Manach, Fox Linton and BILL BENSLEY X JIM THOMPSON** need catalogue
+     names (or a decision not to carry them) before US-006 can import them.
+  4. **The de Le Cuona PDF** is refused by declaration. Somebody has to ask the supplier for the
+     spreadsheet it was printed from; 139 of its rows are already in the price list.
 ---

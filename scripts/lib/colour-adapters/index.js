@@ -19,11 +19,18 @@
  */
 import { normaliseLabel } from '../colour-sheet.js'
 import { RECORD_FIELDS, REQUIRED_COLUMNS } from './records.js'
+import { CC_MILANO } from './cc-milano.js'
+import { COLEFAX } from './colefax.js'
+import { DE_LE_CUONA } from './de-le-cuona.js'
+import { JANNELLI_VOLPI } from './jannelli-volpi.js'
 import { JEAN_MONRO } from './jean-monro.js'
+import { JIM_THOMPSON, JIM_THOMPSON_SS26 } from './jim-thompson.js'
 import { LIBERTY } from './liberty.js'
 import { MADEAUX } from './madeaux.js'
 import { MARIA_FLORA } from './maria-flora.js'
 import { PERENNIALS_FABRICS, PERENNIALS_WALLCOVERINGS } from './perennials.js'
+import { PIERRE_FREY } from './pierre-frey.js'
+import { CLARENCE_HOUSE, S_HARRIS, STROHEIM, TREND, VERVAIN } from './us-houses.js'
 
 const isText = (value) => typeof value === 'string' && value.trim() !== ''
 
@@ -102,17 +109,29 @@ export const assertRegistry = (adapters) => {
   return adapters
 }
 
-// One module per layout family. The straightforward drops are here; the
-// multi-sheet, multi-brand files and the PDF's `unsupported` declaration land
-// alongside them. A drop nothing claims stays an unknown file and the converter
-// says so and exits non-zero — never a silent skip.
+// One module per layout family, and every one of the eighteen drops is claimed
+// by exactly one entry: the seventeen workbooks by an adapter and the de Le
+// Cuona PDF by a declared refusal. A drop nothing claims stays an unknown file
+// and the converter says so and exits non-zero — never a silent skip.
 export const ADAPTERS = assertRegistry(Object.freeze([
+  CC_MILANO,
+  CLARENCE_HOUSE,
+  COLEFAX,
+  DE_LE_CUONA,
+  JANNELLI_VOLPI,
   JEAN_MONRO,
+  JIM_THOMPSON,
+  JIM_THOMPSON_SS26,
   LIBERTY,
   MADEAUX,
   MARIA_FLORA,
   PERENNIALS_FABRICS,
   PERENNIALS_WALLCOVERINGS,
+  PIERRE_FREY,
+  S_HARRIS,
+  STROHEIM,
+  TREND,
+  VERVAIN,
 ]))
 
 /**

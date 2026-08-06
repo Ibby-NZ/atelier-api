@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  TEMPLATES, mapV1, matchTemplate, normaliseHeader, acceptedHeaders,
+  TEMPLATES, mapV1, mapV2, matchTemplate, normaliseHeader, acceptedHeaders,
 } from '../scripts/lib/price-template.js'
 
 // The pricing-template registry is pure: no database, no fixtures on disk.
@@ -24,6 +24,13 @@ const V1_KEYS = [
   'contents', 'unit', 'width', 'repeat', 'vertical_repeat', 'duty_class',
   'wholesale_rate', 'currency', 'freight_class', 'date_effective', 'source_file',
 ]
+
+// v2 is v1 plus four appended columns — same fourteen first, same order.
+const V2_HEADER = [...V1_HEADER, 'Supplier', 'Brand', 'Pattern Match', 'Duty Percent']
+
+const V2_ROW = [...V1_ROW, 'Pierre Frey Paris', 'Braquenié', 'V x 70H', '7.5']
+
+const V2_KEYS = [...V1_KEYS, 'brand_name', 'pattern_match', 'duty_percent', 'template_version']
 
 const contextOf = (overrides = {}) => ({
   lineNumber: 2,
@@ -56,11 +63,28 @@ describe('template registry', () => {
     expect(v1.header).toEqual(normaliseHeader(V1_HEADER))
     expect(v1.map).toBe(mapV1)
   })
+
+  it('declares v2 as a strict superset — v1 first, then the four new columns', () => {
+    const v2 = TEMPLATES.find((template) => template.version === 'v2')
+    expect(v2.header).toEqual(normaliseHeader(V2_HEADER))
+    expect(v2.header.slice(0, V1_HEADER.length)).toEqual(normaliseHeader(V1_HEADER))
+    expect(v2.header.slice(V1_HEADER.length))
+      .toEqual(['supplier', 'brand', 'pattern match', 'duty percent'])
+    expect(v2.map).toBe(mapV2)
+  })
 })
 
 describe('matchTemplate', () => {
   it('matches the v1 header a real drop carries', () => {
     expect(matchTemplate(V1_HEADER).version).toBe('v1')
+  })
+
+  it('matches the v2 header, and never mistakes it for v1', () => {
+    expect(matchTemplate(V2_HEADER).version).toBe('v2')
+  })
+
+  it('refuses a header that is v1 plus SOME of v2 — a half-migrated file', () => {
+    expect(matchTemplate([...V1_HEADER, 'Supplier', 'Brand'])).toBe(null)
   })
 
   it('normalises case and collapses whitespace before matching', () => {
@@ -181,6 +205,102 @@ describe('mapV1', () => {
     row[11] = '0'
     const context = contextOf()
     expect(mapV1(row, context)).toBe(null)
+    expect(context.errors).toEqual([])
+    expect(context.skipped[0]).toMatch(/has no wholesale rate/)
+  })
+
+  it('omits every v2-only key rather than writing it as null', () => {
+    // Nulls here would grow all 19.5k committed records and make the next
+    // regeneration a total diff — the omission is the point, not an oversight.
+    const item = mapV1(V1_ROW, contextOf())
+    for (const key of ['brand_name', 'pattern_match', 'duty_percent', 'template_version']) {
+      expect(Object.hasOwn(item, key)).toBe(false)
+    }
+  })
+
+  it('reads only the first fourteen cells, so a v2 row maps identically', () => {
+    expect(mapV1(V2_ROW, contextOf())).toEqual(mapV1(V1_ROW, contextOf()))
+  })
+})
+
+describe('mapV2', () => {
+  it('emits v1 keys first, then the four appended ones', () => {
+    expect(Object.keys(mapV2(V2_ROW, contextOf()))).toEqual(V2_KEYS)
+  })
+
+  it('lets the Supplier cell win over the filename', () => {
+    expect(mapV2(V2_ROW, contextOf()).supplier).toBe('Pierre Frey Paris')
+  })
+
+  it('falls back to the filename supplier when the cell is blank', () => {
+    const row = [...V2_ROW]
+    row[14] = ''
+    expect(mapV2(row, contextOf()).supplier).toBe('Pierre Frey')
+  })
+
+  it('fails the row when neither the cell nor the filename names a supplier', () => {
+    const row = [...V2_ROW]
+    row[14] = ''
+    const context = contextOf({ supplier: null })
+    expect(mapV2(row, context)).toBe(null)
+    expect(context.errors[0]).toMatch(/^PIERRE FREY PL\.csv:2: empty supplier/)
+  })
+
+  it('maps the shared fourteen columns exactly as v1 does', () => {
+    const { brand_name, pattern_match, duty_percent, template_version, ...shared }
+      = mapV2(V2_ROW, contextOf())
+    expect(shared).toEqual({ ...mapV1(V1_ROW, contextOf()), supplier: 'Pierre Frey Paris' })
+    expect({ brand_name, pattern_match, duty_percent, template_version }).toEqual({
+      brand_name: 'Braquenié',
+      pattern_match: 'V x 70H',
+      duty_percent: 7.5,
+      template_version: 'v2',
+    })
+  })
+
+  it('records the version the header declared, never a cell', () => {
+    expect(mapV2(V2_ROW, contextOf()).template_version).toBe('v2')
+  })
+
+  it('leaves the new optional cells null rather than empty strings', () => {
+    const row = [...V2_ROW]
+    row[15] = ''
+    row[16] = ''
+    row[17] = ''
+    const item = mapV2(row, contextOf())
+    expect(item.brand_name).toBe(null)
+    expect(item.pattern_match).toBe(null)
+    expect(item.duty_percent).toBe(null)
+  })
+
+  it('rounds duty percent to the column scale, so JSON and database agree', () => {
+    const row = [...V2_ROW]
+    row[17] = '7.12345'
+    expect(mapV2(row, contextOf()).duty_percent).toBe(7.123)
+  })
+
+  it('reports a non-numeric duty percent as file:line and writes no row', () => {
+    const row = [...V2_ROW]
+    row[17] = '7%'
+    const context = contextOf()
+    expect(mapV2(row, context)).toBe(null)
+    expect(context.errors[0]).toMatch(/^PIERRE FREY PL\.csv:2: non-numeric duty percent "7%"/)
+  })
+
+  it('keeps every v1 row-level rule, reported once', () => {
+    const row = [...V2_ROW]
+    row[12] = 'Yen'
+    const context = contextOf()
+    expect(mapV2(row, context)).toBe(null)
+    expect(context.errors).toHaveLength(1)
+    expect(context.errors[0]).toMatch(/unmappable currency/)
+  })
+
+  it('skips an unpriced v2 row the way v1 does', () => {
+    const row = [...V2_ROW]
+    row[11] = '0'
+    const context = contextOf()
+    expect(mapV2(row, context)).toBe(null)
     expect(context.errors).toEqual([])
     expect(context.skipped[0]).toMatch(/has no wholesale rate/)
   })

@@ -16,7 +16,7 @@ Started: 2026-08-06T02:40:24Z
 - A Postgres CHECK is satisfied by NULL (unknown, not false), so a `~ '^[A-Z]$'` check on a nullable
   column still lets the column stay empty. That is what makes widening the class checks safe for the
   19.5k existing rows.
-- `npm test` runs 37 files / 577 tests against the real local Postgres in ~22s. `fileParallelism:
+- `npm test` runs 37 files / 593 tests against the real local Postgres in ~22s. `fileParallelism:
   false` is load-bearing — do not touch it.
 - **`incoming/pricing-templates/` does NOT exist in this worktree** — `incoming/` is gitignored, so
   the corpus lives only in the main checkout, which the sandbox refuses to read. `npm run
@@ -27,10 +27,17 @@ Started: 2026-08-06T02:40:24Z
   committed JSON.
 - A converter run against a scratch fixture is the cheap end-to-end check: `node
   scripts/convert-price-lists.js <scratch-in-dir> <scratch-out.json>`. The filename must match
-  `^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b`, e.g. `PIERRE FREY PL.csv`, or supplier parsing
-  throws before anything else runs.
+  `^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b`, e.g. `PIERRE FREY PL.csv`, for any template
+  WITHOUT its own Supplier column (v1); since US-003 a v2 fixture may be named anything.
 - `npm run lint` and `npm test` run fine as `cd atelier-api && npm run <script>`; a bare `npx
   vitest run <file>` is denied by the permission layer, so run the whole suite.
+- A newer template maps by DELEGATING to the older mapper, never by re-listing its columns:
+  `mapV1` already reads only its own first N cells, so `mapV2(row)` calls `mapV1(row, ...)` and
+  spreads the result. That is what keeps the shared columns byte-identical by construction rather
+  than by review.
+- Adding a key to a converter's output means auditing whatever compares two output rows.
+  `sameExceptSource` iterated only the FIRST row's keys, so a richer row would have been silently
+  dropped as an exact duplicate of a thinner one. Compare key COUNTS too.
 ---
 
 ## 2026-08-06T14:44:00Z - W10-US-001 - Migration: price_list_items v2 columns
@@ -138,4 +145,66 @@ Started: 2026-08-06T02:40:24Z
   `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` on a checkout
   that has `incoming/pricing-templates/`, which proves both the byte-identity and that no real
   drop's header row is rejected by the now-exact length match.
+---
+
+## 2026-08-06T15:20:00Z - W10-US-003 - v2 mapping and the omit-on-v1 rule
+- Registered v2 in `scripts/lib/price-template.js`: `V2_HEADER` is v1's fourteen labels plus
+  `supplier`, `brand`, `pattern match`, `duty percent` in that order, and `mapV2` delegates the
+  shared cells to `mapV1` (which reads only its own first 14) then appends `brand_name`,
+  `pattern_match`, `duty_percent` and `template_version: 'v2'`. The Supplier CELL wins over the
+  filename (blank falls back to it; neither present fails the row `file:line: empty supplier ...`).
+  `duty_percent` is `round3(parseNumber(...))` — the scale of `numeric(6,3)`, so the JSON says what
+  the database will hold — with NO range check, and a non-numeric cell fails the row loudly.
+  `mapV1` is unchanged apart from a comment at its return stating why v2 keys are omitted, never
+  written as null. The converter now treats the filename as a FALLBACK: `parseFilename` returns
+  nulls instead of throwing, and a template with no Supplier column plus an unreadable filename is
+  a loud per-file error. `sameExceptSource` now compares key counts as well.
+- Repos and files changed (atelier-api only):
+  - `scripts/lib/price-template.js` (+~55 lines: `V2_HEADER`, `round3`, `failRow`, `mapV2`, entry)
+  - `scripts/convert-price-lists.js` (filename fallback, the v1-needs-a-name error, dedupe guard)
+  - `test/price-template.test.js` (+16 tests: registry superset, v2 header matching, `mapV2`,
+    and the mapV1 omission rule asserted directly)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 593 tests passed). Plus three converter
+  runs against scratchpad fixtures, all writing to scratch paths only:
+  - v1 fixture -> a record with the same key order, `", "` separators and `115.0` float repr as
+    line 2 of the committed JSON, and NONE of the four v2 keys.
+  - v2 fixture named `universal template 2026.csv` (deliberately unparseable) -> two rows, two
+    DIFFERENT suppliers from one file, `duty_percent: 7.5`, `template_version: "v2"`, blank cells
+    as nulls.
+  - the same v1 rows under an unparseable name -> `rates 2026.csv:1: cannot derive supplier from
+    the filename, and v1 has no Supplier column`, nothing written.
+  `src/seed/data/price-lists.json` untouched (`git status` clean for it).
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - A superset template's mapper should delegate to the older one, not re-declare the shared
+      columns. `mapV1` bounds its own read to `V1_HEADER.length`, so passing it an 18-cell row is
+      already correct; overriding one input (the supplier) is `mapV1(row, { ...context, supplier })`.
+    - Whether a file needs the filename is derivable from the registry — `template.header
+      .includes('supplier')` — so the converter needs no per-template flag.
+  - Gotchas (what will bite the next iteration):
+    - **`mapV2` emits `template_version: 'v2'` and `mapV1` emits no such key at all.** US-004 must
+      therefore `COALESCE` it, exactly as its acceptance criterion says; an `unnest` batch binds an
+      explicit NULL for the missing key and that defeats the `NOT NULL DEFAULT 'v1'`.
+    - `validatePriceListItems` (`src/seed/price-lists.js`) does not yet know the four new fields,
+      and `COLUMNS` still lacks them, so a v2 JSON imported today lands with them dropped, silently.
+      That is US-004's whole job.
+    - `mapV2` inherits v1's narrow `FREIGHT_CLASSES`/`DUTY_CLASSES` (`A`–`E`, `A`) because it
+      delegates — so widening them in US-005 widens both templates at once, which is the intent.
+    - `duty_percent` is rounded to 3dp; if a real file ever carries a value ≥ 1000 it will pass the
+      converter and overflow `numeric(6,3)` at import. Not guarded on purpose — no legitimate range
+      has been stated and guessing one is the mistake the old freight-class set already was.
+    - The converter no longer ABORTS on an unreadable filename; it reports and keeps collecting, so
+      one bad name no longer hides every other error in the drop. Still writes nothing.
+  - Context (where the relevant code lives):
+    - Registry, both mappers, header matching: `scripts/lib/price-template.js`.
+    - File walk, filename fallback, dedupe, write: `scripts/convert-price-lists.js`.
+    - Importer that must catch up: `src/seed/price-lists.js` (`validatePriceListItems`, `COLUMNS`).
+    - Rationale: `_bmad-output/planning-artifacts/architecture.md` "## Pricing template".
+- **Needs human verification:** none — the converter is a CLI and no screen renders these fields
+  yet. What a human MUST still do before merge, because no worktree can: run
+  `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` in the main
+  checkout, which is the only place `incoming/pricing-templates/` exists. That proves both the
+  byte-identity of the v1 path and that no real drop's filename has stopped parsing.
 ---

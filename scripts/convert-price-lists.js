@@ -7,8 +7,9 @@
  * No dependencies — CSVs are sniffed as utf-8 or cp1252, XLSX is read straight
  * from the zip (sharedStrings + sheet1). The accepted layouts and their row
  * mappers live in lib/price-template.js — the header row is what says which one
- * a file is. This script owns the file walk, the supplier name and the dedupe,
- * and fails loudly on anything it cannot map, listing every offending file:line.
+ * a file is. This script owns the file walk, the filename's supplier fallback
+ * (v2 files name their own supplier per row) and the dedupe, and fails loudly on
+ * anything it cannot map, listing every offending file:line.
  *
  * Usage: node scripts/convert-price-lists.js [input-dir] [output-json]
  */
@@ -42,9 +43,14 @@ const FILENAME_PATTERN = /^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b/
 
 const capitalise = (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
 
+/**
+ * The supplier and category the FILENAME declares, or nulls when it declares
+ * neither. A v2 file carries its own Supplier column, so an unrecognised name is
+ * only fatal for a template that has nowhere else to get the name from.
+ */
 const parseFilename = (stem) => {
   const match = FILENAME_PATTERN.exec(stem)
-  if (!match) throw new Error(`cannot derive supplier from filename "${stem}"`)
+  if (!match) return { supplier: null, fileCategory: null }
   const prefix = match[1].trim()
   const supplier = SUPPLIER_OVERRIDES.get(prefix)
     ?? prefix.split(/\s+/).filter(Boolean).map(capitalise).join(' ')
@@ -65,8 +71,12 @@ const xlsxRows = function* (path) {
 
 const rowsOf = (path, isXlsx) => (isXlsx ? xlsxRows(path) : csvRows(decodeText(readFileSync(path))))
 
+// Key counts are compared too: a v2 row carries keys a v1 row does not, so
+// comparing only the earlier row's keys would call the two identical and drop
+// the richer one. A genuine clash must surface as a conflict, not a silent keep-first.
 const sameExceptSource = (left, right) =>
-  Object.keys(left).every((key) => key === 'source_file' || left[key] === right[key])
+  Object.keys(left).length === Object.keys(right).length
+  && Object.keys(left).every((key) => key === 'source_file' || left[key] === right[key])
 
 const compareKeys = (left, right) => {
   for (let index = 0; index < left.length; index += 1) {
@@ -104,6 +114,13 @@ const convert = (inputDir, outputPath) => {
         `${name}:${headerLine}: unexpected header ${JSON.stringify(header)}`
         + `; accepted: ${acceptedHeaders().join(' | ')}`,
       )
+      continue
+    }
+    // Only a template declaring its own Supplier column can survive a filename
+    // this script cannot read a supplier out of.
+    if (supplier === null && !template.header.includes('supplier')) {
+      errors.push(`${name}:${headerLine}: cannot derive supplier from the filename`
+        + `, and ${template.version} has no Supplier column`)
       continue
     }
 

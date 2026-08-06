@@ -11,6 +11,10 @@
  * `mapV1` is the converter's original `normaliseRow` moved here unchanged —
  * src/seed/data/price-lists.json is committed and byte-pinned, so any change to
  * what it emits (key order included) surfaces as an 8 MB diff.
+ *
+ * v2 is a strict SUPERSET of v1: the same fourteen columns, in the same order,
+ * with Supplier, Brand, Pattern Match and Duty Percent appended. So `mapV2`
+ * delegates the shared cells to `mapV1` and appends its own keys after them.
  */
 import { excelDate } from './xlsx.js'
 import { parseNumber, round4, generalFormat, floatRepr } from './python-format.js'
@@ -42,6 +46,12 @@ const FREIGHT_CLASSES = new Set(['A', 'B', 'C', 'D', 'E'])
 const DUTY_CLASSES = new Set(['A'])
 
 const INTEGER_PATTERN = /^[+-]?\d+$/
+
+/** Report a row-level failure the way every mapper does: file:line, no row emitted. */
+const failRow = (context, message) => {
+  context.errors.push(`${context.source}:${context.lineNumber}: ${message}`)
+  return null
+}
 
 const parseInteger = (text) => {
   const trimmed = text.trim()
@@ -132,6 +142,13 @@ export const mapV1 = (row, context) => {
     return fail(`bad date "${rawDate}"`)
   }
 
+  // A v1 row emits NONE of the v2-only keys — not even as null. Every one of the
+  // 19.5k records in the committed price-lists.json was written without them, so
+  // adding `brand_name: null` to each would turn the next regeneration into a
+  // total 8 MB diff for no information. An absent key and an explicit null mean
+  // the same thing to the importer, which binds NULL either way (the single
+  // exception is template_version, whose NOT NULL DEFAULT a bound NULL would
+  // defeat — hence the COALESCE there). Do not "tidy" these into explicit nulls.
   return {
     supplier,
     product_range: productRange || null,
@@ -153,9 +170,58 @@ export const mapV1 = (row, context) => {
   }
 }
 
+const V2_HEADER = Object.freeze([
+  ...V1_HEADER, 'supplier', 'brand', 'pattern match', 'duty percent',
+])
+
+/** Python's `round(x, 3)` — the scale of price_list_items.duty_percent. */
+const round3 = (value) => Number(value.toFixed(3))
+
+export const mapV2 = (row, context) => {
+  const cells = []
+  for (let index = V1_HEADER.length; index < V2_HEADER.length; index += 1) {
+    cells.push((row[index] ?? '').trim())
+  }
+  const [supplierCell, brand, patternMatch, rawDutyPercent] = cells
+
+  // The Supplier cell WINS over the filename — the filename was the most fragile
+  // input in the pipeline (a rename or a new naming habit silently renamed a
+  // supplier, and one file could only ever hold one). A blank cell still falls
+  // back to it, so a per-supplier drop needs no new column filled in.
+  const supplier = supplierCell || context.supplier
+  if (!supplier) return failRow(context, 'empty supplier and none in the filename')
+
+  const item = mapV1(row, { ...context, supplier })
+  if (item === null) return null
+
+  let dutyPercent = null
+  if (rawDutyPercent) {
+    try {
+      // Rounded to the column's own scale so the JSON says exactly what the
+      // database will hold. No range check: nobody has stated a legitimate one,
+      // and a guessed range is the mistake the old freight-class set already was.
+      dutyPercent = round3(parseNumber(rawDutyPercent))
+    } catch {
+      return failRow(context, `non-numeric duty percent "${rawDutyPercent}"`)
+    }
+  }
+
+  // Appended after v1's keys, never interleaved: v1's key order is byte-pinned.
+  // template_version is the converter's verdict — which header row this file
+  // declared — written down, never a cell read from the file.
+  return {
+    ...item,
+    brand_name: brand || null,
+    pattern_match: patternMatch || null,
+    duty_percent: dutyPercent,
+    template_version: 'v2',
+  }
+}
+
 /** Accepted templates, newest last — first exact header match wins. */
 export const TEMPLATES = Object.freeze([
   Object.freeze({ version: 'v1', header: V1_HEADER, map: mapV1 }),
+  Object.freeze({ version: 'v2', header: V2_HEADER, map: mapV2 }),
 ])
 
 const normaliseLabel = (cell) => String(cell).toLowerCase().split(/\s+/).filter(Boolean).join(' ')

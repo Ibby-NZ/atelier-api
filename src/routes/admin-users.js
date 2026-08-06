@@ -7,6 +7,10 @@
 //   - an admin can't change their OWN role (a mistyped role='customer' would
 //     instantly revoke their back-office access);
 //   - an admin can't archive their OWN account (self-lockout).
+// The third — you can't hard-delete yourself — lives in the lifecycle registry's
+// `user` guard instead, because `deleteOrExplain` owns that transaction and the
+// refusal has to travel in the same envelope as a probe's. It arrives there as
+// `ctx.user`, which is why the DELETE handler passes `{ user: request.user }`.
 
 import {
   listUsers,
@@ -16,6 +20,7 @@ import {
   setUserArchived,
   USER_SEGMENTS,
 } from '../users/admin-users.js'
+import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 
 // The valid stored roles (matches the users_role_check constraint). Shared by the
 // list filter and the patch/create body so an unknown role is a 400 by schema.
@@ -176,5 +181,24 @@ export const adminUsersRoutes = async (app, { pool }) => {
       }
       return { user }
     }
+  )
+
+  // Hard delete, for a mistyped signup that never transacted. Every FK out of
+  // `users` is SET NULL or CASCADE, so the database raises nothing: an unprobed
+  // delete would silently turn an order history into anonymous guest orders with
+  // no guest_email. The registry's probes turn each of those into a 409 carrying
+  // the counts, and `deleteOrExplain` *returns* the refusal — Fastify's error
+  // serializer drops `blockers` off a thrown error.
+  //
+  // 'user' is a code literal, never `:entity` from the URL: the registry knows
+  // every entity name alike, so it is not an authorisation boundary.
+  app.delete(
+    '/admin/users/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'user', request.params.id, { user: request.user })
+      )
   )
 }

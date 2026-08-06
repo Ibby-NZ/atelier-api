@@ -49,6 +49,13 @@ Story-specific detail belongs in the per-story entries below, not here.
   fixture makes the *cleanup itself* raise 23503 in the NEXT test's `beforeEach`. Delete orders by
   order-number prefix first (their lines cascade). Same rule for any future fixture that inserts
   into `orders`.
+- **The mirror rule: a fixture that blocks a delete through a SET NULL FK must be cleaned by its OWN
+  tag, and before the rows it points at.** The CASCADE-side rule above is about cleanup order; this
+  is about cleanup existing at all. Deleting the parent does not take a SET NULL child with it — the
+  child survives carrying a null FK — so the next test's probes count rows an earlier test created,
+  and the failure appears in a *different* test from the one that leaked. Applies to every `users`
+  child (`orders`, `trade_applications`, `contact_enquiries`) and to `products.collection_id`. Check
+  the migration's `onDelete` before deciding a fixture needs no cleanup of its own.
 - **A cleared `BLOCKED:` prefix is the human answering EVERY blocker that entry listed, not just the
   one the unblock commit's subject names.** US-003's BLOCKED.md carried two: the missing W1 module
   *and* "no epic owns `src/contact/**`". The commit said only "W1 Foundations is now on this branch",
@@ -434,5 +441,63 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   actually appearing in the CRM toast on a successful price-list delete — it is the only place staff
   learn the removal is undone by the next import, and it is easy to drop by rendering only
   `deleted`. Plus the standing cross-origin DELETE preflight check `app.inject()` cannot prove.
+---
+
+## 2026-08-06T03:28:42Z - W2-US-004 - DELETE for user with the self-delete guard
+
+- **Implemented.** `DELETE /admin/users/:id`, backoffice-only, the same one-line
+  `replyDelete(reply, await deleteOrExplain(pool, 'user', request.params.id, { user: request.user }))`
+  shape US-001..003 established. W1's registry already carries the `user` entry with all three
+  probes and the self-delete guard, so this was one route + one test block. The only thing this
+  story adds beyond the established pattern is fixtures: it is the first W2 delete whose blockers
+  are things a *person* accumulates, so the tests have to create an order, a trade application and
+  a contact enquiry.
+- Repos and files changed: `atelier-api` only —
+  `src/routes/admin-users.js` (+1 route, +1 import, header note widened),
+  `test/admin-users.test.js` (+10 tests in one describe block, +4 fixture helpers, +1 cleanup),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 699 tests passed; 689 before).
+- **This delete is the one whose damage is entirely invisible, which is what the tests are for.**
+  Every FK out of `users` is SET NULL or CASCADE — not one is RESTRICT — so `DELETE FROM users`
+  raises nothing and returns success while anonymising the account's whole order history into guest
+  orders carrying no `guest_email`. There is no error to catch and no 23503 backstop to fall back
+  on: the three probes ARE the defence. Each is asserted on its own (orders / trade applications /
+  contact enquiries, each 409 with its named count and `archivable: true`, row still present), plus
+  one test giving an account both an order and an enquiry and asserting the 409 names both — the
+  probes run as a single `UNION ALL`, so a regression that reported only the first relation would
+  still look like a working 409 and would send staff round the loop once per relation.
+- **`trade_account_users` proves the rule the other way round.** Acceptance criterion 3 asks that an
+  access grant not block, and the registry deliberately gives it no probe: `user_id` is CASCADE
+  because one login belongs to one company and a deleted login must not strand a dangling grant.
+  The test deletes a trade client whose only link is that grant, then asserts the grant row is gone
+  AND the `trade_accounts` row survives — the company is a business record, the grant is not.
+- **403 for a self-delete, where self-archive and self-role-change answer 422.** Not an
+  inconsistency: 422 is refusing a *body* the caller sent, and a delete has no body — the caller is
+  simply not permitted. It is also the only one of the three self-protection rules that cannot live
+  in the handler, because `deleteOrExplain` owns the transaction; it reads `ctx.user`, which is what
+  makes `{ user: request.user }` load-bearing on this route rather than the boilerplate it looks
+  like at the other call sites.
+- **Learnings:**
+  - Pattern: a fixture that blocks a delete through a **SET NULL** FK must be cleaned by its own
+    tag, and before the users. Deleting the user does not take it with them — it survives with a
+    null `user_id` — so the next test's probes count rows an earlier test created. This is the
+    mirror of the CASCADE-side rule US-002 recorded (delete orders before brands), and both are now
+    in `## Codebase Patterns`.
+  - Gotcha: `trade_applications` has 24 NOT NULL columns. Insert it as one frozen object with the
+    column list and placeholders generated from `Object.keys`, not a hand-written 24-column INSERT.
+    Going through `POST /auth/trade-application` instead is the tempting alternative and spends the
+    register rate-limit bucket the suite is already husbanding in `beforeAll`.
+  - Gotcha: an `orders` row needs no `order_lines` to block a user — the probe is
+    `SELECT 1 FROM orders WHERE user_id = $1`. Keeping the fixture line-free also keeps it clear of
+    the one RESTRICT edge, so cleanup is a plain delete by order-number prefix.
+  - Context: the `user` registry entry is `src/lifecycle/registry.js` ~line 283 (three probes) and
+    `userGuard` ~line 98. The two handler-side self-protection guards it mirrors are in
+    `src/routes/admin-users.js` (PATCH role, POST archive).
+- **Needs human verification:** no screen calls this route yet. Carry forward to W2-US-012 (delete
+  wired into the users screen): the 409 dialog must render the blocker labels and offer "Archive
+  instead" — for a user those labels ("orders", "trade applications", "contact enquiries") are the
+  only explanation staff get for why a client cannot be removed. Plus the standing cross-origin
+  DELETE preflight from the CRM at :5273, which `app.inject()` cannot prove.
 ---
 

@@ -106,6 +106,22 @@ Story-specific detail belongs in the per-story entries below, not here.
   `c-c-milano`), which is a 23505 mid-transaction. Any code generating slugs in bulk must detect
   the collision against both the planned and the stored slugs and report it, the same way an
   unsluggable name is reported rather than defaulted.
+- **(CRM) `useCrudScreen` IS the screen's plumbing.** It composes `useAdminList`, `useToast`,
+  `useMutation` and the delete flow and returns four NAMESPACES — `list`, `toast`, `mutation`,
+  `remove`. Spread `remove.dialog` onto `<ConfirmDialog />`, read `list.rows`/`list.status`/
+  `list.error`, and keep only filter state, the open row and the drafts in the screen. Pass an
+  `archive` action for any entity with a RESTRICT blocker, or the refusal dialog explains the
+  blockage and offers no way forward.
+- **(CRM) A boolean filter opts OUT by being `flag || null`, never `false`.** `buildListQuery`
+  drops null; `include_archived=false` is a different request for no reason.
+- **(CRM) The screen's field whitelist must mirror the API's frozen update columns exactly.**
+  Ajv's `removeAdditional` STRIPS an unknown body key instead of rejecting it, so a field the form
+  offers and the PATCH schema does not name saves nothing — silently, under a green toast. No
+  cross-repo import is possible, so the test hardcodes the API list as a boundary copy.
+- **(CRM) Mask a cost per VALUE, not per row, and carry it as a flag on the formatter's return.**
+  A value stating the METHOD ("2 discount tiers") is safe for a login without the capability; one
+  quoting a RATE is not. Any surrounding prose that repeats the figure needs a rate-free twin, or
+  a masked headline sits above a note reading "x0.36 net" and hides nothing.
 
 ---
 
@@ -449,5 +465,78 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   backfilled aliases, linked houses and terms render, and that the cost fields honour
   `CAPS.FINANCE_VIEW` masking. `suppliers` is still NOT an AdminJS panel resource, so `/panel`
   shows nothing new.
+---
+
+## 2026-08-06T16:12:30Z - W3-US-007 - AdminSuppliers CRM screen
+- Implemented `atelier-crm/src/screens/AdminSuppliers.jsx` (`/admin/suppliers`), the FIRST screen in
+  this repo to compose the whole W1 kit: `useCrudScreen` (which owns `useAdminList` + the delete
+  flow), `<Pagination>` and `<ConfirmDialog {...remove.dialog} />`. Search (name, alias, short code,
+  country), Show archived, create, inline edit through `drafts.js`, Archive/Restore, and Delete with
+  the blocked-dialog explanation.
+- `atelier-crm/src/screens/adminSuppliers.js` (new, pure) holds every rule — `SUPPLIERS_PATH`/
+  `supplierPath`, `archiveVerb`/`archivePath`, the frozen `SUPPLIER_FIELDS` (mirroring the API's
+  `SUPPLIER_UPDATE_COLUMNS`), `supplierFilters`, and `termsSummary` — with
+  `adminSuppliers.test.js` (23 tests) beside it. The `.jsx` is layout only: this repo has no jsdom,
+  so a component cannot be rendered in a test.
+- `suppliersTabs` added to `src/components/sectionTabs.jsx` ("Supplier master" `/suppliers` →
+  "Manage suppliers" `/admin/suppliers`). The demo `Suppliers.jsx` is byte-for-byte untouched and is
+  reachable from the strip on the live screen; the SideNav item gained
+  `match: ['/suppliers', '/admin/suppliers']` so the nav does not go dark on the new tab.
+- FINANCE_VIEW masking is per VALUE, not per row (`termsSummary`'s `rateFree`): "2 discount tiers"
+  and "Supplier default" state the METHOD and survive the mask; a quoted rate is replaced by
+  `MaskedFigure`, and the chain's note ("Compounded — x0.36 net") has a rate-free `maskedNote` twin,
+  because dropping the figure alone would leave the sentence lying. Same rule the demo screen
+  already applies. Terms are read-only — the API has no write path for them.
+- Repos and files changed: atelier-crm — `src/screens/AdminSuppliers.jsx` (new),
+  `src/screens/adminSuppliers.js` (new), `src/screens/adminSuppliers.test.js` (new),
+  `src/components/sectionTabs.jsx`, `src/App.jsx`, `src/components/layout.jsx`, `CLAUDE.md`
+  (## Suppliers); atelier-api — `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml` (bookkeeping only, no code).
+- Gates: `npm test` (crm) -> 0 (33 files, 412 tests; was 32/389), `npm run build` (crm) -> 0.
+  atelier-api was not touched but its gates were run anyway: `npm run lint` -> 0, `npm test` -> 0
+  (45 files, 802 tests).
+- **Learnings:**
+  - Pattern: `useCrudScreen` is the whole screen in one call — it composes `useAdminList`, the
+    toast, `useMutation` and the delete dialog, and returns four NAMESPACES (`list`, `toast`,
+    `mutation`, `remove`). Spread `remove.dialog` straight onto `<ConfirmDialog />` and read the
+    list through `list.rows`/`list.status`/`list.error`; the screen keeps only its own filter
+    state, the open row and the drafts.
+  - Pattern: pass an `archive` action to `useCrudScreen` for any entity whose blockers include a
+    RESTRICT edge. Without it the refusal dialog says what is blocking and offers no way forward —
+    "Archive instead" only appears when the API said `archivable: true` AND the screen supplied the
+    action.
+  - Pattern: a boolean filter opts OUT by being `flag || null`, not `false`. `buildListQuery` drops
+    null; sending `include_archived=false` is a different request for no reason.
+  - Pattern (masking): make the unit of masking the VALUE, not the row, and carry it as a flag on
+    the formatter's return (`rateFree`) rather than deciding at the call site. Pair it with a
+    `maskedNote` wherever the surrounding prose quotes the same figure — a masked headline above a
+    note reading "x0.36 net" hides nothing. A test asserting `rateFree` implies no `[%x]` in the
+    value is what keeps it honest.
+  - Gotcha: the CRM screen's field whitelist must mirror the API's frozen update columns exactly.
+    Ajv's `removeAdditional` STRIPS an unknown key rather than rejecting it, so a field the screen
+    offers and the API does not accept saves nothing, silently, with a green toast. The test
+    hardcodes the API list as a boundary copy (no cross-repo import is possible).
+  - Gotcha: `src/App.jsx` and `src/components/layout.jsx` are outside this workstream's enumerated
+    CRM file list but are not on the forbidden list, and a screen with no route is unreachable —
+    both edits are one additive line each (a `<Route>` and the nav `match` array) and touch no
+    other workstream's lines. Same judgement US-005 made for `src/app.js` in the API.
+  - Context: the API shapes this screen reads are `GET /admin/suppliers` →
+    `{ suppliers, meta: { total, page, limit } }` and `GET /admin/suppliers/:id` → `{ supplier }`
+    with `aliases`, `brands` (each carrying `terms`), and each terms row carrying `net_multiplier`,
+    `net_source`, `net_label` and `invalid_reason`. The CRM never evaluates a chain — the API's
+    `src/suppliers/discount-chain.js` is the only evaluator, and {0.4,0.4} is x0.36, not -80%.
+  - Context: on a real database today the detail panel is mostly empty — the backfill links 15
+    houses and lands 6 terms rows (Fabricut's markups), and JV's tiers and chain belong to houses
+    that were never catalogued. That is the data, not a broken screen.
+- **Needs human verification:** the whole screen, since nothing here can be rendered in a test
+  (no jsdom, no e2e harness in this repo). Specifically, at
+  `http://localhost:5273/#/admin/suppliers` signed in as a seeded staff login: (a) the tab strip
+  moves between the demo Supplier master and the live screen and the SideNav stays lit on both;
+  (b) a delete blocked by houses/price-list items keeps the dialog OPEN, lists "2 houses, 3
+  price-list items" and offers "Archive instead"; (c) expanding a row loads its aliases, houses and
+  terms, and the terms figures render (x0.36 for a chain, "N discount tiers" with the tier rates
+  below); (d) the FINANCE_VIEW mask — every CRM login maps to the demo `director` capability set
+  today, so a person must temporarily sign in as a non-finance demo login (or flip
+  `STAFF_ROLE_MAP`) to see the masked state at all.
 ---
 

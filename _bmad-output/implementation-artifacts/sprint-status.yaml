@@ -56,7 +56,7 @@ epics:
       US-004: done      # Supplier read models and admin module
       US-005: done      # Supplier routes including DELETE
       US-006: done      # Backfill suppliers from existing data
-      US-007: pending   # AdminSuppliers CRM screen
+      US-007: done      # AdminSuppliers CRM screen
   w4-samples:
     name: "W4 Samples"
     branch: aug6/w4-samples

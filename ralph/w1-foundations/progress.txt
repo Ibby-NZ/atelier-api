@@ -228,3 +228,44 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   needs a human to eyeball the paginator against the existing ones (`/admin/price-list-items` is the
   closest visual reference).
 ---
+
+## 2026-08-06T01:15:05Z - W1-US-005 - CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
+
+- `atelier-crm/src/lib/api.js` gains `apiDelete` (append only). Three new files under
+  `src/admin/`, each with a `.test.js` sibling:
+  - `deleteFlow.js` — pure: `blockerLine`, `describeBlockers(error, opts)`, `attemptDelete(del, opts)`,
+    `deleteDialog(state)`.
+  - `ConfirmDialog.jsx` — `{ open, title, body, lines, confirmLabel, secondaryLabel, onConfirm,
+    onSecondary, onCancel, busy, error }`, plus the exported pure `escapeCancels`.
+  - `useCrudScreen.js` — composes `useAdminList` + `useToast` + `useMutation` + the delete flow,
+    returning four namespaces (`list`, `toast`, `mutation`, `remove`).
+- Gates: `npm test` -> 0 (32 files, 389 tests; was 364, +25), `npm run build` -> 0.
+- **Learnings:**
+  - **`GhostButton` (`src/admin/parts.jsx`) does NOT forward refs** — it is a plain function
+    component, so `ref={...}` on it is silently dropped, with no error and no warning that points at
+    the cause. ConfirmDialog therefore uses native `<button>`s carrying a copy of GhostButton's
+    inline style. Anything in this repo that needs a DOM ref on a button hits this.
+  - **Injecting the request makes the "no pre-flight" rule testable.** `attemptDelete(del)` takes the
+    request as a function, so a `vi.fn()` stub proves it is called exactly once. An acceptance
+    criterion phrased as an absence ("there is no pre-flight request") is otherwise only assertable
+    against source text.
+  - The confirm button is REMOVED on the explanation step, not merely disabled: the blockers will not
+    have vanished a second later, so a retry can only fail again. `deleteDialog` returns
+    `confirmLabel: null` and ConfirmDialog renders nothing for a null label.
+  - **"Archive instead" needs BOTH conditions** — the API's `archivable: true` and an `archive`
+    action from the screen. `inventory` and `shipping_rates` have no `archived_at` column, so the API
+    reports `archivable: false` and offering the button would produce a 500 on click.
+  - `describeBlockers` must fall back to `messageOf` on a missing body. That is not an edge case: a
+    404, a 403 self-delete, a network drop and a non-JSON 500 all take that path, and it is the only
+    sentence the dialog has to show.
+  - Naming: `useAdminList` and `useMutation` both return `error`, meaning different things (the list
+    failed to load vs this edit was refused). `useCrudScreen` returns namespaces rather than
+    flattening, or a stale save error renders above a healthy table.
+  - The API contract this kit consumes is atelier-api `src/lifecycle/delete.js` `replyDelete`:
+    `{ statusCode, error, message, blockers: [{ relation, label, count, capped }], archivable }`.
+    `capped` renders as a trailing `+` ("100+ order lines").
+- **Needs human verification:** the dialog has never been rendered — no jsdom here and no screen
+  consumes it yet. When W2 wires the first delete button, a person must check in a real browser:
+  Escape closes it, focus starts on Cancel, the backdrop click cancels, and a real 409 (delete a
+  house that has products) shows the blocker lines with Archive instead.
+---

@@ -15,7 +15,7 @@ epics:
       US-002: done      # setArchived replaces the eight duplicated archive helpers
       US-003: done      # Registry safety tests
       US-004: done      # CRM list kit: list.js, useAdminList, Pagination
-      US-005: pending   # CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
+      US-005: done      # CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
       US-006: pending   # CI workflows for all three repos
   w2-crud:
     name: "W2 CRUD completion"

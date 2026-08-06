@@ -14,6 +14,7 @@
     "seed:staff": "node src/seed/seed-staff.js",
     "convert:pricing": "node scripts/convert-price-lists.js",
     "import:pricing": "node src/seed/import-price-lists.js",
+    "backfill:suppliers": "node src/seed/backfill-suppliers.js",
     "convert:legacy": "node scripts/convert-d365-exports.js",
     "import:legacy": "node src/seed/import-legacy.js",
     "push:legacy": "node src/seed/push-legacy.js",

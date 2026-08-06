@@ -86,6 +86,26 @@ Story-specific detail belongs in the per-story entries below, not here.
 - **A registry probe is needed most where the FK is SET NULL, not where it is RESTRICT.** RESTRICT at
   least refuses; SET NULL succeeds, reports 200 and silently unlinks every child. Both edges out of
   a new entity need a probe, and the SET NULL one is the load-bearing half.
+- **Split any backfill/import into a PURE planner and a thin apply layer, and make its sources
+  injectable.** The planner takes the sources plus whatever the database already holds and emits
+  desired state keyed by NAME; the apply layer resolves names to ids. That is what lets the
+  real-corpus assertions run with zero writes to the SHARED test database, while the SQL is
+  exercised against small prefixed fixtures with an injected source — without it a test run
+  creates the real production rows and every later suite sees them.
+- **"Re-running changes nothing" is a per-statement guard, not a hope.** `ON CONFLICT (k) DO UPDATE
+  SET c = COALESCE(t.c, EXCLUDED.c), … WHERE (t.c, …) IS DISTINCT FROM (COALESCE(t.c, EXCLUDED.c),
+  …)` fills only NULLs AND does nothing when there is nothing to fill, so `updated_at` does not
+  creep on every run. Build the SET list and the row comparison from ONE frozen column constant so
+  they cannot drift. `RETURNING id, (xmax = 0) AS inserted` then separates a created row from an
+  enriched one — but with that WHERE an untouched conflicting row returns nothing at all, so ids
+  for the rest need a second `WHERE name = ANY($1::text[])`.
+- **An array column that differs per row cannot go through `unnest`** (the arrays would have to be
+  ragged), so a table with one forces a row-at-a-time insert loop. Fine at a couple of dozen rows;
+  it is not an optimisation someone should collapse.
+- **Distinct display names can slugify to the same slug** (`C & C Milano` and `C&C Milano` are both
+  `c-c-milano`), which is a 23505 mid-transaction. Any code generating slugs in bulk must detect
+  the collision against both the planned and the stored slugs and report it, the same way an
+  unsluggable name is reported rather than defaulted.
 
 ---
 
@@ -347,5 +367,87 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   confirm dialog open and renders "2 houses, 3 price-list items" with an "Archive instead" button,
   and (b) that the cost fields honour `CAPS.FINANCE_VIEW` masking. `suppliers` is still NOT
   registered as an AdminJS panel resource, so `/panel` shows nothing new.
+---
+
+## 2026-08-06T15:58:40Z - W3-US-006 - Backfill suppliers from existing data
+- Implemented `npm run backfill:suppliers`: `src/seed/backfill-suppliers.js` (CLI) ->
+  `src/suppliers/backfill.js` (one transaction, all the SQL) -> `src/suppliers/backfill-plan.js`
+  (pure planner, no DB). Sources are exactly the two the AC names: `SELECT DISTINCT
+  price_list_items.supplier` (40 filename-derived spellings, grouped with their item count and
+  currencies) and the vendored `src/seed/data/suppliers.js` (9 houses with country, invoicing
+  currency, agent, incoterm, PO email, discount method, short code).
+- It populates `suppliers`, `supplier_aliases` (the four `SUPPLIER_OVERRIDES` prefixes),
+  `price_list_items.supplier_id` (name then alias), `brands.supplier_id` and
+  `supplier_brand_terms`/`supplier_discount_tiers` — the last two being what US-002's entry
+  deferred to this story. Against the real corpus: 42 suppliers, 4 aliases, 40 name matches,
+  15 house links, 6 terms rows, 0 tiers.
+- **Match, then report — never guess.** Two spellings become one supplier only by an exact
+  `lower(btrim(name))` match or by an alias, and NAME BEATS ALIAS. So `Jannelli Volpi` (the rate
+  ledger, 2,516 rows) and `Janelli Volpi` (the snapshot, which holds JV's three tiers and the
+  {0.4,0.4} chain) are BOTH created and the pair is reported. Collapsing them here would attach a
+  discount to a spelling on a resemblance, and a wrong discount is a wrong landed cost on every
+  metre. The human merge is: add the alias to the survivor, DELETE the duplicate (SET NULL keeps
+  the rates), re-run — which then re-points 2,516 rows and does not recreate the duplicate.
+- Currency comes from the PRICE LIST, never the snapshot and never the country (US-001's own note
+  said the backfill would fill it from there). Manuel Canovas is the live disagreement: every rate
+  on file was quoted GBP, the snapshot says EUR — the rates win and the conflict is reported. A
+  name quoting two currencies is left NULL rather than resolved.
+- Write policy: `price_list_items.supplier_id` is derived and has no screen, so it is re-pointed
+  whenever the resolved supplier differs; `suppliers` columns and `brands.supplier_id` are
+  staff-curated and are filled ONLY where NULL (the `brands.website_url` COALESCE posture).
+- **Scope note.** No brand row and no supplier row is invented from a name only one source knows.
+  The snapshot's seven JV houses are not in `brands` at all (`Armani` vs the catalogue's
+  `Armani Casa`, `Missoni` vs `Missoni Home`, and five that were never catalogued), so they are
+  reported and `supplier_discount_tiers`/`discount_chain` stay empty on a real run today. The six
+  terms rows that do land are Fabricut's retail markups.
+- Repos and files changed: atelier-api — `src/suppliers/backfill-plan.js` (new),
+  `src/suppliers/backfill.js` (new), `src/seed/backfill-suppliers.js` (new),
+  `test/suppliers-backfill.test.js` (new, 23 tests), `package.json` (one `scripts` line —
+  `backfill:suppliers`; no dependency touched), `CLAUDE.md` (## Suppliers),
+  `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (45 files, 802 tests passed; was 44/779).
+- **Learnings:**
+  - Pattern: split a backfill into a PURE planner and a thin apply layer. The planner takes the
+    sources plus whatever the database already holds and emits desired state keyed by NAME; the
+    apply layer resolves names to ids. That is what lets the real-corpus assertions (19.5k rates,
+    the two unmatched spellings, the currency conflict) run with zero writes to the shared test
+    database, while the SQL is exercised against small prefixed fixtures with an INJECTED
+    snapshot — otherwise a test run creates the nine real houses and every later suite sees them.
+  - Pattern: "re-running changes nothing" is a per-statement guard, not a hope. `ON CONFLICT (k)
+    DO UPDATE SET c = COALESCE(t.c, EXCLUDED.c), ... WHERE (t.c, ...) IS DISTINCT FROM
+    (COALESCE(t.c, EXCLUDED.c), ...)` fills only NULLs AND does nothing when there is nothing to
+    fill, so `updated_at` does not creep on every run. Build both the SET list and the row
+    comparison from one frozen column constant so they cannot drift.
+  - Pattern: `RETURNING id, (xmax = 0) AS inserted` separates a created row from an updated one in
+    a single upsert. With the WHERE above, an untouched conflicting row returns NOTHING, so the
+    ids for the rest have to be read back with a second `WHERE name = ANY($1::text[])`.
+  - Gotcha: a row-per-item array column cannot go through `unnest` (the arrays would have to be
+    ragged), so `discount_chain` forces the terms insert to be a row-at-a-time loop. Fine at
+    two dozen rows; do not "optimise" it into a single statement.
+  - Gotcha: `existingSuppliers`/`existingAliases` build one index and the SUPPLIER NAME must win
+    over an alias, per the AC's own "matching name then alias". Consequence a reader will trip on:
+    adding an alias alone does NOT merge two live supplier rows — the duplicate has to go first.
+  - Gotcha: a planner that only plans what a source names will not enrich an existing supplier no
+    source mentions. That is correct, but it means a plan's `suppliers` list is not "every
+    supplier in the database" and a test asserting otherwise is wrong (cost one red test here).
+  - Gotcha: two spellings can slugify to the same slug (`C & C Milano` and `C&C Milano` are both
+    `c-c-milano`), which would be a 23505 on `suppliers_slug_key` mid-transaction. Detect it in the
+    planner, skip the second and report the pair; an unsluggable name (punctuation only) takes the
+    same path rather than defaulting a slug.
+  - Context: the snapshot's catch-all tier is the literal `'All other collections'` in
+    `resolveDiscount` (`src/seed/data/discounts.js`). The backfill translates it into `is_fallback`,
+    which is exactly why the string never has to reach the schema.
+  - Context: `price_list_items.supplier` is a filename prefix, so many of the 40 values are BRANDS
+    (`Altagamma`, `S Harris`, `Jane Churchill`, `Kieffer`). A row is still created per distinct
+    name — the story is "nobody retypes 40 names" — and merging is the CRM's job.
+- **Needs human verification:** two things, neither of which any test can cover. (a) Run the real
+  sequence on a database that has the rates — `npm run migrate && npm run seed && npm run
+  import:pricing && npm run backfill:suppliers` — and read the printed report: the
+  `Jannelli Volpi` / `Janelli Volpi` pair and the seven uncatalogued JV houses are decisions for
+  the office, not defects. (b) The US-007 CRM screen is where a person must eyeball that the
+  backfilled aliases, linked houses and terms render, and that the cost fields honour
+  `CAPS.FINANCE_VIEW` masking. `suppliers` is still NOT an AdminJS panel resource, so `/panel`
+  shows nothing new.
 ---
 

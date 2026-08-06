@@ -921,3 +921,205 @@ describe('W5-US-005 — product performance by house and design', () => {
     })
   })
 })
+
+// The export over HTTP. src/reports/export.js is pure and its file format is
+// proved in test/report-filters.test.js; what only Postgres and a real route can
+// answer is whether the file carries the same population the table does — and
+// more of it than a limited page — and whether a design name a staff member
+// typed as a formula reaches the file neutralised.
+//
+// Requests here are counted deliberately: the export's own bucket is tighter
+// than the table's, so the block fetches ONE file in beforeAll and asserts
+// against it, the same posture the rate-limit header test takes.
+describe('W5-US-006 — server-side CSV export', () => {
+  let pool
+  let app
+  let backofficeCookie
+  let customerCookie
+  let csv
+  let table
+
+  const PATH = '/admin/reports/product-performance'
+  const EXPORT_PATH = `${PATH}/export.csv`
+  const SCOPE_QUERY = HOUSES.map((slug) => `brand=${slug}`).join('&')
+
+  // A design name a staff member could plausibly type, and the exact thing that
+  // becomes live code when the client opens the file in Excel.
+  const FORMULA_NAME = '=SUM(A1:A9)'
+
+  const request = (path, query = '', cookie = backofficeCookie) =>
+    app.inject({
+      method: 'GET',
+      url: `${path}?${SCOPE_QUERY}${query}`,
+      headers: cookie ? { cookie } : {},
+    })
+
+  const sessionCookieFrom = (response) => {
+    const setCookie = response.headers['set-cookie']
+    const header = Array.isArray(setCookie) ? setCookie[0] : setCookie
+    return header.split(';')[0]
+  }
+
+  // The file's shape, asserted structurally: line 1 is the header, the totals row
+  // is the last line before the notes' blank separator, and everything between
+  // the two is the report's own rows.
+  const linesOf = (body) => body.split('\r\n')
+  const dataRowsOf = (body) => linesOf(body).slice(1, linesOf(body).indexOf('') - 1)
+  const totalsRowOf = (body) => linesOf(body)[linesOf(body).indexOf('') - 1]
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    await runMigrations(config.databaseUrl)
+    pool = createPool(config.databaseUrl)
+    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+    await app.ready()
+
+    await cleanReports(pool)
+    await cleanup(pool)
+
+    const boss = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: `${PREFIX}-export-boss@example.test`, password: PASSWORD, name: 'Boss' },
+    })
+    backofficeCookie = sessionCookieFrom(boss)
+    await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [
+      `${PREFIX}-export-boss@example.test`,
+    ])
+
+    const shopper = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: `${PREFIX}-export-shopper@example.test`, password: PASSWORD },
+    })
+    customerCookie = sessionCookieFrom(shopper)
+
+    const fixture = await insertFixture(pool)
+
+    // A fourth sold design, whose name is a formula.
+    const { rows: productRows } = await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website)
+       VALUES ($1, $2, $3, 'fabric', 'NZD', true) RETURNING id`,
+      [fixture.houseId, FORMULA_NAME, `${PREFIX}-formula`]
+    )
+    const { rows: colourwayRows } = await pool.query(
+      `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Ivory', $2) RETURNING id`,
+      [productRows[0].id, `${PREFIX}-SKU-FML`]
+    )
+    const { rows: orderRows } = await pool.query(
+      `INSERT INTO orders (order_number, kind, status, created_at)
+       VALUES ($1, 'checkout', 'paid', '2026-03-18 12:00:00'::timestamptz) RETURNING id`,
+      [`${ORDER_PREFIX}-FML`]
+    )
+    await pool.query(
+      `INSERT INTO order_lines (order_id, colourway_id, qty, unit_price_cents)
+       VALUES ($1, $2, '1.00', 5000)`,
+      [orderRows[0].id, colourwayRows[0].id]
+    )
+
+    csv = await request(EXPORT_PATH)
+    table = await request(PATH)
+  })
+
+  afterAll(async () => {
+    await cleanReports(pool)
+    await cleanup(pool)
+    await app.close()
+    await pool.end()
+  })
+
+  describe('access', () => {
+    it('refuses an anonymous caller with 401', async () => {
+      expect((await request(EXPORT_PATH, '', null)).statusCode).toBe(401)
+    })
+
+    it('refuses a customer with 403', async () => {
+      expect((await request(EXPORT_PATH, '', customerCookie)).statusCode).toBe(403)
+    })
+
+    it('serves a back-office caller', () => {
+      expect(csv.statusCode).toBe(200)
+    })
+
+    // An export runs the same aggregate with no row limit and then serialises
+    // the whole of it, so it is the more expensive of the two by exactly the
+    // margin the limit was providing.
+    it('meters itself more tightly than the table it exports', () => {
+      expect(Number(csv.headers['x-ratelimit-limit'])).toBeLessThan(
+        Number(table.headers['x-ratelimit-limit'])
+      )
+    })
+  })
+
+  describe('the download', () => {
+    it('is served as a UTF-8 CSV attachment', () => {
+      expect(csv.headers['content-type']).toBe('text/csv; charset=utf-8')
+      expect(csv.headers['content-disposition']).toBe(
+        'attachment; filename="atelier-product-performance.csv"'
+      )
+    })
+
+    // `.csv` is its own path segment rather than a suffix on a param — Fastify
+    // would otherwise fold it into the preceding `:param` — so the table route
+    // beside it is untouched and still answers JSON.
+    it('sits beside the table route without shadowing it', () => {
+      expect(table.statusCode).toBe(200)
+      expect(table.headers['content-type']).toMatch(/application\/json/)
+      expect(table.json().report).toBe('product-performance')
+    })
+
+    it('takes its header row from the report’s declared columns', () => {
+      expect(linesOf(csv.body)[0]).toBe(
+        PRODUCT_PERFORMANCE_COLUMNS.map((column) => column.label).join(',')
+      )
+    })
+
+    it('appends the totals row the table carries', () => {
+      expect(totalsRowOf(csv.body)).toMatch(/^All houses,All designs,/)
+    })
+
+    // This report declares no finance column, so masking runs and removes
+    // nothing; US-007's stock report is the first whose landed cost is deleted.
+    it('carries no withheld-columns note, because nothing here is finance', () => {
+      expect(csv.body).not.toContain('Columns withheld')
+    })
+  })
+
+  // The whole reason src/lib/csv.js was extracted in US-001. A design name is
+  // staff-typed free text via PATCH /admin/products, and this file is built to
+  // open in Excel, where =HYPERLINK and =WEBSERVICE exfiltrate the sheet.
+  it('neutralises a design name beginning with =', () => {
+    expect(csv.body).toContain(`'${FORMULA_NAME}`)
+    expect(csv.body).not.toMatch(/^=SUM/m)
+  })
+
+  // The failure this story exists to prevent: a file that silently was the page
+  // the table happened to be showing.
+  it('exports every row even when the table is showing one', async () => {
+    const page = await request(PATH, '&limit=1')
+    const file = await request(EXPORT_PATH, '&limit=1')
+
+    expect(page.json().rows).toHaveLength(1)
+    expect(page.json().meta.rows_total).toBe(4)
+    // `limit` is not part of the export's vocabulary at all: Ajv strips it, and
+    // the handler asks the shared builder for every row regardless.
+    expect(dataRowsOf(file.body)).toHaveLength(4)
+  })
+
+  // "I want the exported file to match what I filtered" — so the file carries
+  // the narrowed population AND says which filters narrowed it.
+  it('exports what was filtered, and states the filters in the file', async () => {
+    const file = await request(EXPORT_PATH, '&from=2026-03-18')
+
+    expect(dataRowsOf(file.body)).toHaveLength(1)
+    expect(file.body).toContain(`'${FORMULA_NAME}`)
+    expect(file.body).not.toContain(`${PREFIX} Other Design`)
+    expect(file.body).toContain('from=2026-03-18')
+  })
+
+  // The CSV is the copy that leaves the building, so it states its coverage
+  // rather than relying on a screen's footnote.
+  it('states its coverage in the file, not only in the payload', () => {
+    expect(csv.body).toContain(COVERAGE_NOTE)
+  })
+})

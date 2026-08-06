@@ -15,6 +15,10 @@
 //
 // revenue-lines.js — the population is one frozen default, overridable, and the
 // CTE is the seam a second source unions into.
+//
+// export.js — the file is rendered from the MASKED envelope's own columns, so a
+// withheld figure has no header and no cell, and every value goes through the
+// formula guard on its way out.
 
 import { describe, it, expect } from 'vitest'
 import {
@@ -27,6 +31,11 @@ import {
   buildReportFilters,
 } from '../src/reports/filters.js'
 import { reportAccess, defineColumns, maskReport } from '../src/reports/access.js'
+import {
+  toReportCsv,
+  reportCsvFilename,
+  REPORT_CSV_CONTENT_TYPE,
+} from '../src/reports/export.js'
 import {
   PRODUCT_PERFORMANCE,
   PRODUCT_PERFORMANCE_COLUMNS,
@@ -733,5 +742,193 @@ describe('product performance', () => {
 
   it('bounds the table’s default page below its maximum', () => {
     expect(DEFAULT_ROW_LIMIT).toBeLessThanOrEqual(MAX_ROW_LIMIT)
+  })
+})
+
+// export.js — the CSV writer. Pure: it takes a masked envelope and returns text,
+// so everything about the file's shape is provable here. What only Postgres can
+// answer — that the file carries the same population the table does, and more
+// rows than a limited page — is in test/admin-reports.test.js beside it.
+describe('the report CSV writer', () => {
+  const COLUMNS = defineColumns([
+    { key: 'brand_name', label: 'House' },
+    { key: 'product_name', label: 'Design' },
+    { key: 'qty', label: 'Quantity', kind: 'number' },
+    { key: 'value_cents', label: 'Sales', kind: 'money' },
+    { key: 'landed_cents', label: 'Landed', kind: 'money', finance: true },
+  ])
+
+  const report = (overrides = {}) =>
+    Object.freeze({
+      report: 'test-report',
+      title: 'A test report',
+      columns: COLUMNS,
+      rows: [
+        {
+          brand_name: 'Pierre Frey',
+          product_name: 'Atlas',
+          qty: 2,
+          value_cents: 100000,
+          landed_cents: 40000,
+        },
+      ],
+      totals: { brand_name: 'All houses', value_cents: 100000, landed_cents: 40000 },
+      meta: {
+        filters: { from: '2026-01-01', brand: ['pierre-frey', 'liberty-london'] },
+        coverage: { note: 'Live platform orders only.' },
+        masked_columns: [],
+      },
+      ...overrides,
+    })
+
+  // The file split back into rows, the way the reader's spreadsheet reads it.
+  const linesOf = (csv) => csv.split('\r\n')
+
+  describe('the table it writes', () => {
+    it('takes its header from the columns, in declaration order', () => {
+      expect(linesOf(toReportCsv(report()))[0]).toBe('House,Design,Quantity,Sales,Landed')
+    })
+
+    it('writes one row per row, cells in column order', () => {
+      expect(linesOf(toReportCsv(report()))[1]).toBe('Pierre Frey,Atlas,2,1000.00,400.00')
+    })
+
+    it('appends the totals row as a row, with no second rule', () => {
+      expect(linesOf(toReportCsv(report()))[2]).toBe('All houses,,,1000.00,400.00')
+    })
+
+    // A totals row deliberately omits a figure that cannot be added — metres and
+    // units do not sum — and a 0 there would state a total nobody computed.
+    it('writes an absent key as an empty cell, never as a zero', () => {
+      expect(linesOf(toReportCsv(report()))[2].split(',')[2]).toBe('')
+    })
+
+    it('ends with a trailing newline, so an importer cannot drop the last row', () => {
+      expect(toReportCsv(report())).toMatch(/\r\n$/)
+    })
+  })
+
+  // The reason src/lib/csv.js was extracted in US-001: a design name is
+  // staff-typed free text and this file is built to open in Excel.
+  describe('the escaping it inherits', () => {
+    it('neutralises a product name beginning with =', () => {
+      const csv = toReportCsv(
+        report({ rows: [{ brand_name: 'House', product_name: '=HYPERLINK("http://x")' }] })
+      )
+      expect(linesOf(csv)[1]).toBe('House,"\'=HYPERLINK(""http://x"")",,,')
+    })
+
+    it('neutralises the other formula lead-ins too', () => {
+      for (const prefix of ['+', '-', '@', '\t', '\r']) {
+        const csv = toReportCsv(report({ rows: [{ brand_name: `${prefix}cut to order` }] }))
+        expect(csv).toContain(`'${prefix}cut to order`)
+      }
+    })
+
+    it('quotes a value carrying a comma, per RFC 4180', () => {
+      const csv = toReportCsv(report({ rows: [{ brand_name: 'Linen, washed' }] }))
+      expect(linesOf(csv)[1]).toBe('"Linen, washed",,,,')
+    })
+  })
+
+  // `kind` is declared once for the table and the file alike, which is what lets
+  // the writer tell a figure from a name without a second list.
+  describe('the money it renders', () => {
+    it('writes a money column in units at two decimal places, never in cents', () => {
+      expect(linesOf(toReportCsv(report({ rows: [{ value_cents: 4998 }] })))[1]).toBe(',,,49.98,')
+    })
+
+    it('hands a non-numeric money value on untouched rather than writing NaN', () => {
+      expect(linesOf(toReportCsv(report({ rows: [{ value_cents: 'unknown' }] })))[1]).toBe(
+        ',,,unknown,'
+      )
+    })
+
+    it('leaves a number column alone', () => {
+      expect(linesOf(toReportCsv(report({ rows: [{ qty: 2.5 }] })))[1]).toBe(',,2.5,,')
+    })
+  })
+
+  // A masked export must not read as a complete one. The header IS the masked
+  // envelope's columns, so a deleted column has no header and no cell anywhere.
+  describe('what a masked report exports', () => {
+    const maskedCsv = (finance) =>
+      toReportCsv(
+        maskReport(report(), reportAccess({ role: 'backoffice', can_view_finance: finance }))
+      )
+
+    it('gives a non-finance caller no finance header', () => {
+      expect(linesOf(maskedCsv(false))[0]).toBe('House,Design,Quantity,Sales')
+    })
+
+    it('gives a non-finance caller no finance VALUE anywhere in the file', () => {
+      expect(maskedCsv(false)).not.toContain('400.00')
+      expect(maskedCsv(false)).not.toContain('40000')
+    })
+
+    it('says which columns were withheld, by label', () => {
+      expect(maskedCsv(false)).toContain('Columns withheld,Landed')
+    })
+
+    it('gives a finance caller the whole file, with no withheld note', () => {
+      expect(linesOf(maskedCsv(true))[0]).toBe('House,Design,Quantity,Sales,Landed')
+      expect(maskedCsv(true)).not.toContain('Columns withheld')
+    })
+  })
+
+  // The CSV is the copy that leaves the building: a file that does not say what
+  // it covers is read as covering everything.
+  describe('the notes below the table', () => {
+    it('separates itself from the data with a blank row', () => {
+      const lines = linesOf(toReportCsv(report()))
+      expect(lines.indexOf('')).toBe(3)
+    })
+
+    it('names the report and states its coverage', () => {
+      const csv = toReportCsv(report())
+      expect(csv).toContain('Report,A test report')
+      expect(csv).toContain('Coverage,Live platform orders only.')
+    })
+
+    it('states the filters the file was built with, multi-value ones included', () => {
+      expect(toReportCsv(report())).toContain(
+        'Filters,"from=2026-01-01; brand=pierre-frey, liberty-london"'
+      )
+    })
+
+    it('says so plainly when nothing was filtered', () => {
+      expect(toReportCsv(report({ meta: { filters: {} } }))).toContain('Filters,none')
+    })
+
+    it('omits the coverage line when the report states none', () => {
+      expect(toReportCsv(report({ meta: { filters: {} } }))).not.toContain('Coverage,')
+    })
+  })
+
+  describe('the filename and the content type', () => {
+    it('builds the filename from the report’s own name', () => {
+      expect(reportCsvFilename({ report: 'product-performance' })).toBe(
+        'atelier-product-performance.csv'
+      )
+    })
+
+    // A report's name is a module constant, so a value that is not filename-safe
+    // is a code fault (a 500) rather than a caller's 400 — the posture
+    // requireEntity takes for a registry key.
+    it('throws on a report name that could reach the header as anything else', () => {
+      for (const name of ['Product Performance', 'a"b', '../etc', '', undefined, 42]) {
+        expect(() => reportCsvFilename({ report: name })).toThrow(/filename-safe/)
+      }
+    })
+
+    it('declares UTF-8, because a house name is not ASCII', () => {
+      expect(REPORT_CSV_CONTENT_TYPE).toBe('text/csv; charset=utf-8')
+    })
+  })
+
+  // Without columns there is no header and no cell order, and a file built from
+  // the rows' own keys would vary per row.
+  it('refuses a report that declares no columns', () => {
+    expect(() => toReportCsv({ report: 'empty', columns: [] })).toThrow(/declares no columns/)
   })
 })

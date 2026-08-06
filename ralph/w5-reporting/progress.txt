@@ -72,6 +72,37 @@ Story-specific detail belongs in the per-story entries below, not here.
   @fastify/rate-limit puts `x-ratelimit-limit` on a metered route and nothing else does, so
   `expect(response.headers['x-ratelimit-limit']).toBeDefined()` (paired with the same assertion
   being UNDEFINED on an unmetered admin route) proves the opt-in in two requests instead of sixty.
+- **A file that leaves the building states its own coverage, its filters and what was withheld from
+  it — in the file, not in the screen that produced it.** A CSV is read on a laptop nobody here
+  owns, a week later, with no UI around it, so an export with no notes is read as covering
+  everything and a MASKED export is read as a complete one. `src/reports/export.js` writes them
+  BELOW the table, after a blank row: line 1 has to stay the header for anything reading the file
+  mechanically, and in a spreadsheet a footnote under the table is where a reader looks anyway.
+  Same argument as `meta.coverage` existing at all.
+- **Two routes serving one thing are registered off ONE declaration, or "they cannot disagree" is a
+  convention rather than a fact.** `registerReport(path, build)` in `src/routes/admin-reports.js`
+  takes a single builder and registers the table and its `export.csv` from it, so the acceptance
+  criterion "the export shares one query builder with the table" is structural. The export differs
+  in exactly three declared ways — every row (`limit: null`), no `limit` in its querystring
+  vocabulary, and its own tighter bucket. US-007's reports are one more `registerReport` line.
+- **Build and MASK before setting a single response header.** `maskReport` throws 403, and a
+  refusal raised after `reply.header('content-type', 'text/csv')` leaves as JSON wearing a CSV
+  content type and an `attachment` disposition — the browser saves the error. Applies to every
+  route that sets headers before returning a body.
+- **A cell's `kind` is what lets one writer tell a figure from a name, so `money` is written in
+  UNITS and never in cents.** `100000` under a heading of "Sales" is a wrong figure to every human
+  who opens the file, and the column declaration is the only place the distinction is stated once
+  for the table and the file alike. Consequence to know: `csvCell` neutralises a leading `-`, so a
+  negative money figure is written `'-50.00` and Excel shows it as text. That is the formula guard
+  working as designed — widen it in `src/lib/csv.js` or not at all, never special-case a caller.
+- **A rate-limited route is asserted RELATIVELY when the point is that it is tighter.** Comparing
+  `Number(x-ratelimit-limit)` on the export against the same header on the table proves the
+  relationship in two requests and survives both numbers being retuned, where asserting `10`
+  pins a value nobody promised. Same header trick as proving the opt-in at all.
+- **A test block against a tightly-metered route fetches ONE response in `beforeAll` and asserts
+  against it.** The export bucket is 10/min, so a per-test request would spend it and the failure
+  would surface as a 429 in an unrelated assertion. Count the requests a block makes, the way
+  `beforeAll` registration already counts the 10-per-15-min register bucket.
 - **`src/routes/*.js` body schemas are OUTSIDE this workstream's file list, so a new writable
   column is inert over HTTP until its route file's owner adds the property.** Ajv runs
   `removeAdditional: true`, so an unlisted key is silently STRIPPED, not 400'd — the PATCH
@@ -344,4 +375,71 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   One product decision for a human: whether "Sales" should be finance-masked after all — this story
   says no, following access.js and the CRM's existing policy, and reversing it is a one-line change
   to the column declaration.
+---
+
+## 2026-08-06T19:15:00Z - W5-US-006 - Server-side CSV export
+- `src/reports/export.js` (new, pure) renders a MASKED report envelope as CSV: the header is
+  `columns.map(label)`, every cell is read by that column's key in that order, the totals row is
+  appended as a row, and a notes block below a blank separator states the report, the filters, the
+  coverage note and any withheld column LABELS. Every value goes through `csvCell`
+  (`src/lib/csv.js`, US-001), a `money` column is written in units at 2dp, and an absent key is an
+  empty cell rather than a zero. `reportCsvFilename` builds `atelier-<report>.csv` from the
+  report's own name and throws a plain Error on anything not `[a-z][a-z0-9-]*` — it reaches a
+  Content-Disposition header and the name is a module constant, so a bad one is a code fault.
+  `src/routes/admin-reports.js` now registers the table and its export off ONE declaration
+  (`registerReport(path, build)`): `GET /admin/reports/product-performance/export.csv`,
+  backoffice-only, rate-limited 10/min against the table's 60, `limit` absent from its querystring
+  schema, and `build(pool, filters, { limit: null })` for every row.
+- Repos and files changed: atelier-api — `src/reports/export.js` (new),
+  `src/routes/admin-reports.js`, `test/report-filters.test.js` (+24 pure tests),
+  `test/admin-reports.test.js` (+13 route tests), `ralph/w5-reporting/prd.json`,
+  `ralph/w5-reporting/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`,
+  `CLAUDE.md`. atelier-crm — untouched.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (53 files, 1331 tests); CRM baseline run untouched:
+  `npm test` -> 0 (567), `npm run build` -> 0.
+- **Learnings:**
+  - Six general ones promoted to Codebase Patterns above: a file that leaves the building states
+    its coverage/filters/withheld columns in the file; two routes serving one thing are registered
+    off one declaration; mask before setting any header; `kind: money` is written in units, and the
+    formula guard's treatment of a leading `-` is deliberate; a tighter rate limit is asserted
+    relatively from `x-ratelimit-limit`; a metered block fetches one response in `beforeAll`.
+  - **`limit: null` had to be UNREACHABLE from the table route for "the export is not the current
+    page" to be true while both share a builder.** The table's schema caps at `MAX_ROW_LIMIT` (an
+    over-large limit is a 400, not a silent clamp), and the export's schema does not declare
+    `limit` at all — Ajv's `removeAdditional` strips one a caller sends, which is the right
+    outcome here because the export's answer is every row either way. Tested directly: `?limit=1`
+    gives the table 1 row and the file all 4.
+  - Gotcha for US-007: `productPerformanceReport`'s signature `(db, filters, { limit })` IS the
+    contract `registerReport` calls. A report whose builder takes anything else needs its own
+    registration rather than a widened helper — the helper's whole value is that both routes get
+    the same function.
+  - Gotcha for US-007: the stock report is the first whose masking actually deletes a column, so it
+    is the first export that emits `Columns withheld,<labels>`. The pure suite already proves that
+    line against a synthetic report with a `finance` column
+    (`test/report-filters.test.js` › "what a masked report exports"); the DB-backed suite asserts
+    the note is ABSENT here, because product performance declares no finance column.
+  - Gotcha: `COVERAGE_NOTE` and the filter summary both contain commas, so `csvCell` quotes them —
+    a test asserting on a note line must expect the quoted form (`Filters,"from=…; brand=a, b"`).
+  - Gotcha: `csvCell` quotes a value containing `\r`, and the writer joins on `\r\n`, so a cell
+    holding a bare CR does not break a `split('\r\n')` — but a cell holding a real newline would
+    split a row in two for any test that parses the body that way. No column emits one today.
+  - Context: `src/reports/` now holds `filters.js`, `revenue-lines.js`, `access.js`,
+    `product-performance.js` and `export.js`; `src/routes/admin-reports.js` serves two routes off
+    one `registerReport` call. `stock.js` and `not-invoiced.js` (US-007) are still unwritten, and
+    `/auth/me` still carries no `report_access` (US-008).
+  - Test context: the US-006 block in `test/admin-reports.test.js` builds its OWN app, registers
+    two logins under `${PREFIX}-export-*` emails and inserts the shared fixture PLUS a fourth sold
+    design named `=SUM(A1:A9)`, so the population there is 4 rows where the US-005 block's is 3.
+    Its helpers (`dataRowsOf`, `totalsRowOf`) locate the rows structurally — header is line 1, the
+    totals row is the last line before the notes' blank separator — which is itself an assertion
+    about the file's shape.
+- **Needs human verification:** none in a browser — no CRM screen calls this endpoint until US-008
+  and there is no e2e harness on this machine. What a person should eyeball once is the FILE: sign
+  in with a back-office login, download
+  `GET /admin/reports/product-performance/export.csv?from=2026-01-01` and open it in Excel, to
+  confirm the notes block reads well under the table and that no cell evaluates. On `atelier_w5`
+  the live population is the test fixtures alone, so it answers a header, a totals row and the
+  notes. One product decision for a human: whether the office wants the date range in the download
+  FILENAME (today it is always `atelier-product-performance.csv`, so two exports of different
+  windows overwrite each other in a Downloads folder).
 ---

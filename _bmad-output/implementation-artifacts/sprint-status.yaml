@@ -81,7 +81,7 @@ epics:
       US-003: done      # Report filter layer
       US-004: done      # Revenue scope CTE and the masking module
       US-005: done      # Product performance by brand
-      US-006: pending   # Server-side CSV export
+      US-006: done      # Server-side CSV export
       US-007: pending   # Stock and not-invoiced reports
       US-008: pending   # report_access on /auth/me and CRM consumption
   w6-category-export:

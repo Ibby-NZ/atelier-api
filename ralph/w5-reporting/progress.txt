@@ -18,6 +18,18 @@ Story-specific detail belongs in the per-story entries below, not here.
 - **A gate failure that your diff cannot reach is environment, not code.** Prove it by naming the
   files you touched and the ones the failing test reads, fix the environment, re-run the full
   suite — do not "fix" the test.
+- **A migration that seeds or backfills must EXPORT its statement.** node-pg-migrate reads only
+  `up`/`down`, so anything else exported is free — and `atelier_w5` holds almost no rows, so a
+  backfill's UPDATE matches nothing here and the migration alone proves nothing. The test inserts
+  its own fixtures and runs the migration's OWN exported SQL against them. Retyping the statement
+  in the test is how the two drift. Established by `1786593600000_featured-rank.js`, followed by
+  `1786680000000_reporting-finance-access.js`.
+- **`src/routes/*.js` body schemas are OUTSIDE this workstream's file list, so a new writable
+  column is inert over HTTP until its route file's owner adds the property.** Ajv runs
+  `removeAdditional: true`, so an unlisted key is silently STRIPPED, not 400'd — the PATCH
+  succeeds and writes nothing. Add the column to the domain module's whitelist (which is what the
+  acceptance criteria mean by "the PATCH whitelist"), then say so in this log; do not reach into
+  the route file.
 
 ---
 
@@ -50,5 +62,54 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
 - **Needs human verification:** none. No route, no response shape and no screen changed. The
   `/account/price-lists/:brandSlug/export.csv` download is the only consumer and is covered by
   `test/price-list-exposure.test.js`.
+---
+
+## 2026-08-06T18:25:00Z - W5-US-002 - Migration: reporting index and finance access
+- `migrations/1786680000000_reporting-finance-access.js` (new, ESM) adds a plain ascending btree
+  index on `orders.created_at` — the date range is every Epic 5 report's primary scan and only
+  `user_id`/`status` were indexed — plus `users.can_view_finance boolean NOT NULL DEFAULT false`,
+  backfilled `true` for directors. The backfill statement is exported as `DIRECTOR_BACKFILL_SQL`
+  so the test runs the exact statement the migration ran, and carries its own
+  `AND can_view_finance = false` guard so a re-run writes nothing.
+  `src/users/admin-users.js` joins the column to `USER_UPDATE_COLUMNS` and to the read projection
+  (`USER_READ_COLUMNS` + `toUser`), and `updateUser` clears it when the patched role is not in
+  `FINANCE_ROLES` (`backoffice`, `director`) — the same discipline `trade_approved` already has,
+  including "an explicit `can_view_finance: true` in the same body loses".
+- Repos and files changed: atelier-api — `migrations/1786680000000_reporting-finance-access.js`
+  (new), `src/users/admin-users.js`, `test/admin-reports.test.js` (new, 14 tests),
+  `ralph/w5-reporting/prd.json`, `ralph/w5-reporting/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`, `CLAUDE.md`. atelier-crm — untouched.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (52 files, 1178 tests); CRM baseline run untouched:
+  `npm test` -> 0 (567), `npm run build` -> 0. `npm run migrate` -> applied, second programmatic
+  run returned `[]` (asserted in the suite as well, not only by hand).
+- **Learnings:**
+  - A migration that seeds or backfills must export its statement — see the Codebase Patterns entry
+    added above. `atelier_w5` currently holds ZERO users, so the migration's own backfill matched
+    nothing; without the exported statement there would be no evidence it works.
+  - **A plain ascending btree is the right index for a date RANGE, not a composite and not DESC.**
+    A btree range scan is direction-agnostic, so `ORDER BY created_at DESC` uses it. A composite
+    `(status, created_at)` was rejected because the status filter is overridable
+    (architecture.md § Reporting): the column that is ALWAYS in the predicate is the one to index.
+  - **`can_view_finance` is NOT NULL DEFAULT false because finance visibility must fail closed.**
+    A nullable column turns "nobody has decided yet" into a value every reader interprets, and the
+    interpretations drift. Same reasoning as `brands.trade_only` defaulting closed.
+  - Gotcha for US-008 and anyone extending the account admin: the CRM cannot yet SEND
+    `can_view_finance`. `patchBodySchema` in `src/routes/admin-users.js` does not list it and that
+    file is outside this workstream's allowed paths; Ajv's `removeAdditional: true` STRIPS the key,
+    so the PATCH returns 200 having written nothing. Today the two working write paths are the
+    migration's director backfill and the AdminJS panel (`users` is an editable resource, and
+    `@adminjs/sql` introspects the new column automatically) — the same stopgap posture
+    `trade_accounts` shipped with. The module-level rule holds for every caller regardless.
+  - Gotcha: `USER_READ_COLUMNS` feeds `createUser`/`getUser`/`listUsers`/`setUserArchived`
+    RETURNING alike, so adding a column to it widens all four responses at once. Safe here only
+    because `test/admin-users.test.js` asserts with `toHaveProperty`, never an exact `toEqual` on a
+    user — check that before widening it again.
+  - Context: the whole reporting surface is still unwritten. `src/reports/` does not exist yet;
+    `filters.js`, `revenue-lines.js` and the access/masking module land in US-003 and US-004, and
+    `test/report-filters.test.js` is likewise not created yet.
+- **Needs human verification:** none in the browser — no route, no response body reachable by a
+  screen and no CRM file changed. One decision for a human: whether `can_view_finance` should be
+  editable from the CRM's Users & permissions screen before US-008 lands, which needs the property
+  added to `patchBodySchema` by whoever owns `src/routes/admin-users.js`.
 ---
 

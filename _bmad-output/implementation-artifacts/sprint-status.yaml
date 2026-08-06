@@ -77,7 +77,7 @@ epics:
     status: pending
     stories:
       US-001: done      # Extract the hardened CSV writer to src/lib/csv.js
-      US-002: pending   # Migration: reporting index and finance access
+      US-002: done      # Migration: reporting index and finance access
       US-003: pending   # Report filter layer
       US-004: pending   # Revenue scope CTE and the masking module
       US-005: pending   # Product performance by brand

@@ -58,6 +58,22 @@ Story-specific detail belongs in the per-story entries below, not here.
 - **Filter a shared-database assertion to the fixture's own prefix and assert RELATIVE order.**
   `atelier_w7` is seeded and the migration already featured real rows, so any absolute position or
   `toHaveLength` over a public listing is asserting about the seed as much as the fixture.
+- **A fallback chain must never BORROW another row's asset.** Where art is keyed to a specific
+  entity, the honest rungs are: this entity's commissioned asset, then this entity's own live
+  asset, then a designed empty ground. Substituting a neighbour's picture is worse than the plain
+  ground because the caption asserts it belongs to this row — and a same-key collision is exactly
+  how it happens by accident, which is the second reason to key on the `(brand_slug, slug)` PAIR.
+- **Moving a page's composition from constants to the API removes its outage state, silently.**
+  A storefront page whose slugs, names and art were hardcoded rendered fully with the API down;
+  once the API chooses, "API down" and "office chose nothing" are the same empty list. `safeFetch`
+  only guarantees the BUILD succeeds — the empty case has to be designed, and it bites hardest
+  where a layout prop (here `overlay`, the header floating in the first band) assumes the section
+  is there.
+- **Verify a build-time-fetching page against a fixture API on a spare port**, not against the
+  shared one: `node <scratch>/fixture-api.mjs` serving the three catalogue endpoints, then a
+  wrapper that spawns `npm run build` with `PUBLIC_API_BASE_URL` pointed at it, then parse
+  `dist/client/index.html`. Two runs — the seeded ranks and a deliberately re-ordered list —
+  prove the ordering and every fallback rung without a browser or an e2e harness.
 
 ---
 
@@ -407,6 +423,115 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
     through a reload. This is the round trip US-002 asked a human to eyeball.
   - The same screen's Houses list with "Show archived" both on and off — the toggle no longer
     refetches, so confirm archived rows still appear and disappear as before.
+  - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
+    be started.)
+---
+
+## 2026-08-06T17:12:40Z - W7-US-006 - Storefront homepage reads featured
+
+- `FEATURED_COLLECTIONS`, `FEATURED_SLUG` and `LATEST_SLUGS` are gone from
+  `src/pages/index.astro`. The homepage's whole composition now comes from `featured_rank` on
+  `GET /catalogue/collections`, which US-003 already exposes and orders:
+  - hero = the first `HERO_SLOTS` (3) featured collections in rank order;
+  - "Latest collections" = the featured ones the hero did not take, then the rest of the catalogue
+    to fill four tiles, excluding anything already on the page;
+  - the featured band = the collection its commissioned portrait was shot for (see below).
+- Four new pure helpers in `src/lib/home.js`, all tested (`home.test.js`, 121 tests in the repo
+  now, 25 of them new): `collectionKey` (the `(house, collection)` PAIR), `featuredCollections`,
+  `collectionArtwork` (the fallback chain) and `pickFeature`. `collectionBySlug` was deleted — the
+  seasonal slug lookup was its only caller. `pickCollections` lost its `slugs` option and now
+  de-duplicates on the pair rather than the slug.
+- **The artwork fallback chain, three rungs, and it never borrows**: art commissioned for THIS
+  collection (keyed by its pair, `HERO_ART` / `FEATURE_ART` in the frontmatter) -> the collection's
+  own catalogue `image_url` -> no photograph, and the slide paints the umber ground
+  (`.home-hero-slide.is-plain`, the same answer `/brands/[slug]` gives a house with no banner
+  imagery). It never falls back to ANOTHER collection's picture: a hero captioned "Nature's Opera"
+  over Larsen's interior is worse than a plain band. No `<img>` is emitted without a source.
+- **The art registries are not a merchandising choice.** They say which photograph belongs to which
+  collection, which is a fact about the art; the office can reorder, add and drop featured
+  collections in the CRM without anyone editing the page. A featured collection with no entry is
+  the normal case, not an omission.
+- **The featured band takes the collection its PORTRAIT was shot for, not the top rank** — its
+  frame is 40vw beside the copy, not 88vh behind it, so it is genuinely art-directed. That answers
+  the question US-001's log left open (`FEATURED_SLUG` was `larsen-2024`, which is rank **2**):
+  the band does not follow rank at all, so reordering the hero does not move it, and today's page
+  is unchanged. It falls back to the first featured collection with a photograph of its own, and
+  the band is omitted entirely when nothing featured has a picture.
+- **The page kept an outage state it would otherwise have lost.** It used to render three hero
+  photographs with the API down because the slugs, names and art were hardcoded; now an empty
+  featured list means no hero, and the page is `<Layout bleed overlay>` — a collapsed hero leaves
+  the header's bone type on the cream tile wall below. `CollectionHero` renders an umber
+  `.home-hero.is-empty` band carrying the site's own headline and a link to `/products` instead.
+  `prerender = true` and every `safeFetch` are untouched, so the build still succeeds with the API
+  down (verified: a build with nothing listening emitted exactly that band).
+- Repos and files changed: atelier-storefront only — `src/lib/home.js`, `src/lib/home.test.js`,
+  `src/pages/index.astro`, `src/components/CollectionHero.astro`, `src/styles/home.css`,
+  `CLAUDE.md` (new `## Featured` section, plus the three now-false lines in the `/` and chrome
+  sections that named the deleted constants); plus atelier-api bookkeeping
+  (`ralph/w7-featured/prd.json`, `ralph/w7-featured/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`).
+- Gates: `npm run lint` (store) -> 0, `npm test` (store) -> 0 (121 tests), `npm run build` (store)
+  -> 0. The two untouched repos were run as well: `npm run lint` + `npm test` (api) -> 0 (940
+  tests, 50 files); `npm test` + `npm run build` (crm) -> 0 (459 tests).
+
+- **Verified without a browser**, by building against a throwaway fixture API on port 3199/3200
+  (never 3001 — another loop may hold it) and parsing `dist/client/index.html`:
+  - Seeded ranks 1-7: hero = Nature's Opera / Larsen 2024 / Manuel Canovas 2024 in that order,
+    each on its own commissioned banner; latest row = ranks 4-7 in order; featured band = Larsen
+    2024 on the committed portrait with House/Origin/Designs held; exactly one `<h1>`.
+    **This is today's page, unchanged.**
+  - A deliberately re-ordered list: rank 1 a collection with no commissioned art (renders its own
+    `image_url`, and the `og:image` follows it), rank 2 a collection with no picture at all
+    (renders `is-plain`, no `<img>` element), rank 3 one with commissioned art. The band stayed on
+    Larsen 2024 at rank 4 and the row skipped everything already shown.
+  - API down: `.home-hero.is-empty` with the site headline, build exit 0.
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only) — promoted to `## Codebase Patterns` above: a
+    fallback chain must never borrow another row's asset; moving a page's composition from
+    constants to the API silently removes its outage state; how to verify a build-time-fetching
+    page against a fixture API on a spare port.
+  - Gotchas:
+    - **An env-var prefix (`PUBLIC_API_BASE_URL=... npm run build`) is not an approved command
+      shape in this loop.** A three-line scratchpad script that spawns `npm run build` with an
+      extended `env` is the way to do it. Do NOT write a storefront `.env` — that file is
+      forbidden, and Astro would pick it up on every later build.
+    - **Astro's `<Image>` takes an `ImageMetadata`, never a URL string**, so a chain mixing
+      committed art with a catalogue URL cannot be one element: `collectionArtwork` returns
+      `{ image, src }` with at most one set and the template branches. A remote URL through
+      `<Image>` needs configured domains and would fail the build.
+    - `.photo-band-body` is `position: absolute; bottom: 0`, so the empty hero could not reuse the
+      slide machinery and shrink to its copy — it is its own `.home-hero-empty` block. Any future
+      "band with no photograph" hits the same wall.
+    - The `og:image` now has two shapes to read: `heroSlides[0]?.image?.src` for committed art
+      (an `ImageMetadata`) and `heroSlides[0]?.src` for a catalogue URL.
+    - `pickCollections` now DROPS a collection with no `brand.slug` (it has no pair key). The API
+      always joins the house, so this is unreachable in practice — but a hand-built list would
+      lose rows silently.
+    - The collections endpoint returns featured-first already, so the row would come out right
+      even without slicing; the page slices explicitly anyway, because relying on an endpoint's
+      ORDER BY for a COMPOSITION is exactly the coupling the schema note warns against.
+  - Context:
+    - Rules: `atelier-storefront/src/lib/home.js` (+ `home.test.js`). Page:
+      `src/pages/index.astro` (the two art registries are at the top of the frontmatter).
+      Hero: `src/components/CollectionHero.astro`. Styles: the `is-plain` / `is-empty` blocks in
+      `src/styles/home.css`.
+    - The API side this reads: `listCollections` in `atelier-api/src/catalogue/collections.js`.
+    - Architecture: `_bmad-output/planning-artifacts/architecture.md` § "Featured ordering", the
+      "Storefront asymmetry" paragraph.
+- **Needs human verification:**
+  - The homepage (`/`) after a build against a live API — confirm the hero, the latest row and the
+    featured band look exactly as they do today. This is the check US-001 asked for.
+  - **Confirm `featured-collection-image.jpg` really is Larsen 2024's portrait.** It is now keyed
+    to `larsen/larsen-2024` in `FEATURE_ART`, which is what today's page renders, but the file
+    name says nothing and no loop can look at it. If it is a generic interior, the band should
+    key it differently (or the registry should carry a generic entry) — otherwise reordering in
+    the CRM will move a portrait away from a collection it never belonged to, which is harmless,
+    or leave it on one it does not depict, which is not.
+  - The two degraded states, which a human should judge rather than a test: a featured collection
+    rendering its own catalogue photograph in the 88vh hero frame (a 4:5 room shot, so the crop is
+    not art-directed), and the plain umber slide. Both are correct per the chain; whether the
+    office finds them acceptable is a design call.
   - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
     be started.)
 ---

@@ -1,9 +1,20 @@
-// src/reports/filters.js is pure by design, so this suite takes no pool, runs no
-// migration and stubs nothing. The two properties it exists to hold are:
+// The pure half of src/reports/. These modules are pure by design, so this suite
+// takes no pool, runs no migration and stubs nothing — the moment it needs
+// loadConfig() they have stopped being what it claims. Anything only Postgres
+// can confirm (the enum copies, the CTE as SQL) is in test/admin-reports.test.js
+// beside it.
+//
+// filters.js — the two properties it exists to hold are:
 //   - a filter NAME only ever resolves through the frozen whitelist
 //   - a filter VALUE only ever leaves as a $n placeholder
 // Everything else here is the parsing contract the reports and their exports
 // share, so the table and the CSV cannot disagree about what was filtered.
+//
+// access.js — a finance column is deleted from every part of the payload, and a
+// report that is finance end to end is a 403 rather than an empty table.
+//
+// revenue-lines.js — the population is one frozen default, overridable, and the
+// CTE is the seam a second source unions into.
 
 import { describe, it, expect } from 'vitest'
 import {
@@ -15,6 +26,14 @@ import {
   parseReportFilters,
   buildReportFilters,
 } from '../src/reports/filters.js'
+import { reportAccess, defineColumns, maskReport } from '../src/reports/access.js'
+import {
+  REVENUE_STATUSES,
+  SCOPE_NAME,
+  SCOPE_COLUMNS,
+  assertScopeSource,
+  buildRevenueScope,
+} from '../src/reports/revenue-lines.js'
 
 const statusOf = (fn) => {
   try {
@@ -297,6 +316,357 @@ describe('report filters', () => {
       const error = statusOf(() => buildReportFilters({}, { names: ['supplier'] }))
       expect(error.statusCode).toBeUndefined()
       expect(error.message).toContain('supplier')
+    })
+  })
+})
+
+// src/reports/access.js is pure for the same reason filters.js is: what a report
+// CONTAINS needs a database, but which of it survives does not — so the masking
+// rules are provable on their own here, and the schema agreement that only
+// Postgres can confirm stays in test/admin-reports.test.js.
+describe('report access and masking', () => {
+  const columns = defineColumns([
+    { key: 'brand_name', label: 'House' },
+    { key: 'qty', label: 'Metres', kind: 'number' },
+    { key: 'revenue_cents', label: 'Revenue', kind: 'money' },
+    { key: 'cost_cents', label: 'Cost', kind: 'money', finance: true },
+    { key: 'margin_cents', label: 'Margin', kind: 'money', finance: true },
+  ])
+
+  const report = Object.freeze({
+    report: 'product-performance',
+    columns,
+    rows: [
+      { brand_name: 'Pierre Frey', qty: 12, revenue_cents: 240000, cost_cents: 90000, margin_cents: 150000 },
+      { brand_name: 'Liberty London', qty: 3, revenue_cents: 60000, cost_cents: 25000, margin_cents: 35000 },
+    ],
+    totals: { qty: 15, revenue_cents: 300000, cost_cents: 115000, margin_cents: 185000 },
+    meta: { coverage: 'live orders only' },
+  })
+
+  const FINANCE = Object.freeze({ reports: true, finance: true })
+  const STAFF = Object.freeze({ reports: true, finance: false })
+
+  describe('reportAccess', () => {
+    it('gives an anonymous caller nothing', () => {
+      expect(reportAccess(null)).toEqual({ reports: false, finance: false })
+      expect(reportAccess(undefined)).toEqual({ reports: false, finance: false })
+    })
+
+    it('gives a client nothing, whatever its flag says', () => {
+      expect(reportAccess({ role: 'customer', can_view_finance: true })).toEqual({
+        reports: false,
+        finance: false,
+      })
+      expect(
+        reportAccess({ role: 'trade', trade_approved: true, can_view_finance: true })
+      ).toEqual({ reports: false, finance: false })
+    })
+
+    it('opens the reports to staff and the finance columns only on the flag', () => {
+      expect(reportAccess({ role: 'backoffice', can_view_finance: false })).toEqual({
+        reports: true,
+        finance: false,
+      })
+      expect(reportAccess({ role: 'backoffice', can_view_finance: true })).toEqual({
+        reports: true,
+        finance: true,
+      })
+    })
+
+    // The role is not the answer: `backoffice` covers the showroom and the
+    // accounts desk alike, and a director whose grant was revoked must lose it.
+    it('refuses finance to a director whose flag is false', () => {
+      expect(reportAccess({ role: 'director', can_view_finance: false })).toEqual({
+        reports: true,
+        finance: false,
+      })
+    })
+
+    // Access is derived from request.user and nothing else. A caller that sends
+    // its own answer is sending an opinion, not a fact.
+    it('ignores anything but the user’s own role and flag', () => {
+      const access = reportAccess({
+        role: 'backoffice',
+        can_view_finance: false,
+        finance: true,
+        report_access: { finance: true },
+        query: { finance: 'true' },
+      })
+      expect(access.finance).toBe(false)
+    })
+
+    it('is frozen, so a handler cannot widen it after the fact', () => {
+      expect(Object.isFrozen(reportAccess({ role: 'director', can_view_finance: true }))).toBe(true)
+    })
+  })
+
+  describe('defineColumns', () => {
+    it('freezes the declaration and defaults kind and finance', () => {
+      expect(Object.isFrozen(columns)).toBe(true)
+      expect(columns[0]).toEqual({ key: 'brand_name', label: 'House', kind: 'text', finance: false })
+    })
+
+    it('refuses a malformed declaration while the report module is loading', () => {
+      expect(() => defineColumns([])).toThrow(/at least one column/)
+      expect(() => defineColumns([{ key: 'Brand', label: 'House' }])).toThrow(/malformed key/)
+      expect(() => defineColumns([{ key: 'qty', label: '  ' }])).toThrow(/no label/)
+      expect(() => defineColumns([{ key: 'qty', label: 'Metres', kind: 'currency' }])).toThrow(
+        /unknown kind/
+      )
+      expect(() =>
+        defineColumns([
+          { key: 'qty', label: 'Metres' },
+          { key: 'qty', label: 'Units' },
+        ])
+      ).toThrow(/declared twice/)
+    })
+  })
+
+  describe('maskReport', () => {
+    it('serves a finance login the whole report and an empty masked list', () => {
+      const masked = maskReport(report, FINANCE)
+
+      expect(masked.columns).toHaveLength(5)
+      expect(masked.rows[0].cost_cents).toBe(90000)
+      expect(masked.totals.margin_cents).toBe(185000)
+      expect(masked.meta.masked_columns).toEqual([])
+      // The standing note survives masking; it is the report's own.
+      expect(masked.meta.coverage).toBe('live orders only')
+    })
+
+    // Deleted, not nulled: a key that survives with an empty value still says
+    // which figures exist.
+    it('deletes the finance columns from columns, every row and totals', () => {
+      const masked = maskReport(report, STAFF)
+
+      expect(masked.columns.map((column) => column.key)).toEqual([
+        'brand_name',
+        'qty',
+        'revenue_cents',
+      ])
+      for (const row of masked.rows) {
+        expect(Object.hasOwn(row, 'cost_cents')).toBe(false)
+        expect(Object.hasOwn(row, 'margin_cents')).toBe(false)
+      }
+      expect(Object.hasOwn(masked.totals, 'cost_cents')).toBe(false)
+      expect(masked.totals).toEqual({ qty: 15, revenue_cents: 300000 })
+    })
+
+    // The epic's key acceptance criterion for this story, asserted the way a
+    // reader would check it: no finance key anywhere in the payload.
+    it('leaves no finance key anywhere in the serialised payload', () => {
+      const body = JSON.stringify(maskReport(report, STAFF))
+
+      expect(body).not.toContain('cost_cents')
+      expect(body).not.toContain('margin_cents')
+      expect(body).toContain('revenue_cents')
+    })
+
+    it('carries the masked columns as labels only', () => {
+      const masked = maskReport(report, STAFF)
+
+      expect(masked.meta.masked_columns).toEqual(['Cost', 'Margin'])
+      expect(JSON.stringify(masked.meta.masked_columns)).not.toContain('_cents')
+    })
+
+    it('leaves the report it was given untouched', () => {
+      maskReport(report, STAFF)
+
+      expect(report.rows[0].cost_cents).toBe(90000)
+      expect(report.columns).toHaveLength(5)
+    })
+
+    // Rows are projected onto the surviving columns, so a key nobody declared
+    // cannot ride out of the report on the strength of being forgotten.
+    it('projects a row onto the declared columns, in column order', () => {
+      const masked = maskReport(
+        { ...report, rows: [{ landed_cost_cents: 1, qty: 2, brand_name: 'Liberty London' }] },
+        STAFF
+      )
+
+      expect(Object.keys(masked.rows[0])).toEqual(['brand_name', 'qty'])
+    })
+
+    it('answers 403 with a reason when every column is finance', () => {
+      const purchases = {
+        report: 'purchases',
+        columns: defineColumns([
+          { key: 'spend_cents', label: 'Committed spend', kind: 'money', finance: true },
+        ]),
+        rows: [{ spend_cents: 12000 }],
+      }
+
+      const error = statusOf(() => maskReport(purchases, STAFF))
+
+      expect(error.statusCode).toBe(403)
+      expect(error.message).toContain('purchases')
+      expect(error.message).toContain('finance visibility')
+      // …and a finance login still gets it.
+      expect(maskReport(purchases, FINANCE).rows).toHaveLength(1)
+    })
+
+    // A report can be finance end to end while still carrying a name column;
+    // "there is no version of this minus the money" is the report's own
+    // statement, not something the column list can be read off.
+    it('answers 403 for a report that declares itself finance-only', () => {
+      const error = statusOf(() =>
+        maskReport(
+          { ...report, finance_only: true, finance_reason: 'Committed supplier spend.' },
+          STAFF
+        )
+      )
+
+      expect(error.statusCode).toBe(403)
+      expect(error.message).toBe('Committed supplier spend.')
+    })
+
+    // 200 with an empty table is indistinguishable from "no trade this month".
+    it('never answers a refusal with an empty table', () => {
+      const error = statusOf(() =>
+        maskReport({ ...report, finance_only: true, rows: [] }, STAFF)
+      )
+      expect(error.statusCode).toBe(403)
+    })
+
+    it('nulls a totals row that masking emptied, rather than serving a blank one', () => {
+      const valuation = {
+        report: 'stock',
+        columns: defineColumns([
+          { key: 'sku', label: 'SKU' },
+          { key: 'value_cents', label: 'Value', kind: 'money', finance: true },
+        ]),
+        rows: [{ sku: 'PF-001', value_cents: 5000 }],
+        totals: { value_cents: 5000 },
+      }
+
+      expect(maskReport(valuation, STAFF).totals).toBeNull()
+      expect(maskReport(valuation, FINANCE).totals).toEqual({ value_cents: 5000 })
+    })
+
+    // Absent access is no access: a caller that forgot to pass one must not be
+    // handed the finance columns by default.
+    it('masks when it is given no access at all', () => {
+      expect(maskReport(report).meta.masked_columns).toEqual(['Cost', 'Margin'])
+    })
+
+    it('throws a plain error for a report that declares no columns', () => {
+      const error = statusOf(() => maskReport({ report: 'broken', columns: [] }, FINANCE))
+      expect(error.statusCode).toBeUndefined()
+      expect(error.message).toContain('broken')
+    })
+  })
+})
+
+// The scope CTE's SQL text is pure — it is built from frozen declarations and
+// bound params — so everything except "does Postgres accept it" is provable
+// here. That half lives in test/admin-reports.test.js.
+describe('the revenue scope', () => {
+  it('defaults the population to paid and shipped, and says so in one constant', () => {
+    expect([...REVENUE_STATUSES]).toEqual(['paid', 'shipped'])
+    expect(Object.isFrozen(REVENUE_STATUSES)).toBe(true)
+  })
+
+  it('binds the default population as a placeholder, never as SQL text', () => {
+    const { cte, params } = buildRevenueScope()
+
+    expect(cte).toContain('o.status = ANY($1::text[])')
+    expect(cte).not.toContain("'paid'")
+    expect(params).toEqual([['paid', 'shipped']])
+  })
+
+  // Overridable, and by REPLACEMENT: intersecting the two would answer
+  // status=requested with zero rows, which reads as "no trade".
+  it('lets a status filter replace the default population rather than narrow it', () => {
+    const { cte, params } = buildRevenueScope(parseReportFilters({ status: 'requested' }))
+
+    expect(cte).toContain('o.status = $1')
+    expect(cte).not.toContain('ANY($1::text[])')
+    expect(params).toEqual(['requested'])
+  })
+
+  it('keeps every kind, so a request-kind line is in the population', () => {
+    const { cte } = buildRevenueScope()
+    expect(cte).not.toContain('o.kind =')
+  })
+
+  it('carries the per-line quantity, value and unpriced flag', () => {
+    const { cte } = buildRevenueScope()
+
+    expect(cte).toContain('(ol.qty * ol.unit_price_cents) AS line_value_cents')
+    expect(cte).toContain('(ol.unit_price_cents = 0) AS unpriced')
+  })
+
+  it('excludes archived orders and nothing else archived', () => {
+    const { cte } = buildRevenueScope()
+
+    expect(cte).toContain('o.archived_at IS NULL')
+    expect(cte).not.toContain('p.archived_at')
+    expect(cte).not.toContain('b.archived_at')
+  })
+
+  it('appends the filters after the population, all bound', () => {
+    const filters = parseReportFilters({ brand: 'pierre-frey', from: '2026-01-01' })
+    const { cte, params } = buildRevenueScope(filters)
+
+    expect(params).toEqual([['paid', 'shipped'], '2026-01-01', ['pierre-frey']])
+    expect(cte).toContain('o.created_at >= $2::date')
+    expect(cte).toContain('b.slug = ANY($3::text[])')
+  })
+
+  it('numbers its placeholders from the params a report has already bound', () => {
+    const existing = ['a-report-of-its-own']
+    const { cte, params } = buildRevenueScope({}, { params: existing })
+
+    expect(cte).toContain('o.status = ANY($2::text[])')
+    expect(params).toEqual(['a-report-of-its-own', ['paid', 'shipped']])
+    expect(existing).toEqual(['a-report-of-its-own'])
+  })
+
+  it('names the CTE once, so a report and its export cannot spell it apart', () => {
+    expect(buildRevenueScope().cte.startsWith(`${SCOPE_NAME} AS (`)).toBe(true)
+  })
+
+  // The seam. One source today, and the shape is what makes the second additive.
+  describe('the union seam', () => {
+    const source = {
+      name: 'legacy lines',
+      columns: Object.fromEntries(SCOPE_COLUMNS.map((name) => [name, `l.${name}`])),
+      from: 'FROM legacy_sales_invoice_lines l',
+      conditions: [],
+      statusColumn: null,
+      filters: ['from', 'to'],
+    }
+
+    it('accepts a second source that emits the contract', () => {
+      expect(() => assertScopeSource(source)).not.toThrow()
+    })
+
+    // A UNION ALL lines its branches up by POSITION, so agreeing on the names
+    // while disagreeing on the order files one house's revenue under another's.
+    it('refuses a source whose columns are reordered', () => {
+      const reordered = { ...source, columns: { ...source.columns } }
+      const [first] = SCOPE_COLUMNS
+      delete reordered.columns[first]
+      reordered.columns[first] = `l.${first}`
+
+      expect(() => assertScopeSource(reordered)).toThrow(/in that order/)
+    })
+
+    it('refuses a source that drops or invents a column', () => {
+      const thinner = { ...source, columns: { ...source.columns } }
+      delete thinner.columns.unpriced
+      expect(() => assertScopeSource(thinner)).toThrow(/must emit exactly/)
+    })
+
+    it('refuses a source claiming a filter the whitelist does not know', () => {
+      expect(() => assertScopeSource({ ...source, filters: ['salesperson'] })).toThrow(
+        /unknown filter/
+      )
+    })
+
+    it('refuses a source with no FROM clause', () => {
+      expect(() => assertScopeSource({ ...source, from: '' })).toThrow(/FROM clause/)
     })
   })
 })

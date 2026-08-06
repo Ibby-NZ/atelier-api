@@ -79,7 +79,7 @@ epics:
       US-001: done      # Extract the hardened CSV writer to src/lib/csv.js
       US-002: done      # Migration: reporting index and finance access
       US-003: done      # Report filter layer
-      US-004: pending   # Revenue scope CTE and the masking module
+      US-004: done      # Revenue scope CTE and the masking module
       US-005: pending   # Product performance by brand
       US-006: pending   # Server-side CSV export
       US-007: pending   # Stock and not-invoiced reports

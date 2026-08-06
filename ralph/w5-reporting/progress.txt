@@ -37,6 +37,25 @@ Story-specific detail belongs in the per-story entries below, not here.
   migration and stubs nothing; the schema agreement lives in `test/admin-reports.test.js`. Splitting
   the two is what keeps the pure suite honest — the moment it needs `loadConfig()` it is no longer
   proving the module is pure.
+- **A masking rule that SUBTRACTS a list can only remove what somebody remembered to declare;
+  one that PROJECTS onto the survivors cannot leak a key nobody declared.** `maskReport`
+  (`src/reports/access.js`) rebuilds each row from the surviving column keys rather than deleting
+  the finance ones out of it. The cost is real and is the right way round: an undeclared key
+  silently disappears, which surfaces as a missing value in the report's own test, where a leaked
+  cost figure is invisible. The same choice applies to any future response built from a declared
+  column list.
+- **A default population that a filter can override must be REPLACED by it, never intersected with
+  it.** `buildRevenueScope` omits its own `status = ANY('paid','shipped')` clause entirely when the
+  caller supplied a `status` filter. Intersecting would answer `status=requested` with zero rows,
+  which a reader parses as "no trade" rather than "outside the default" — the same failure mode as
+  a filter that silently matches nothing.
+- **A UNION seam is checked positionally at module load or it is not a seam.** `assertScopeSource`
+  compares each source's column list to `SCOPE_COLUMNS` joined in order, because a UNION ALL lines
+  its branches up by POSITION: two sources agreeing on the names while disagreeing on the order
+  file one house's revenue under another's heading, and nothing raises. Same posture as
+  `assertEntity` (`src/lifecycle/registry.js`) and `assertStorable`. Export the assertion so the
+  unit tests can prove it rejects a drifted source — a load-time check nothing exercises is a
+  comment.
 - **`src/routes/*.js` body schemas are OUTSIDE this workstream's file list, so a new writable
   column is inert over HTTP until its route file's owner adds the property.** Ajv runs
   `removeAdditional: true`, so an unlisted key is silently STRIPPED, not 400'd — the PATCH
@@ -173,3 +192,70 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   is not wired to anything yet.
 ---
 
+
+## 2026-08-06T18:50:00Z - W5-US-004 - Revenue scope CTE and the masking module
+- Two new pure modules. `src/reports/revenue-lines.js` declares the revenue population once:
+  `REVENUE_STATUSES` (`paid`, `shipped`, all kinds) is the frozen default,
+  `buildRevenueScope(filters, { params })` emits `scope AS ( … )` plus its bound params, and
+  `SOURCES` is the union seam — one source today (`live order lines`), checked positionally against
+  `SCOPE_COLUMNS` by the exported `assertScopeSource` at module load. Each line carries `qty`,
+  `line_value_cents` (`ol.qty * ol.unit_price_cents`, numeric) and `unpriced`
+  (`ol.unit_price_cents = 0`), so a request-kind line is IN the population contributing metreage at
+  zero value. `listRevenueLines` (bounded at `REVENUE_LINE_LIMIT`) and `summariseRevenue`
+  (`lines`/`qty`/`value_cents`/`unpriced_lines`) run it.
+  `src/reports/access.js` is the access and masking half: `reportAccess(user)` derives
+  `{ reports, finance }` from the user record alone, `defineColumns` validates a report's column
+  declaration at module load, and `maskReport(report, access)` rebuilds `columns`, every row and
+  `totals` from the surviving columns, puts the dropped columns' LABELS in `meta.masked_columns`,
+  and throws 403 with a reason when a report is finance end to end.
+- Repos and files changed: atelier-api — `src/reports/revenue-lines.js` (new),
+  `src/reports/access.js` (new), `test/report-filters.test.js` (+34 pure tests),
+  `test/admin-reports.test.js` (+14 database-backed tests), `ralph/w5-reporting/prd.json`,
+  `ralph/w5-reporting/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`,
+  `CLAUDE.md`. atelier-crm — untouched.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (53 files, 1262 tests); CRM baseline run untouched:
+  `npm test` -> 0 (567), `npm run build` -> 0.
+- **Learnings:**
+  - Masking by PROJECTION rather than subtraction, and a default population REPLACED rather than
+    intersected by its filter — both promoted to Codebase Patterns above, as is the positional
+    union check.
+  - **Finance visibility is the column, never the role, and that is what makes it revocable.**
+    `reportAccess` reads `user.can_view_finance` and requires a staff role; it does NOT grant
+    finance to `director` by role. Consequence to know: a director created AFTER
+    `1786680000000_reporting-finance-access.js` ran starts closed, because the migration backfilled
+    existing directors and the column defaults false. That is the fail-closed posture
+    architecture.md § Reporting states ("backed by `users.can_view_finance`"), and the alternative
+    is worse — a role-derived answer can be granted and never taken back, so an explicit revocation
+    would be silently ineffective.
+  - **A 403 must be raised from the masking module, not from the route**, or each report re-decides
+    it. `maskReport` throws `Object.assign(new Error(msg), { statusCode: 403 })`, which Fastify
+    serialises as `{ statusCode, error, message }` — so US-005/006/007's handlers need no try/catch,
+    the same posture `src/checkout/checkout.js` and `parseReportFilters` already take.
+  - Gotcha for US-005 and US-006: `line_value_cents` is `numeric`, because `qty` is `numeric(12,2)`
+    — 2.5 m at NZ$19.99 is 4997.5 cents. Round at the AGGREGATE (`ROUND(SUM(...))`, as
+    `summariseRevenue` does), never per line, or the rounding error is multiplied by the row count.
+    pg then hands the sum back as a string; coerce with `Number()`.
+  - Gotcha: a report envelope's rows are projected onto its declared `columns`, so any key the CRM
+    needs (a `brand_slug` behind a link, say) must BE a column — a column the table need not render.
+    A key that is not declared silently disappears from both the JSON and the CSV.
+  - Gotcha for the export story: `maskReport` returns a frozen envelope whose `columns` are in
+    declaration order and whose rows are built in that same order, so the CSV writer can take its
+    header and its cells straight off it without a second ordering rule.
+  - Context: `src/reports/` now holds `filters.js`, `revenue-lines.js` and `access.js`.
+    `product-performance.js`, `stock.js`, `not-invoiced.js` and `src/routes/admin-reports.js` are
+    still unwritten (US-005 onward), so nothing serves a report over HTTP yet and no route
+    registers `reportAccess`. `src/lib/csv.js` (US-001) is the writer US-006 will use.
+  - The fixture in `test/admin-reports.test.js` inserts six orders spanning every status the
+    population has an opinion about, including an ARCHIVED paid one. Cleanup deletes orders by
+    order-number prefix BEFORE brands by slug prefix: `order_lines.colourway_id` is the schema's one
+    RESTRICT edge, so a brand cascade cannot get past it and the cleanup itself would 23503.
+  - Every assertion there scopes itself with a `brand` filter over the two fixture houses —
+    `atelier_w5` also carries the seeded catalogue and whatever other suites left behind, and an
+    unscoped population counts all of it.
+- **Needs human verification:** none in the browser — no route, no response body reachable by a
+  screen and no CRM file changed. Two things a human should decide before US-008 ships: whether a
+  NEW director should be granted `can_view_finance` on creation (today only the migration's backfill
+  and the AdminJS panel can set it — `patchBodySchema` in `src/routes/admin-users.js` still does not
+  list the property), and whether `REVENUE_STATUSES` is the client's answer to A2 ("what counts as a
+  sale"), which is the one frozen constant that changes if it is not.
+---

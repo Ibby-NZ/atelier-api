@@ -4,7 +4,13 @@ import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { updateUser, getUser } from '../src/users/admin-users.js'
 import { DIRECTOR_BACKFILL_SQL } from '../migrations/1786680000000_reporting-finance-access.js'
-import { PRODUCT_TYPES, ORDER_KINDS, ORDER_STATUSES } from '../src/reports/filters.js'
+import {
+  PRODUCT_TYPES,
+  ORDER_KINDS,
+  ORDER_STATUSES,
+  parseReportFilters,
+} from '../src/reports/filters.js'
+import { listRevenueLines, summariseRevenue } from '../src/reports/revenue-lines.js'
 
 // Fixtures are prefix-namespaced and cleaned up by prefix, like every other suite
 // here. These are plain INSERTs rather than /auth/register calls: register is
@@ -244,5 +250,278 @@ describe('W5-US-003 — the report filter vocabularies against the schema', () =
 
   it('accepts exactly the statuses orders_status_check allows', async () => {
     expect(await checkValues(pool, 'orders_status_check')).toEqual([...ORDER_STATUSES].sort())
+  })
+})
+
+// src/reports/revenue-lines.js builds SQL from frozen declarations, so its TEXT
+// is unit-tested in test/report-filters.test.js. What only Postgres can answer
+// is whether the CTE runs and whether the population it describes is the one
+// that comes back — which needs orders, lines and a catalogue behind them.
+describe('W5-US-004 — the revenue scope against real orders', () => {
+  let pool
+  let fixture
+
+  // Namespaced like every other suite here. Order numbers carry their own prefix
+  // because orders are cleaned up BEFORE the brands they hang off:
+  // order_lines.colourway_id is the schema's one RESTRICT edge, so a brand
+  // cascade cannot get past it and the cleanup itself would raise 23503.
+  const ORDER_PREFIX = 'W5-REPORTING-TEST'
+
+  const cleanReports = async (db) => {
+    await db.query(`DELETE FROM orders WHERE order_number LIKE $1`, [`${ORDER_PREFIX}-%`])
+    await db.query(`DELETE FROM brands WHERE slug LIKE $1`, [`${PREFIX}-%`])
+  }
+
+  // Two houses, one collection, one design each, and six orders spanning every
+  // status the population has an opinion about.
+  const insertFixture = async (db) => {
+    const brand = async (slug, name) => {
+      const { rows } = await db.query(
+        `INSERT INTO brands (name, slug, currency, is_international, trade_only)
+         VALUES ($1, $2, 'NZD', false, false) RETURNING id`,
+        [name, slug]
+      )
+      return rows[0].id
+    }
+    const product = async (brandId, slug, name, collectionId = null) => {
+      const { rows } = await db.query(
+        `INSERT INTO products (brand_id, collection_id, name, slug, product_type, currency, show_on_website)
+         VALUES ($1, $2, $3, $4, 'fabric', 'NZD', true) RETURNING id`,
+        [brandId, collectionId, name, slug]
+      )
+      return rows[0].id
+    }
+    const colourway = async (productId, sku) => {
+      const { rows } = await db.query(
+        `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Ivory', $2) RETURNING id`,
+        [productId, sku]
+      )
+      return rows[0].id
+    }
+    const order = async (suffix, kind, status, createdAt, { archived = false } = {}) => {
+      const { rows } = await db.query(
+        `INSERT INTO orders (order_number, kind, status, guest_email, created_at, archived_at)
+         VALUES ($1, $2, $3, $4, $5::timestamptz, $6)
+         RETURNING id`,
+        [
+          `${ORDER_PREFIX}-${suffix}`,
+          kind,
+          status,
+          `${PREFIX}@example.test`,
+          createdAt,
+          archived ? new Date() : null,
+        ]
+      )
+      return rows[0].id
+    }
+    const line = (orderId, colourwayId, qty, unitPriceCents) =>
+      db.query(
+        `INSERT INTO order_lines (order_id, colourway_id, qty, unit_price_cents)
+         VALUES ($1, $2, $3, $4)`,
+        [orderId, colourwayId, qty, unitPriceCents]
+      )
+
+    const houseId = await brand(`${PREFIX}-house`, `${PREFIX} House`)
+    const otherId = await brand(`${PREFIX}-other`, `${PREFIX} Other`)
+    const { rows: collectionRows } = await db.query(
+      `INSERT INTO collections (brand_id, name, slug) VALUES ($1, 'Season', $2) RETURNING id`,
+      [houseId, `${PREFIX}-season`]
+    )
+    const collectionId = collectionRows[0].id
+
+    const designId = await product(houseId, `${PREFIX}-design`, `${PREFIX} Design`, collectionId)
+    const looseId = await product(houseId, `${PREFIX}-loose`, `${PREFIX} Loose`)
+    const otherDesignId = await product(otherId, `${PREFIX}-other-design`, `${PREFIX} Other Design`)
+
+    const design = await colourway(designId, `${PREFIX}-SKU-1`)
+    const loose = await colourway(looseId, `${PREFIX}-SKU-2`)
+    const otherColourway = await colourway(otherDesignId, `${PREFIX}-SKU-3`)
+
+    // A card checkout: paid, priced, in the default population.
+    const paid = await order('CHK', 'checkout', 'paid', '2026-03-15 12:00:00')
+    await line(paid, design, '2.00', 10000)
+
+    // A fabric request the office cut and shipped. Request-kind lines are created
+    // at unit_price_cents = 0 and nothing ever fills them in.
+    const shipped = await order('SHP', 'order_request', 'shipped', '2026-03-16 23:30:00')
+    await line(shipped, loose, '3.00', 0)
+
+    // Neither of these is a sale under the default population.
+    const requested = await order('REQ', 'order_request', 'requested', '2026-03-17 12:00:00')
+    await line(requested, design, '5.00', 0)
+    const declined = await order('DEC', 'order_request', 'declined', '2026-03-17 12:00:00')
+    await line(declined, design, '9.00', 0)
+
+    // Paid, but the back office took it out of its own lists.
+    const archived = await order('ARC', 'checkout', 'paid', '2026-03-15 12:00:00', {
+      archived: true,
+    })
+    await line(archived, design, '7.00', 10000)
+
+    // Another house, so the brand filter has something to exclude.
+    const otherPaid = await order('OTH', 'checkout', 'paid', '2026-03-15 12:00:00')
+    await line(otherPaid, otherColourway, '4.00', 25000)
+
+    return Object.freeze({ houseId, otherId, collectionId, design, loose })
+  }
+
+  // Every assertion scopes itself to the fixture houses: this database carries
+  // the seeded catalogue and whatever the other suites left behind, and an
+  // unscoped population would count all of it.
+  const HOUSES = Object.freeze([`${PREFIX}-house`, `${PREFIX}-other`])
+  const scoped = (query = {}) => parseReportFilters({ brand: HOUSES, ...query })
+  const numbersOf = (lines) => lines.map((line) => line.order_number).sort()
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    await runMigrations(config.databaseUrl)
+    pool = createPool(config.databaseUrl)
+    await cleanReports(pool)
+    fixture = await insertFixture(pool)
+  })
+
+  afterAll(async () => {
+    await cleanReports(pool)
+    await pool.end()
+  })
+
+  describe('the default population', () => {
+    it('is paid and shipped orders of every kind', async () => {
+      const lines = await listRevenueLines(pool, scoped())
+
+      expect(numbersOf(lines)).toEqual([
+        `${ORDER_PREFIX}-CHK`,
+        `${ORDER_PREFIX}-OTH`,
+        `${ORDER_PREFIX}-SHP`,
+      ])
+    })
+
+    // Archiving an order takes it out of the back office's own lists; it must
+    // not keep contributing to revenue.
+    it('excludes an archived order even though it is paid', async () => {
+      const lines = await listRevenueLines(pool, scoped())
+
+      expect(numbersOf(lines)).not.toContain(`${ORDER_PREFIX}-ARC`)
+    })
+
+    // Overridable, and by replacement: intersecting with the default would
+    // answer status=requested with zero rows, which reads as "no trade".
+    it('is replaced, not narrowed, by a status filter', async () => {
+      const lines = await listRevenueLines(pool, scoped({ status: 'requested' }))
+
+      expect(numbersOf(lines)).toEqual([`${ORDER_PREFIX}-REQ`])
+    })
+
+    it('still excludes the archived order under an explicit status filter', async () => {
+      const lines = await listRevenueLines(pool, scoped({ status: 'paid' }))
+
+      expect(numbersOf(lines)).toEqual([`${ORDER_PREFIX}-CHK`, `${ORDER_PREFIX}-OTH`])
+    })
+  })
+
+  describe('a line in the scope', () => {
+    it('carries its order, its design and its house', async () => {
+      const lines = await listRevenueLines(pool, scoped({ brand: `${PREFIX}-house` }))
+      const line = lines.find((row) => row.order_number === `${ORDER_PREFIX}-CHK`)
+
+      expect(line).toMatchObject({
+        source: 'live',
+        kind: 'checkout',
+        status: 'paid',
+        sku: `${PREFIX}-SKU-1`,
+        product_slug: `${PREFIX}-design`,
+        product_type: 'fabric',
+        brand_id: fixture.houseId,
+        brand_slug: `${PREFIX}-house`,
+        collection_slug: `${PREFIX}-season`,
+        qty: 2,
+        unit_price_cents: 10000,
+        line_value_cents: 20000,
+        unpriced: false,
+      })
+    })
+
+    // The criterion this story exists for: a request line is IN the population
+    // and contributes metreage at nothing. Dropped, it would understate what was
+    // cut; counted as money, it would understate the average price.
+    it('contributes a request-kind line’s quantity at zero value, flagged unpriced', async () => {
+      const lines = await listRevenueLines(pool, scoped())
+      const line = lines.find((row) => row.order_number === `${ORDER_PREFIX}-SHP`)
+
+      expect(line).toMatchObject({
+        kind: 'order_request',
+        qty: 3,
+        unit_price_cents: 0,
+        line_value_cents: 0,
+        unpriced: true,
+      })
+    })
+
+    it('reads a product with no collection as uncollected rather than dropping it', async () => {
+      const lines = await listRevenueLines(pool, scoped())
+      const line = lines.find((row) => row.order_number === `${ORDER_PREFIX}-SHP`)
+
+      expect(line.collection_slug).toBeNull()
+    })
+  })
+
+  describe('the filters, applied to the population', () => {
+    it('narrows to one house', async () => {
+      const lines = await listRevenueLines(pool, scoped({ brand: `${PREFIX}-other` }))
+
+      expect(numbersOf(lines)).toEqual([`${ORDER_PREFIX}-OTH`])
+    })
+
+    it('narrows to a collection, which excludes the uncollected designs', async () => {
+      const lines = await listRevenueLines(pool, scoped({ collection: `${PREFIX}-season` }))
+
+      expect(numbersOf(lines)).toEqual([`${ORDER_PREFIX}-CHK`])
+    })
+
+    it('narrows by kind', async () => {
+      const lines = await listRevenueLines(pool, scoped({ kind: 'order_request' }))
+
+      expect(numbersOf(lines)).toEqual([`${ORDER_PREFIX}-SHP`])
+    })
+
+    // `to` is exclusive on the NEXT day, so an order placed at 23:30 on the last
+    // day of the range is in it. `<= to::date` would drop the whole day.
+    it('includes the last day of the range, not the morning of it', async () => {
+      const lines = await listRevenueLines(
+        pool,
+        scoped({ from: '2026-03-15', to: '2026-03-16' })
+      )
+
+      expect(numbersOf(lines)).toEqual([
+        `${ORDER_PREFIX}-CHK`,
+        `${ORDER_PREFIX}-OTH`,
+        `${ORDER_PREFIX}-SHP`,
+      ])
+    })
+
+    it('excludes what falls outside the range', async () => {
+      const lines = await listRevenueLines(pool, scoped({ from: '2026-03-16', to: '2026-03-16' }))
+
+      expect(numbersOf(lines)).toEqual([`${ORDER_PREFIX}-SHP`])
+    })
+  })
+
+  describe('the population summarised', () => {
+    it('totals the quantity, the value and the lines carrying no price', async () => {
+      const summary = await summariseRevenue(pool, scoped())
+
+      expect(summary).toEqual({
+        lines: 3,
+        qty: 9, // 2 + 3 + 4
+        value_cents: 120000, // 20000 + 0 + 100000
+        unpriced_lines: 1,
+      })
+    })
+
+    it('answers an empty population with zeroes rather than nulls', async () => {
+      const summary = await summariseRevenue(pool, scoped({ from: '2027-01-01' }))
+
+      expect(summary).toEqual({ lines: 0, qty: 0, value_cents: 0, unpriced_lines: 0 })
+    })
   })
 })

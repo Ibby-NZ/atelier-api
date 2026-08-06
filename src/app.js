@@ -16,6 +16,7 @@ import { adminTradeApplicationRoutes } from './routes/admin-trade-applications.j
 import { adminInventoryRoutes } from './routes/admin-inventory.js'
 import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
+import { adminReportRoutes } from './routes/admin-reports.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
@@ -137,6 +138,11 @@ export const buildApp = ({
     // Back-office only: the record carries the freight terms, the PO address and
     // each house's discount, none of which may reach a client-facing response.
     api.register(adminSupplierRoutes, { pool })
+    // /admin/reports/* — the report library the CRM's Reporting screen reads.
+    // Back-office only, masked server-side before the payload exists, and the
+    // only admin routes here that opt into the rate limiter (a report is an
+    // unbounded aggregate over the order ledger).
+    api.register(adminReportRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })

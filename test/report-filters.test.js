@@ -28,6 +28,14 @@ import {
 } from '../src/reports/filters.js'
 import { reportAccess, defineColumns, maskReport } from '../src/reports/access.js'
 import {
+  PRODUCT_PERFORMANCE,
+  PRODUCT_PERFORMANCE_COLUMNS,
+  COVERAGE_NOTE,
+  TOTALS_LABELS,
+  DEFAULT_ROW_LIMIT,
+  MAX_ROW_LIMIT,
+} from '../src/reports/product-performance.js'
+import {
   REVENUE_STATUSES,
   SCOPE_NAME,
   SCOPE_COLUMNS,
@@ -668,5 +676,62 @@ describe('the revenue scope', () => {
     it('refuses a source with no FROM clause', () => {
       expect(() => assertScopeSource({ ...source, from: '' })).toThrow(/FROM clause/)
     })
+  })
+})
+
+// product-performance.js — the declarations, which are the half of the report
+// that needs no database. Everything the query answers is in
+// test/admin-reports.test.js, against real orders.
+describe('product performance', () => {
+  it('declares its columns once, validated at module load', () => {
+    expect(PRODUCT_PERFORMANCE).toBe('product-performance')
+    expect(PRODUCT_PERFORMANCE_COLUMNS.map((column) => column.key)).toEqual([
+      'brand_name',
+      'product_name',
+      'product_type',
+      'currency',
+      'orders',
+      'qty',
+      'value_cents',
+      'unpriced_lines',
+    ])
+  })
+
+  // A sell value is money and is not a cost. The CRM's own policy leaves a sell
+  // "Value" column open to every staff login and masks the landed ones; this
+  // report has no cost column at all, so it survives a non-finance login whole.
+  it('declares no finance column, so nothing here is masked away', () => {
+    expect(PRODUCT_PERFORMANCE_COLUMNS.filter((column) => column.finance)).toEqual([])
+  })
+
+  it('types the money and the counts, so one cell pipeline can render them', () => {
+    const kinds = Object.fromEntries(
+      PRODUCT_PERFORMANCE_COLUMNS.map((column) => [column.key, column.kind])
+    )
+
+    expect(kinds).toMatchObject({
+      brand_name: 'text',
+      value_cents: 'money',
+      qty: 'number',
+      orders: 'number',
+    })
+  })
+
+  // The coverage note travels in the payload rather than in a screen's footnote,
+  // because the CSV is the copy that leaves the building.
+  it('states that the historic Dynamics sales are header-only and excluded', () => {
+    expect(COVERAGE_NOTE).toMatch(/header-only/)
+    expect(COVERAGE_NOTE).toMatch(/no pre-launch sale is included/)
+  })
+
+  // A totals row is a row, so its label travels as data in the first two
+  // columns — that is what lets one renderer and one CSV writer handle it.
+  it('labels the totals row in the columns the table leads with', () => {
+    const [first, second] = PRODUCT_PERFORMANCE_COLUMNS
+    expect(Object.keys(TOTALS_LABELS)).toEqual([first.key, second.key])
+  })
+
+  it('bounds the table’s default page below its maximum', () => {
+    expect(DEFAULT_ROW_LIMIT).toBeLessThanOrEqual(MAX_ROW_LIMIT)
   })
 })

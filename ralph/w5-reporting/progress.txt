@@ -56,6 +56,22 @@ Story-specific detail belongs in the per-story entries below, not here.
   `assertEntity` (`src/lifecycle/registry.js`) and `assertStorable`. Export the assertion so the
   unit tests can prove it rejects a drifted source — a load-time check nothing exercises is a
   comment.
+- **A figure that cannot be added is ABSENT from a totals row, never summed into one.** A fabric is
+  metres and a finished good is units; `order_lines.unit_price_cents` is denominated in the
+  PRODUCT's currency and `orders` carries none of its own. So `productPerformanceReport` omits `qty`
+  from its totals outright and omits `value_cents` whenever the population quotes more than one
+  currency — a projected row simply has no such key, which the CRM renders as a dash and the CSV as
+  an empty cell. Checkout already refuses a mixed-currency cart for the same reason ("picking a
+  winner would silently mis-charge"), and the CRM's own by-design view drops its quantity column on
+  the same argument. Any future aggregate over `order_lines` inherits both hazards.
+- **Totals are computed over the POPULATION, never over the rows that survived a limit.** A total
+  that added up only the visible page agrees with everything on screen and is wrong, which is the
+  kind of error nobody checks. `product-performance.js` runs a second aggregate over the same scope
+  CTE and puts `rows_total`/`truncated` in `meta` so the table admits which of the two it is.
+- **A route's rate limiting is provable from a response HEADER, not by spending the bucket.**
+  @fastify/rate-limit puts `x-ratelimit-limit` on a metered route and nothing else does, so
+  `expect(response.headers['x-ratelimit-limit']).toBeDefined()` (paired with the same assertion
+  being UNDEFINED on an unmetered admin route) proves the opt-in in two requests instead of sixty.
 - **`src/routes/*.js` body schemas are OUTSIDE this workstream's file list, so a new writable
   column is inert over HTTP until its route file's owner adds the property.** Ajv runs
   `removeAdditional: true`, so an unlisted key is silently STRIPPED, not 400'd — the PATCH
@@ -258,4 +274,74 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   and the AdminJS panel can set it — `patchBodySchema` in `src/routes/admin-users.js` still does not
   list the property), and whether `REVENUE_STATUSES` is the client's answer to A2 ("what counts as a
   sale"), which is the one frozen constant that changes if it is not.
+---
+
+## 2026-08-06T19:05:00Z - W5-US-005 - Product performance by brand
+- `src/reports/product-performance.js` (new) groups the revenue scope by house and design:
+  `PRODUCT_PERFORMANCE_COLUMNS` is the declared table (House, Design, Type, Currency, Orders,
+  Quantity, Sales, Unpriced lines — none of them `finance`), and
+  `productPerformanceReport(db, filters, { limit })` returns the frozen envelope
+  `{ report, title, columns, rows, totals, meta }`. Rows are `COUNT(DISTINCT order_id)`,
+  `SUM(qty)`, `ROUND(SUM(qty * unit_price_cents))` and `COUNT(*) FILTER (WHERE unpriced)`, ranked by
+  value. `meta.coverage` carries the observed window, the range that was asked for and
+  `COVERAGE_NOTE` — live platform orders only, historic D365 header-only, so no pre-launch sale.
+  `src/routes/admin-reports.js` (new) serves `GET /admin/reports/product-performance`,
+  backoffice-only, rate-limited 60/min, parsing the querystring through `parseReportFilters` and
+  returning `maskReport(report, reportAccess(request.user))`.
+  `src/reports/revenue-lines.js` gained one scope column, `currency` (`p.currency`).
+- Repos and files changed: atelier-api — `src/reports/product-performance.js` (new),
+  `src/routes/admin-reports.js` (new), `src/reports/revenue-lines.js` (+1 scope column),
+  `src/app.js` (import + one `api.register`, additive, per the shared-file rule),
+  `test/admin-reports.test.js` (fixture hoisted to module scope + 26 tests),
+  `test/report-filters.test.js` (+6 pure tests), `ralph/w5-reporting/prd.json`,
+  `ralph/w5-reporting/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`,
+  `CLAUDE.md`. atelier-crm — untouched.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (53 files, 1294 tests); CRM baseline run untouched:
+  `npm test` -> 0 (567), `npm run build` -> 0.
+- **Learnings:**
+  - The three general ones — a figure that cannot be added is absent from the totals row, totals
+    cover the population and not the page, and a rate limit is provable from `x-ratelimit-limit` —
+    are promoted to Codebase Patterns above.
+  - **`orders` has NO currency column and `order_lines.unit_price_cents` is in the PRODUCT's
+    currency**, which varies in the live catalogue (the seeded products are 22 EUR, 13 USD, 9 GBP,
+    4 NZD). Nothing can be bought in a foreign currency today — `validateCheckoutLines` refuses a
+    product with a null `retail_price_cents`, and only the domestic house has one — so every paid
+    line is NZD in practice and request lines are 0. That is a property of the checkout path, not of
+    the schema, so the scope now carries `currency` and every money aggregate must group by it.
+  - **Nothing in this report is a `finance` column, and that is the deliberate reading of US-004's
+    rule.** access.js states it outright ("a sell value is money and is not a cost") and the CRM's
+    own `REPORT_POLICY` agrees — R-05's sell "Value" is open, R-10's "Landed /m" is masked. So
+    masking runs over this report and removes nothing; the first report where it actually deletes a
+    column is US-007's stock report, whose landed cost IS a cost. Do not "fix" this by marking
+    Sales finance: it would contradict the CRM policy US-008 has to consume.
+  - Gotcha for US-006: the export calls `productPerformanceReport(pool, filters, { limit: null })` —
+    `limit: null` is the "every row" contract and is unreachable from HTTP (the route schema caps at
+    `MAX_ROW_LIMIT`, so an over-large limit is a 400 rather than a silent clamp). That is what makes
+    "the export is not the current page" true while table and file share one builder.
+  - Gotcha for US-006: `maskReport` must run BEFORE the writer sees a row, so the export handler
+    calls the same `maskReport(report, reportAccess(request.user))` and then writes `columns`
+    (header) and `rows` off the masked envelope. The totals row is a ROW — its label travels as data
+    in `brand_name`/`product_name` (`TOTALS_LABELS`) — so the writer appends it with no second rule,
+    and a key the totals deliberately lack renders as an empty cell.
+  - Gotcha: the report envelope is returned at the TOP LEVEL, not wrapped in a named key like
+    `{ suppliers, meta }`. A report is one document and its own name is already the `report` field.
+  - Gotcha for whoever adds the second report: `assertScopeSource` is positional, so adding a scope
+    column (as this story did with `currency`) means every future source must emit it in the same
+    place. The pure suite derives its synthetic source from `SCOPE_COLUMNS`, so it adapted for free.
+  - Context: `src/reports/` now holds `filters.js`, `revenue-lines.js`, `access.js` and
+    `product-performance.js`; `src/routes/admin-reports.js` exists and is registered in
+    `src/app.js`. `stock.js` and `not-invoiced.js` (US-007) are still unwritten, and nothing exports
+    CSV yet — `src/lib/csv.js` (US-001) is the writer US-006 will use.
+  - Test context: `test/admin-reports.test.js`'s order fixture (two houses, three designs, six
+    orders) is now MODULE-scoped and shared by the US-004 and US-005 blocks; the describes run in
+    declaration order and each one cleans before it inserts. The US-005 block is the first here to
+    build an app and register logins — a fresh `buildApp()` has a fresh rate-limit bucket, so its
+    two `/auth/register` calls are safe, but they must stay in `beforeAll`.
+- **Needs human verification:** none in a browser yet — no CRM screen reads this endpoint until
+  US-008, and there is no e2e harness on this machine. A person with a back-office login can eyeball
+  `GET /admin/reports/product-performance?from=2026-01-01` once there are real orders; on
+  `atelier_w5` the live population is the test fixtures alone, so it answers an empty table.
+  One product decision for a human: whether "Sales" should be finance-masked after all — this story
+  says no, following access.js and the CRM's existing policy, and reversing it is a one-line change
+  to the column declaration.
 ---

@@ -1,6 +1,6 @@
 /**
- * Byte decoding and CSV reading, shared by the supplier price-list converter and
- * by any route that accepts a spreadsheet staff saved out of Excel.
+ * Byte decoding, CSV reading and CSV writing, shared by the supplier price-list
+ * converter and by any route that hands staff a spreadsheet or accepts one back.
  *
  * The templates arrive from ~40 different suppliers' spreadsheets: roughly
  * two-fifths are cp1252, the rest UTF-8, and nothing declares which. So the
@@ -110,3 +110,56 @@ export function* csvRows(text) {
     yield [lineNumber, row]
   }
 }
+
+// ---------------------------------------------------------------------------
+// Writing. The other half of the round trip: a sheet this API hands the office
+// is opened in Excel, filled in and posted back, so it is written by the same
+// module that reads it.
+//
+// `src/pricing/trade-price-lists.js` carries its own copy of these two rules for
+// the client-facing trade list. It is not collapsed onto this module here
+// because that file belongs to another feature and nothing about the price list
+// changed; whoever next touches it should import from here instead.
+// ---------------------------------------------------------------------------
+
+// A spreadsheet treats a cell opening with any of these as a FORMULA, so a
+// design name a staff member typed as "=cut to order" becomes live code in
+// whoever opens the file — and =HYPERLINK/=WEBSERVICE exfiltrate the rest of the
+// sheet. Every name, collection and house in an export is staff-typed free text
+// via PATCH /admin/*. Prefixing with an apostrophe is the standard
+// neutralisation: Excel shows the text and evaluates nothing.
+const FORMULA_PREFIXES = ['=', '+', '-', '@', '\t', '\r']
+
+/**
+ * One CSV cell: formula lead-in neutralised, then quoted per RFC 4180.
+ *
+ * @param {unknown} value  null/undefined become an empty cell
+ * @returns {string}
+ */
+export const csvCell = (value) => {
+  if (value === null || value === undefined) {
+    return ''
+  }
+  const text = String(value)
+  const guarded = FORMULA_PREFIXES.some((prefix) => text.startsWith(prefix)) ? `'${text}` : text
+  // RFC 4180: quote when the value carries a quote, comma or newline, and double
+  // any embedded quote.
+  return /["\n\r,]/.test(guarded) ? `"${guarded.replace(/"/g, '""')}"` : guarded
+}
+
+/**
+ * One CSV record, without its line ending.
+ *
+ * @param {unknown[]} cells
+ * @returns {string}
+ */
+export const csvRow = (cells) => cells.map(csvCell).join(',')
+
+/**
+ * A whole CSV file: CRLF-separated records with a trailing newline, because a
+ * file ending mid-row makes some importers drop the last one.
+ *
+ * @param {unknown[][]} rows  the header row included, as the caller ordered them
+ * @returns {string}
+ */
+export const csvDocument = (rows) => `${rows.map(csvRow).join('\r\n')}\r\n`

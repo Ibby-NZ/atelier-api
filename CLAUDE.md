@@ -601,3 +601,48 @@ the supplier pricing pipeline rather than reimplemented beside it.
   `^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b` — and diff the emitted record against the
   corresponding line of the committed JSON. `test/price-template.test.js`'s byte-pin block names the
   exact cells behind its first record.
+
+### The sheet (`GET /admin/product-sheet/export.csv`)
+
+- **The header row is a CONTRACT, not a caption**: `Product ID,House,Collection,Design,Category`,
+  declared once as `PRODUCT_SHEET_HEADER` in `src/products/product-sheet.js` and asserted verbatim
+  by `test/product-sheet.test.js`. The re-import matches on it, so renaming a label breaks every
+  sheet already sitting on somebody's desk.
+- **`Category` is emitted EMPTY on every row, and that is what makes the round trip legible.**
+  Exporting the stored value would leave the re-import unable to tell "the office confirmed this"
+  from "the office did not touch this row" — so blank means *skipped* and a value equal to the
+  stored one means *unchanged*, which is exactly the pair of counts the apply step reports. The
+  four legal values are deliberately NOT printed in the file: a CSV has nowhere to put a note Excel
+  will not hand back as a data row, so the CRM panel states them and an unknown one is reported
+  with its row number.
+- **`Product ID` is `products.id`, and it is there so a re-import never depends on row order.**
+  Staff sort the sheet, delete the rows they have finished and paste blocks between files, none of
+  which a positional match survives. The id rather than the slug because the slug is immutable by
+  policy while the id is immutable by construction.
+- **Archived products are out, hidden ones are in.** Archiving is how a design leaves the
+  catalogue, so categorising one is work nothing reads; `show_on_website = false` is a design still
+  being photographed, which is exactly the kind nobody has categorised yet. The house itself is
+  fetched whatever its archived state, like every other by-slug admin read.
+- **An unknown slug is a 404; a house with no products is a header-only file.** The empty sheet is
+  a true statement ("this house holds nothing"), where a 404 there would read as a broken export.
+- **`?brand=` defaults to `atelier-textiles-nz` through Ajv's `useDefaults`, which fires only when
+  the key is ABSENT.** `?brand=` (empty string) is present, so it meets the `^[a-z0-9-]+$` pattern
+  and 400s — the right answer for a download, and the opposite of the CRM's list convention, where
+  `buildListQuery` drops an empty filter precisely so it never reaches the API.
+- **A test for the default must not assume the seed.** CI runs migrations only, so
+  `atelier-textiles-nz` may not exist; assert that the no-`?brand=` response EQUALS the explicit
+  one (true at 200 and at 404 alike) plus the exported constant, never that the download succeeds.
+- **The hardened CSV writer is `csvCell`/`csvRow`/`csvDocument` in `src/lib/csv-text.js`**, beside
+  the reader — the file staff post back is read by the module that wrote it. Formula lead-ins
+  (`= + - @ TAB CR`) take an apostrophe because every name in the sheet is staff-typed free text via
+  `PATCH /admin/*` and `=HYPERLINK`/`=WEBSERVICE` exfiltrate in Excel; then RFC 4180 quoting; CRLF
+  separators and a trailing newline. `src/pricing/trade-price-lists.js` still holds its own copy of
+  those two rules — it belongs to the client-facing trade list and nothing about it changed —
+  and should import from here whenever it is next touched.
+- **`csvCell('=HYPERLINK("x")')` is `"'=HYPERLINK(""x"")"`**, not `'=HYPERLINK…`: a quote in the
+  payload triggers RFC-4180 quoting on top of the neutralisation, so a `startsWith("'=")`
+  assertion fails on the writer being more correct, not less.
+- The `Content-Disposition` filename comes from the brand **slug** (`[a-z0-9-]` by construction,
+  server-generated and immutable), never the house NAME, which is free text and can carry a quote
+  or a CR. `.csv` is its own path segment — hung off a `:param` Fastify folds it into the parameter
+  and every lookup 404s.

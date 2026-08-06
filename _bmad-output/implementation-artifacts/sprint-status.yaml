@@ -90,7 +90,7 @@ epics:
     status: in_progress
     stories:
       US-001: done      # Extract the encoding-sniffing CSV reader
-      US-002: pending   # Product sheet export with an empty Category column
+      US-002: done      # Product sheet export with an empty Category column
       US-003: pending   # Re-import parse and validate
       US-004: pending   # Apply validated categories
       US-005: pending   # CRM export and import panel

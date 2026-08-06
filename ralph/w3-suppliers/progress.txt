@@ -49,6 +49,26 @@ Story-specific detail belongs in the per-story entries below, not here.
   (`src/catalogue/products.js`) and `PRODUCT_UPDATE_COLUMNS` (`src/catalogue/admin-products.js`)
   are each gated by a schema in a route file — `src/routes/catalogue.js` and
   `src/routes/admin-catalogue.js` respectively. Both edits are needed or neither is worth making.
+- **The admin module template is `src/pricing/admin-price-lists.js`**, and every back-office read
+  model in this repo is the same five parts: `DEFAULT_PAGE`/`DEFAULT_LIMIT`/`MAX_LIMIT`, a private
+  `httpError`, a `rethrowConflict` keyed on `error.constraint`, a frozen `*_UPDATE_COLUMNS` fed to
+  `buildUpdate`, and a `to<Entity>` mapper returning a frozen object. The list returns
+  `{ <plural>, total }` — the ROUTE builds the meta envelope, never the module.
+- **A local `escapeLike` is duplicated per module on purpose** (`admin-users.js`,
+  `admin-price-lists.js`, and now `admin-suppliers.js`). It always pairs with an explicit
+  `ESCAPE '\'` in the SQL — the clause is not optional, and the term is otherwise a wildcard.
+- **`Number(null)` is 0, which reads as "free" for any rate column.** Every nullable numeric a read
+  model coerces needs `value == null ? null : Number(value)`; the blanket "coerce with `Number()`"
+  rule silently turns "no discount recorded" into "100% off".
+- **An exposure test asserts BOTH directions or it rots.** A suite that only asserts a field is
+  absent from `/catalogue/*` keeps passing after the admin read model quietly stops returning it.
+  Pair every absence assertion with one that the back-office model DOES carry the field, and scan
+  the raw response BODY for the fixture's secret values as well as its keys — a renamed column
+  passes a key scan while still shipping the value.
+- **Use the bare table name, not an alias, when a query needs a correlated EXISTS.** An unqualified
+  `*_COLUMNS` projection constant is only valid while the statement has no alias, so
+  `FROM suppliers ... WHERE supplier_aliases.supplier_id = suppliers.id` keeps one constant usable
+  in the SELECT, the INSERT RETURNING and the UPDATE RETURNING alike.
 
 ---
 
@@ -192,5 +212,62 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   appears in the AdminJS panel at `/panel` (it introspects `products`, an editable resource) as a
   free-text field with no dropdown; a human may want to glance at it, and note that the panel will
   surface the raw CHECK violation rather than a friendly message if someone types a fifth value.
+---
+
+## 2026-08-06T15:33:10Z - W3-US-004 - Supplier read models and admin module
+- Implemented `src/suppliers/admin-suppliers.js`: `listSuppliers` (free-text `q`,
+  `includeArchived`, page/limit with `MAX_LIMIT` clamp, returns `{ suppliers, total }`),
+  `getSupplier` (the row plus its `aliases`, the `brands` it invoices and each house's terms),
+  `createSupplier` (slug derived server-side from the name, never accepted) and `updateSupplier`
+  (frozen `SUPPLIER_UPDATE_COLUMNS` through `buildUpdate`). Plus
+  `src/suppliers/supplier-terms.js`: `listSupplierBrandTerms`, which batch-loads the tiers for
+  every terms row in ONE query and resolves each row's net multiplier through the existing
+  `discount-chain.js`.
+- The list search reaches `supplier_aliases` via a correlated EXISTS. Staff look a house up by
+  whichever spelling is in front of them ('JWALL', 'C&C MILANO'), and those live only as aliases —
+  a name-only search would answer "no such supplier" for the spellings the price lists actually use.
+- `slug` is server-generated on create and NOT recomputed on rename: it is the stable key the
+  US-006 backfill and any later import address a supplier by, and a rename is a correction rather
+  than a new supplier. `discount_method` is in the update whitelist but its vocabulary is the
+  database's CHECK, not a JS list, so the two can never drift.
+- **Scope note — no route, no registry entry, deliberately.** `src/routes/admin-suppliers.js` and
+  the `supplier` entry in `src/lifecycle/registry.js` are US-005's (the DELETE story is what makes
+  the registry load-bearing, and `setArchived` cannot reach an entity that is not in it). Nothing
+  in US-004's ACs needs either: `include_archived` is a read filter, not an archive write.
+- Repos and files changed: atelier-api — `src/suppliers/admin-suppliers.js` (new),
+  `src/suppliers/supplier-terms.js` (new), `test/suppliers-admin.test.js` (new, 38 tests),
+  `CLAUDE.md` (## Suppliers), `ralph/w3-suppliers/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (43 files, 732 tests passed; was 42/694).
+- **Learnings:**
+  - Pattern: every back-office admin module here is the same five parts (limits, `httpError`,
+    `rethrowConflict` keyed on `error.constraint`, a frozen update whitelist, a frozen mapper) and
+    returns `{ <plural>, total }` so the ROUTE owns the meta envelope. `admin-price-lists.js` is
+    the template to copy.
+  - Pattern: an exposure test must assert both directions. Absence from `/catalogue/*` alone keeps
+    passing once the admin model stops returning the field; pairing it with "the back-office model
+    DOES carry these keys" is what keeps the assertion about exposure rather than about nothing.
+    Scan the raw BODY for the fixture's secret VALUES too — a renamed column passes a key scan.
+  - Gotcha: `Number(null)` is 0. On a discount or markup column that reads as "free"/"sell at
+    cost", so every nullable numeric needs `value == null ? null : Number(value)`. The house
+    "coerce numeric with `Number()`" rule is about a value that is known to be present.
+  - Gotcha: `rethrowConflict` is called from the `catch` of `updateSupplier`, which also throws its
+    own 404 from inside the `try`. That is deliberate and matches `updatePriceListItem` — a
+    non-23505 error is rethrown untouched, so the 404 survives. Do not "tidy" the 404 out of the
+    try block; it needs the same UPDATE's `rows.length`.
+  - Gotcha: a table alias breaks an unqualified `*_COLUMNS` projection constant. The list query
+    uses `FROM suppliers` with `supplier_aliases.supplier_id = suppliers.id` in the EXISTS so one
+    constant serves the SELECT, the INSERT RETURNING and the UPDATE RETURNING.
+  - Gotcha: `${PREFIX}` cleanup must delete `brands` before `suppliers` — `brands.supplier_id` is
+    RESTRICT, so the supplier delete 23503s inside cleanup and every later test sees leftovers.
+    `supplier_brand_terms` needs no line of its own: it CASCADEs from both sides.
+  - Context: the supplier vocabulary and the four unique constraints that produce a 409
+    (`suppliers_name_key`, `suppliers_slug_key`, `suppliers_d365_token_unique`,
+    `suppliers_short_code_unique`) come from `migrations/1786334400000_suppliers.js`; the terms
+    shapes from `migrations/1786420800000_suppliers-brand-terms.js`.
+- **Needs human verification:** none yet — module + tests only, no endpoint and no screen, so
+  nothing is reachable from a browser. The CRM screen that renders these fields lands in US-007
+  and is what a person must eyeball (specifically that the cost fields honour `CAPS.FINANCE_VIEW`
+  masking). The tables remain unregistered in the AdminJS panel at `/panel`, deliberately.
 ---
 

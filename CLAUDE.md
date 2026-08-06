@@ -717,3 +717,56 @@ migrations.
   survived the run and its literal `legacy_account_guid` 23505'd on the next one — the suite passed
   exactly once per database. The pattern is anchored on `${PREFIX}%` now. Any fixture carrying a
   literal unique value (a uuid, a guid) has this failure mode.
+
+### Read models (`src/samples/admin-samples.js`)
+
+- **The register's back-office reads: `listSamples`, `getSample`, `getSampleByBarcode`,
+  `listSampleLoans`.** Shape follows `src/suppliers/admin-suppliers.js` — the module exports
+  `DEFAULT_PAGE`/`DEFAULT_LIMIT` (50)/`MAX_LIMIT` (200) and returns `{ samples, total }`; the route
+  builds the `{ samples, meta: { total, page, limit } }` envelope and spends `MAX_LIMIT` as its
+  schema `maximum`, so an over-large limit is a 400 rather than a silent clamp (the module still
+  clamps, because it is also called directly).
+- **Overdue is ONE expression constant used by the projection AND the filter**:
+  `COALESCE(ol.due_back_at < now(), false)`, with the `returned_at IS NULL` half carried by the
+  open-loan join predicate. Two spellings of it is how a list and its badge start disagreeing. The
+  `COALESCE` is load-bearing rather than defensive: `due_back_at` is nullable and a comparison
+  against NULL yields NULL, which pg hands back as JS `null` (so `overdue === false` never matches)
+  and which makes `WHERE NOT <expr>` drop the row instead of keeping it.
+- **The open loan is a plain `LEFT JOIN`, licensed by `sample_loans_open_unique`.** At most one open
+  loan per sample means the join cannot multiply a row, which is what lets the COUNT query share
+  `SAMPLE_FROM` — and it must share it, because the `overdue` filter names the joined alias. A
+  lateral with `LIMIT 1` would also work and would hide the fact that the invariant is what makes it
+  correct. `loan_count` is a correlated scalar subquery in the projection for the same reason: an
+  aggregate join would need a GROUP BY over every selected column and would put the count into the
+  count query, where it is dead weight.
+- **Every row carries its parents by NAME** (`colourway_name`, `colourway_sku`, `product_name`,
+  `brand_name`, `supplier_name`, `showroom_name`), not just their ids — nothing on a sample row says
+  which design or showroom the object in your hand belongs to, which is the whole point of a
+  register. Same reason `listAdminColourways` carries the design and the house. All five joins are
+  LEFT: a sample with no catalogue link is normal, not broken.
+- **`overdue` is a TRI-STATE filter**: absent leaves the list alone, `true` is the chase list,
+  `false` is "not late back" — out on time OR on the shelf. It is not "on the shelf"; that is
+  `status`.
+- **`status` and `include_archived` are different questions and a screen needs both.** A `retired`
+  sample is a LIVE row and appears in the default list; archiving is the reversible removal of the
+  row. Collapsing the two is the obvious wrong simplification, so a test asserts it.
+- **`q` searches the tag, the shelf and the design** (barcode, label, sample_type, location,
+  colourway name/SKU, product name), with `%`/`_`/`\` escaped and `ESCAPE '\'` in the SQL so a
+  barcode containing a wildcard matches one row. It deliberately does NOT search `holder_name`:
+  "what has Kedgley got out" is a question about loans, and a loan list is its own read model.
+- **`getSampleByBarcode` is an EXACT match on the unique column** — one row or null, never a prefix
+  and never a pattern, which is what makes the scanner's answer 200-or-404 rather than a filtered
+  list. Neither by-id nor by-barcode filters `archived_at`, like every other by-id admin read here;
+  for the scanner that is load-bearing, since a scanned object exists whatever the CRM list is
+  currently showing.
+- **`SAMPLE_STATUSES` is exported so a route spends it as a schema enum instead of keeping its own
+  copy**, and `test/samples-read-models.test.js` parses the live `samples_status_check` and asserts
+  the two are the same set — the `DISCOUNT_METHOD_ENUM` posture with the drift test built in.
+- **"Samples are not stock" is asserted twice.** The static source scan in
+  `test/samples-schema.test.js` globs `src/samples/**`; the runtime counterpart here drives every
+  read model against a four-line recording stub pool (`{ query }` only) and asserts no statement
+  they issue names `qty_available`/`qty_reserved` or puts `inventory` in a SQL position.
+- **A derived value is only proved derived by moving its input.** The overdue test reads once, moves
+  the LOAN's `due_back_at` into the past, reads again, and asserts the value flipped while the
+  SAMPLE's `updated_at` did not — a stored flag cannot satisfy that pair, whereas a single read
+  passes against one.

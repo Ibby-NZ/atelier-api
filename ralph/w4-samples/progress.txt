@@ -45,6 +45,21 @@ Story-specific detail belongs in the per-story entries below, not here.
   files aside costs a 30 s suite run and, for a migration, leaves `pgmigrations` naming a file that
   is no longer on disk. `psql` is denied at the tool level; `node -e` with `require('dotenv')` +
   `require('pg')` against `process.env.DATABASE_URL` is the way to look at `atelier_w4`.
+- **A SQL comparison against a NULLABLE column yields NULL, not false, and pg hands that back as
+  JS `null`** — so a derived boolean in a projection must be `COALESCE(<comparison>, false)` or a
+  caller that wrote `x.overdue === false` silently never matches. The same NULL then makes
+  `WHERE NOT <expr>` drop the row instead of keeping it, so the filter and the projection must use
+  the ONE expression constant, not two spellings of it.
+- **A list whose filter refers to a JOINED table forces the count query to share the FROM clause,
+  and that is only safe while no join can multiply a row.** A UNIQUE column is the usual licence
+  (`inventory.colourway_id`); a PARTIAL unique index is an equally good one where the join carries
+  its predicate (`sample_loans_open_unique` + `ON ... AND returned_at IS NULL` is at most one row
+  per sample). State which index licenses it in a comment — a later join added without one inflates
+  `meta.total` while every row still looks correct.
+- **"Derived at read time, never stored" is only proved by a test that changes the INPUT and
+  re-reads.** Reading once and asserting the value passes against a stored column too. Move the
+  dependency (the due date, the clock), read again, assert the derived value flipped AND that the
+  parent row's `updated_at` did not — that pair is what a stored flag cannot satisfy.
 - **`src/seed/legacy-import.js`'s `LEGACY_TABLES` is the canonical declaration of what every
   `legacy_*` table holds**, so "no legacy table gained a column" is a real assertion: compare
   `information_schema.columns` against the map plus `imported_at`. One pre-existing exception —
@@ -236,5 +251,80 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
 - **Needs human verification:** none — schema only, no screen and no route. A human should confirm
   that a sample order is one requested item with no quantity, and that `displayed` is the office's
   own word for "it is on the shelf in the showroom", before US-007 draws the lifecycle on it.
+---
+
+## 2026-08-06T18:44:00Z - W4-US-004 - Sample read models, filters and overdue derivation
+
+- Added `src/samples/admin-samples.js`, the back-office read layer for the register: `listSamples`
+  (filters `q`, `status`, `showroom_id`, `supplier_id`, `overdue`, `include_archived`; paginated
+  `{ samples, total }`, the route builds the meta envelope), `getSample`, `getSampleByBarcode`
+  (exact match on the unique column, so the scanner's answer is one row or none) and
+  `listSampleLoans`. Every row carries its parents by NAME (colourway, design, house, supplier,
+  showroom), its open loan, a lifetime `loan_count` and a freshly derived `overdue`. Also exports
+  `SAMPLE_STATUSES` so US-005's route can spend the vocabulary as a schema enum instead of keeping
+  its own copy.
+- Overdue is one expression constant, `COALESCE(ol.due_back_at < now(), false)`, used by both the
+  projection and the filter; the `returned_at IS NULL` half rides on the open-loan join predicate.
+  Nothing is stored and no column exists to store it in.
+- Repos and files changed: atelier-api only — `src/samples/admin-samples.js` (new),
+  `test/samples-read-models.test.js` (new, 25 tests), plus the bookkeeping (`prd.json`,
+  `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (55 files, 1237 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the three entries added to
+    `## Codebase Patterns` above — a nullable comparison derives NULL rather than false (so one
+    COALESCE'd expression constant must serve the projection AND the filter), a count query sharing
+    a FROM needs every join to be non-multiplying (a PARTIAL unique index licenses one), and
+    "derived at read time" is only proved by moving the input and re-reading.
+  - Gotchas:
+    - **The open loan is a plain `LEFT JOIN`, not a lateral, and that is deliberate.**
+      `sample_loans_open_unique` guarantees at most one open loan per sample, which is exactly what
+      lets the count query reuse `SAMPLE_FROM` — and it must reuse it, because the `overdue` filter
+      names `ol`. A lateral with `LIMIT 1` would work and would hide the fact that the invariant is
+      what makes it correct.
+    - **`loan_count` is a correlated scalar subquery in the projection, never an aggregate join.**
+      An aggregate join would need a GROUP BY over every selected column and would put the count
+      into the count query, where it is dead weight.
+    - **`overdue` is tri-state as a filter**: absent leaves the list alone, `true` is the chase
+      list, `false` is "not late back" (out on time OR on the shelf). `false` is not the same as
+      "on the shelf" and a screen must not treat it as such.
+    - **`q` deliberately does NOT search `holder_name`.** "What has Kedgley got out" is a question
+      about loans, and a loan list is its own read model; folding it in here would make a register
+      search return samples whose own fields match nothing the user typed.
+    - The by-id and by-barcode reads do NOT filter `archived_at` — house rule for every by-id admin
+      read, and for the scanner it is load-bearing: a scanned object exists whatever the CRM list is
+      currently showing.
+    - `status` and `include_archived` answer different questions and both are needed. A `retired`
+      sample is a LIVE row (`archived_at IS NULL`) and appears in the default list; a test asserts
+      exactly that, because collapsing the two is the obvious wrong simplification.
+    - Test fixture cleanup is anchored on `${PREFIX}%` (no separator) per the pattern above, and the
+      order is `sample_loans` -> `samples` -> `brands` -> `suppliers` -> `showrooms`.
+  - Context:
+    - The AC "no sample code path reads or writes inventory" is covered twice now: the static source
+      scan in `test/samples-schema.test.js` already globs `src/samples/**`, and
+      `test/samples-read-models.test.js` adds the runtime counterpart — a recording stub pool
+      (`{ query }` only, four lines) asserting no statement these read models issue names
+      `qty_available`/`qty_reserved` or puts `inventory` in a SQL position.
+    - US-005 owns `src/routes/admin-samples.js`. It should spend `MAX_LIMIT` as the query schema's
+      `maximum` (an over-large limit is a 400 there; the module still clamps because it is also
+      called directly), `SAMPLE_STATUSES` as the `status` enum, and build
+      `{ samples, meta: { total, page, limit } }` from `{ samples, total }` — the shape
+      `src/routes/admin-suppliers.js` already uses.
+    - `getSampleByBarcode` is written and tested here rather than in US-005 because it is a read
+      model; US-005 only has to wire the route and turn null into a 404.
+    - **`src/lifecycle/registry.js` is STILL not in this workstream's allowed files** and still owes
+      three probes (`sample` -> `sample_loans`, the open-loan guard on `sample loan`, the
+      requested/cancelled guard on `sample order`, plus a `samples` probe on `product`/`colourway`).
+      US-005's "DELETE is blocked by sample_loans" is the story that finally collides with it: E2
+      owns `src/lifecycle/`, so that is an ownership question for a human, not a tidy-up. The
+      alternative a reviewer may prefer is that US-005 relies on the RESTRICT FK's 23503 rather than
+      a probe — but the house rule is that the probe is the primary defence and the catch is the
+      backstop, so this needs deciding rather than assuming.
+- **Needs human verification:** none — no route and no screen yet, so nothing is reachable from a
+  browser. A human should confirm the register list's search fields are the ones staff actually
+  type (tag, label, type, shelf location, design name, SKU — deliberately not the borrower) before
+  US-008 draws the filter bar on them.
 ---
 

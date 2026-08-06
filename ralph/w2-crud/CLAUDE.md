@@ -38,7 +38,9 @@ Follow existing patterns. Small files. Immutable updates. Explicit errors. No ha
 Match the surrounding code's idiom and comment density.
 
 ### Files you MAY touch
-- atelier-api: `src/routes/admin-catalogue.js`, `admin-inventory.js`, `admin-orders.js`, `admin-price-lists.js`, `src/routes/shipping.js`; `src/catalogue/admin-products.js`, `admin-brands.js`; `src/inventory/**`, `src/shipping/rates.js`; `test/admin-*.test.js`
+- atelier-api routes: `src/routes/admin-catalogue.js`, `admin-inventory.js`, `admin-orders.js`, `admin-price-lists.js`, `admin-users.js`, `src/routes/shipping.js`, `src/routes/contact.js`
+- atelier-api modules — every domain whose entity you add a DELETE for, because the route needs its read model back: `src/catalogue/admin-products.js`, `admin-brands.js`, `src/inventory/**`, `src/shipping/rates.js`, `src/pricing/admin-price-lists.js`, `src/users/admin-users.js`, `src/contact/contact.js`
+- atelier-api tests: `test/admin-*.test.js`, `test/shipping.test.js`, `test/contact.test.js`
 - atelier-crm: `src/screens/AdminProducts.jsx`, `AdminStock.jsx`, `AdminOrders.jsx`, `AdminPriceListItems.jsx`, `ClientAccounts.jsx`, `UserManagement.jsx`, new `AdminCollections.jsx`, new `AdminShipping.jsx`; `src/App.jsx`, `src/components/layout.jsx`, `src/components/sectionTabs.jsx`
 - Both repos: `CLAUDE.md` under a `## CRUD completion` heading
 

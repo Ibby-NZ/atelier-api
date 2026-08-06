@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 
 # AdminJS writes bundled user components here at boot under NODE_ENV=production.
 # Build artefact, regenerated every start — and the reason the panel needs a

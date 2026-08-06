@@ -88,7 +88,7 @@
       ],
       "priority": 5,
       "passes": false,
-      "notes": ""
+      "notes": "BLOCKED: needs src/app.js (nothing registers a sample route, so the routes are unreachable) and src/lifecycle/registry.js (no 'sample' entry, so the sample_loans DELETE blocker cannot exist) — both outside this workstream's allowed files"
     },
     {
       "id": "US-006",

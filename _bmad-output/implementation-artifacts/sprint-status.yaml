@@ -66,7 +66,7 @@ epics:
       US-002: done      # Migration: sample_loans with the one-open-loan index
       US-003: done      # Migration: sample_orders
       US-004: done      # Sample read models, filters and overdue derivation
-      US-005: pending   # Sample CRUD routes and by-barcode lookup
+      US-005: blocked   # Sample CRUD routes and by-barcode lookup — see ralph/w4-samples/BLOCKED.md
       US-006: pending   # Check-out and check-in verb routes
       US-007: pending   # Sample-order lifecycle module and routes
       US-008: pending   # AdminSamples and AdminShowrooms screens

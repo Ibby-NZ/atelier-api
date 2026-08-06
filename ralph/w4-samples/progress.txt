@@ -60,6 +60,21 @@ Story-specific detail belongs in the per-story entries below, not here.
   re-reads.** Reading once and asserting the value passes against a stored column too. Move the
   dependency (the due date, the clock), read again, assert the derived value flipped AND that the
   parent row's `updated_at` did not — that pair is what a stored flag cannot satisfy.
+- **A ROUTE story in this workstream cannot ship without `src/app.js`, which is out of bounds.**
+  There is no plugin auto-loader here: every route module is an explicit
+  `api.register(<module>, { pool })` inside `buildApp`, so `src/routes/admin-samples.js` is dead
+  code until someone edits `src/app.js`. Standing up a bare Fastify instance in the test instead
+  does not rescue it — the route needs `app.guards.requireRole('backoffice')` and `guards` is
+  decorated onto the instance by `buildApp` (`src/app.js:60`), so a hand-rolled app proves the
+  handlers work and proves nothing about the authorisation every other `/admin/*` route carries.
+  This hits US-005, US-006 and US-007 identically; see `BLOCKED.md`. Do not write a route file
+  and leave it unregistered — check `grep -n "routes/" src/app.js` FIRST.
+- **`src/lifecycle/registry.js` has no `sample` entry and `deleteOrExplain` 500s on an unknown
+  name.** `requireEntity` throws a plain Error rather than answering 404 (deliberately — so an
+  `:entity` wired from a URL fails loudly), so any samples DELETE story is blocked on that entry
+  existing. The registry's own header comment (line 27) and `atelier-api/CLAUDE.md` both say the
+  workstream that creates the tables adds it; this loop's file list says E2 owns `src/lifecycle/`.
+  That contradiction is a human decision, not a tidy-up.
 - **`src/seed/legacy-import.js`'s `LEGACY_TABLES` is the canonical declaration of what every
   `legacy_*` table holds**, so "no legacy table gained a column" is a real assertion: compare
   `information_schema.columns` against the map plus `imported_at`. One pre-existing exception —
@@ -326,5 +341,84 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   browser. A human should confirm the register list's search fields are the ones staff actually
   type (tag, label, type, shelf location, design name, SKU — deliberately not the borrower) before
   US-008 draws the filter bar on them.
+---
+
+## 2026-08-06T19:02:00Z - W4-US-005 - BLOCKED - Sample CRUD routes and by-barcode lookup
+
+- Nothing was implemented. The block was found before a line was written and the working tree is
+  clean at `9d06df4 feat(api): [W4-US-004]`. Full detail and the options a human chooses between
+  are in `ralph/w4-samples/BLOCKED.md`.
+- The story needs TWO files this workstream may not touch:
+  1. **`src/app.js`** — nothing registers a sample route, so `src/routes/admin-samples.js` would be
+     unreachable and all three status-code criteria (by-barcode 200/404, POST 409, DELETE 409)
+     would be unassertable.
+  2. **`src/lifecycle/registry.js`** — no `sample` entry, so `deleteOrExplain(pool, 'sample', …)`
+     answers 500 via `requireEntity` and the "DELETE is blocked by sample_loans" criterion has
+     nothing to hang the probe on.
+- No gate was run: there was no code to gate. The evidence is four read-only commands.
+
+  ```
+  $ ls src/routes/ | grep -i sample
+  (no output)
+
+  $ grep -n "routes/" src/app.js
+  7:import { authRoutes } from './routes/auth.js'
+  … 18 route modules, none of them samples …
+  24:import { webhookRoutes } from './routes/webhooks.js'
+  108:    api.register(authRoutes, { pool })
+  … 18 registrations, none of them samples …
+  164:  app.register(webhookRoutes, { pool, stripe, stripeWebhookSecret, mailer })
+
+  $ grep -n "sample" src/lifecycle/registry.js
+  27:// Entities whose tables do not exist yet (samples, sample orders and sample
+
+  $ grep -n "^  [a-z_]*: {" src/lifecycle/registry.js
+  182:  brand: {        195:  collection: {   208:  product: {     235:  colourway: {
+  260:  inventory: {    272:  price_list_item: {              289:  supplier: {
+  307:  user: {         329:  shipping_rate: {                338:  contact_enquiry: {
+  354:  order: {
+  (11 entries, no sample)
+  ```
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the two entries added to
+    `## Codebase Patterns` above — a route story here cannot ship without `src/app.js` because
+    there is no auto-loader AND `guards` is decorated by `buildApp`, and `deleteOrExplain` 500s
+    rather than 404s on an entity the registry has never heard of.
+  - Gotchas:
+    - **US-006 and US-007 are route stories too and hit the `src/app.js` wall identically.** They
+      are NOT marked BLOCKED — the loop's rule is one story per iteration and a human may clear
+      all three with one decision — but an iteration picking US-006 next should check
+      `grep -n "routes/" src/app.js` before writing anything, and block on the same ground if the
+      file list has not been widened. Do not write `src/routes/admin-samples.js` and leave it
+      unregistered to make a story look finished; it ships nothing.
+    - **The 23503 workaround was considered and deliberately refused.**
+      `sample_loans.sample_id` is RESTRICT, so a bare `DELETE FROM samples` really does raise
+      23503 while a loan points at it, and catching that inside `src/samples/` would satisfy the
+      criterion's literal words in-bounds. It is wrong twice over: `atelier-api/CLAUDE.md` states
+      the probe is the primary defence and the catch only the backstop, and the 409 envelope
+      (`{ message, blockers: [{ relation, label, count, capped }], archivable }`) is a shared
+      contract the CRM's `describeBlockers`/`ConfirmDialog` kit consumes — a second, divergent
+      implementation of it in a domain folder is a decision for a human, which is what US-004's
+      entry already said ("this needs deciding rather than assuming").
+    - **`sprint-status.yaml` has a `blocked` value** — line 6 declares
+      `# Values: pending | in_progress | done | blocked`. It does not need a new state inventing.
+  - Context:
+    - The delete policy is `_bmad-output/planning-artifacts/architecture.md` § *Delete policy*:
+      `sample` → blocked by sample loans; `sample order` → 409 unless requested/cancelled;
+      `sample loan` → 409 while still open. All three, plus a `samples` probe on the existing
+      `product` and `colourway` entries, are owed to `src/lifecycle/registry.js`.
+    - The read models US-005 would have wired are already written and tested
+      (`src/samples/admin-samples.js`, W4-US-004): `listSamples`, `getSample`,
+      `getSampleByBarcode` (exact match on the unique column — the route only has to turn null
+      into a 404) and `listSampleLoans`, plus `DEFAULT_PAGE`/`DEFAULT_LIMIT`/`MAX_LIMIT` and
+      `SAMPLE_STATUSES` for the query schema. The route work itself is small; only the two
+      out-of-bounds files stand in the way.
+    - `src/routes/admin-suppliers.js` is the shape to copy when this is unblocked — same
+      `{ suppliers, meta: { total, page, limit } }` envelope built in the route, `MAX_LIMIT` as
+      the schema `maximum`, `rethrowConflict` for the 23505, and `deleteOrExplain`/`replyDelete`
+      with the entity name as a single-quoted literal.
+- **Needs human verification:** none — no code was written and no screen exists. What a human owes
+  is the decision in `BLOCKED.md`, not a browser check.
 ---
 

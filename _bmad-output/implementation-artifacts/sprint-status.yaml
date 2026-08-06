@@ -97,15 +97,15 @@ epics:
   w7-featured:
     name: "W7 Featured"
     branch: aug6/w7-featured
-    status: pending
+    status: done
     stories:
-      US-001: pending   # Migration: featured_rank on brands and collections
-      US-002: pending   # Admin patch support and whole-list reorder endpoints
-      US-003: pending   # Public read-model ordering
-      US-004: pending   # Seed test: featured survives a reseed
-      US-005: pending   # CRM featured panel
-      US-006: pending   # Storefront homepage reads featured
-      US-007: pending   # Storefront brands page reads featured
+      US-001: done      # Migration: featured_rank on brands and collections
+      US-002: done      # Admin patch support and whole-list reorder endpoints
+      US-003: done      # Public read-model ordering
+      US-004: done      # Seed test: featured survives a reseed
+      US-005: done      # CRM featured panel
+      US-006: done      # Storefront homepage reads featured
+      US-007: done      # Storefront brands page reads featured
   w8-colour-files:
     name: "W8 Colour files"
     branch: aug6/w8-colour-files

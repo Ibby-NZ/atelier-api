@@ -29,6 +29,9 @@ import {
   createCollection,
   updateCollection,
   setCollectionArchived,
+  setFeaturedBrands,
+  setFeaturedCollections,
+  FEATURED_LIMIT,
 } from '../catalogue/admin-brands.js'
 import {
   listAdminProducts,
@@ -59,6 +62,12 @@ const hexTonesProp = {
   maxItems: 12,
   items: { type: 'string', pattern: '^#[0-9a-fA-F]{6}$' },
 }
+// Position in the storefront's featured order. Nullable so an explicit null
+// clears it (buildUpdate keeps that distinct from an absent key); `minimum`
+// applies to numbers only, so the null arm still passes. Rank 0 is refused here
+// as well as by the column CHECK, so it is a 400 rather than an opaque 23514.
+const featuredRankProp = { type: ['integer', 'null'], minimum: 1 }
+const slugProp = { type: 'string', minLength: 1, maxLength: 200 }
 
 // Spec + pricing fields shared by product create and patch.
 const productDetailProps = {
@@ -131,6 +140,7 @@ const brandPatchSchema = {
     is_international: { type: 'boolean' },
     trade_only: { type: 'boolean' },
     website_url: nullableUrl,
+    featured_rank: featuredRankProp,
   },
 }
 
@@ -154,6 +164,40 @@ const collectionPatchSchema = {
     name: nameProp,
     description: nullableText,
     image_url: nullableUrl,
+    featured_rank: featuredRankProp,
+  },
+}
+
+// Whole-list reorder bodies. Both accept an EMPTY array — featuring nothing is
+// how the office turns a strip off — and both cap the list, so an accidental
+// paste of the whole catalogue is a 400 rather than a page of hero slides.
+//
+// Houses are named by slug; collections by the (brand_slug, slug) PAIR, because
+// a collection slug is unique per brand and never globally.
+const featuredBrandsBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['slugs'],
+  properties: {
+    slugs: { type: 'array', maxItems: FEATURED_LIMIT, items: slugProp },
+  },
+}
+
+const featuredCollectionsBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['collections'],
+  properties: {
+    collections: {
+      type: 'array',
+      maxItems: FEATURED_LIMIT,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['brand_slug', 'slug'],
+        properties: { brand_slug: slugProp, slug: slugProp },
+      },
+    },
   },
 }
 
@@ -261,6 +305,24 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
     { preHandler: backoffice, schema: { params: idParamsSchema, body: brandPatchSchema } },
     async (request) => ({
       brand: await updateBrand(pool, request.params.id, request.body),
+    })
+  )
+
+  // Whole-list featured reorder. PUT rather than PATCH because the body IS the
+  // list: anything absent from it stops being featured. A static path segment
+  // beats a parametric one in Fastify's router, and nothing else registers PUT
+  // under /admin/brands, so this can never be read as `:id`.
+  app.put(
+    '/admin/brands/featured',
+    { preHandler: backoffice, schema: { body: featuredBrandsBodySchema } },
+    async (request) => ({ brands: await setFeaturedBrands(pool, request.body.slugs) })
+  )
+
+  app.put(
+    '/admin/collections/featured',
+    { preHandler: backoffice, schema: { body: featuredCollectionsBodySchema } },
+    async (request) => ({
+      collections: await setFeaturedCollections(pool, request.body.collections),
     })
   )
 

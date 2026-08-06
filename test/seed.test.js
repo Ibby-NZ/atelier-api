@@ -285,6 +285,60 @@ describe('catalogue seed import', () => {
     await pool.query(`UPDATE brands SET trade_only = true WHERE slug = 'pierre-frey'`)
   })
 
+  // featured_rank is absent from the seed entirely — not merely from the
+  // DO UPDATE set lists — so what the storefront leads with is an office
+  // decision that outlives a reseed, the same posture as trade_only above and
+  // as inventory / shipping_rates (INSERT … DO NOTHING). The rows featured here
+  // must be ones the seed actually upserts: a prefix-namespaced fixture house is
+  // not in the vendored catalogue, so a reseed never touches it and the
+  // assertion would pass even against a set list that cleared the column. The
+  // story is overwritten alongside the rank for exactly that reason — the seed
+  // refreshes story unconditionally, so its return proves the row was upserted
+  // rather than skipped.
+  it('never moves a featured house or collection, on any later reseed', async () => {
+    const featured = async () => {
+      const { rows } = await pool.query(
+        `SELECT b.featured_rank AS brand, b.story, c.featured_rank AS collection
+           FROM brands b
+           JOIN collections c ON c.brand_id = b.id AND c.slug = $2
+          WHERE b.slug = $1`,
+        ['pierre-frey', 'pierre-frey-cappuccino']
+      )
+      return rows[0]
+    }
+
+    const before = await featured()
+    // Otherwise the ranks asserted below could be the ones already there.
+    expect(before.brand).not.toBe(99)
+    expect(before.collection).not.toBe(98)
+    await pool.query(
+      `UPDATE brands SET featured_rank = 99, story = 'reseed probe' WHERE slug = 'pierre-frey'`
+    )
+    // The pair, never the slug alone: collection slugs are unique per brand.
+    await pool.query(
+      `UPDATE collections c SET featured_rank = 98
+         FROM brands b
+        WHERE b.id = c.brand_id AND b.slug = $1 AND c.slug = $2`,
+      ['pierre-frey', 'pierre-frey-cappuccino']
+    )
+    await runSeed(pool)
+
+    const after = await featured()
+    expect(after.brand).toBe(99)
+    expect(after.collection).toBe(98)
+    expect(after.story).toMatch(/^Founded 1935/)
+
+    await pool.query(`UPDATE brands SET featured_rank = $1 WHERE slug = 'pierre-frey'`, [
+      before.brand,
+    ])
+    await pool.query(
+      `UPDATE collections c SET featured_rank = $3
+         FROM brands b
+        WHERE b.id = c.brand_id AND b.slug = $1 AND c.slug = $2`,
+      ['pierre-frey', 'pierre-frey-cappuccino', before.collection]
+    )
+  })
+
   it('seeds shipping rates: three zones with two tiers each (boundary 20)', async () => {
     const { rows } = await pool.query(
       `SELECT zone, count(*)::int AS tiers,

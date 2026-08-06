@@ -9,9 +9,9 @@ epics:
   w1-foundations:
     name: "W1 Foundations"
     branch: aug6/w1-foundations
-    status: pending
+    status: in_progress
     stories:
-      US-001: pending   # Lifecycle registry and deleteOrExplain
+      US-001: done      # Lifecycle registry and deleteOrExplain
       US-002: pending   # setArchived replaces the eight duplicated archive helpers
       US-003: pending   # Registry safety tests
       US-004: pending   # CRM list kit: list.js, useAdminList, Pagination

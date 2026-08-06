@@ -48,6 +48,14 @@ Story-specific detail belongs in the per-story entries below, not here.
   `text/plain` or `application/json` — the root instance already parses both, and re-registering an
   inherited type throws at boot. The consequence: a caller posting JSON to a file route arrives with
   an OBJECT body, so the handler must check `Buffer.isBuffer` rather than assume bytes.
+- **A read model takes `db` — a pool OR an open client — and that is what lets a write step run
+  the SAME read inside its own transaction.** `src/lifecycle/archive.js` and
+  `src/email/recipients.js` already take that shape; anything a later story has to apply should be
+  written that way from the start rather than duplicated. Where the read decides what the write
+  will do, it needs `FOR UPDATE` in the transactional case and must NOT take locks in the dry-run
+  case, so the lock is an option on the shared function, not a second copy of it. Lock in a
+  deterministic order (`ORDER BY id`) or two concurrent callers with overlapping row sets deadlock
+  instead of queueing.
 - **Ajv applies a querystring `default` only when the key is ABSENT.** `?brand=` sends the empty
   string, which is present, so it meets the `pattern` instead and 400s. That is the right answer
   for an export (the caller asked for a house and named none) and the opposite of the CRM list
@@ -194,5 +202,56 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   rows, save as "CSV (Comma delimited)" — which is cp1252 on Windows — and POST the file to
   `/admin/product-sheet/validate` with `content-type: text/csv`. Confirm the counts match what they
   typed and that the categories in the database are unchanged afterwards.
+---
+
+## 2026-08-06T18:47:00Z - W6-US-004 - Apply validated categories
+- `POST /admin/product-sheet/apply` (backoffice-only) writes the filled-in sheet. One transaction:
+  either every category the office typed lands or none does. It takes the FILE again rather than
+  the validate step's report — a list of updates handed back by a client is a list the client could
+  have edited — so the counts are recomputed at write time and returned, never echoed.
+- Contract: 200 `{ applied, summary: { rows, skipped, repeats, unchanged, changed }, changes }`,
+  where `applied` is the UPDATE's own `rowCount` (the database's count, not the report's
+  prediction). A row-level failure is the SAME 422 body the dry run returns, built by one shared
+  `refusalBody(report)` in the route file, and the transaction is rolled back — "Nothing has been
+  written" is a statement about a rollback there, not about a route that cannot write. A file that
+  is not a product sheet at all is a 400 thrown by the parser BEFORE a connection is taken.
+- Re-uploading the same file changes nothing: a stated category equal to the stored one is
+  `unchanged`, never a write, so the second run reports `applied: 0, changed: 0` and touches no row.
+- Repos and files changed: atelier-api — `src/products/product-sheet.js` (`matchProductSheet` split
+  out of `validateProductSheet`, `applyProductSheet` added), `src/routes/admin-product-sheet.js`
+  (`refusalBody` + the apply route), `test/product-sheet.test.js` (+10 tests, third suite),
+  `CLAUDE.md` (`## Category export`), `ralph/w6-category-export/{prd.json,progress.txt}`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` (atelier-api) -> 0, `npm test` (atelier-api) -> 0 (52 files, 1216 tests),
+  `npm test` (atelier-crm) -> 0 (37 files, 567 tests), `npm run build` (atelier-crm) -> 0.
+- **Learnings:**
+  - The dry run and the apply must not be two implementations of one decision. `validateProductSheet`
+    was split into the pure `parseProductSheet` (already there) plus a private
+    `matchProductSheet(db, parsed, { lock })`; `validateProductSheet` is now two lines over it and
+    the apply calls the same function inside its transaction with `lock: true`. Promoted the general
+    shape to Codebase Patterns.
+  - `FOR UPDATE` on the matching read is what makes the report true at write time: without it a
+    product could be archived or hard-deleted between the decision and the UPDATE, and the office
+    would be told a row was written that was not. `ORDER BY id` beside it is the deadlock rule —
+    two overlapping sheets applied at once take the same locks in the same order.
+  - A backstop still earns its place after the lock: `rowCount !== updates.length` throws a 409 and
+    rolls back, because the alternative is reporting a count the database did not do. Same posture
+    as `src/lifecycle/delete.js`'s 23503 catch — unreachable by an ordinary request, correct anyway.
+  - A write suite needs a `beforeEach` that resets only the FIXTURE ROWS, never the users: this file
+    now has three suites, and re-registering would spend the 10-per-15-min bucket. Each suite owns
+    its own `buildApp()` (fresh limiter store), its own slug prefix and its own email domain — and
+    the prefixes must not be prefixes OF each other: `sheet-test-%` does not match
+    `sheet-apply-test-house`, which is the only reason three cleanups can coexist.
+  - Asserting the two routes' refusals are `toEqual` is what keeps one CRM renderer serving both;
+    asserting each separately would let the messages drift apart and both tests stay green.
+  - Context: the header contract, the parser, the matcher and the apply all live in
+    `src/products/product-sheet.js`; the four legal values come from `CATEGORIES` in
+    `scripts/lib/price-template.js` and are never retyped.
+- **Needs human verification:** no screen exists yet (US-005 builds the panel), so a person should
+  drive the whole round trip once from a signed-in back-office session: download
+  `/admin/product-sheet/export.csv?brand=<house>`, type categories into a few rows in Excel, save as
+  "CSV (Comma delimited)", POST it to `/admin/product-sheet/validate` (content-type `text/csv`),
+  read the counts, then POST the SAME file to `/admin/product-sheet/apply` and confirm the products
+  carry the categories in the CRM — then POST it a third time and confirm `applied` is 0.
 ---
 

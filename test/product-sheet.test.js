@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
@@ -783,5 +783,306 @@ describe('POST /admin/product-sheet/validate', () => {
       unchanged: 0,
       changed: 2,
     })
+  })
+})
+
+describe('POST /admin/product-sheet/apply', () => {
+  const PREFIX_UP = 'sheet-apply-test'
+  const DOMAIN_UP = 'sheet-apply-test.example.com'
+  const SLUG_UP = {
+    house: `${PREFIX_UP}-house`,
+    plain: `${PREFIX_UP}-plain`,
+    second: `${PREFIX_UP}-second`,
+    already: `${PREFIX_UP}-already`,
+    archived: `${PREFIX_UP}-archived`,
+  }
+  const HOUSE_NAME = 'Apply Test House'
+
+  let pool
+  let app
+  let backofficeCookie
+  let customerCookie
+  let ids
+
+  const cleanup = async () => {
+    await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX_UP}-%`])
+    await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${DOMAIN_UP}`])
+  }
+
+  const send = (url, payload, cookie, contentType = 'text/csv') =>
+    app.inject({
+      method: 'POST',
+      url,
+      headers: {
+        ...(cookie ? { cookie } : {}),
+        ...(contentType ? { 'content-type': contentType } : {}),
+      },
+      payload,
+    })
+
+  const apply = (payload, cookie, contentType) =>
+    send('/admin/product-sheet/apply', payload, cookie, contentType)
+
+  const categoryOf = async (slug) => {
+    const { rows } = await pool.query('SELECT category FROM products WHERE slug = $1', [slug])
+    return rows[0].category
+  }
+
+  /** A data line for one fixture product; the House and Design cells are the human's. */
+  const line = (slug, category) => `${ids[slug]},${HOUSE_NAME},,Design,${category}`
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    pool = createPool(config.databaseUrl)
+    await runner({
+      databaseUrl: config.databaseUrl,
+      dir: 'migrations',
+      direction: 'up',
+      migrationsTable: 'pgmigrations',
+      log: () => {},
+    })
+    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+    await app.ready()
+
+    await cleanup()
+
+    const { rows: brands } = await pool.query(
+      `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story)
+       VALUES ($1, $2, 'New Zealand', 'NZD', false, false, 'A test house.')
+       RETURNING id`,
+      [HOUSE_NAME, SLUG_UP.house]
+    )
+    const brandId = brands[0].id
+
+    for (const [slug, name] of [
+      [SLUG_UP.plain, 'Atlas'],
+      [SLUG_UP.second, 'Bramble'],
+      [SLUG_UP.already, 'Cirrus'],
+    ]) {
+      await pool.query(
+        `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website)
+         VALUES ($1, $2, $3, 'fabric', 'NZD', true)`,
+        [brandId, name, slug]
+      )
+    }
+    // Out of the catalogue, so off the sheet — a row against it is refused.
+    await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website, archived_at)
+       VALUES ($1, 'Dune', $2, 'fabric', 'NZD', true, now())`,
+      [brandId, SLUG_UP.archived]
+    )
+
+    const { rows: products } = await pool.query(
+      'SELECT slug, id FROM products WHERE slug LIKE $1',
+      [`${PREFIX_UP}-%`]
+    )
+    ids = Object.fromEntries(products.map((row) => [row.slug, row.id]))
+
+    // Registered ONCE: /auth/register is 10 per 15 min per IP. This suite has
+    // its own app instance, so it has its own limiter store.
+    const boss = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: `boss@${DOMAIN_UP}`, password: PASSWORD, name: 'Boss' },
+    })
+    backofficeCookie = sessionCookieFrom(boss)
+    await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [
+      `boss@${DOMAIN_UP}`,
+    ])
+
+    const shopper = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: `shopper@${DOMAIN_UP}`, password: PASSWORD },
+    })
+    customerCookie = sessionCookieFrom(shopper)
+  })
+
+  // This suite WRITES, so every test starts from the same catalogue state.
+  // Products only — re-registering the users would spend the rate-limit bucket.
+  beforeEach(async () => {
+    await pool.query(
+      `UPDATE products SET category = NULL WHERE slug = ANY($1::text[])`,
+      [[SLUG_UP.plain, SLUG_UP.second, SLUG_UP.archived]]
+    )
+    await pool.query(`UPDATE products SET category = 'fabric' WHERE slug = $1`, [SLUG_UP.already])
+  })
+
+  afterAll(async () => {
+    await cleanup()
+    await app.close()
+    await pool.end()
+  })
+
+  it('refuses an anonymous caller and a customer', async () => {
+    const csv = utf8(sheetCsv([line(SLUG_UP.plain, 'fabric')]))
+    expect((await apply(csv)).statusCode).toBe(401)
+    expect((await apply(csv, customerCookie)).statusCode).toBe(403)
+    // And neither refusal wrote anything on the way past.
+    expect(await categoryOf(SLUG_UP.plain)).toBeNull()
+  })
+
+  it('400s a body posted as JSON rather than as the file', async () => {
+    const response = await apply({ rows: [] }, backofficeCookie, 'application/json')
+    expect(response.statusCode).toBe(400)
+    expect(response.json().message).toContain('text/csv')
+  })
+
+  it('400s a file that is not a product sheet, before it opens a transaction', async () => {
+    const response = await apply(utf8('name,qty\r\nAtlas,3\r\n'), backofficeCookie)
+    expect(response.statusCode).toBe(400)
+    expect(response.json().message).toContain('Download the sheet again')
+  })
+
+  it('writes the categories and reports what it wrote', async () => {
+    const response = await apply(
+      utf8(
+        sheetCsv([
+          line(SLUG_UP.plain, 'wallpaper'),
+          line(SLUG_UP.second, 'trimming'),
+          // Already `fabric`: confirmed, not written.
+          line(SLUG_UP.already, 'fabric'),
+          // Blank: the row nobody got to.
+          line(SLUG_UP.plain, ''),
+        ])
+      ),
+      backofficeCookie
+    )
+
+    expect(response.statusCode).toBe(200)
+    const { applied, summary, changes } = response.json()
+    expect(summary).toEqual({ rows: 4, skipped: 1, repeats: 0, unchanged: 1, changed: 2 })
+    // Every row of the file is accounted for.
+    expect(summary.rows).toBe(
+      summary.skipped + summary.repeats + summary.unchanged + summary.changed
+    )
+    // The database's own count, not the report's prediction.
+    expect(applied).toBe(2)
+    expect(changes.map((change) => change.to).sort()).toEqual(['trimming', 'wallpaper'])
+
+    expect(await categoryOf(SLUG_UP.plain)).toBe('wallpaper')
+    expect(await categoryOf(SLUG_UP.second)).toBe('trimming')
+    expect(await categoryOf(SLUG_UP.already)).toBe('fabric')
+  })
+
+  it('changes nothing when the same file is applied again', async () => {
+    const csv = utf8(
+      sheetCsv([line(SLUG_UP.plain, 'wallpaper'), line(SLUG_UP.second, 'trimming')])
+    )
+
+    const first = await apply(csv, backofficeCookie)
+    expect(first.statusCode).toBe(200)
+    expect(first.json().applied).toBe(2)
+
+    const second = await apply(csv, backofficeCookie)
+    expect(second.statusCode).toBe(200)
+    const { applied, summary, changes } = second.json()
+    // Every row now states what the catalogue already holds: confirmed, not
+    // written. That is why the export leaves Category empty — blank is
+    // "skipped" and a stored value is "unchanged", which are different rows.
+    expect(applied).toBe(0)
+    expect(summary).toEqual({ rows: 2, skipped: 0, repeats: 0, unchanged: 2, changed: 0 })
+    expect(changes).toEqual([])
+
+    expect(await categoryOf(SLUG_UP.plain)).toBe('wallpaper')
+    expect(await categoryOf(SLUG_UP.second)).toBe('trimming')
+  })
+
+  it('applies nothing at all when one row fails — the whole sheet is one transaction', async () => {
+    const response = await apply(
+      utf8(
+        sheetCsv([
+          // Good, and FIRST: a per-row write would have landed it before
+          // reaching the row that fails.
+          line(SLUG_UP.plain, 'wallpaper'),
+          line(SLUG_UP.second, 'trimming'),
+          `${UNMATCHED_ID},${HOUSE_NAME},,Nowhere,fabric`,
+        ])
+      ),
+      backofficeCookie
+    )
+
+    expect(response.statusCode).toBe(422)
+    const body = response.json()
+    expect(body.error_count).toBe(1)
+    expect(body.errors[0].row).toBe(4)
+    expect(body.message).toContain('Nothing has been written')
+    // Refused whole: the two good rows are untouched too.
+    expect(await categoryOf(SLUG_UP.plain)).toBeNull()
+    expect(await categoryOf(SLUG_UP.second)).toBeNull()
+  })
+
+  it('refuses a row against an archived product and writes nothing', async () => {
+    const response = await apply(
+      utf8(
+        sheetCsv([line(SLUG_UP.plain, 'fabric'), line(SLUG_UP.archived, 'fabric')])
+      ),
+      backofficeCookie
+    )
+    expect(response.statusCode).toBe(422)
+    expect(response.json().errors[0].message).toContain('archived')
+    expect(await categoryOf(SLUG_UP.plain)).toBeNull()
+    expect(await categoryOf(SLUG_UP.archived)).toBeNull()
+  })
+
+  it('refuses a sheet contradicting itself, in the words the dry run used', async () => {
+    const csv = utf8(
+      sheetCsv([line(SLUG_UP.plain, 'wallpaper'), line(SLUG_UP.plain, 'trimming')])
+    )
+    const dryRun = await send('/admin/product-sheet/validate', csv, backofficeCookie)
+    const applied = await apply(csv, backofficeCookie)
+
+    expect(applied.statusCode).toBe(422)
+    // One report, whichever button the office pressed.
+    expect(applied.json()).toEqual(dryRun.json())
+    expect(await categoryOf(SLUG_UP.plain)).toBeNull()
+  })
+
+  it('leaves the dry run with nothing left to report', async () => {
+    const csv = utf8(
+      sheetCsv([line(SLUG_UP.plain, 'accessory'), line(SLUG_UP.second, 'accessory')])
+    )
+    expect((await apply(csv, backofficeCookie)).json().applied).toBe(2)
+
+    const dryRun = await send('/admin/product-sheet/validate', csv, backofficeCookie)
+    expect(dryRun.statusCode).toBe(200)
+    expect(dryRun.json().summary).toEqual({
+      rows: 2,
+      skipped: 0,
+      repeats: 0,
+      unchanged: 2,
+      changed: 0,
+    })
+  })
+
+  it('applies the sheet it exported, filled in', async () => {
+    const exported = await app.inject({
+      method: 'GET',
+      url: `/admin/product-sheet/export.csv?brand=${SLUG_UP.house}`,
+      headers: { cookie: backofficeCookie },
+    })
+    expect(exported.statusCode).toBe(200)
+
+    const [header, ...dataRows] = [...csvRows(exported.body)]
+    const filled = csvDocument([
+      header[1],
+      ...dataRows.map(([, fields]) => [...fields.slice(0, 4), 'wallpaper']),
+    ])
+
+    const response = await apply(utf8(filled), backofficeCookie)
+    expect(response.statusCode).toBe(200)
+    // Three live products: two uncategorised, one already `fabric`.
+    expect(response.json().summary).toEqual({
+      rows: 3,
+      skipped: 0,
+      repeats: 0,
+      unchanged: 0,
+      changed: 3,
+    })
+    for (const slug of [SLUG_UP.plain, SLUG_UP.second, SLUG_UP.already]) {
+      expect(await categoryOf(slug)).toBe('wallpaper')
+    }
+    // The archived design was never on the sheet, so it is still uncategorised.
+    expect(await categoryOf(SLUG_UP.archived)).toBeNull()
   })
 })

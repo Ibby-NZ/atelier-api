@@ -723,3 +723,46 @@ the supplier pricing pipeline rather than reimplemented beside it.
   backoffice guard is the gate, per the convention in the suppliers section.
 - **Do not write a literal U+FEFF into source to strip a BOM.** It is invisible in the file and in
   every diff; `String.fromCharCode(0xfeff)` says the same thing visibly.
+
+### Writing it back (`POST /admin/product-sheet/apply`)
+
+- **The apply takes the FILE again, never the validate step's report.** A list of updates handed
+  back by a client is a list the client could have edited, so the bytes are re-parsed and re-matched
+  and the counts are recomputed at write time. The consequence to know is that the office may have
+  changed the catalogue between the two requests, which is why the apply RETURNS its own counts
+  rather than echoing the dry run's.
+- **The whole sheet is one transaction**: `BEGIN` → match (locking) → one `UPDATE … FROM
+  unnest($1::int[], $2::text[])` → `COMMIT`. Either every category the office typed lands or none
+  does — a half-applied sheet is worse than a refused one, because the office cannot tell which half
+  by looking at the file. A per-row UPDATE in a loop would be the same transaction and the same
+  result at one round trip per design, which is the reason every batch write here unnests.
+- **`validateProductSheet` and the apply are one decision, not two implementations.** The private
+  `matchProductSheet(db, parsed, { lock })` is the shared half; `db` is a pool or an open client
+  (the shape `setArchived` and `resolveOrderRecipient` already take), which is what lets the apply
+  run the identical read inside its own transaction.
+- **`lock` adds `FOR UPDATE` and it is what makes the report true at write time.** Without it a
+  product can be archived or hard-deleted between the decision and the UPDATE, and the office is
+  told a row was written that was not. The dry run passes it false on purpose — a report that took
+  row locks would block the back office over a question. `ORDER BY id` sits beside it as the
+  deadlock rule: two overlapping sheets applied at once take the same locks in the same order.
+- **`rowCount !== updates.length` throws a 409 and rolls back.** The lock makes it unreachable from
+  an ordinary request, exactly like `src/lifecycle/delete.js`'s 23503 catch, and it is correct
+  anyway: the alternative is reporting to the office a count the database did not do.
+- **`applied` is the UPDATE's own `rowCount`, and it is deliberately not just `summary.changed`.**
+  The two agree by the check above; one of them is a prediction and the other is evidence, and the
+  number a person reads as "done" should be the second.
+- **Both routes refuse a broken sheet in the same words**, through one `refusalBody(report)` in the
+  route file — the 422 shape is what the CRM renders, so one screen serves both buttons. "Nothing
+  has been written" is a statement about a rollback on the apply and about a route that cannot write
+  on the validate. `test/product-sheet.test.js` asserts the two bodies are `toEqual`; asserting each
+  separately would let them drift with both tests green.
+- **The parse happens before a connection is taken**, so a file that is not a product sheet at all
+  is a 400 that never holds one open.
+- Re-applying the same file is a no-op by construction rather than by a guard: a stated category
+  equal to the stored one is `unchanged`, never an update, so the second run reports
+  `applied: 0, changed: 0`.
+- **A write suite resets only its FIXTURE ROWS in `beforeEach`, never its users** — this test file
+  now holds three suites and re-registering would spend the 10-per-15-min bucket. Each owns its own
+  `buildApp()` (a fresh limiter store), slug prefix and email domain, and the prefixes must not be
+  prefixes of one another: `sheet-test-%` does not match `sheet-apply-test-house`, which is the only
+  reason three prefix cleanups can coexist in one file.

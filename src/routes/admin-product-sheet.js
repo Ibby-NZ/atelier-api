@@ -15,6 +15,7 @@ import {
   toProductSheetCsv,
   productSheetFilename,
   validateProductSheet,
+  applyProductSheet,
   DEFAULT_BRAND_SLUG,
   MAX_REPORTED_ERRORS,
   MAX_REPORTED_CHANGES,
@@ -55,6 +56,23 @@ const SHEET_CONTENT_TYPES = Object.freeze([
 // a few thousand designs at ~80 bytes a row. Fastify's 1 MB default would
 // refuse a legitimate one on the biggest houses.
 const IMPORT_BODY_LIMIT = 4 * 1024 * 1024
+
+// The dry run and the apply refuse a broken sheet in exactly the same words, so
+// the CRM renders one report and the office reads one message whichever button
+// it pressed. Both say "Nothing has been written", and for the apply that is a
+// statement about a transaction that rolled back rather than about a route that
+// never writes.
+const refusalBody = (report) => ({
+  error: 'Unprocessable Entity',
+  message:
+    `${report.errors.length} row${report.errors.length === 1 ? '' : 's'} could not be read. ` +
+    'Nothing has been written.',
+  // Capped, and the true count sits beside it — sixty broken rows are usually
+  // one mistake made sixty times.
+  errors: report.errors.slice(0, MAX_REPORTED_ERRORS),
+  error_count: report.errors.length,
+  summary: report.summary,
+})
 
 export const adminProductSheetRoutes = async (app, { pool }) => {
   app.addContentTypeParser(
@@ -103,23 +121,42 @@ export const adminProductSheetRoutes = async (app, { pool }) => {
 
       if (report.errors.length > 0) {
         reply.code(422)
-        return {
-          error: 'Unprocessable Entity',
-          message:
-            `${report.errors.length} row${report.errors.length === 1 ? '' : 's'} could not be ` +
-            'read. Nothing has been written.',
-          // Capped, and the true count sits beside it — sixty broken rows are
-          // usually one mistake made sixty times.
-          errors: report.errors.slice(0, MAX_REPORTED_ERRORS),
-          error_count: report.errors.length,
-          summary: report.summary,
-        }
+        return refusalBody(report)
       }
 
       // `updates` is the apply step's seam and is deliberately not served: the
-      // office decides from the counts and the preview, and US-004 re-reads the
-      // file rather than trusting a list a client hands back.
+      // office decides from the counts and the preview, and the apply re-reads
+      // the file rather than trusting a list a client hands back.
       return {
+        summary: report.summary,
+        changes: report.changes.slice(0, MAX_REPORTED_CHANGES),
+      }
+    }
+  )
+
+  // The write. It takes the FILE again rather than the validate step's report:
+  // a list of updates handed back by a client is a list the client could have
+  // edited, and re-reading the bytes costs one parse and is the only version of
+  // this route that cannot be driven to write something the office never saw.
+  // The consequence — the office may have changed the catalogue between the two
+  // requests — is why the counts are recomputed here and returned, rather than
+  // the validate step's being echoed.
+  app.post(
+    '/admin/product-sheet/apply',
+    { preHandler: backoffice, bodyLimit: IMPORT_BODY_LIMIT },
+    async (request, reply) => {
+      const report = await applyProductSheet(pool, request.body)
+
+      if (report.errors.length > 0) {
+        reply.code(422)
+        return refusalBody(report)
+      }
+
+      return {
+        // What the database actually wrote. `summary.changed` is what the sheet
+        // asked for and the two agree by construction, but a count the office
+        // reads as "done" should be the statement's own.
+        applied: report.applied,
         summary: report.summary,
         changes: report.changes.slice(0, MAX_REPORTED_CHANGES),
       }

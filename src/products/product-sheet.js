@@ -310,27 +310,36 @@ export const parseProductSheet = (bytes) => {
 const describeRow = (entry) => (entry.design === '' ? '' : ` (${entry.design})`)
 
 /**
- * Parse a posted sheet and match every stated category against the catalogue.
- * Reads only — the counts it returns are what US-004 applies and reports back.
+ * Match a parsed sheet against the catalogue. Reads only.
+ *
+ * `db` is a pool or an open client, so the apply step can run this inside its
+ * own transaction — the shape `src/lifecycle/archive.js` and the email module's
+ * recipient lookup already take. `lock` is what makes that worth doing: with
+ * `FOR UPDATE` the rows this read decided about cannot be archived or deleted
+ * between the decision and the write, so the report the office is answered with
+ * is the state the write actually met. The dry run passes it false — a report
+ * that took row locks would block the back office over a question.
  *
  * When there are no errors the whole file is accounted for:
  * `rows === skipped + repeats + unchanged + changed`.
  *
- * @param {import('pg').Pool} pool
- * @param {Buffer} bytes
- * @returns {Promise<{ summary: object, changes: object[], updates: object[], errors: object[] }>}
- * @throws 400 when the file is not a product sheet at all
+ * @param {{ query: Function }} db  a pool or an open client
+ * @param {ReturnType<typeof parseProductSheet>} parsed
+ * @param {{ lock?: boolean }} [options]
  */
-export const validateProductSheet = async (pool, bytes) => {
-  const parsed = parseProductSheet(bytes)
+const matchProductSheet = async (db, parsed, { lock = false } = {}) => {
   const errors = [...parsed.errors]
   const changes = []
   const updates = []
   let unchanged = 0
 
   if (parsed.entries.length > 0) {
-    const { rows } = await pool.query(
-      'SELECT id, name, category, archived_at FROM products WHERE id = ANY($1::int[])',
+    // Ordered by id, and that is the deadlock rule rather than a tidy-up: two
+    // offices applying overlapping sheets take the same row locks in the same
+    // order, so one waits instead of both dying.
+    const { rows } = await db.query(
+      'SELECT id, name, category, archived_at FROM products WHERE id = ANY($1::int[])' +
+        ` ORDER BY id${lock ? ' FOR UPDATE' : ''}`,
       [parsed.entries.map((entry) => entry.id)]
     )
     const products = new Map(rows.map((row) => [row.id, row]))
@@ -388,4 +397,87 @@ export const validateProductSheet = async (pool, bytes) => {
     updates,
     errors,
   })
+}
+
+/**
+ * Parse a posted sheet and match it against the catalogue, writing nothing.
+ * The dry run the office reads before it decides.
+ *
+ * @param {{ query: Function }} db
+ * @param {Buffer} bytes
+ * @returns {Promise<{ summary: object, changes: object[], updates: object[], errors: object[] }>}
+ * @throws 400 when the file is not a product sheet at all
+ */
+export const validateProductSheet = async (db, bytes) =>
+  matchProductSheet(db, parseProductSheet(bytes))
+
+// One statement for the whole sheet, the shape every batch write in this API
+// takes (the pricing and legacy imports both unnest their batch): a per-row
+// UPDATE in a loop would be the same transaction and the same result, at one
+// round trip per design.
+const APPLY_SQL = `UPDATE products AS p
+      SET category = v.category
+     FROM unnest($1::int[], $2::text[]) AS v(id, category)
+    WHERE p.id = v.id`
+
+/**
+ * Apply a filled-in sheet. One transaction: either every category the office
+ * typed lands or none does, because a half-applied sheet is worse than a
+ * refused one — the office cannot tell which half by looking at the file.
+ *
+ * A file with any row error is refused whole and reported exactly as the dry
+ * run reports it, `applied: 0`. Re-applying the same file is a no-op: a stated
+ * category equal to the stored one is `unchanged`, never a write, so the second
+ * run reports `changed: 0` and touches nothing.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {Buffer} bytes
+ * @returns {Promise<{ applied: number, summary: object, changes: object[],
+ *                     updates: object[], errors: object[] }>}
+ * @throws 400 when the file is not a product sheet at all
+ */
+export const applyProductSheet = async (pool, bytes) => {
+  // Parsed before a connection is taken: a file that is not a product sheet at
+  // all is a 400 and has no business holding one open.
+  const parsed = parseProductSheet(bytes)
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const report = await matchProductSheet(client, parsed, { lock: true })
+
+    if (report.errors.length > 0) {
+      await client.query('ROLLBACK')
+      return Object.freeze({ ...report, applied: 0 })
+    }
+
+    let applied = 0
+    if (report.updates.length > 0) {
+      const result = await client.query(APPLY_SQL, [
+        report.updates.map((update) => update.id),
+        report.updates.map((update) => update.category),
+      ])
+      applied = result.rowCount
+      // The rows were locked by the read above, so this cannot differ — and if
+      // it ever does, the counts the office is about to be shown are wrong, so
+      // the sheet is refused rather than reported inaccurately.
+      if (applied !== report.updates.length) {
+        throw httpError(
+          409,
+          'The catalogue changed while the sheet was being applied. Nothing has been written; ' +
+            'download the sheet again.'
+        )
+      }
+    }
+
+    await client.query('COMMIT')
+    // The database's own count, not the report's prediction: they agree by the
+    // check above, and this is the one of the two that is evidence.
+    return Object.freeze({ ...report, applied })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
 }

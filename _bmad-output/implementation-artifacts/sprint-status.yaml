@@ -31,7 +31,7 @@ epics:
   w2-crud:
     name: "W2 CRUD completion"
     branch: aug6/w2-crud
-    status: in_progress
+    status: done
     stories:
       US-001: done      # DELETE for brand and collection
       US-002: done      # DELETE for product and colourway
@@ -44,7 +44,7 @@ epics:
       US-009: done      # Delete on the products and houses screens
       US-010: done      # Standalone AdminCollections screen
       US-011: done      # AdminShipping screen
-      US-012: pending   # Delete on stock, supplier rates, orders and users screens
+      US-012: done      # Delete on stock, supplier rates, orders and users screens
   w3-suppliers:
     name: "W3 Suppliers"
     branch: aug6/w3-suppliers

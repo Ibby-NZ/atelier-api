@@ -216,6 +216,42 @@ Story-specific detail belongs in the per-story entries below, not here.
   does not ban reading what the list already returned. Grouping the loaded tiers to mark a zone's
   only tier, or reading a `product_count` off a detail the screen already holds, costs no request
   and is the only warning staff get before a refusal.
+- **Check the read model's projection before trusting `useCrudScreen`'s default delete path.** It is
+  `` `${path}/${row.id}` ``, and `inventory` has no `id` in its public shape — one row per colourway,
+  every caller addresses it by colourway — so the default builds
+  `DELETE /admin/inventory/undefined`. That is what the `deletePath` option is for, and the same
+  question applies to any entity whose URL key is not its primary key.
+- **Deleting the row a list is keyed on removes the way back to it, so the create has to ship in the
+  same story.** A colourway whose stock row is deleted vanishes from `GET /admin/inventory`
+  altogether; a screen that only lists inventory can never show it again. The fix is a second
+  endpoint that still sees the row — `GET /admin/colourways` reports `inventory: null` for exactly
+  those — not a cleverer query against the list's own. Ask "what does this list stop showing after a
+  successful delete" before wiring one.
+- **A screen composing the kit may override a `remove.dialog` prop after spreading it; that is
+  composition, not re-implementation.** `useCrudScreen` discards a delete's response body, so an API
+  that qualifies its own success (`DELETE /admin/price-list-items/:id` returns a `warning` saying the
+  next import re-creates the row) cannot reach the toast — and a caveat that lands after the deletion
+  is not a caveat. Rewrite the **ask** step's body instead, keyed on `confirmLabel`: it is `'Delete'`
+  while the dialog is still asking and `null` once the API has refused, and a refusal's body is the
+  API's own sentence, which must never be overwritten. Re-implementing `deleteDialog` would be the
+  violation; passing a later prop is not.
+- **The dialog's name for a row must identify it across the WHOLE list it appears in.** The general
+  form of US-010's collection rule: a key unique within a parent, or within an identity tuple, names
+  several rows once the list spans all of them. A price-list `code` is unique only within
+  `(supplier, category)`, so `describeRate` leads with the supplier; an account is named by `email`
+  (unique by constraint) and never by `name` (nullable, freely duplicated). Ask what the row's real
+  uniqueness constraint is, not what looks like a name.
+- **A control bound to server truth needs no revert when its write fails.** `useMutation`
+  deliberately does not reload on error, and once a list belongs to `useAdminList` a `<select
+  value={row.role}>` re-renders from the unchanged row by itself — so the `load()`-to-undo that a
+  hand-rolled screen needed becomes dead weight. The rule only holds while the control reads the row
+  rather than a draft; an editor holding a draft still has to re-seed it.
+- **A negative source scan for "this screen does X nowhere" must name the one token that opens X.**
+  `not.toContain('Delete')` and `not.toContain('ConfirmDialog')` both fail against a header comment
+  explaining *why* a screen has neither. `remove.ask` is the only entry point into the kit's delete
+  flow, so its absence is the criterion; `'<ConfirmDialog'` (with the angle bracket) is the rendered
+  form the prose cannot accidentally contain. Third instance of the same trap — see US-010's
+  `useMutation` and US-011's `/archive`.
 
 ---
 
@@ -1248,4 +1284,137 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   forward from US-001..010: a real cross-origin DELETE preflight from the CRM at :5273, which
   `app.inject()` cannot prove — this screen is the first one to issue a DELETE against a route whose
   refusal staff will actually see.
+---
+
+## 2026-08-06T17:05:00Z - W2-US-012 - Delete on stock, supplier rates, orders and users screens
+
+- **Implemented.** The last five live list screens move onto W1's kit: `AdminStock`,
+  `AdminPriceListItems`, `AdminOrders`, `ClientAccounts` and `UserManagement` now compose
+  `useCrudScreen` and render the shared `<Pagination />`. Four of them gain a Delete button and the
+  shared `ConfirmDialog`; **Web orders deliberately gains neither**. The four Dynamics mirror screens
+  that carried a copy-pasted paginator (`ClientsList`, `PriceLists`, `Reserves`, `SalesOrdersList`)
+  take `pageCount` + `<Pagination />` and keep their read-only fetch. With this story every live list
+  screen in the CRM composes the kit, and no screen anywhere carries its own pager.
+- **The story title says "users screens", plural, and there are two of them.** `ClientAccounts`
+  (`segment=clients`) and `UserManagement` (the superset, `/users`) both list `users` and both now
+  delete. Wiring only the first would have left the self-delete 403 unreachable from the UI:
+  `segment=clients` never returns the signed-in staff account, so `UserManagement` is the only screen
+  where that refusal can occur. Criterion 1's "all four screens" reads as four datasets — stock,
+  supplier rates, orders, users — which is five files.
+- Repos and files changed: `atelier-crm` only —
+  `src/screens/adminLists.js` (new, the pure half: `UNPAGED_LIST_LIMIT`, `RATE_LIST_LIMIT`,
+  `RATE_DELETE_CAVEAT`, four filter builders, `stockDeletePath`, three `describe*`, `needsStockRow`,
+  `withDeleteCaveat`), `src/screens/adminLists.test.js` (new, 42 tests),
+  `src/screens/AdminStock.jsx` (kit + Delete + a restock create panel),
+  `src/screens/AdminPriceListItems.jsx`, `src/screens/AdminOrders.jsx`,
+  `src/screens/ClientAccounts.jsx`, `src/screens/UserManagement.jsx`,
+  `src/screens/clientAccounts.js` + `.test.js` (`clientAccountsQuery` -> `clientAccountsFilters`),
+  `src/screens/ClientsList.jsx`, `PriceLists.jsx`, `Reserves.jsx`, `SalesOrdersList.jsx`
+  (paginator only), `CLAUDE.md` (`## CRUD completion`, plus the one stale line saying hard DELETE
+  exists on the catalogue screens). `atelier-api` carries the bookkeeping only —
+  `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`, `ralph/w2-crud/PR-BODY.md`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm test` -> 0 (35 files, 490 tests passed; 447 before), `npm run build` -> 0. The API
+  gates were not run: no API source file was touched and the story's own criteria name the CRM pair
+  — the same posture US-009, US-010 and US-011 took.
+- **The five copy-pasted paginators were not the five screens this story names.** `list.js`'s header
+  said "five screens had grown their own copy"; the five that actually matched
+  `Math.max(1, Math.ceil(total / LIMIT))` were `AdminPriceListItems` plus **four Dynamics mirror
+  screens**, and the mirrors are absent from the MAY-touch list. They are also absent from the
+  MUST-NOT-touch list and from every epic — a grep of epics.md for ClientsList / Reserves /
+  SalesOrders / PriceLists returns nothing — so there is nobody to collide with, and criterion 2
+  ("the five copy-pasted paginators are gone — grep proves it") is what assigns the work. Same
+  judgement US-003 made about `src/routes/contact.js`. The change there is genuinely small: the
+  mirrors keep their hand-rolled fetch (they have no live list to hand to `useAdminList`), and only
+  the arithmetic and the Previous/Next pair were ever duplicated.
+- **`<Pagination />` is rendered on all five kit screens even though four endpoints do not page, and
+  the rendering is identical to the US-009 screens that render none.** It returns null at
+  `totalPages <= 1`, and `UNPAGED_LIST_LIMIT` (1000) keeps `totalPages` at 1 over
+  `/admin/inventory`, `/admin/orders` and `/admin/users` — all three of which answer with the whole
+  list and declare `additionalProperties: false`, so Ajv strips the `page` the hook sends. So there
+  is no user-visible inconsistency with AdminBrands/AdminProducts; the difference is that criterion 1
+  asks for the component and that the day one of those endpoints gains `page`, the screen already
+  has the pager. `/admin/price-list-items` is the CRM's one genuinely paged list and therefore the
+  kit's first real consumer of the component.
+- **Manage stock gained a create, and that is not scope creep — it is what makes the delete
+  reversible.** US-008's own entry flagged it: a colourway whose stock row is deleted vanishes from
+  `GET /admin/inventory` entirely, so shipping Delete alone would make the removal permanent from
+  the CRM's point of view. The "Put a colourway back into stock" panel searches
+  `GET /admin/colourways` (US-006's endpoint, which reports `inventory: null` for exactly those
+  rows) and POSTs `{ colourway_id }`; `unit` is never sent, because the API derives it from the
+  product type and a client-chosen one would silently redenominate the stock.
+- **The price-list `warning` reaches staff, but in the confirmation rather than the toast.**
+  US-003's carried-forward item asked for the API's `warning` in the CRM toast; `useCrudScreen`
+  discards a delete's response body, and the kit is W1's. Rather than re-implement the flow, the
+  screen rewrites the **ask** step's body via `withDeleteCaveat` — so the caveat arrives *before* the
+  deletion, which is the only time it can change a decision. A refusal keeps the API's own sentence.
+- **Web orders composes the kit and never touches `remove`.** The registry has `order` as
+  `deletable: false` (a CASCADE would take the lines, the delete would not release `qty_reserved`,
+  and the row holds the Xero reference and the Stripe session id), so there is no endpoint to wire.
+  The screen takes `list`, `toast` and `mutation` and renders no `<ConfirmDialog>` and no Delete
+  button. Its Archive stays `tone="danger"` — alone among the live screens, and by the same rule
+  rather than as an exception: only the most permanent verb on a row is red, and on an order archive
+  is it.
+- **What the 42 new tests assert:** `pageCount(866, UNPAGED_LIST_LIMIT) === 1` against
+  `pageCount(866, 25) === 35`, and `RATE_LIST_LIMIT` inside the endpoint's `MAX_LIMIT` of 200; each
+  filter builder through `buildListQuery` (an unset filter never becoming `status=` / `role=`, which
+  the enums answer with a list-killing 400); `stockDeletePath` addressing by colourway **with an
+  explicit assertion that the row has no `id`**; `describeRate` telling two suppliers' rows with the
+  same code apart, and `describeAccount` preferring email over name; `needsStockRow` separating "no
+  row" from "a row at zero"; `withDeleteCaveat` rewriting the ask, leaving a refusal untouched and
+  mutating nothing. Then the source scans: all five screens contain `useCrudScreen` and
+  `<Pagination`; the four delete screens contain `remove.ask` and `<ConfirmDialog` and none of
+  `apiDelete`/`attemptDelete`/`describeBlockers`/`deleteDialog`/`role="dialog"`; none of the five
+  keeps `useToast`, `loadError` or `useState('loading')`; AdminOrders has no `remove.ask`, no
+  `<ConfirmDialog` and no rendered `Delete` label, and still has `/archive`; AdminStock has no
+  `/archive` (not archivable) and does have `stockDeletePath`; and all five former paginator screens
+  contain `<Pagination` and neither `Math.ceil(` nor `Previous`.
+- **Learnings:**
+  - Patterns: check the read model's projection before trusting the kit's default delete path; a
+    delete removes the way back to its own row, so the create ships with it; overriding a
+    `remove.dialog` prop after spreading is composition; a dialog name must be unique across the
+    whole list; a control bound to server truth needs no revert; a negative source scan must name
+    the one token that opens the behaviour. All six promoted to `## Codebase Patterns` above.
+  - Gotcha: `clientAccountsQuery` returned a **querystring** and `useAdminList` wants a **filters
+    object**, so it became `clientAccountsFilters` and its seven tests now assert through
+    `buildListQuery`. Any screen-local query builder written before W1 landed has the same shape
+    mismatch; converting it is the conversion.
+  - Gotcha: `useMutation` does not reload on failure, which is correct and was previously papered
+    over. `UserManagement` called `load()` to revert a refused PATCH; with the row owned by the hook
+    the `<select>` reverts by itself, and the extra reload was hiding the fact that the control was
+    already bound to server truth.
+  - Gotcha: the drafts effect on AdminStock must key on `crud.list.rows`, which `useAdminList` holds
+    in state — a stable identity between renders. Keyed on anything rebuilt per render it would
+    loop, and with no jsdom nothing in this repo would catch it.
+  - Gotcha: `readList` falls back to the row count when there is no `meta`, so `crud.list.total` is
+    the right source for every "N shown" counter — including on the three unpaged endpoints, where
+    it equals `rows.length` by construction.
+  - Context: the new pure half is `src/screens/adminLists.js` (beside `adminCatalogue.js`,
+    `adminShipping.js` and `clientAccounts.js`); the kit it composes is `src/admin/useCrudScreen.js`,
+    `useAdminList.js`, `list.js`, `Pagination.jsx`, `ConfirmDialog.jsx` and `deleteFlow.js`. The
+    API routes behind the deletes are `DELETE /admin/inventory/:colourwayId` (US-008),
+    `/admin/price-list-items/:id` (US-003) and `/admin/users/:id` (US-004); `POST /admin/inventory`
+    and `GET /admin/colourways` (US-006) are what the restock panel calls.
+- **Needs human verification:** **all nine touched screens, in a browser — the contract is visual
+  and there is no e2e harness or `dev-browser` on this machine.** Specifically:
+  (1) **Manage stock** — Delete a stock row with `qty_reserved > 0`: the dialog stays open, reads the
+  guard's sentence, and shows **Cancel only** (no "Archive instead" — inventory has no archive).
+  Then Delete an unreserved row, confirm the SKU is still in the catalogue, and use "Add a stock
+  row" to bring it back at 0 in the right unit (metres for a fabric, units for a finished good).
+  (2) **Supplier rates** — the pager is the first real one in the CRM: page through it, check a
+  search resets to page 1, and check that deleting the last row on the last page steps back a page
+  rather than showing an empty table. Delete a rate and read the confirmation: it must say the next
+  import re-creates it, **before** the Delete button is pressed.
+  (3) **Web orders** — there must be no Delete button on any row and no delete in any state; Archive
+  and Restore still work, and Archive is still the red verb there.
+  (4) **Trade accounts / Users & permissions** — Delete a client with an order: the 409 names
+  "orders", "trade applications", "contact enquiries" with their counts and offers Archive instead.
+  On Users & permissions, try to delete **your own** signed-in account: 403, no count lines, Archive
+  instead offered. Also confirm a role change still saves and that a refused one snaps the select
+  back to the saved role.
+  (5) **The four Dynamics mirrors** (Clients, Price lists, Stock/Reserves, Sales orders) — the pager
+  looks and behaves as it did, and disappears when a search narrows to one page.
+  (6) The standing item carried from US-001..011: a **real cross-origin DELETE preflight from the
+  CRM at :5273**, which `app.inject()` cannot prove and which would make every delete in this epic
+  fail while curl passes.
 ---

@@ -24,6 +24,19 @@ Story-specific detail belongs in the per-story entries below, not here.
   its own fixtures and runs the migration's OWN exported SQL against them. Retyping the statement
   in the test is how the two drift. Established by `1786593600000_featured-rank.js`, followed by
   `1786680000000_reporting-finance-access.js`.
+- **A vocabulary copied to a code boundary needs a drift test that parses the LIVE
+  `pg_get_constraintdef`, not a literal list.** A boundary copy of a CHECK exists so an unknown
+  value is a 400 instead of a 500; the cost is that the two can drift silently, and comparing the
+  copy against another hand-written list proves nothing. `test/admin-reports.test.js`'s
+  `checkValues(pool, constraint)` extracts every `'value'::text` out of the constraint definition —
+  the posture `DISCOUNT_METHOD_ENUM` and `suppliers-product-category.test.js` already take. Where a
+  frozen JS list ALREADY exists (`ORDER_STATUSES` in `src/orders/admin-orders.js`), import it
+  instead of copying, and still drift-test it.
+- **A pure module's unit test may not touch the pool, so anything only the database can confirm
+  belongs in the DB-backed suite beside it.** `test/report-filters.test.js` takes no pool, runs no
+  migration and stubs nothing; the schema agreement lives in `test/admin-reports.test.js`. Splitting
+  the two is what keeps the pure suite honest — the moment it needs `loadConfig()` it is no longer
+  proving the module is pure.
 - **`src/routes/*.js` body schemas are OUTSIDE this workstream's file list, so a new writable
   column is inert over HTTP until its route file's owner adds the property.** Ajv runs
   `removeAdditional: true`, so an unlisted key is silently STRIPPED, not 400'd — the PATCH
@@ -111,5 +124,52 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   screen and no CRM file changed. One decision for a human: whether `can_view_finance` should be
   editable from the CRM's Users & permissions screen before US-008 lands, which needs the property
   added to `patchBodySchema` by whoever owns `src/routes/admin-users.js`.
+---
+
+## 2026-08-06T18:35:00Z - W5-US-003 - Report filter layer
+- `src/reports/filters.js` (new, pure, no pool and no query) is the one place a reporting
+  querystring becomes SQL. `FILTER_COLUMNS` is the frozen name -> trusted-column whitelist for the
+  seven filters (`from`, `to`, `brand`, `product_type`, `collection`, `kind`, `status`);
+  `parseReportFilters(query)` validates values into a canonical frozen object, ignoring an
+  unrecognised key and throwing a 400 naming the filter for a value it cannot use; and
+  `buildReportFilters(filters, { params, names })` emits the WHERE fragments with every value bound
+  as `$n`. `brand` is the multi-valued one (repeated params or one comma-separated value, blanks
+  dropped, de-duplicated, bound as `= ANY($n::text[])`). `PRODUCT_TYPES` and `ORDER_KINDS` are
+  boundary copies of the schema CHECKs; `ORDER_STATUSES` is re-exported from
+  `src/orders/admin-orders.js` rather than retyped.
+- Repos and files changed: atelier-api — `src/reports/filters.js` (new),
+  `test/report-filters.test.js` (new, 33 tests), `test/admin-reports.test.js` (+ a `checkValues`
+  helper and 3 drift tests), `ralph/w5-reporting/prd.json`, `ralph/w5-reporting/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`, `CLAUDE.md`. atelier-crm — untouched.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (53 files, 1214 tests); CRM baseline run untouched:
+  `npm test` -> 0 (567), `npm run build` -> 0.
+- **Learnings:**
+  - **The column literals fix the table aliases every Epic 5 query must use** — `o` orders,
+    `b` brands, `p` products, `col` collections, which is what the order and catalogue read models
+    already use. US-004's scope CTE, US-005's product performance and US-007's two reports have to
+    alias their FROM the same way or the clauses this module emits will not resolve.
+  - **`to` is exclusive on the NEXT day (`< ($n::date + 1)`), never `<= $n::date`.** `created_at` is
+    `timestamptz`, so `<= to::date` cuts the range at that morning's midnight and silently drops
+    everything the office did on the last day of its own report — a wrong answer that looks like a
+    quiet day. The date bounds resolve in the database session's timezone; nothing here pins one.
+  - **`names` is how a report declines a filter it cannot honour.** A stock report has no `orders`
+    in its FROM, so a `status` clause there is a broken query rather than a narrowing. An unknown
+    name in `names` throws a plain Error (a 500) because it is a code literal, exactly as
+    `requireEntity` does — a client can never reach it.
+  - Gotcha: a filter value is validated for SHAPE, so `brand=Pierre Frey` is a 400 rather than a
+    report that matches nothing. Slugs are `[a-z0-9-]` by construction (`src/seed/slugify.js`), so
+    that is safe — but any future filter over free text (a product name, an order number) must NOT
+    reuse `parseSlug`.
+  - Gotcha for whoever writes the route: `parseReportFilters` throws `statusCode: 400` errors, which
+    Fastify serialises as `{ statusCode, error, message }` — so the handler needs no try/catch, in
+    the same posture as `src/checkout/checkout.js`. The route's own querystring schema should NOT
+    declare `additionalProperties: false` expecting rejection; Ajv's `removeAdditional: true` strips
+    unknown keys, and ignoring them is this module's stated behaviour anyway.
+  - Context: `src/reports/` now exists and holds `filters.js` alone. `access.js`,
+    `revenue-lines.js`, `product-performance.js`, `stock.js`, `not-invoiced.js` and
+    `src/routes/admin-reports.js` are still unwritten (US-004 onward). `src/lib/csv.js` from US-001
+    is the export writer US-006 will use.
+- **Needs human verification:** none. No route, no response shape and no screen changed — the module
+  is not wired to anything yet.
 ---
 

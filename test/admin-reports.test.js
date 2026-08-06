@@ -4,6 +4,7 @@ import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { updateUser, getUser } from '../src/users/admin-users.js'
 import { DIRECTOR_BACKFILL_SQL } from '../migrations/1786680000000_reporting-finance-access.js'
+import { PRODUCT_TYPES, ORDER_KINDS, ORDER_STATUSES } from '../src/reports/filters.js'
 
 // Fixtures are prefix-namespaced and cleaned up by prefix, like every other suite
 // here. These are plain INSERTs rather than /auth/register calls: register is
@@ -35,6 +36,19 @@ const financeFlagOf = (pool, id) =>
     .then(({ rows }) => rows[0].can_view_finance)
 
 const cleanup = (pool) => pool.query(`DELETE FROM users WHERE email LIKE $1`, [`${PREFIX}-%`])
+
+// The values a CHECK constraint accepts, read off its live definition — e.g.
+// "CHECK ((kind = ANY (ARRAY['checkout'::text, ...])))".
+const checkValues = (pool, constraint) =>
+  pool
+    .query(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1`,
+      [constraint]
+    )
+    .then(({ rows }) => {
+      expect(rows).toHaveLength(1)
+      return [...rows[0].def.matchAll(/'([^']+)'::text/g)].map((match) => match[1]).sort()
+    })
 
 describe('W5-US-002 — reporting index and finance access', () => {
   let pool
@@ -200,5 +214,35 @@ describe('W5-US-002 — reporting index and finance access', () => {
 
       expect(user.can_view_finance).toBe(true)
     })
+  })
+})
+
+// src/reports/filters.js is unit-tested purely in test/report-filters.test.js.
+// The one thing that file CANNOT prove is that its enum copies still describe
+// the database: a boundary copy exists so an unknown value is a 400 instead of a
+// 500, and the cost of one is that the two can drift silently.
+describe('W5-US-003 — the report filter vocabularies against the schema', () => {
+  let pool
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    await runMigrations(config.databaseUrl)
+    pool = createPool(config.databaseUrl)
+  })
+
+  afterAll(async () => {
+    await pool.end()
+  })
+
+  it('accepts exactly the product types products_product_type_check allows', async () => {
+    expect(await checkValues(pool, 'products_product_type_check')).toEqual([...PRODUCT_TYPES].sort())
+  })
+
+  it('accepts exactly the kinds orders_kind_check allows', async () => {
+    expect(await checkValues(pool, 'orders_kind_check')).toEqual([...ORDER_KINDS].sort())
+  })
+
+  it('accepts exactly the statuses orders_status_check allows', async () => {
+    expect(await checkValues(pool, 'orders_status_check')).toEqual([...ORDER_STATUSES].sort())
   })
 })

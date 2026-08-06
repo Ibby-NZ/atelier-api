@@ -111,6 +111,23 @@ Story-specific detail belongs in the per-story entries below, not here.
   The pattern is a second `…_CONTEXT_COLUMNS` + `…_CONTEXT_FROM` pair beside the narrow select, fed
   to the mapper's `extra` argument — so the rows embedded in a parent's detail read keep the narrow
   shape (they already sit under their parent) and only the standalone reads pay for the joins.
+- **A PATCH with exactly ONE editable column takes `required`, not `minProperties: 1`.** The house
+  PATCH shape (whitelist + `minProperties: 1` + `buildUpdate`) exists to pick some-of-many; with one
+  column there is nothing to pick, and the two rules answer differently when Ajv's
+  `removeAdditional` strips the immutable keys a client sent. `{ zone, threshold_qty }` becomes `{}`,
+  which `minProperties` was evaluated BEFORE the strip and therefore lets through — the handler then
+  builds an empty SET clause, which is invalid SQL. `required: ['rate_cents']` makes that same body a
+  400. Write the UPDATE inline too: a one-column `buildUpdate` call is indirection over a literal.
+- **The identity key of a row is not always its id.** `shipping_rates` is addressed by `id` for PATCH
+  and DELETE but keyed on `(zone, threshold_qty)` — the quote resolves against the pair and the seed
+  upserts on it — so moving either column is a delete plus a create, never an edit. When a table has
+  both, the id belongs in the read projection (nothing else can address a row for a single-row
+  write) and the key columns belong out of every PATCH whitelist. Assert the strip explicitly: a
+  PATCH body carrying the key must come back with the key unchanged.
+- **A single-row POST beside a bulk PUT must 409 rather than upsert.** The bulk path is "make this
+  table so" and upserting is its whole point; a create is a statement that the row is new, so a
+  collision is a mistyped key, and silently overwriting a live row hides it. Same table, two write
+  paths, deliberately different conflict behaviour.
 - **A mid-transaction race is reproducible deterministically by wrapping the pool, not by timing.**
   `deleteOrExplain` only uses `connect()`/`query()`/`release()`, so `{ connect: async () => ({
   query, release }) }` around a real client can run arbitrary work on another connection when a
@@ -725,4 +742,76 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   design name (not just the SKU) is what staff expect. Carried forward from US-001..005: a real
   cross-origin preflight from the CRM at :5273, which `app.inject()` cannot prove — these two are
   GETs, which the default CORS `methods` already allowed, so they are not at the DELETEs' risk.
+---
+
+## 2026-08-06T03:52:12Z - W2-US-007 - Shipping-rate CRUD with the last-tier guard
+
+- **Implemented.** Four routes on `/admin/shipping-rates`, all backoffice-only: `GET` (every tier,
+  zone then threshold ascending, each carrying its `id`), `POST` (201, 409 on the
+  `(zone, threshold_qty)` unique constraint), `PATCH /:id` (`rate_cents` only) and `DELETE /:id`
+  (through `deleteOrExplain`, whose `shipping_rate` guard refuses the last tier for a zone). The
+  bulk `PUT` is untouched. As with US-001..004 the registry entry already existed — W1's
+  `shipping_rate` entry carries `shippingRateGuard` verbatim — so the delete half was one route.
+- Repos and files changed: `atelier-api` only —
+  `src/shipping/rates.js` (+`createShippingRate`, +`updateShippingRate`, +`RATE_COLUMNS`,
+  +`toShippingRate`, +local `httpError`; `listShippingRates` now selects `id` and goes through the
+  mapper), `src/routes/shipping.js` (+4 routes, +3 schemas, +2 imports, shared tier prop constants,
+  header note), `test/shipping.test.js` (+22 tests in one describe with four nested blocks),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 752 tests passed; 730 before —
+  `test/shipping.test.js` 11 -> 33).
+- **`id` had to be added to the read model before any of this could exist, and that is the story's
+  one externally visible change to an existing endpoint.** `listShippingRates` returned
+  `{ zone, threshold_qty, rate_cents }` and nothing else, so there was no way to address a single
+  tier: the pair that identifies it is also the pair a PATCH must never move. `PUT`'s response is
+  built from the same function, so its rows now carry `id` too — additive, no existing key changed,
+  and its five existing tests pass untouched. One new test asserts the PUT still upserts tier 0 in
+  place (rather than duplicating it) and that its rows carry ids.
+- **What the tests assert**, against the acceptance criteria:
+  - *List.* Both fixture tiers ascending with distinct numeric ids, and `threshold_qty` as a
+    **number** — the column is `numeric(12,2)`, so pg hands back `'30.00'` and only the mapper
+    coerces it; a string would land in the CRM's number input. Plus 401/403.
+  - *Create.* 201 with the id, the new tier immediately quotable, a brand-new zone coming into
+    existence from its first tier (the zone 400s before it and quotes after), 409 on a duplicate
+    `(zone, threshold_qty)` **with the existing rate proved unchanged**, 400 on a missing field,
+    401/403 each with the tier count unchanged.
+  - *Patch.* `rate_cents` written and the quote following it; a body carrying `zone` and
+    `threshold_qty` leaving both alone (and the named other zone not gaining a tier); that same body
+    without `rate_cents` being a 400; 404 unknown id; 403 with the rate unchanged.
+  - *Delete.* A non-last tier gone with `{ deleted: { entity: 'shipping_rate', id } }` and the zone
+    still quoting (the qty that reached the deleted tier falls back to the one below); the last tier
+    409 with the zone named, `blockers: []` and `archivable: false`; the *second* delete refused once
+    a two-tier zone is down to one, which is the same outage reached one tier at a time; 404 with
+    `blockers: []`; 401/403 with the row still present.
+- **`archivable: false` is the part a CRM story must not skip.** `shipping_rates` has no
+  `archived_at` column, so the 409 dialog's usual "Archive instead" escape does not exist here —
+  the only way out is to add a replacement tier first, which is what the guard's message says.
+- **Learnings:**
+  - Pattern: the one-editable-column PATCH rule (`required`, not `minProperties: 1`), the
+    identity-key-is-not-the-id rule, and "a single-row POST beside a bulk PUT must 409 rather than
+    upsert" — all three promoted to `## Codebase Patterns` above.
+  - Gotcha: `test/shipping.test.js` has no `beforeEach` and its bulk-PUT tests mutate the shared
+    fixture zone in order (the tier-50 test leaves it behind). New blocks must own their zones and
+    reset them per test, and every fixture zone name must end in `Test Zone` — the file's
+    `deleteTestData` cleans by `zone LIKE '%Test Zone'` and nothing else would ever be removed.
+  - Gotcha: the shipping routes carry no `config.rateLimit`, like the rest of the admin surface —
+    the limiter is `global: false`, so these four are unmetered by design, not by omission.
+  - Gotcha: `upsertShippingRates` returns `listShippingRates(pool)`, so any column added to the list
+    projection silently widens the PUT's response as well. That is fine while the addition is
+    additive; a *renamed* column there would break the PUT contract with nothing in the PUT's own
+    code changed.
+  - Context: the guard is `shippingRateGuard` in `src/lifecycle/registry.js` (~line 72) and the
+    entry is `shipping_rate` (~line 305), `archivable: false`, `probes: []`. The unique constraint
+    is `shipping_rates_zone_threshold_unique`
+    (`migrations/1784603440195_users-orders-shipping-schema.js`). `getShippingQuote` answering 400
+    for a zone with no rows is what makes the last-tier guard a guard rather than a nicety.
+- **Needs human verification:** none for this story on its own — no screen calls these four routes
+  yet. Carry forward to **W2-US-011 (AdminShipping)**, which is the story that consumes all of them:
+  the last-tier 409 must render as a readable refusal with **no** "Archive instead" button
+  (`archivable: false`), the duplicate-tier 409 must be distinguishable from it (it arrives as a
+  plain `{ statusCode, error, message }` from the module, with no `blockers`/`archivable` keys —
+  `describeBlockers` sees an empty list either way), and a rate typed in dollars must reach the API
+  as whole cents. Plus the standing cross-origin DELETE preflight from the CRM at :5273, which
+  `app.inject()` cannot prove.
 ---

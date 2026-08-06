@@ -16,8 +16,21 @@ Started: 2026-08-06T02:40:24Z
 - A Postgres CHECK is satisfied by NULL (unknown, not false), so a `~ '^[A-Z]$'` check on a nullable
   column still lets the column stay empty. That is what makes widening the class checks safe for the
   19.5k existing rows.
-- `npm test` runs 36 files / 560 tests against the real local Postgres in ~22s. `fileParallelism:
+- `npm test` runs 37 files / 577 tests against the real local Postgres in ~22s. `fileParallelism:
   false` is load-bearing — do not touch it.
+- **`incoming/pricing-templates/` does NOT exist in this worktree** — `incoming/` is gitignored, so
+  the corpus lives only in the main checkout, which the sandbox refuses to read. `npm run
+  convert:pricing` therefore cannot be run here at all, and the project-context gate
+  `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` is
+  unrunnable in this workstream. Byte-identity must be argued by construction (move code, do not
+  rewrite it) and proved with a hand-made fixture converted to a scratchpad path — never to the
+  committed JSON.
+- A converter run against a scratch fixture is the cheap end-to-end check: `node
+  scripts/convert-price-lists.js <scratch-in-dir> <scratch-out.json>`. The filename must match
+  `^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b`, e.g. `PIERRE FREY PL.csv`, or supplier parsing
+  throws before anything else runs.
+- `npm run lint` and `npm test` run fine as `cd atelier-api && npm run <script>`; a bare `npx
+  vitest run <file>` is denied by the permission layer, so run the whole suite.
 ---
 
 ## 2026-08-06T14:44:00Z - W10-US-001 - Migration: price_list_items v2 columns
@@ -65,4 +78,64 @@ Started: 2026-08-06T02:40:24Z
 - **Needs human verification:** none for this story — it is schema only, no screen renders these
   columns yet. (When US-004/US-005 expose them, the CRM's Price lists screen is what a human should
   eyeball.)
+---
+
+## 2026-08-06T15:00:00Z - W10-US-002 - Template registry with v1 moved verbatim
+- Created `scripts/lib/price-template.js`: the accepted layouts now live in one frozen registry
+  `TEMPLATES = [{ version: 'v1', header, map }]`, with `matchTemplate(row)` (normalise labels,
+  match exactly on length and labels, first match wins), `normaliseHeader` and `acceptedHeaders()`.
+  The converter's `normaliseRow` moved across UNCHANGED as `mapV1` — same key order, same
+  `cleanMeasure`/`round4`/`generalFormat`/`floatRepr` calls, same comments — and its private
+  helpers came with it (`parseDate`/`parseInteger`/`isoDate`/`cleanMeasure`, the item-type, pack,
+  currency, freight and duty vocabularies). `scripts/convert-price-lists.js` now owns only the file
+  walk, the supplier name, the dedupe and the write; on a header mismatch it pushes the SAME
+  `file:line: unexpected header [...]` error, now with `; accepted: v1 [...]` listing every
+  accepted header.
+- Repos and files changed (atelier-api only):
+  - `scripts/lib/price-template.js` (new, 180 lines)
+  - `scripts/convert-price-lists.js` (−120 lines: everything row-shaped moved out)
+  - `test/price-template.test.js` (new, 17 tests)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 577 tests passed). Plus an end-to-end
+  converter run against a scratchpad fixture: emitted `{"supplier": "Pierre Frey", ... "wholesale_rate":
+  115.0, ...}` — same key order, same `", "` separators and same Python float repr as line 2 of the
+  committed `price-lists.json`, which was diffed by eye against that line. `src/seed/data/price-lists.json`
+  is untouched (`git status` clean for it).
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - Moving code to make it extensible is only safe if it is MOVED. `mapV1` was copied
+      character-for-character including its comments; the only edit was `COLUMNS` ->
+      `V1_HEADER.length`. Anything reworded while moving cannot be argued to be byte-identical.
+    - Converting a hand-made fixture to a scratchpad path and eyeballing it against a line of the
+      committed output is a real byte check that costs nothing and touches no committed file.
+  - Gotchas (what will bite the next iteration):
+    - **The old header check sliced to 14 columns before comparing**, so a header with extra
+      columns matched v1 by its first 14. That had to stop — a v2 file starts with v1's 14 columns
+      and would otherwise be silently imported as v1. `matchTemplate` is exact on length, and the
+      15-column `v1 + Supplier` header now fails loudly (verified). US-003 makes that same header
+      match v2 by adding the second registry entry.
+    - **`normaliseHeader` deliberately drops TRAILING EMPTY cells before matching.** A CSV header
+      line ending in a comma yields a 15th blank field, and Excel emits blank cells too; counting
+      one would have failed a real drop over a stray comma. A blank cell declares no column, so it
+      cannot disambiguate two templates — a NAMED extra column still changes the length and still
+      fails. This tolerance was chosen because the corpus is unreadable from this worktree and the
+      strict rule could not be tested against it; if a real drop ever fails on its header, this is
+      the first place to look.
+    - The corpus cannot be read from this worktree at all (see Codebase Patterns), so
+      `npm run convert:pricing` is not a gate anyone can run here. US-003's "byte-identical
+      price-lists.json" criterion has to be met by construction plus US-006's unit-level byte pin.
+    - `FREIGHT_CLASSES`/`DUTY_CLASSES` moved verbatim and are still the narrow sets (`A`–`E`, `A`).
+      They are now in `price-template.js`, which is where US-005 wants the shared vocabularies —
+      but they are still private to that file. US-005 exports them.
+  - Context (where the relevant code lives):
+    - Registry + v1 mapper: `scripts/lib/price-template.js`. Its tests: `test/price-template.test.js`.
+    - File walk, supplier name, dedupe, write: `scripts/convert-price-lists.js`.
+    - Shared machinery it leans on: `scripts/lib/{xlsx,text,python-format}.js`.
+    - Rationale: `_bmad-output/planning-artifacts/architecture.md` "## Pricing template".
+- **Needs human verification:** none — no screen renders anything from this change; the converter
+  is a CLI. What a human SHOULD do before merge, because this loop cannot: run
+  `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` on a checkout
+  that has `incoming/pricing-templates/`, which proves both the byte-identity and that no real
+  drop's header row is rejected by the now-exact length match.
 ---

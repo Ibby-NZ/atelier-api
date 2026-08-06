@@ -23,7 +23,7 @@ epics:
     status: in_progress
     stories:
       US-001: done      # Migration: price_list_items v2 columns
-      US-002: pending   # Template registry with v1 moved verbatim
+      US-002: done      # Template registry with v1 moved verbatim
       US-003: pending   # v2 mapping and the omit-on-v1 rule
       US-004: pending   # Importer accepts the v2 fields
       US-005: pending   # Shared vocabulary module

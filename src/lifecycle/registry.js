@@ -29,6 +29,8 @@
 // validated at import time by `assertEntity` below, so a malformed probe cannot
 // reach production — the server refuses to boot instead.
 
+import { DELETABLE_SAMPLE_ORDER_STATUSES } from '../samples/sample-order-states.js'
+
 // A probe body must be a bare existence select over one relation, taking the
 // parent id as its only parameter. delete.js wraps it in `count(*)` + LIMIT, so
 // anything else here would produce nonsense rather than an error.
@@ -83,6 +85,35 @@ const shippingRateGuard = async (client, id) => {
       409,
       `"${row.zone}" would be left with no shipping tiers, which stops checkout ` +
         'for that zone. Add a replacement tier first, or edit this one.'
+    )
+  }
+  return null
+}
+
+/**
+ * A sample order that was actually placed is a commercial record: a house was
+ * asked for something and may already have shipped it. Only a request nobody
+ * acted on (`requested`) and one abandoned before anybody did (`cancelled`) can
+ * be removed without destroying that, which is the delete policy's "409 unless
+ * requested or cancelled".
+ *
+ * The two states come from `src/samples/sample-order-states.js` — the same pure
+ * module the transition routes and the CRM spend — rather than being re-typed
+ * here, so widening the machine cannot leave this guard behind. That module
+ * imports nothing, which is what keeps this import out of a cycle with
+ * `archive.js`.
+ */
+const sampleOrderGuard = async (client, id) => {
+  const { rows } = await client.query(
+    `SELECT status FROM sample_orders WHERE id = $1`,
+    [id]
+  )
+  const status = rows[0]?.status
+  if (status && !DELETABLE_SAMPLE_ORDER_STATUSES.includes(status)) {
+    return refuse(
+      409,
+      `This sample order is "${status}", so it is a record of material a house ` +
+        'was asked for. Archive it instead to hide it without losing that.'
     )
   }
   return null
@@ -340,6 +371,20 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     probes: [
       probe('sample_loans', 'loans', 'SELECT 1 FROM sample_loans WHERE sample_id = $1'),
     ],
+  },
+
+  // Nothing in the schema references a sample order, so there is no probe to
+  // write and the FKs all point the other way — which is exactly why the rule
+  // here is a GUARD. "Is this row still a record of something" is a question
+  // about the row's own state, not about what points at it, and no foreign key
+  // can express it.
+  sample_order: {
+    table: 'sample_orders',
+    idColumn: 'id',
+    label: 'sample order',
+    archivable: true,
+    guard: sampleOrderGuard,
+    probes: [],
   },
 
   // No archived_at column: a rate tier is either priced or absent.

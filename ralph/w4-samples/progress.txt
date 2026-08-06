@@ -138,6 +138,31 @@ Story-specific detail belongs in the per-story entries below, not here.
   without reordering another's, add your own registry entities and leave the rest alone. Three
   stories' worth of blocks were cleared by that one edit.
 
+- **A state machine that another repo must mirror has to be a LEAF module — and the lifecycle
+  registry forces the same shape for a different reason.** `src/lifecycle/registry.js` is imported
+  by `src/lifecycle/archive.js`, so any domain module calling `setArchived` cannot also be imported
+  BY the registry: registry → domain → archive → registry is a cycle, and the registry validates
+  its entries at import time, so it would run against a half-initialised module. Putting the
+  vocabulary, the transitions and the guard predicate in a pure module that imports nothing
+  (`src/samples/sample-order-states.js`) lets the registry's guard and the SQL module share one
+  copy — and is the same property the CRM needs to import it into a browser bundle. Test the pure
+  module in a `describe` with no `beforeAll` pool at all; that block IS the proof it is portable.
+- **A guard answers "is this row still a record of something"; a probe answers "does anything point
+  at this".** Where no FK points at the table, there is nothing to probe and the delete rule is a
+  guard on the row's own state — which the registry reports with `blockers: []` and the entity's
+  `archivable`, so the CRM's dialog needs no second shape. `refuse(409, …)` is the whole of it.
+- **A concurrency test only discriminates when the two racers make the SAME move.** Racing
+  `requested → ordered` against `requested → cancelled` through a correct lock yields TWO 200s (the
+  loser wakes up in `ordered`, and `ordered → cancelled` is legal), so the test fails against
+  working code and would pass against a broken lock only by accident. Race one move against itself:
+  the loser's second read sees the state it was asked to move to, the self-move is refused, and the
+  assertion `[200, 409]` then means the lock actually serialised. Assert the winner's stamp still
+  stands afterwards — that is what a lost update would have overwritten.
+- **"Nothing changed" is a stronger assertion than the status code, and costs one line.** An
+  illegal transition test that only checks 409 passes against a handler that writes first and
+  refuses afterwards. Read the row before, read it after, `toEqual` the two — every stamp, every
+  column, including `updated_at`.
+
 ---
 
 ## Story log
@@ -714,4 +739,108 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   scanner to these endpoints: (1) that a `missing`, `retired` or archived sample may be checked out
   without an argument from the system, and (2) that check-in always returns the sample to
   `in_library`, a damaged return being a separate PATCH to `retired`.
+---
+
+## 2026-08-06T07:25:43Z - W4-US-007 - Sample-order lifecycle module and routes
+
+- Shipped the showroom-stocking lifecycle: the state machine, the read/write module and the whole
+  route surface. Three files, one registry entry, no `src/app.js` change (the routes live in the
+  `adminSampleRoutes` plugin US-005 registered).
+- `src/samples/sample-order-states.js` is the machine and imports NOTHING: `SAMPLE_ORDER_STATUSES`,
+  `ALLOWED_TRANSITIONS` (requested -> ordered -> in_transit -> received -> displayed, `cancelled`
+  from anywhere short of terminal, both terminals empty), `SOURCE_STATUSES` (derived inverse, never
+  a second copy), `STATUS_STAMPS`, `DELETABLE_SAMPLE_ORDER_STATUSES`, `requireStatus`,
+  `requireTransition`, `isDeletableStatus`, plus an `assertMachine()` that runs at module load.
+  This is the module `atelier-crm/src/screens/sampleFlow.js` (US-009) mirrors.
+- `src/samples/sample-orders.js` is the SQL: `listSampleOrders` (filters `q`, `status`,
+  `showroom_id`, `supplier_id`, `include_archived`; paginated `{ sample_orders, total }`),
+  `getSampleOrder`, `createSampleOrder`, `updateSampleOrder`, `withSampleOrderTxn`,
+  `transitionSampleOrder`, `setSampleOrderArchived`. Every row carries its showroom, design, house
+  and supplier by NAME; every write returns through `getSampleOrder`, so one CRM renderer serves
+  create, patch, move, archive and read alike.
+- Routes appended to `src/routes/admin-samples.js`, all backoffice-only:
+  `GET|POST /admin/sample-orders`, `GET|PATCH|DELETE /admin/sample-orders/:id`,
+  `POST /admin/sample-orders/:id/transition`, `POST /admin/sample-orders/:id/archive|restore`.
+- `src/lifecycle/registry.js` gained the `sample_order` entity (table `sample_orders`,
+  `archivable: true`, NO probes, `guard: sampleOrderGuard`) and one import of
+  `DELETABLE_SAMPLE_ORDER_STATUSES`. Additive; nothing else in that file moved.
+- Repos and files changed: atelier-api only — `src/samples/sample-order-states.js` (new),
+  `src/samples/sample-orders.js` (new), `src/routes/admin-samples.js` (imports, four schemas, eight
+  routes — additive), `src/lifecycle/registry.js` (one import, one guard, one entity),
+  `test/samples-order-lifecycle.test.js` (new, 64 tests), plus the bookkeeping (`prd.json`,
+  `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (58 files, 1386 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **NOT COMMITTED — git was denied at the tool level for this entire iteration** (`status`, `add`
+  and `commit` all returned "This command requires approval"), exactly as it was for the US-006
+  BLOCKED iteration. **The story is finished and both gates are green**; only the commit is
+  missing, so the next iteration inherits a dirty tree it did not create. It is NOT half-done code
+  and must not be reverted. The nine paths are:
+  `src/samples/sample-order-states.js`, `src/samples/sample-orders.js`,
+  `src/routes/admin-samples.js`, `src/lifecycle/registry.js`,
+  `test/samples-order-lifecycle.test.js`, `CLAUDE.md`, `ralph/w4-samples/prd.json`,
+  `ralph/w4-samples/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+  No `.env`, no secret and nothing under `incoming/` was touched. An iteration that HAS git should
+  commit them as `feat(api): [W4-US-007] - Sample-order lifecycle module and routes`, either on its
+  own or ahead of its own commit.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the four entries added to
+    `## Codebase Patterns` above — a mirrored state machine must be a LEAF module (the registry's
+    import-time validation makes the cycle fatal, and the CRM needs it importable anyway), a guard
+    is the delete rule where no FK points at the table, a concurrency test must race the SAME move
+    or a correct lock produces two successes, and an illegal-transition test must assert the row is
+    byte-for-byte unchanged rather than just the 409.
+  - Gotchas:
+    - **The first concurrency test written here FAILED against correct code.** `ordered` raced
+      against `cancelled` returned `[200, 200]`, which is right: serialised, the loser reads
+      `ordered` and `ordered -> cancelled` is a legal move. Racing `ordered` against `ordered` is
+      the version that discriminates. Worth knowing before assuming a lock is broken.
+    - **`status` is not patchable and a create cannot choose one.** Both are the same rule the
+      register applies to `out`: a move writes the state AND the stamp that dates it, and either
+      alone is a row that contradicts itself (a `displayed` order with `displayed_at` NULL, when a
+      NULL stamp is defined to read as "has not been there"). Recording an order raised weeks ago is
+      a create with a back-dated `requested_at` plus moves each carrying their own `at`.
+    - **`showroom_id` is the one editable ref here that is NOT nullable.** A request can be
+      redirected to another showroom but never un-homed, so the route types it `integer` rather than
+      `['integer','null']` — an explicit null is a 400 there, and the module maps the 23502 to 422
+      for a direct caller.
+    - **`transitionSampleOrder` looks its stamp column up in `STATUS_STAMPS` and refuses an unknown
+      key with a 422 before interpolating anything.** The route spends the vocabulary as a schema
+      enum (400), but the module is also called directly and `undefined` interpolated into an UPDATE
+      is a 500 nobody can read.
+    - **Terminal means terminal: nothing moves out of `displayed` or `cancelled`.** An abandoned
+      order is re-raised as a new request, not resurrected — resurrecting one would leave
+      `cancelled_at` stamped on a live row and make all six stamps unreadable.
+    - Fixture cleanup is `sample_orders` (by `showroom_id IN (SELECT id FROM showrooms WHERE name
+      LIKE $1)`) -> `brands` -> `suppliers` -> `showrooms`. Because `showroom_id` is NOT NULL, every
+      fixture order hangs off a fixture showroom and the table needs no prefix column of its own.
+    - The ISO stamp on this entry is real UTC from `date -u`; several earlier entries in this log
+      carry what looks like NZ local time labelled `Z`, so the log is not monotonic. Append order is
+      the reliable ordering, not the timestamps.
+  - Context:
+    - The spec is `_bmad-output/planning-artifacts/architecture.md` § *Samples domain* ("Showroom
+      stocking — `showrooms` + `sample_orders` advancing requested -> ordered -> in_transit ->
+      received -> displayed | cancelled") and the § *Delete policy* row `sample order` -> "409
+      unless requested/cancelled". The migration header (`1786852800000_samples-orders.js`) already
+      stated the machine belongs in US-007's module and not in a CHECK; this implements exactly that
+      split, and a test parses the live `sample_orders_status_check` to prove the two agree on the
+      vocabulary.
+    - **US-009 mirrors `sample-order-states.js`.** `sampleFlow.js` needs `ALLOWED_TRANSITIONS`
+      (so the UI never offers a move that 409s) and `isDeletableStatus` (so Delete is greyed rather
+      than discovered). The endpoint is `POST /admin/sample-orders/:id/transition` with body
+      `{ status, at? }`, answering `{ sample_order }` — the same envelope every other write here
+      returns.
+    - **Still owed and named by no story** (unchanged from US-005/US-006): `CONSTRAINT_BLOCKERS` in
+      `src/lifecycle/delete.js` has no `sample_loans_sample_id_fkey` entry; the `product` and
+      `colourway` registry entries carry no `samples` probe; and there is **no showroom CRUD
+      anywhere in this PRD** — `showrooms` has a table, an `archived_at`, no routes and no registry
+      entry, so US-008's `AdminShowrooms.jsx` has nothing to call. That is now the next iteration's
+      problem: US-008 is a CRM story whose screen needs an API that no story creates.
+- **Needs human verification:** none in a browser — no screen exists yet and there is no e2e harness
+  on this machine. Three judgement calls a person should confirm before US-009 draws the lifecycle:
+  (1) that `displayed` and `cancelled` are terminal, so a cancelled request is re-raised rather than
+  reopened; (2) that a sample order may be deleted outright only while `requested` or `cancelled`,
+  everything else archiving instead; and (3) that an order is created `requested` and advanced,
+  rather than being creatable directly in a later state.
 ---

@@ -881,3 +881,63 @@ migrations.
   the validator as null, so a plain `type: 'object'` schema would 400 the most ordinary check-in
   there is; the handler passes `request.body ?? {}`. Routes with no body schema at all
   (archive/restore) never hit this.
+
+### The sample-order lifecycle (`src/samples/sample-order-states.js` + `sample-orders.js`)
+
+- **The machine lives in a module that imports NOTHING, and that is load-bearing twice over.**
+  `sample-order-states.js` holds `SAMPLE_ORDER_STATUSES`, `ALLOWED_TRANSITIONS`, `SOURCE_STATUSES`
+  (the derived inverse), `STATUS_STAMPS`, `DELETABLE_SAMPLE_ORDER_STATUSES`, `requireStatus`,
+  `requireTransition` and `isDeletableStatus`. The CRM mirrors it (`sampleFlow.js`), so anything
+  reaching for pg would make it uncopyable across the repo boundary — and `src/lifecycle/registry.js`
+  imports the deletable set for its guard, which is only possible while the module is a LEAF:
+  registry → sample-orders → `lifecycle/archive.js` → registry is a cycle, and the registry
+  validates its entries at import time, so it would run against a half-initialised module.
+  `assertMachine()` runs at module load (the `assertEntity` posture) and a test exercises the whole
+  machine with no database at all — that block IS the proof it is portable.
+- **The vocabulary is the schema's and the transitions are the module's**, exactly as
+  `1786852800000_samples-orders.js` said: a CHECK sees one row at a time and cannot see which state
+  a row is moving FROM. `test/samples-order-lifecycle.test.js` parses the live
+  `sample_orders_status_check` and asserts the two agree on the vocabulary, and that every
+  `STATUS_STAMPS` column exists — the `DISCOUNT_METHOD_ENUM` posture with the drift test built in.
+- **`displayed` and `cancelled` are terminal.** An abandoned request is re-raised as a new one,
+  never reopened: reopening would leave `cancelled_at` stamped on a live row, and the whole point of
+  six stamps is that a NULL reads as "has not been there" without consulting `status`.
+- **`POST /admin/sample-orders/:id/transition` (body `{ status, at? }`) is the ONLY way a status
+  moves.** `status` is absent from `SAMPLE_ORDER_UPDATE_COLUMNS` and from the PATCH schema, and a
+  create always lands in `requested` whatever the body says (Ajv strips the key rather than 400ing
+  it, so the whitelist is the real defence). Same rule as `out` on a sample: a move writes the state
+  AND the stamp that dates it, and either alone is a row that contradicts itself. Recording an order
+  raised weeks ago is a create with a back-dated `requested_at` plus moves each carrying their own
+  `at`; nothing refuses a stamp earlier than the previous one, because a back-dated correction has
+  to stay possible.
+- **`withSampleOrderTxn` mirrors `withSampleTxn`**: BEGIN, `SELECT id, status … FOR UPDATE` (404 on
+  an unknown id), run, COMMIT, re-read through `getSampleOrder`. The lock is what makes
+  `requireTransition` mean anything — it reads the state this transaction is about to overwrite — so
+  two staff advancing one order are serialised and the loser is refused rather than silently
+  rewriting the winner's stamp.
+- **A concurrency test must race the SAME move.** `ordered` against `cancelled` yields two 200s
+  through a *correct* lock (the loser wakes in `ordered`, and `ordered → cancelled` is legal), so it
+  fails against working code and passes against a broken lock only by accident. Racing `ordered`
+  against `ordered` is what discriminates: the loser's re-read sees the state it was asked to move
+  to and the self-move is refused.
+- **An illegal-transition test asserts the row is UNCHANGED, not just the 409.** A status code alone
+  passes against a handler that writes first and refuses afterwards; read before, read after,
+  `toEqual`.
+- **`sample_order` is in the lifecycle registry with a GUARD and no probes** — nothing in the schema
+  references `sample_orders`, so there is nothing to probe, and "is this row still a record of
+  something" is a question about the row's own state that no foreign key can express. The refusal
+  carries `blockers: []` and `archivable: true`, so the CRM's existing dialog needs no second shape.
+  Deletable only while `requested` or `cancelled`: an order actually placed with a house is the
+  record that the house was asked for something.
+- **`showroom_id` is the one editable ref here that is NOT nullable** (a request is redirected, never
+  un-homed): the route types it `integer`, so an explicit null is a 400, and the module maps the
+  23502 to a 422 for a direct caller. `colourway_id` and `supplier_id` clear with an explicit null
+  as usual. There is no 23505 branch at all — nothing on this table is unique, and two showrooms
+  asking one house for one design on one day are two real requests.
+- **The list's count query shares `ORDER_FROM`, which is safe because every join is on a primary
+  key**; the showroom join is INNER (`showroom_id` is NOT NULL) and the rest are LEFT. `q` searches
+  the label, the showroom and the design, and deliberately not `notes` — the office's running
+  commentary would make a list of requests answer with orders whose request matched nothing typed.
+- **Still owed and named by no story:** there is no showroom CRUD anywhere — `showrooms` has a
+  table, an `archived_at`, no routes and no registry entry — so the CRM's showrooms screen has
+  nothing to call.

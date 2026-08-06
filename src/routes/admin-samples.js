@@ -19,6 +19,11 @@
 //     properties, so a thrown error could not carry `blockers`, which is the
 //     entire point of the 409.
 //
+// The plugin carries BOTH samples lifecycles: the loan register (`/admin/samples`)
+// and showroom stocking (`/admin/sample-orders`, W4-US-007, at the bottom of the
+// file). One registration in src/app.js, one guard, two independent domains that
+// nothing joins.
+//
 // Check-out and check-in (W4-US-006) are VERB routes here, not a status PATCH:
 // each writes two tables and must be one transaction, so both go through
 // `withSampleTxn` in ../samples/sample-loans.js. Their two 409s come from the
@@ -39,6 +44,18 @@ import {
   MAX_LIMIT,
 } from '../samples/admin-samples.js'
 import { checkOutSample, checkInSample } from '../samples/sample-loans.js'
+import {
+  listSampleOrders,
+  getSampleOrder,
+  createSampleOrder,
+  updateSampleOrder,
+  transitionSampleOrder,
+  setSampleOrderArchived,
+  DEFAULT_PAGE as ORDER_DEFAULT_PAGE,
+  DEFAULT_LIMIT as ORDER_DEFAULT_LIMIT,
+  MAX_LIMIT as ORDER_MAX_LIMIT,
+} from '../samples/sample-orders.js'
+import { SAMPLE_ORDER_STATUSES } from '../samples/sample-order-states.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 
 // Required on create, editable after — a printed tag can be mistyped.
@@ -168,6 +185,88 @@ const checkInSchema = {
   },
 }
 
+// ---------------------------------------------------------------------------
+// Showroom stocking: sample orders (W4-US-007).
+//
+// The second lifecycle, sharing this plugin because it is the same domain and
+// the same guard — src/app.js registers `adminSampleRoutes` once and a further
+// samples route belongs inside it.
+//
+// A MOVE IS A VERB, NOT A STATUS PATCH, for the same reason check-out is: it
+// writes the state AND the stamp that dates it, and either alone is a row that
+// contradicts itself. `status` is therefore absent from the PATCH schema and
+// from the module's column whitelist, and `POST /:id/transition` is the only way
+// a state changes. The machine itself (which moves are legal) lives in the pure
+// ../samples/sample-order-states.js, which the CRM mirrors.
+// ---------------------------------------------------------------------------
+
+// NOT nullable, unlike every other ref here: an order with no destination is a
+// request nobody can fulfil, so the column is NOT NULL and an explicit null is a
+// 400 rather than a way to clear it.
+const showroomRef = { type: 'integer', minimum: 1 }
+
+const sampleOrderProps = {
+  colourway_id: nullableRef,
+  supplier_id: nullableRef,
+  label: nullableText,
+  notes: { type: ['string', 'null'], maxLength: 5000 },
+}
+
+const orderListQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    q: { type: 'string', maxLength: 200 },
+    status: { type: 'string', enum: [...SAMPLE_ORDER_STATUSES] },
+    showroom_id: { type: 'integer', minimum: 1 },
+    supplier_id: { type: 'integer', minimum: 1 },
+    include_archived: { type: 'boolean', default: false },
+    page: { type: 'integer', minimum: 1, default: ORDER_DEFAULT_PAGE },
+    limit: {
+      type: 'integer',
+      minimum: 1,
+      maximum: ORDER_MAX_LIMIT,
+      default: ORDER_DEFAULT_LIMIT,
+    },
+  },
+}
+
+// No `status`: every order starts `requested`, because one created at `received`
+// would carry none of the stamps that say how it got there.
+const orderCreateSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['showroom_id'],
+  properties: {
+    showroom_id: showroomRef,
+    ...sampleOrderProps,
+    // Back-dating the request itself, mirroring `out_at` on a check-out.
+    requested_at: timestampProp,
+  },
+}
+
+const orderPatchSchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: {
+    showroom_id: showroomRef,
+    ...sampleOrderProps,
+  },
+}
+
+// The move. `at` dates it and defaults to now(), so an order advanced in the
+// system days after the house actually shipped still reads truthfully.
+const transitionSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['status'],
+  properties: {
+    status: { type: 'string', enum: [...SAMPLE_ORDER_STATUSES] },
+    at: timestampProp,
+  },
+}
+
 const notFound = (reply, what) => {
   reply.code(404)
   return { error: 'Not Found', message: what }
@@ -290,6 +389,100 @@ export const adminSampleRoutes = async (app, { pool }) => {
       replyDelete(
         reply,
         await deleteOrExplain(pool, 'sample', request.params.id, {
+          user: request.user,
+        })
+      )
+  )
+
+  // --- Sample orders (W4-US-007) -------------------------------------------
+
+  app.get(
+    '/admin/sample-orders',
+    { preHandler: backoffice, schema: { querystring: orderListQuerySchema } },
+    async (request) => {
+      const { q, status, showroom_id, supplier_id, include_archived, page, limit } = request.query
+      const { sample_orders, total } = await listSampleOrders(pool, {
+        q,
+        status,
+        showroomId: showroom_id,
+        supplierId: supplier_id,
+        includeArchived: include_archived,
+        page,
+        limit,
+      })
+      return { sample_orders, meta: { total, page, limit } }
+    }
+  )
+
+  app.get(
+    '/admin/sample-orders/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const sampleOrder = await getSampleOrder(pool, request.params.id)
+      if (!sampleOrder) return notFound(reply, `Sample order ${request.params.id} not found.`)
+      return { sample_order: sampleOrder }
+    }
+  )
+
+  app.post(
+    '/admin/sample-orders',
+    { preHandler: backoffice, schema: { body: orderCreateSchema } },
+    async (request, reply) => {
+      const sampleOrder = await createSampleOrder(pool, request.body)
+      reply.code(201)
+      return { sample_order: sampleOrder }
+    }
+  )
+
+  app.patch(
+    '/admin/sample-orders/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: orderPatchSchema } },
+    async (request) => ({
+      sample_order: await updateSampleOrder(pool, request.params.id, request.body),
+    })
+  )
+
+  // The move. An illegal one — including a move to the state the order is
+  // already in, and any move out of `displayed`/`cancelled` — is a 409 from
+  // `requireTransition`, decided against the row this transaction holds locked.
+  app.post(
+    '/admin/sample-orders/:id/transition',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: transitionSchema } },
+    async (request) => ({
+      sample_order: await transitionSampleOrder(pool, request.params.id, request.body),
+    })
+  )
+
+  app.post(
+    '/admin/sample-orders/:id/archive',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const sampleOrder = await setSampleOrderArchived(pool, request.params.id, true)
+      if (!sampleOrder) return notFound(reply, `Sample order ${request.params.id} not found.`)
+      return { sample_order: sampleOrder }
+    }
+  )
+
+  app.post(
+    '/admin/sample-orders/:id/restore',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const sampleOrder = await setSampleOrderArchived(pool, request.params.id, false)
+      if (!sampleOrder) return notFound(reply, `Sample order ${request.params.id} not found.`)
+      return { sample_order: sampleOrder }
+    }
+  )
+
+  // Refused unless the order is still `requested` or was `cancelled` — the
+  // registry's guard, not a rule written here, so the CRM's confirm dialog reads
+  // the same envelope every other blocked delete produces.
+  app.delete(
+    '/admin/sample-orders/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'sample_order', request.params.id, {
           user: request.user,
         })
       )

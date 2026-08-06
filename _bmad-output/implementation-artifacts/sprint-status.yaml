@@ -60,9 +60,9 @@ epics:
   w4-samples:
     name: "W4 Samples"
     branch: aug6/w4-samples
-    status: pending
+    status: in_progress
     stories:
-      US-001: pending   # Migration: showrooms and samples
+      US-001: done      # Migration: showrooms and samples
       US-002: pending   # Migration: sample_loans with the one-open-loan index
       US-003: pending   # Migration: sample_orders
       US-004: pending   # Sample read models, filters and overdue derivation

@@ -572,3 +572,56 @@ Inventory create and delete — `POST /admin/inventory`, `DELETE /admin/inventor
 - **A row is DECLINED with a stated reason; a malformed BATCH is rejected before any SQL.** Emptiness is a decline — a house with no catalogue row, a row carrying no design or no colour code (Liberty prints exactly one, whose design, colour code and name are all "-") — and each reason names a KIND of row, so the summary reads "7,823 house not in the catalogue, 1 no design name" rather than a number nobody can account for. A missing coordinate or a non-string field is malformed and throws with `file:sheet:row` before a connection is even taken, the same posture as `validateLegacyRecords` and `validatePriceListItems`. Rows in = colourways out + skipped + repeats + conflicts, exactly, and the whole corpus balances.
 - **The supplier colour code is NEVER joined to `price_list_items.code`** — the D365 item code's numeric part is the supplier's colour code and does not match the price list's. Nothing in the importer reads or writes that table, and a stub-pool test asserts it by logging every statement the import issues. The `design_code` the file carries (what the supplier's own price list keys on) has no column to land in and is deliberately dropped rather than squeezed into one that means something else.
 - The whole import is one transaction in chunked `unnest` batches: either the catalogue gains every colourway or it gains none, because a half-imported house looks exactly like a house the supplier stopped carrying. Guarded by `test/colour-files.test.js` (114 tests), which covers the plan purely, the statement order and the price-list abstinence through a stub pool, and the real database behaviour — idempotency proved by comparing every catalogue row before and after a second run, plus `inventoryCreated: 0`.
+
+## Samples
+
+The physical sample register. `showrooms` + `samples` land in
+`migrations/1786680000000_samples-register.js`; the loan and order lifecycles follow in their own
+migrations.
+
+- **The tables live OUTSIDE the `legacy_*` namespace, deliberately** — `importLegacyEntity` upserts
+  every mapped column to EXCLUDED, so state written onto a staging row is destroyed by the next
+  `npm run import:legacy`. Same reason `trade_accounts` sits outside it. `test/samples-schema.test.js`
+  asserts the reverse too: every live `legacy_*` column is declared in `LEGACY_TABLES`
+  (`src/seed/legacy-import.js`) plus `imported_at`, so a column added to a staging table by any
+  workstream fails here. The one pre-existing exception is
+  `legacy_sales_orders.owning_business_unit`, staged by the migration and never imported.
+- **Nothing is copied out of `legacy_cuttings.comments`.** 1,757 of its 1,886 rows carry one and
+  they hold staff names, handling instructions and, in current rows, third parties' names, emails,
+  phones and home addresses. `samples.notes` is staff-typed and nothing else, and a test asserts
+  neither samples table carries a `comments` column at all.
+- **Samples are not stock.** A sample is a physical object on a shelf, never a sellable quantity:
+  no column mirrors an inventory figure and no sample code path may read or write one, because the
+  order state machine's reservation arithmetic breaks silently rather than loudly when a second
+  writer appears. Enforced two ways — an `information_schema` check that no samples column matches
+  `/qty_available|qty_reserved/`, and a source scan over every file this domain owns
+  (`migrations/*samples*`, `src/samples/**`, `src/routes/admin-samples.js`) for those two tokens
+  plus `/(?:INTO|FROM|JOIN|UPDATE)\s+inventory\b/i`. The scan bans the table in a **SQL position**
+  only, so a comment may still explain why samples are not inventory, and it asserts its own file
+  list is non-empty — a scan matching nothing passes every per-file check vacuously.
+- **`barcode` is NOT NULL and unique.** `GET /admin/samples/by-barcode/:barcode` has to give one
+  deterministic answer, 200 or 404, never a filtered list; a nullable barcode would let the unique
+  index tolerate any number of unlabelled samples and turn that lookup into a guess. A duplicate is
+  detected by the database (23505 on `samples_barcode_key` → 409), never by a pre-check that races.
+- **The three FKs differ on purpose.** `colourway_id` is **RESTRICT and nullable** — restricted
+  because a sample is physical evidence the design exists and deleting the catalogue row underneath
+  it leaves a labelled object nobody can identify; nullable because plenty of samples predate the
+  catalogue or come from a house Atelier does not stock, and `label` is what identifies those.
+  `supplier_id` and `showroom_id` are **SET NULL**: who sent a sample is history, and closing a
+  showroom must not destroy the samples that stood in it.
+- **`status` and `archived_at` are different questions and both are needed.** `retired` is a
+  statement about the physical object (worn out, sent back); archiving is the reversible removal of
+  the ROW that every live CRM list offers, and the samples list's `include_archived` filter reads
+  it. `status` is CHECK-constrained to `in_library|out|missing|retired`; the inline `check:` in
+  `createTable` is emitted unnamed and Postgres auto-names it `samples_status_check`.
+- **`sample_type` is free text, and that is a decision.** Nobody has ratified a vocabulary for what
+  a sample IS (hanger, cutting, book, memo), and a guessed CHECK would refuse the office's own word
+  for it the first time they typed it. Same posture as `duty_class` being stored raw.
+- **Fixture cleanup order is `samples` → `brands` → `suppliers` → `showrooms`.**
+  `samples.colourway_id` is RESTRICT, so it stops a brand cascade dead and the *cleanup itself*
+  raises 23503 in the next test's `beforeEach` — the same trap `order_lines.colourway_id` sets.
+- **The delete registry is not wired up yet.** `src/lifecycle/registry.js` has no `sample` entry
+  and neither the `product` nor the `colourway` entry probes `samples`, so a product delete does
+  not yet see them. The registry's `information_schema` safety test means a probe could not have
+  been stubbed before the table existed; adding one now is a cross-workstream ownership question
+  (E2 owns `src/lifecycle/`), not a tidy-up.

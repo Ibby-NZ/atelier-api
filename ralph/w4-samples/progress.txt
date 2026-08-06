@@ -5,11 +5,79 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- (nothing yet — the first iteration adds to this)
+- **The allowed migration glob is `migrations/*samples*`, so every migration this workstream
+  writes must contain the literal string "samples"** — `..._sample-loans.js` does NOT match and
+  would be an out-of-bounds file. Name them `..._samples-loans.js`, `..._samples-orders.js`.
+- **`atelier_w4` was migrated BEFORE it was seeded**, so any migration that seeds by UPDATE matched
+  nothing and its effect is missing from this database while the code is correct. That is how
+  `test/featured-rank.test.js` was already failing on a clean checkout (all `featured_rank` NULL).
+  Repair is to re-run the migration's OWN exported statements against the database
+  (`1786593600000_featured-rank.js` exports `FEATURED_BRANDS`/`brandFeatureSql` for exactly this),
+  never to edit another workstream's test. If a suite fails before you have written a line, prove
+  it is pre-existing by moving your new files aside and re-running — do not assume either way.
+- **`npx vitest run <one file>` is denied at the tool level; `npm test` is the only way to run
+  tests.** Budget for the whole suite (~30 s, 52 files) on every check.
+- **A source scan that bans a token must not ban it in prose too.** Ban the literal column names
+  (`qty_available`, `qty_reserved`) plus the table in a SQL position
+  (`/(?:INTO|FROM|JOIN|UPDATE)\s+inventory\b/i`), so a comment may still explain WHY samples are
+  not inventory. And assert the scanned file list is non-empty — a scan that matches nothing
+  passes every per-file check vacuously.
+- **`src/seed/legacy-import.js`'s `LEGACY_TABLES` is the canonical declaration of what every
+  `legacy_*` table holds**, so "no legacy table gained a column" is a real assertion: compare
+  `information_schema.columns` against the map plus `imported_at`. One pre-existing exception —
+  `legacy_sales_orders.owning_business_unit` is staged by the migration and never imported.
 
 ---
 
 ## Story log
 
 Appended by each iteration, newest last. Never rewrite an existing entry.
+
+## 2026-08-06T06:19:01Z - W4-US-001 - Migration: showrooms and samples
+
+- Created the `showrooms` and `samples` tables, the first two of the samples domain. `samples`
+  carries `barcode` (NOT NULL, unique — the scanner's key, so `by-barcode` can give one
+  deterministic answer), `label`, `colourway_id` (RESTRICT, nullable), `supplier_id` (SET NULL),
+  `showroom_id` (SET NULL), `sample_type`, `location`, `status` (CHECK
+  `in_library|out|missing|retired`, default `in_library`), `notes`, timestamps and `archived_at`.
+  `showrooms` is a plain address-book row (name unique, address, city, three contact fields,
+  notes) plus timestamps and `archived_at`.
+- Repos and files changed: atelier-api only —
+  `migrations/1786680000000_samples-register.js` (new), `test/samples-schema.test.js` (new, 15
+  tests), plus the bookkeeping (`prd.json`, `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `npm run migrate` twice -> second run "No migrations to run!";
+  `( cd atelier-api && npm run lint && npm test )` -> 0 (52 files, 1179 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the four entries added to
+    `## Codebase Patterns` above — the `*samples*` glob trap, the unseeded-`atelier_w4` cause of
+    the pre-existing `featured-rank` failure, the prose-safe source-scan shape, and `LEGACY_TABLES`
+    as the baseline for "no legacy table gained a column".
+  - Gotchas:
+    - Fixture cleanup order is `samples` -> `brands` -> `suppliers` -> `showrooms`.
+      `samples.colourway_id` is RESTRICT, so it stops a brand cascade dead and the *cleanup itself*
+      raises 23503 in the next test's `beforeEach` — the same trap `order_lines.colourway_id`
+      already sets in `test/admin-catalogue.test.js`.
+    - `status` and `archived_at` both exist and are NOT redundant: `retired` is a statement about
+      the physical object, archiving is the reversible removal of the ROW that every live CRM list
+      offers. US-004's `include_archived` filter needs the column.
+    - An inline `check:` in `createTable` is emitted unnamed and Postgres auto-names it
+      `samples_status_check` — that is the name a `rejects.toThrow(...)` anchors on, and the name
+      US-005's `rethrowConflict` will key `samples_barcode_key` on.
+    - `sample_type` is deliberately free text: nobody has ratified a vocabulary (hanger, cutting,
+      book, memo) and a guessed CHECK would refuse the office's own word for it.
+  - Context:
+    - The domain spec is `_bmad-output/planning-artifacts/architecture.md` § *Samples domain*, and
+      the delete policy table above it already lists `sample` / `sample order` / `sample loan`.
+    - **`src/lifecycle/registry.js` is NOT in this workstream's allowed files**, yet the delete
+      policy wants a `samples` probe on the `product` and `colourway` entries, and US-005's "DELETE
+      is blocked by sample_loans" needs a `sample` registry entry. Whoever reaches US-005 must
+      decide: either the allowed-file list is widened for `src/lifecycle/registry.js`, or the
+      story is BLOCKED on that ownership conflict (atelier-api's CLAUDE.md says E4 adds the probe;
+      the loop's file list says E2 owns lifecycle). Do not silently edit the registry.
+- **Needs human verification:** none — schema only, no screen and no route. A human should confirm
+  the `showrooms` column set is what the office actually records for a stockist (address, city,
+  contact name/email/phone, notes) before US-008 draws the form on it.
+---
 

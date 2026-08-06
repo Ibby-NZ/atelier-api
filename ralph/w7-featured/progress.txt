@@ -5,7 +5,20 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- (nothing yet — the first iteration adds to this)
+- **The local database `atelier_w7` IS SEEDED** (41 brands, the full collection set). So a migration's
+  data-correction UPDATE actually matches rows here, unlike CI. Do not assume an empty database.
+- **A migration may export more than `up`/`down`.** node-pg-migrate only reads those two, so extra
+  named exports (frozen data literals, SQL builders) are free — and are how a test exercises the
+  exact statement the migration ran without duplicating it. `test/featured-rank.test.js` imports
+  `migrations/1786593600000_featured-rank.js` directly.
+- **A migration builder takes statements, not parameters** (`pgm.sql(text)`), so any seeded value is
+  interpolated rather than bound. Validate every interpolated value at module load — slug regex,
+  positive-integer check — so a typo throws while the file loads instead of reaching the database.
+  Same posture as `assertEntity` in `src/lifecycle/`.
+- **`( cd atelier-api && npm test )` runs the WHOLE suite in ~27s** (907 tests, 47 files). There is
+  no need to try to run one file; `npm test -- <file>` needs an extra approval anyway.
+- Do NOT `cd` inside a Bash call and then rely on the next call's path — the working directory
+  persists between calls, so a later relative path silently resolves somewhere else.
 
 ---
 
@@ -13,3 +26,75 @@ Story-specific detail belongs in the per-story entries below, not here.
 
 Appended by each iteration, newest last. Never rewrite an existing entry.
 
+## 2026-08-06T16:25:00Z - W7-US-001 - Migration: featured_rank on brands and collections
+
+- Implemented `migrations/1786593600000_featured-rank.js`: `featured_rank integer NULL` on both
+  `brands` and `collections`, each with an inline CHECK `featured_rank IS NULL OR featured_rank > 0`
+  (Postgres auto-names them `brands_featured_rank_check` / `collections_featured_rank_check`). No
+  index, no unique constraint — the read model's `ORDER BY featured_rank ASC NULLS LAST, name ASC,
+  id ASC` is deterministic without one, and a unique index would make every reorder step a
+  potential 409.
+- The migration then carries the storefront's current hand-picked choice across so nothing moves
+  when US-006/US-007 start reading the column:
+  - collections, one ordered list of SEVEN: the homepage's three `FEATURED_COLLECTIONS` in their own
+    order (de-le-cuona/nature-s-opera, larsen/larsen-2024, manuel-canovas/manuel-canovas-2024) then
+    its four `LATEST_SLUGS` (manuel-canovas/manuel-canovas-giverny,
+    no-9-thompson/no-9-thompson-mazan-outdoor, pierre-frey/pierre-frey-cappuccino,
+    no-9-thompson/no-9-thompson-feuillage). The database owns the ORDER; the page owns the
+    COMPOSITION, so "the first three are the hero" is deliberately NOT encoded in the schema — but
+    ranks 4–7 are there so US-006 can keep the latest-collections row identical too.
+  - brands, three: de-le-cuona (1), larsen (2), manuel-canovas (3) — the houses behind the three hero
+    collections. See the judgement call below.
+- The collection UPDATE matches on `(brand_slug, slug)` PAIRS via a join to `brands`, never on slug
+  alone.
+- Repos and files changed: atelier-api only — `migrations/1786593600000_featured-rank.js` (new),
+  `test/featured-rank.test.js` (new, 12 tests), `CLAUDE.md` (new `## Featured` section),
+  `ralph/w7-featured/prd.json`, `ralph/w7-featured/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (907 passed, 47 files), `npm run migrate` -> 0 twice
+  (second run printed "No migrations to run!" — the programmatic runner in the test returns `[]`,
+  asserted by "is a no-op when migrations run again").
+- Verified against the seeded `atelier_w7`: 3 brand rows and all 7 collection rows carry the
+  intended ranks after the migration.
+
+- **Judgement call a human should confirm — which HOUSES are featured.** The storefront has never
+  hand-picked houses: `/brands`'s "in focus" strip DERIVES its three from `is_international` + a
+  design count + whether editorial photography exists, and that last input lives in the storefront's
+  own content (markdown `src/content/brands/`, only `pierre-frey.md` is committed, plus the
+  gitignored EmDash SQLite). No SQL in this repo can reproduce it. The migration therefore seeds the
+  three hero-collection houses, which at least makes the homepage and the directory agree. If the
+  office wants a different three, that is now one CRM edit rather than a deploy — which is the point
+  of the column.
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only) — promoted to `## Codebase Patterns` above:
+    a migration may export data + SQL builders for its test; interpolated migration values must be
+    validated at module load; `atelier_w7` is seeded.
+  - Gotchas:
+    - `slugify` turns an apostrophe into a hyphen, so "Nature's Opera" is `nature-s-opera` — do not
+      "correct" it to `natures-opera`.
+    - Collection slugs derive from the FULL snapshot title ("Pierre Frey | Cappuccino" →
+      `pierre-frey-cappuccino`) while the DISPLAY name drops the house prefix ("Cappuccino"). The
+      slug is the `(brand_id, slug)` upsert key; never derive it from the display name.
+    - `featured_rank` is absent from the seed entirely (not just from its `DO UPDATE` set lists), so
+      a fresh `npm run seed` leaves every row NULL and only this migration features anything. That
+      is what US-004 has to assert survives a reseed.
+    - The next storefront-facing stories should know: the homepage's `FEATURED_SLUG`
+      (`larsen-2024`, the collection that also gets the full band lower down) is rank **2**, not
+      rank 1 — US-006 has to pick that band's collection deliberately rather than assuming "the
+      first featured one".
+  - Context:
+    - Storefront hardcoded choice: `atelier-storefront/src/pages/index.astro` lines ~76–99
+      (`FEATURED_COLLECTIONS` / `FEATURED_SLUG` / `LATEST_SLUGS`); the derived brands strip is
+      `atelier-storefront/src/pages/brands/index.astro` lines ~92–96.
+    - Seed collection rows: `src/seed/catalogue-data.js` `buildCollectionRows()` over
+      `src/seed/data/realCatalogue.js`.
+    - Architecture: `_bmad-output/planning-artifacts/architecture.md` § "Featured ordering".
+- **Needs human verification:**
+  - `/brands` "in focus" strip once US-007 lands — confirm de Le Cuona / Larsen / Manuel Canovas are
+    the three houses the office wants featured, and reorder in the CRM if not.
+  - The homepage hero and the latest-collections row once US-006 lands — they should look exactly as
+    they do today.
+  - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
+    be started.)
+---

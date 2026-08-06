@@ -22,6 +22,16 @@ Story-specific detail belongs in the per-story entries below, not here.
   (`/(?:INTO|FROM|JOIN|UPDATE)\s+inventory\b/i`), so a comment may still explain WHY samples are
   not inventory. And assert the scanned file list is non-empty — a scan that matches nothing
   passes every per-file check vacuously.
+- **A concurrency invariant held by a partial unique index is testable without stubbing pg**, and
+  the shape is reusable for any check-then-write here: take TWO clients off the pool, `BEGIN` both,
+  INSERT on the first, start the second INSERT as a PENDING promise (do not await it), sleep ~50 ms
+  so it actually reaches the lock wait, `COMMIT` the first, then await the rejection. Without the
+  sleep the two statements may simply run in sequence — the assertion still passes, but it has
+  stopped testing contention. `client.release()` in a `finally`, and `ROLLBACK` the aborted
+  transaction.
+- **`rethrowConflict` is EXPORTED from `src/catalogue/admin-brands.js` and is the house 23505 -> 409
+  mapper for the whole API.** An unrecognised `error.constraint` degrades the MESSAGE and never the
+  status, so a domain that has no message table yet can already prove its duplicate answers 409.
 - **`src/seed/legacy-import.js`'s `LEGACY_TABLES` is the canonical declaration of what every
   `legacy_*` table holds**, so "no legacy table gained a column" is a real assertion: compare
   `information_schema.columns` against the map plus `imported_at`. One pre-existing exception —
@@ -79,5 +89,66 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
 - **Needs human verification:** none — schema only, no screen and no route. A human should confirm
   the `showrooms` column set is what the office actually records for a stockist (address, city,
   contact name/email/phone, notes) before US-008 draws the form on it.
+---
+
+## 2026-08-06T18:26:00Z - W4-US-002 - Migration: sample_loans with the one-open-loan index
+
+- Created `sample_loans`: `sample_id` (NOT NULL, RESTRICT), `trade_account_id` (nullable, SET
+  NULL), `holder_name` (NOT NULL, the snapshot), `out_at` (NOT NULL, default now()),
+  `due_back_at`, `returned_at`, `notes`, `created_at`, `updated_at`. Four indexes:
+  `sample_loans_open_unique` (UNIQUE on `sample_id` WHERE `returned_at IS NULL` — the invariant),
+  a plain `sample_id` index for history reads and the per-sample loan count,
+  a `trade_account_id` index, and `sample_loans_overdue_idx` (`due_back_at` WHERE
+  `returned_at IS NULL`) so US-004 can derive overdue cheaply.
+- Repos and files changed: atelier-api only —
+  `migrations/1786766400000_samples-loans.js` (new), `test/samples-loans.test.js` (new, 16 tests),
+  plus the bookkeeping (`prd.json`, `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `npm run migrate` twice -> second run "No migrations to run!";
+  `( cd atelier-api && npm run lint && npm test )` -> 0 (53 files, 1195 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the two entries added to
+    `## Codebase Patterns` above — the two-client recipe for testing a partial unique index under
+    real contention, and `rethrowConflict` being exported from `src/catalogue/admin-brands.js` as
+    the API-wide 23505 -> 409 mapper whose unknown-constraint path degrades the message only.
+  - Gotchas:
+    - **`trade_account_id` is NOT in architecture.md's column list and was still the right call.**
+      AC #2 says "holder_name is a snapshot, so history survives a trade account being unlinked or
+      renamed" — a sentence with no meaning unless a loan can reference a trade account, and an
+      AC that cannot be tested without one. It is nullable + SET NULL: most borrowers (architects,
+      stylists, Atelier's own staff) are not trade clients at all, and the link is CURRENT state
+      while the loan is history. `holder_name` is never joined for.
+    - **`sample_loans` has NO `archived_at`, unlike every other live table here.** A loan is
+      append-only history and no CRM list may offer to remove one. Do not add it in US-004 "for
+      consistency" — `returned_at IS NULL` is the whole of "still out". A test asserts no column
+      matches `/overdue|is_out|archived_at/`, which also nails down "overdue is derived, never
+      stored".
+    - **The unique index MUST stay partial.** A plain unique on `sample_id` would allow one loan
+      per sample for all time; the `WHERE returned_at IS NULL` predicate is what lets a returned
+      sample go out again. Two tests cover the two halves separately.
+    - Fixture cleanup order gained a step ahead of US-001's: `sample_loans` -> `samples` ->
+      `brands` -> `suppliers` -> `showrooms`, plus `trade_accounts` (by
+      `legacy_customer_name LIKE`). `sample_loans.sample_id` is RESTRICT, so a `samples` delete
+      23503s inside cleanup while a loan points at it.
+    - `trade_accounts` needs `legacy_account_guid` (uuid, NOT NULL, unique) and
+      `legacy_customer_name` (NOT NULL) — a fixture must supply a literal uuid.
+    - The source scan in `test/samples-schema.test.js` globs `migrations/*samples*`, so this
+      migration is scanned too: its header may say "samples are not stock" but must not put the
+      inventory table in a SQL position or name the two quantity columns.
+  - Context:
+    - The spec is `_bmad-output/planning-artifacts/architecture.md` § *Samples domain* (the loan
+      register bullet plus the four invariants) and the delete-policy table above it, which lists
+      `sample` -> blocked by sample loans and `sample loan` -> 409 while still open.
+    - US-006 owns `withSampleTxn` and the check-out/check-in verb routes; its "already out" 409 is
+      the caught 23505 on `sample_loans_open_unique` this migration creates, and its message
+      belongs in a `CONFLICT_MESSAGES`-style table keyed on that constraint name.
+    - **`src/lifecycle/registry.js` is still NOT in this workstream's allowed files** and now has
+      two probes owing to it, not one: `sample` -> `sample_loans` and the open-loan guard on
+      `sample loan`. Same ownership question US-001 flagged (E2 owns lifecycle); do not edit the
+      registry silently.
+- **Needs human verification:** none — schema only, no screen and no route. A human should confirm
+  that recording a borrower as a free-text `holder_name` plus an optional trade-account link is
+  what the counter actually does, before US-006 draws the check-out form on it.
 ---
 

@@ -625,3 +625,44 @@ migrations.
   not yet see them. The registry's `information_schema` safety test means a probe could not have
   been stubbed before the table existed; adding one now is a cross-workstream ownership question
   (E2 owns `src/lifecycle/`), not a tidy-up.
+
+### `sample_loans` (`migrations/1786766400000_samples-loans.js`)
+
+- **One open loan per sample is a PARTIAL UNIQUE INDEX, not application code.**
+  `sample_loans_open_unique` covers `sample_id WHERE returned_at IS NULL`. The scanner is a
+  concurrent device: two staff scanning one barcode out at once would otherwise open two loans and
+  the register would name the wrong holder from then on, with nothing in the data to say which row
+  was the lie. A pre-check cannot close that window — it reads a row another transaction is about
+  to write — so "already out" is a **caught 23505 on this constraint**, mapped to 409 by
+  `rethrowConflict` (exported from `src/catalogue/admin-brands.js`, whose unknown-constraint path
+  degrades the message and never the status). Guarded by a two-client contention test in
+  `test/samples-loans.test.js`.
+- **The index must stay PARTIAL.** Check-in sets `returned_at`, which drops the row out of the
+  index and lets the next check-out succeed; a plain unique on `sample_id` would allow one loan per
+  sample for all time. The two halves are asserted separately (a second open loan is refused; three
+  closed loans on one sample are fine).
+- **`sample_id` is RESTRICT: history is a record, not an owned child.** CASCADE would let deleting
+  a sample destroy every movement it was ever part of — precisely the question the register exists
+  to answer — and do it silently. This is the FK under architecture.md's "a sample with loans is a
+  409".
+- **`holder_name` is a snapshot and is NOT NULL; `trade_account_id` is nullable and SET NULL.**
+  The link is the CURRENT state of a business relationship and the loan is history:
+  `trade_accounts.legacy_customer_name` is itself re-snapshotted when staff re-link an account, the
+  login↔company grant is unlinked by back office as a matter of course, and plenty of borrowers are
+  not trade clients at all (an architect, a stylist, Atelier's own staff). The name is never joined
+  for. `trade_account_id` is not in architecture.md's column list — it is what makes the AC
+  "history survives a trade account being unlinked or renamed" mean anything.
+- **There is NO `archived_at` here, unlike every other live table**, and no `is_overdue`. A loan is
+  append-only history and no CRM list may offer to remove one; `returned_at IS NULL` is the whole of
+  "still out", and overdue is `returned_at IS NULL AND due_back_at < now()` derived at read time —
+  a stored boolean is wrong from the first minute nobody runs the job that would maintain it.
+  `sample_loans_overdue_idx` (`due_back_at WHERE returned_at IS NULL`) is what makes deriving it
+  cheap, and a test asserts no column matches `/overdue|is_out|archived_at/`.
+- **`due_back_at` is nullable**: plenty of samples go out with no date agreed, and defaulting one
+  would make them overdue on a deadline nobody set. `out_at` defaults to `now()` but is its own
+  column rather than `created_at`, so a movement recorded after the fact can carry the day it
+  happened.
+- **Fixture cleanup order gains a step: `sample_loans` → `samples` → `brands` → `suppliers` →
+  `showrooms`**, plus `trade_accounts` by `legacy_customer_name` prefix. `sample_id` is RESTRICT, so
+  deleting a sample 23503s inside cleanup while a loan points at it. A `trade_accounts` fixture
+  needs a literal uuid for `legacy_account_guid` and a `legacy_customer_name`.

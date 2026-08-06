@@ -27,6 +27,20 @@
 //     `sample_loans_open_unique` guarantees at most one open loan per sample. That
 //     is what lets the count query share the FROM clause without inflating
 //     `meta.total`.
+//
+// The writes live here too (W4-US-005). Two rules shape them:
+//   - A duplicate barcode is the database's 23505 on `samples_barcode_key`,
+//     mapped to a 409. Never pre-checked: a pre-check races the scanner, which is
+//     a concurrent device, and would still need the handler.
+//   - `out` is never accepted on a create or a PATCH. It is the one status that
+//     ASSERTS an open loan exists, and only check-out (US-006) writes both tables
+//     in the one transaction that can make that true. A status PATCH that could
+//     say `out` would let a screen mark a sample out with no loan behind it,
+//     which is exactly what architecture.md means by "check-out and check-in are
+//     verb routes, not a status PATCH".
+
+import { buildUpdate } from '../catalogue/admin-brands.js'
+import { setArchived } from '../lifecycle/archive.js'
 
 export const DEFAULT_PAGE = 1
 export const DEFAULT_LIMIT = 50
@@ -44,9 +58,90 @@ export const SAMPLE_STATUSES = Object.freeze([
   'retired',
 ])
 
+// The statuses a create or a PATCH may write — everything the CHECK accepts
+// except `out`, which only check-out may set (see the module header). Derived
+// from SAMPLE_STATUSES rather than re-typed, so widening the CHECK widens this
+// too and the two can never drift into disagreeing about a value.
+export const WRITABLE_SAMPLE_STATUSES = Object.freeze(
+  SAMPLE_STATUSES.filter((status) => status !== 'out')
+)
+
 // The derivation, in one place. NULL-safe: a loan with no agreed date is not
 // overdue, and neither is a sample with no open loan (the join yields NULL).
 const OVERDUE_EXPRESSION = `COALESCE(ol.due_back_at < now(), false)`
+
+const httpError = (statusCode, message) =>
+  Object.assign(new Error(message), { statusCode })
+
+// Message per unique constraint. Only one can fire today, but the shape is the
+// house one (src/suppliers/admin-suppliers.js): keyed on the constraint name, an
+// unknown key degrades the MESSAGE and never the status.
+const CONFLICT_MESSAGES = Object.freeze({
+  samples_barcode_key: 'A sample with that barcode already exists.',
+})
+
+// A named parent that is not there. All three are 422 rather than 404: the id
+// arrived in a body as a business fact about the sample, exactly like an unknown
+// `brand_id` on a product create, so it is the body that is wrong and not the URL.
+const MISSING_PARENT_MESSAGES = Object.freeze({
+  samples_colourway_id_fkey: 'That colourway does not exist.',
+  samples_supplier_id_fkey: 'That supplier does not exist.',
+  samples_showroom_id_fkey: 'That showroom does not exist.',
+})
+
+const rethrowWriteError = (error) => {
+  if (error?.code === '23505') {
+    throw httpError(
+      409,
+      CONFLICT_MESSAGES[error.constraint] ?? 'That sample detail is already in use.'
+    )
+  }
+  if (error?.code === '23503') {
+    throw httpError(
+      422,
+      MISSING_PARENT_MESSAGES[error.constraint] ?? 'A referenced record does not exist.'
+    )
+  }
+  // The route spends WRITABLE_SAMPLE_STATUSES as a schema enum, so a bad status
+  // is a 400 there. This is the direct caller's answer: a 23514 is a rejected
+  // value, not a server fault, so it must not surface as a 500.
+  if (error?.code === '23514' && error.constraint === 'samples_status_check') {
+    throw httpError(422, `status must be one of: ${SAMPLE_STATUSES.join(', ')}.`)
+  }
+  throw error
+}
+
+// Columns a create or a PATCH may ever write. Frozen and in-code, as buildUpdate
+// requires — column names are never user input. The timestamps are absent (the
+// UPDATE stamps `updated_at` itself) and so is `archived_at`, which setArchived
+// owns. `barcode` IS editable: it is a printed tag that can be mistyped, and
+// nothing references it — `sample_loans.sample_id` points at the row's id — so a
+// correction is safe, and a collision is the same 409 a create answers with.
+export const SAMPLE_UPDATE_COLUMNS = Object.freeze([
+  'barcode',
+  'label',
+  'colourway_id',
+  'supplier_id',
+  'showroom_id',
+  'sample_type',
+  'location',
+  'status',
+  'notes',
+])
+
+// `out` is refused in the module as well as at the route schema, because the
+// module is also called directly. 422 rather than 400: the value is a legal
+// status, it is just not one a caller may assert without the loan write that
+// makes it true.
+const assertWritableStatus = (status) => {
+  if (status !== undefined && status !== null && !WRITABLE_SAMPLE_STATUSES.includes(status)) {
+    throw httpError(
+      422,
+      `status "${status}" is set by checking the sample out, not by writing it. ` +
+        `Writable here: ${WRITABLE_SAMPLE_STATUSES.join(', ')}.`
+    )
+  }
+}
 
 const SAMPLE_COLUMNS = `s.id, s.barcode, s.label, s.colourway_id, s.supplier_id,
               s.showroom_id, s.sample_type, s.location, s.status, s.notes,
@@ -322,3 +417,94 @@ export const getSample = (db, id) => readOne(db, 's.id = $1', id)
  * @returns {Promise<object|null>}
  */
 export const getSampleByBarcode = (db, barcode) => readOne(db, 's.barcode = $1', barcode)
+
+/**
+ * Register a new sample. The barcode is the tag on the object and is required;
+ * a duplicate is the database's 23505, mapped to a 409 here.
+ *
+ * Every write returns through `getSample`, so a create, a patch, an archive and
+ * a plain read all hand the CRM the SAME shape — parents by name, the open loan,
+ * the loan count and the derived `overdue`. That costs one extra round trip and
+ * buys one renderer instead of two, which is what the screens actually need
+ * (they re-read a row after every write anyway).
+ *
+ * @param {import('pg').Pool} pool
+ * @param {object} input
+ * @returns {Promise<object>}
+ */
+export const createSample = async (pool, input) => {
+  assertWritableStatus(input.status)
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO samples
+         (barcode, label, colourway_id, supplier_id, showroom_id, sample_type,
+          location, status, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'in_library'), $9)
+       RETURNING id`,
+      [
+        input.barcode,
+        input.label ?? null,
+        input.colourway_id ?? null,
+        input.supplier_id ?? null,
+        input.showroom_id ?? null,
+        input.sample_type ?? null,
+        input.location ?? null,
+        input.status ?? null,
+        input.notes ?? null,
+      ]
+    )
+    return getSample(pool, rows[0].id)
+  } catch (error) {
+    return rethrowWriteError(error)
+  }
+}
+
+/**
+ * Patch a sample from the frozen whitelist. `Object.hasOwn` (inside buildUpdate)
+ * keeps an explicit null — which clears a nullable column, e.g. un-homing a
+ * sample from a showroom — distinct from an absent key.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {object} input
+ * @returns {Promise<object>}
+ */
+export const updateSample = async (pool, id, input) => {
+  assertWritableStatus(input.status)
+  const { sets, params } = buildUpdate(input, SAMPLE_UPDATE_COLUMNS)
+  try {
+    const { rows } = await pool.query(
+      `UPDATE samples SET ${sets.join(', ')}, updated_at = now()
+        WHERE id = $${params.length + 1}
+        RETURNING id`,
+      [...params, id]
+    )
+    if (rows.length === 0) {
+      throw httpError(404, `Sample ${id} not found.`)
+    }
+    return getSample(pool, id)
+  } catch (error) {
+    return rethrowWriteError(error)
+  }
+}
+
+/**
+ * Soft-archive (archived=true) or restore (archived=false) a sample, stamping
+ * `updated_at`. Returns the fresh row, or null when the id is unknown.
+ *
+ * This is the alternative a blocked DELETE offers. A sample that has ever been
+ * lent is refused a hard delete for good — its loans are the register's whole
+ * point — so archiving is the only way one leaves the working list.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {boolean} archived
+ * @returns {Promise<object|null>}
+ */
+export const setSampleArchived = async (pool, id, archived) => {
+  const row = await setArchived(pool, 'sample', id, archived, {
+    extraSets: ['updated_at = now()'],
+    returning: 'id',
+  })
+  return row ? getSample(pool, row.id) : null
+}

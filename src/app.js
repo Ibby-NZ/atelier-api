@@ -16,6 +16,7 @@ import { adminTradeApplicationRoutes } from './routes/admin-trade-applications.j
 import { adminInventoryRoutes } from './routes/admin-inventory.js'
 import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
+import { adminSampleRoutes } from './routes/admin-samples.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
@@ -137,6 +138,10 @@ export const buildApp = ({
     // Back-office only: the record carries the freight terms, the PO address and
     // each house's discount, none of which may reach a client-facing response.
     api.register(adminSupplierRoutes, { pool })
+    // /admin/samples — the physical sample register (what is on the shelf, what
+    // is out, what is late back) plus the scanner's by-barcode lookup. Back
+    // office only, same CORS allowance as every other CRM screen.
+    api.register(adminSampleRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })

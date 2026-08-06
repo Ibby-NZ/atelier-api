@@ -770,3 +770,60 @@ migrations.
   the LOAN's `due_back_at` into the past, reads again, and asserts the value flipped while the
   SAMPLE's `updated_at` did not — a stored flag cannot satisfy that pair, whereas a single read
   passes against one.
+
+### Routes (`src/routes/admin-samples.js`)
+
+- **`GET|POST /admin/samples`, `GET /admin/samples/by-barcode/:barcode`,
+  `GET|PATCH|DELETE /admin/samples/:id`, `POST /admin/samples/:id/archive|restore`** — all
+  `requireRole('backoffice')` (director inherits). The register says where a physical object is and
+  who has it: staff information, with no viewer below them. The guard test is parameterised over
+  the whole surface, so a route added later without one fails. Registered in `src/app.js` as
+  `adminSampleRoutes`; a further samples route belongs inside that existing plugin.
+- **Every payload in a parameterised 401/403 sweep must be VALID.** Fastify validates before it
+  runs a preHandler, so a guard test posting a malformed body asserts a 400 and passes even if the
+  guard has been deleted.
+- **`by-barcode` is an EXACT match answering 200 or 404, never a filtered list**, and it is a
+  separate path segment from `/admin/samples/:id` so the two cannot collide (`:id` is an integer by
+  schema, the barcode sits one segment further down). Three failure modes are tested rather than
+  assumed: a barcode one character short must 404 rather than resolve to its neighbour, a `%` in
+  the scanned value must not behave as a LIKE pattern, and an ARCHIVED sample must still be found —
+  a scanned object exists whatever the CRM list is currently showing.
+- **`out` is refused by the create and the PATCH alike, and this is what keeps the check-out story
+  meaningful.** It is the one status that ASSERTS an open loan exists, and only check-out writes
+  both tables in the transaction that makes that true; a status PATCH able to say `out` would let a
+  screen mark a sample out with no loan behind it, which is exactly what architecture.md means by
+  "check-out and check-in are verb routes, not a status PATCH". `WRITABLE_SAMPLE_STATUSES` is
+  DERIVED from `SAMPLE_STATUSES` by filter, never re-typed, so widening the CHECK widens it too;
+  the route spends it as a schema enum (400) and `admin-samples.js` re-checks it (422) because the
+  module is also called directly. The verb routes must therefore write `status` themselves inside
+  `withSampleTxn` — they cannot go through `updateSample`. `missing` and `retired` stay freely
+  writable: those are statements staff make about the object, not about a loan.
+- **A duplicate barcode is the database's 23505 on `samples_barcode_key`, never a pre-check.** The
+  scanner is a concurrent device, so a read-then-insert pre-check is exactly the race that would
+  let two tags through; a test fires two creates at one barcode with `Promise.all` and asserts the
+  pair of codes is `[201, 409]`.
+- **`barcode` IS editable by PATCH.** It is a printed tag that can be mistyped and nothing
+  references it — `sample_loans.sample_id` points at the row's id — so a correction is safe, and a
+  collision is the same 409 the create answers with. Same reasoning as `colourways.sku`.
+- **A 23503 on any of the three FKs is a 422, not a 404.** The id arrived in a BODY as a business
+  fact about the sample, exactly like an unknown `brand_id` on a product create, so it is the body
+  that is wrong and not the URL. Keyed on the constraint name
+  (`samples_{colourway,supplier,showroom}_id_fkey`); an unknown one degrades the message, never the
+  status.
+- **Every write returns through `getSample`.** A create, a patch, an archive and a plain read hand
+  the CRM one shape — parents by name, the open loan, the loan count, the derived `overdue` and the
+  loan history — so the screens need one renderer rather than two. It costs a round trip and the
+  screens re-read after every write anyway.
+- **`sample` is in the lifecycle registry: table `samples`, `archivable: true`, one probe on
+  `sample_loans`.** `sample_loans.sample_id` is RESTRICT so the database would refuse anyway; the
+  probe still wins, because it reports HOW MANY movements are in the way and runs before anything
+  is destroyed. A CLOSED loan blocks exactly as hard as an open one — history is the register's
+  reason to exist — and that is tested separately, because "block only while something is out" is
+  the obvious wrong simplification. `'sample'` is a code literal at the call site, never `:entity`
+  from the URL.
+- **Still owed, and deliberately not done here:** `src/lifecycle/delete.js`'s `CONSTRAINT_BLOCKERS`
+  has no `sample_loans_sample_id_fkey` entry (only a lost race falls through to the generic
+  "related records"), and neither the `product` nor the `colourway` entry probes `samples`, so
+  deleting a design does not yet see the samples cut from it. There is also **no showroom CRUD
+  anywhere**: `showrooms` has a table and an `archived_at` but no routes and no registry entry,
+  which the CRM's showrooms screen will need.

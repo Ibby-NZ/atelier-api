@@ -325,6 +325,23 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     ],
   },
 
+  // A sample's loans ARE the register: who had what, when, and whether it came
+  // back. `sample_loans.sample_id` is RESTRICT, so the database would refuse this
+  // one anyway — the probe still wins, because it reports HOW MANY movements are
+  // in the way and it runs before anything is destroyed. That is the house order
+  // (probe first, 23503 only as the backstop), and it is what lets the refusal
+  // offer archiving instead: `samples.archived_at` exists, and a sample with
+  // history is a row that must stop appearing without ceasing to exist.
+  sample: {
+    table: 'samples',
+    idColumn: 'id',
+    label: 'sample',
+    archivable: true,
+    probes: [
+      probe('sample_loans', 'loans', 'SELECT 1 FROM sample_loans WHERE sample_id = $1'),
+    ],
+  },
+
   // No archived_at column: a rate tier is either priced or absent.
   shipping_rate: {
     table: 'shipping_rates',

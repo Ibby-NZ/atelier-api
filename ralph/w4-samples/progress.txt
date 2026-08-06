@@ -60,21 +60,24 @@ Story-specific detail belongs in the per-story entries below, not here.
   re-reads.** Reading once and asserting the value passes against a stored column too. Move the
   dependency (the due date, the clock), read again, assert the derived value flipped AND that the
   parent row's `updated_at` did not — that pair is what a stored flag cannot satisfy.
-- **A ROUTE story in this workstream cannot ship without `src/app.js`, which is out of bounds.**
-  There is no plugin auto-loader here: every route module is an explicit
-  `api.register(<module>, { pool })` inside `buildApp`, so `src/routes/admin-samples.js` is dead
-  code until someone edits `src/app.js`. Standing up a bare Fastify instance in the test instead
-  does not rescue it — the route needs `app.guards.requireRole('backoffice')` and `guards` is
+- **A ROUTE story here ships nothing until `src/app.js` registers it.** There is no plugin
+  auto-loader: every route module is an explicit `api.register(<module>, { pool })` inside
+  `buildApp`. Standing up a bare Fastify instance in the test instead does not rescue an
+  unregistered module — the route needs `app.guards.requireRole('backoffice')` and `guards` is
   decorated onto the instance by `buildApp` (`src/app.js:60`), so a hand-rolled app proves the
   handlers work and proves nothing about the authorisation every other `/admin/*` route carries.
-  This hits US-005, US-006 and US-007 identically; see `BLOCKED.md`. Do not write a route file
-  and leave it unregistered — check `grep -n "routes/" src/app.js` FIRST.
-- **`src/lifecycle/registry.js` has no `sample` entry and `deleteOrExplain` 500s on an unknown
-  name.** `requireEntity` throws a plain Error rather than answering 404 (deliberately — so an
-  `:entity` wired from a URL fails loudly), so any samples DELETE story is blocked on that entry
-  existing. The registry's own header comment (line 27) and `atelier-api/CLAUDE.md` both say the
-  workstream that creates the tables adds it; this loop's file list says E2 owns `src/lifecycle/`.
-  That contradiction is a human decision, not a tidy-up.
+  *(Both `src/app.js` and `src/lifecycle/registry.js` are now on this workstream's allowed list,
+  additive only. `adminSampleRoutes` is registered as of W4-US-005 — a further samples route
+  belongs in that existing plugin, so no second registration is needed.)* The first assertion in
+  `test/samples-routes.test.js` is a plain 200 on `GET /admin/samples`: it asserts the
+  REGISTRATION, ahead of anything about behaviour, which is the cheap guard against this failure.
+- **`deleteOrExplain` 500s on a registry name that does not exist** — `requireEntity` throws a
+  plain Error rather than answering 404, deliberately, so an `:entity` wired from a URL fails
+  loudly. `sample` is registered as of W4-US-005 (probe `sample_loans`, `archivable: true`);
+  `sample order` and `sample loan` are NOT, and US-007 owes the first of those. Two probes the
+  delete policy calls for are still missing and belong to no story in this PRD: a `samples` probe
+  on the existing `product` and `colourway` entries, so deleting a design sees the samples cut
+  from it. Do not add those silently — they change another workstream's delete route.
 - **`src/seed/legacy-import.js`'s `LEGACY_TABLES` is the canonical declaration of what every
   `legacy_*` table holds**, so "no legacy table gained a column" is a real assertion: compare
   `information_schema.columns` against the map plus `imported_at`. One pre-existing exception —
@@ -96,6 +99,13 @@ Story-specific detail belongs in the per-story entries below, not here.
   available, commit the bookkeeping for any uncommitted entry you find here alongside your own.
   To look at `atelier_w4`, `node -e` with `require('dotenv')` + `require('pg')` against
   `process.env.DATABASE_URL` remains the way in (`psql` is denied too).
+- **The allowed-file list is data, not a constant — re-read `ralph/w4-samples/CLAUDE.md` every
+  iteration before concluding a story is blocked on ownership.** A human unblocks by editing BOTH
+  `prd.json` (clearing the `BLOCKED:` prefix) and the file list itself, and those two edits can land
+  mid-iteration. `src/app.js` and `src/lifecycle/registry.js` are now MAY-touch for this workstream,
+  **additive only and only for this workstream's own entries** — register your own route plugin
+  without reordering another's, add your own registry entities and leave the rest alone. Three
+  stories' worth of blocks were cleared by that one edit.
 
 ---
 
@@ -511,3 +521,80 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   registration), which clears US-005, US-006 and US-007 in one move.
 ---
 
+
+## 2026-08-06T19:05:00Z - W4-US-005 - Sample CRUD routes and by-barcode lookup
+
+- **The block was cleared by a human mid-iteration and the story shipped.** This iteration opened
+  by re-running the two-command wall check for US-007, found both walls still standing, and started
+  the BLOCKED bookkeeping — at which point `ralph/w4-samples/CLAUDE.md` and `prd.json` were both
+  edited: the allowed-file list gained `src/app.js` and `src/lifecycle/registry.js` (additive only,
+  own entries only), and the `BLOCKED:` prefix was cleared from US-005, US-006 and US-007.
+  `BLOCKED.md` was deleted in the same move. That made US-005 the lowest unblocked story, so the
+  block bookkeeping was reverted and US-005 was implemented.
+- Shipped the register's write layer and its whole route surface:
+  `GET /admin/samples` (the meta envelope over `listSamples`),
+  `GET /admin/samples/by-barcode/:barcode`, `GET|PATCH|DELETE /admin/samples/:id`,
+  `POST /admin/samples`, `POST /admin/samples/:id/archive|restore`. Backoffice-only throughout.
+  Module gained `createSample`, `updateSample`, `setSampleArchived`, `SAMPLE_UPDATE_COLUMNS` and
+  `WRITABLE_SAMPLE_STATUSES`; the registry gained the `sample` entry (probe `sample_loans`,
+  `archivable: true`); `src/app.js` gained one import and one `api.register`.
+- Repos and files changed: atelier-api only — `src/routes/admin-samples.js` (new),
+  `src/samples/admin-samples.js` (writes appended), `src/lifecycle/registry.js` (one entry, added),
+  `src/app.js` (one import + one registration, added), `test/samples-routes.test.js` (new, 55
+  tests), plus the bookkeeping (`prd.json`, `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (56 files, 1292 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the entry added to `## Codebase Patterns`
+    above — the allowed-file list is DATA and must be re-read every iteration, because a human
+    unblocks by editing it and `prd.json` together and both edits can land mid-iteration.
+  - Gotchas:
+    - **`out` is refused by both the create and the PATCH, and that is what keeps US-006
+      meaningful.** It is the one status that ASSERTS an open loan exists, and only check-out can
+      write both tables in the transaction that makes it true; a status PATCH that could say `out`
+      would let a screen mark a sample out with no loan behind it. `WRITABLE_SAMPLE_STATUSES` is
+      DERIVED from `SAMPLE_STATUSES` (filter, not a second literal), so widening the CHECK widens
+      it too and the two cannot drift. The route spends it as a schema enum (400) and the module
+      re-checks it (422), because the module is also called directly. **US-006 must write `status`
+      itself inside `withSampleTxn`** — it cannot go through `updateSample`.
+    - **Fastify validates BEFORE it runs a preHandler**, so a guard test that posts a malformed
+      body asserts 400 and passes without the guard existing. Every payload in the parameterised
+      401/403 sweep is deliberately valid.
+    - `barcode` is editable by PATCH on purpose (a printed tag can be mistyped and nothing
+      references it — `sample_loans.sample_id` points at the row id), and a collision is the same
+      409 the create answers with.
+    - Every write returns through `getSample`, so create/patch/archive/read all hand the CRM ONE
+      shape (parents by name, open loan, loan count, derived overdue, loan history). Costs a round
+      trip, saves the screens a second renderer.
+    - A 23503 on any of the three FKs is a **422**, not a 404: the id arrived in a BODY as a fact
+      about the sample, exactly like an unknown `brand_id` on a product create. Constraint names
+      are `samples_{colourway,supplier,showroom}_id_fkey`.
+  - Context:
+    - `test/samples-schema.test.js`'s source scan already globs `src/routes/admin-samples.js`, so
+      the new route file was in its blast radius from the moment it existed — the "samples are not
+      stock" ban applies to it without any test edit. The runtime counterpart for the WRITES and
+      the delete probe is in `test/samples-routes.test.js`.
+    - **Two things the delete story did NOT do, both deliberate and both still owed.**
+      (1) `src/lifecycle/delete.js`'s `CONSTRAINT_BLOCKERS` has no
+      `sample_loans_sample_id_fkey` entry — that file is not on the widened list, and the probe
+      covers the case; only a lost race would fall through to the generic "related records".
+      (2) The `product` and `colourway` registry entries still carry NO `samples` probe, so
+      deleting a product does not yet see the samples cut from it. `atelier-api/CLAUDE.md`
+      (§ CRUD completion) records that as owed to E4, but **no story in this PRD names it** — it is
+      not in any US-005..US-009 acceptance criterion, and adding it changes another workstream's
+      delete route. A human should decide whether it becomes a story.
+    - **There is no showroom CRUD anywhere in this PRD.** US-008 draws `AdminShowrooms.jsx`, but
+      no API story creates `GET|POST|PATCH|DELETE /admin/showrooms` — `showrooms` has a table, an
+      `archived_at` and no routes and no registry entry. The iteration that reaches US-008 will
+      find the screen has nothing to call. Flagging it here rather than widening US-005's scope.
+    - US-006 is next and is now unblocked. What it owes: `withSampleTxn` mirroring `withOrderTxn`
+      (`src/orders/admin-orders.js:207`), the two verb routes registered in the plugin this story
+      created, "already out" as a caught 23505 on `sample_loans_open_unique` through
+      `rethrowConflict`, and "not out" as an ordinary 409 on the row the transaction holds locked.
+- **Needs human verification:** none in a browser — no screen exists yet. Two judgement calls a
+  human should confirm before US-008 draws on them: that `out` being unwritable by PATCH matches
+  how the counter actually works (a sample can be marked `missing` or `retired` directly, but goes
+  out and comes back only through the verb routes), and that a sample with any loan history is
+  never hard-deletable, archiving being the only way one leaves the list.
+---

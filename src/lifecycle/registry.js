@@ -125,6 +125,9 @@ export const assertEntity = (name, entity) => {
     bad('idColumn must be lower_snake_case.')
   }
   if (typeof entity.archivable !== 'boolean') bad('archivable must be a boolean.')
+  if (entity.deletable !== undefined && typeof entity.deletable !== 'boolean') {
+    bad('deletable must be a boolean when present.')
+  }
   if (typeof entity.label !== 'string' || entity.label === '') {
     bad('label must be a non-empty string.')
   }
@@ -315,6 +318,23 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     archivable: true,
     probes: [],
   },
+
+  // Present ONLY so setArchived can reach it — an order is never hard-deletable.
+  // CASCADE would take its lines with it; the delete would not release
+  // qty_reserved, permanently corrupting stock; and the row carries
+  // xero_invoice_ref and stripe_session_id, which are the audit trail. Absence
+  // from this registry is the normal protection (requireEntity throws on an
+  // unknown name), so order_lines, webhook_events, trade applications, trade
+  // accounts and every legacy_* table need no entry at all; `deletable: false`
+  // exists for the one entity that has to be here for another reason.
+  order: {
+    table: 'orders',
+    idColumn: 'id',
+    label: 'order',
+    archivable: true,
+    deletable: false,
+    probes: [],
+  },
 })
 
 /** Every registered entity name, for tests and route registration. */
@@ -333,6 +353,25 @@ export const requireEntity = (entityName) => {
     throw new Error(
       `Unknown lifecycle entity "${entityName}". ` +
         `Known: ${LIFECYCLE_ENTITY_NAMES.join(', ')}.`
+    )
+  }
+  return entity
+}
+
+/**
+ * Look an entity up for a hard delete. Same contract as `requireEntity`, and
+ * additionally refuses an entity marked `deletable: false` — those are in the
+ * registry so `setArchived` can reach them, and a DELETE route registered
+ * against one would be a wiring mistake that no request should be able to make.
+ *
+ * @param {string} entityName
+ * @returns {object}
+ */
+export const requireDeletableEntity = (entityName) => {
+  const entity = requireEntity(entityName)
+  if (entity.deletable === false) {
+    throw new Error(
+      `Lifecycle entity "${entityName}" is never hard-deletable; archive it instead.`
     )
   }
   return entity

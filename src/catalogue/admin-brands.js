@@ -14,6 +14,7 @@
 // rethrowConflict) so both halves of the catalogue behave identically.
 
 import { slugify } from '../seed/slugify.js'
+import { setArchived } from '../lifecycle/archive.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -356,16 +357,13 @@ export const updateCollection = async (pool, id, input) => {
  * @returns {Promise<object>}
  */
 export const setBrandArchived = async (pool, id, archived) => {
-  const { rows } = await pool.query(
-    `UPDATE brands SET archived_at = ${archived ? 'now()' : 'NULL'}
-      WHERE id = $1
-      RETURNING ${BRAND_COLUMNS}`,
-    [id]
-  )
-  if (rows.length === 0) {
+  const row = await setArchived(pool, 'brand', id, archived, {
+    returning: BRAND_COLUMNS,
+  })
+  if (!row) {
     throw httpError(404, `Brand ${id} not found.`)
   }
-  return toBrand(rows[0])
+  return toBrand(row)
 }
 
 /**
@@ -378,15 +376,16 @@ export const setBrandArchived = async (pool, id, archived) => {
  * @returns {Promise<object>}
  */
 export const setCollectionArchived = async (pool, id, archived) => {
-  const { rows } = await pool.query(
-    `UPDATE collections c SET archived_at = ${archived ? 'now()' : 'NULL'}
-       FROM brands b
-      WHERE c.id = $1 AND b.id = c.brand_id
-      RETURNING c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.archived_at, b.name AS brand_name`,
-    [id]
-  )
-  if (rows.length === 0) {
+  // The join is here only to decorate the projection with the house name, which
+  // toCollection needs; it is not part of the write.
+  const row = await setArchived(pool, 'collection', id, archived, {
+    alias: 'c',
+    from: 'FROM brands b',
+    filter: 'AND b.id = c.brand_id',
+    returning: `c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.archived_at, b.name AS brand_name`,
+  })
+  if (!row) {
     throw httpError(404, `Collection ${id} not found.`)
   }
-  return toCollection(rows[0])
+  return toCollection(row)
 }

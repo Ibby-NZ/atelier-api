@@ -95,3 +95,50 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
     clears `show_on_website`.
 - **Needs human verification:** none. Nothing is wired to a route or a screen yet.
 ---
+
+## 2026-08-06T01:15:05Z - W1-US-002 - setArchived replaces the eight duplicated archive helpers
+
+- Added `setArchived(db, entityName, id, archived, options)` and pointed all eight archive helpers at
+  it. Each keeps its own thin wrapper and its own return shape (three different conventions survive:
+  throw 404 / return null / re-fetch through a joined read model), because that is what the callers'
+  existing tests assert. `withOrderTxn` and its terminal-state guard are untouched — the order
+  helper now passes its transaction's `client` into `setArchived` instead of running its own UPDATE.
+- Repos and files changed — atelier-api only:
+  - `src/lifecycle/archive.js` (new) — `setArchived`.
+  - `src/lifecycle/registry.js` — added the `order` entry (`archivable: true, deletable: false`),
+    a `deletable` check in `assertEntity`, and `requireDeletableEntity`.
+  - `src/lifecycle/delete.js` — `deleteOrExplain` now resolves through `requireDeletableEntity`.
+  - The eight callers, UPDATE fragment only: `src/catalogue/admin-brands.js` (brand, collection),
+    `src/catalogue/admin-products.js` (product, colourway), `src/pricing/admin-price-lists.js`,
+    `src/orders/admin-orders.js`, `src/users/admin-users.js`, `src/contact/contact.js`.
+  - `test/lifecycle-archive.test.js` (new) — 7 tests, for the helper's own contract only.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (38 files, 577 tests; was 570, +7). **No existing test
+  file was modified** (`git diff --name-only -- test/` is empty) — that is the move-not-rewrite proof
+  the story asks for.
+- **Learnings:**
+  - **`order` had to enter the registry for archiving, and must never be deletable.** architecture.md
+    lists orders among the never-hard-deletable entities, but `setArchived` is keyed on the registry,
+    so the entry has to exist. Hence `deletable: false` and `requireDeletableEntity`, which
+    `deleteOrExplain` (and only `deleteOrExplain`) resolves through. **The normal protection is
+    ABSENCE** — `requireEntity` throws on an unknown name, so order_lines, webhook_events, trade
+    applications, trade accounts and every `legacy_*` table need no entry at all. Only add
+    `deletable: false` for an entity that has to be in the registry for some other reason.
+  - The real duplication was four lines, not a function: the `now()`/`NULL` fragment, the WHERE on
+    the id column, the RETURNING projection and "no row means unknown id". Everything else differed
+    per caller. Two callers need extra SET fragments (`products` clears `show_on_website` when
+    archiving but NOT when restoring; `price_list_items` stamps `updated_at`), and `collections`
+    needs an `UPDATE … FROM brands` join purely to decorate the RETURNING with the house name — so
+    `setArchived` takes `extraSets`, `alias`, `from`, `filter` and `returning`, all frozen code
+    literals in the same posture as `buildUpdate`'s column whitelists.
+  - `price_list_items` was the one helper using a parameterised `CASE WHEN $2::boolean` instead of
+    the literal fragment. It now matches the other seven; `archived` is a trusted boolean argument,
+    never user input, which is what makes switching the fragment on it safe.
+  - `setArchived` takes `db`, not `pool`, so it works with an open client. That is load-bearing for
+    the order helper: the terminal-state guard and the write must be the same transaction or a
+    concurrent transition slips between them.
+  - Every column constant used as a RETURNING projection (`BRAND_COLUMNS`, `ROW_COLUMNS`,
+    `USER_READ_COLUMNS`, `ENQUIRY_COLUMNS`) is UNQUALIFIED, so it only works while the statement has
+    no alias. The collection wrapper passes a fully qualified projection because it does.
+- **Needs human verification:** none. Behaviour is unchanged by construction; the existing
+  archive/restore suites are the evidence.
+---

@@ -33,7 +33,7 @@
 // along with staying an honest 409 rather than a 500 if someone adds a RESTRICT
 // FK and forgets the registry entry.
 
-import { requireEntity } from './registry.js'
+import { requireDeletableEntity } from './registry.js'
 
 // Each probe runs LIMIT 101 and anything past PROBE_CAP is reported as
 // "100, capped". Answering "is there any?" must not mean counting 19,000 rows.
@@ -196,7 +196,7 @@ const runDelete = async (client, entity, entityName, id, ctx) => {
  * >}
  */
 export const deleteOrExplain = async (pool, entityName, id, ctx = {}) => {
-  const entity = requireEntity(entityName)
+  const entity = requireDeletableEntity(entityName)
   const client = await pool.connect()
   try {
     await client.query('BEGIN')

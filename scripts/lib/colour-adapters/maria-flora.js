@@ -13,6 +13,8 @@
  * one thing that must not happen.
  */
 
+import { skip } from './rates.js'
+
 const HOUSES = Object.freeze({ mariaflora: 'Maria Flora' })
 
 /**
@@ -30,9 +32,76 @@ const mariaFloraRecord = (values) => ({
   colourName: values.colourName,
 })
 
+/**
+ * The rate side: one sheet, two houses, and the two are separate SUPPLIERS.
+ *
+ * The price list files them apart — 125 rows under "Maria Flora" and 63 under
+ * "Filippo Uecher", both keyed on the pattern number this sheet calls `Item
+ * Number` — so the rate takes its supplier from the same declared alias the
+ * brand comes from. A spelling the table does not carry falls back to the
+ * drop's supplier rather than opening a supplier of its own.
+ *
+ * `Collection` is what says whether a row is a fabric: the sheet holds
+ * wallcoverings (81 rows), trims (44), rugs (30) and throws (16) beside its
+ * 1,270 fabrics, and nothing else in the row distinguishes them.
+ */
+const SUPPLIERS = Object.freeze({ mariaflora: 'Maria Flora', 'filippo uecher': 'Filippo Uecher' })
+
+const ITEM_TYPES = Object.freeze({
+  wallcoverings: 'Wallpaper',
+  trims: 'Trimmings',
+  rugs: 'Accessories',
+  throws: 'Accessories',
+})
+
+/** `sqm` is a square metre, which the template has no pack type for. */
+const PACKS = Object.freeze({ m: 'p/m', pc: 'p/p' })
+
+const mariaFloraRate = (values) => {
+  const packType = PACKS[values.unit.toLowerCase()]
+  if (packType === undefined) {
+    return skip(`sold by "${values.unit}", which no template pack type covers`)
+  }
+  const house = values.brand.toLowerCase()
+  return {
+    supplier: SUPPLIERS[house] ?? undefined,
+    brand: HOUSES[house] ?? values.brand,
+    code: values.code,
+    description: values.design,
+    productRange: values.collection,
+    itemType: ITEM_TYPES[values.collection.toLowerCase()] ?? 'Fabrics',
+    packType,
+    contents: values.contents,
+    width: values.width,
+    repeat: values.repeat,
+    verticalRepeat: values.verticalRepeat,
+    wholesale: values.wholesale,
+  }
+}
+
 export const MARIA_FLORA = Object.freeze({
   prefix: 'Maria Flora',
   supplier: 'Maria Flora',
+  rateSheets: Object.freeze([
+    Object.freeze({
+      name: 'Foglio1',
+      brand: 'Maria Flora',
+      currency: 'Euro',
+      columns: Object.freeze({
+        code: 'Item Number (pattern + Color)',
+        design: 'Product Name',
+        brand: 'Brand',
+        collection: 'Collection',
+        unit: 'Unit of Measure',
+        wholesale: 'Price',
+        contents: 'Composition',
+        width: 'Width (cm)',
+        repeat: 'Horizontal Repeat (cm)',
+        verticalRepeat: 'Vertical Repeat (cm)',
+      }),
+      row: mariaFloraRate,
+    }),
+  ]),
   sheets: Object.freeze([
     Object.freeze({
       name: 'Foglio1',

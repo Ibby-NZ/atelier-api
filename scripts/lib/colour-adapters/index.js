@@ -19,6 +19,7 @@
  */
 import { normaliseLabel } from '../colour-sheet.js'
 import { RECORD_FIELDS, REQUIRED_COLUMNS } from './records.js'
+import { assertRateSheet } from './rates.js'
 import { CC_MILANO } from './cc-milano.js'
 import { COLEFAX } from './colefax.js'
 import { DE_LE_CUONA } from './de-le-cuona.js'
@@ -83,6 +84,9 @@ export const assertAdapter = (adapter) => {
   if (adapter.unsupported !== undefined) {
     if (!isText(adapter.unsupported)) throw new Error(`${at}: unsupported must state a reason`)
     if (adapter.sheets !== undefined) throw new Error(`${at}: unsupported and sheets are exclusive`)
+    if (adapter.rateSheets !== undefined) {
+      throw new Error(`${at}: unsupported and rateSheets are exclusive`)
+    }
     return adapter
   }
   if (!isText(adapter.supplier)) throw new Error(`${at}: supplier must be a non-empty string`)
@@ -90,6 +94,14 @@ export const assertAdapter = (adapter) => {
     throw new Error(`${at}: sheets must be a non-empty array`)
   }
   for (const sheet of adapter.sheets) assertSheet(sheet, at)
+  // The rate sheets are declared apart from the colourway ones and validated
+  // against the price template's own vocabularies — see rates.js.
+  if (adapter.rateSheets !== undefined) {
+    if (!Array.isArray(adapter.rateSheets) || adapter.rateSheets.length === 0) {
+      throw new Error(`${at}: rateSheets must be a non-empty array`)
+    }
+    for (const sheet of adapter.rateSheets) assertRateSheet(sheet, at)
+  }
   return adapter
 }
 

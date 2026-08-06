@@ -71,6 +71,31 @@ Story-specific detail belongs in the per-story entries below, not here.
 - **A converter whose output lands in its own input directory must filter directories out of the
   walk.** `readdirSync(dir, { withFileTypes: true })` + `isFile()`: otherwise the second run meets
   the `normalized/` directory it wrote and reports it as a drop nobody has mapped.
+- **A second output belongs in a shape the office already ratified, not in one of its own.** The
+  colour files are price lists too, and `scripts/lib/price-template.js` already defines what a
+  supplier rate looks like — so the rate output IS the v2 template (a CSV with its header row),
+  which puts it through `convert-price-lists.js`'s vocabularies, code normalisation, dedupe and
+  importer instead of a second private path. The header is asserted against `matchTemplate` at
+  module load, and every emitted row is run through the template's own mapper before the file is
+  written, so "it is in the template's shape" is a measurement rather than a claim.
+- **A SECTIONED sheet reprints its header with some columns RENAMED, and often SHIFTED.** Liberty's
+  wallpaper section writes `WALLPAPER NAME`/`PAPER TYPE` and inserts `ROLL DIMENSIONS` after the
+  width, so every later cell moves by one; Madeaux relabels its price column per section
+  (`Export/m`, `Export/ Roll`, `Export`). Two consequences: the shared "row repeats the header" rule
+  does not recognise such a row (declare it by the one label that does not change), and no column
+  past the first divergence may be declared at all — a composition read at the wrong index is a
+  repeat measurement filed as a fibre content, which nothing downstream can detect.
+- **The committed price list is the corpus that verifies a whole extraction, not just a code.**
+  Every emitted rate can be looked up by `(supplier, category, code)` in `src/seed/data/
+  price-lists.json`: 14,914 of 15,611 land on a row the office already holds and 10,634 of those
+  are identical to the cent. That turns supplier naming, code grain, category and unit into
+  measurements — and it is how the JV dealer-price factor and Liberty's two price columns were
+  settled. A rule nobody can measure this way is a guess.
+- **`(supplier, category, code)` is a ratified key, so two rates under it are not a clash to report
+  — they are a rate nobody may write.** Unlike a colourway clash (both rows kept, because the SKU's
+  shape is still the import's decision), the ledger holds exactly one row per key. Keeping the
+  first decides silently and keeping both makes the pricing converter refuse the whole file, so the
+  code gets NO rate and every coordinate is printed. 230 of 15,841 codes end up there.
 - **Verify a derivation against the file's own redundancy before shipping it.** Several of these
   sheets decompose a value into extra columns they then leave blank further down (Jean Monro splits
   its item codes across three unlabelled cells for the first 102 rows of one sheet and none of the
@@ -385,4 +410,96 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   3. **Run `npm run convert:colour` once by hand** to create `incoming/colour-files/normalized/` and
      confirm the file lands where the office expects it — this loop deliberately never wrote into
      `incoming/`.
+---
+
+## 2026-08-06T18:10:00Z - W8-US-005 - Rates as a secondary output
+
+- **What was implemented** — the 2026 rates these files carry, written in the office's UNIVERSAL
+  PRICING TEMPLATE rather than in a shape of this pipeline's own:
+  - `scripts/lib/colour-adapters/rate-template.js` (new) — `RATE_HEADER` (the v2 template's
+    eighteen columns as a supplier's own drop spells them), `assertTemplateHeader` running at
+    module load against `matchTemplate`, `rateCells`, `rateKey`, `collectRates`, `verifyRates` and
+    `serialiseRates` (RFC 4180, CRLF).
+  - `scripts/lib/colour-adapters/rates.js` (new) — the rate record, `assertRateSheet` (validating
+    a sheet's declared currency/item type/pack against the SHARED vocabularies in
+    `price-template.js`, so an adapter cannot declare a value the pricing converter would refuse)
+    and `sheetRates`, the reader that classifies every row as a rate, a stated decline or an error.
+  - `reading.js` — one counting loop now serves both passes (`readSheet`, `readRateSheet`,
+    `readColourFile`, `readRateFile`); rows in = entries out + skips + errors, as before.
+  - `index.js` — `rateSheets` is validated at import beside `sheets`, and is exclusive with a
+    declared refusal.
+  - Rate declarations in all twelve adapters: `jean-monro`, `liberty`, `madeaux`, `maria-flora`,
+    `perennials` (×2), `colefax`, `us-houses` (×5), `cc-milano`, `jannelli-volpi` (×9 sheets),
+    `pierre-frey`, `jim-thompson` (three RATE-ONLY sheets — the one file whose colour names and
+    prices never meet).
+  - `scripts/convert-colour-files.js` — reads the rate sheets in a second pass, reports rates in /
+    out / skipped by reason / collapsed / conflicted, verifies every row through the template's own
+    mapper (refusal = write nothing, exit 1), and writes
+    `incoming/colour-files/normalized/rates.csv` beside the colourways. Third CLI argument.
+  - `test/colour-files.test.js` — 72 -> 98 tests.
+- **Repos and files changed** — atelier-api only:
+  `scripts/lib/colour-adapters/{rate-template,rates}.js` (new), `scripts/lib/colour-adapters/
+  {index,reading,cc-milano,colefax,jannelli-volpi,jean-monro,jim-thompson,liberty,madeaux,
+  maria-flora,perennials,pierre-frey,us-houses}.js`, `scripts/convert-colour-files.js`,
+  `test/colour-files.test.js`, `CLAUDE.md`. `package.json` needed no change.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 847 tests, 98 in colour-files).
+- **Corpus result** (`node scripts/convert-colour-files.js incoming/colour-files <scratch>.json
+  <scratch>.csv`, exit 0). Colourways unchanged from US-004 (47,082 out, 45,923 written). Rates:
+  **47,608 priced rows in, 15,611 rates out**, 1,822 skipped, 29,397 exact duplicates and 313
+  same-rate repeats collapsed, **230 codes priced more than one way and therefore not written**.
+  Skips by reason are dominated by the units the template has no pack for (JV's books, hangers and
+  shop displays; S Harris's 84 SQFT rows; Maria Flora's 30 sqm) plus 587 C&C Milano sample cuttings.
+- **The whole output was checked against the office's own ledger** (`src/seed/data/
+  price-lists.json`, read as evidence — never written): **14,914 of the 15,611 rates land on a row
+  it already holds under the same supplier, category and code, and 10,634 of those carry the
+  identical rate.** End to end, `node scripts/convert-price-lists.js <dir with rates.csv>
+  <scratch>.json` reads all 15,611 rows with zero errors (30 suppliers) and
+  `validatePriceListItems` accepts every one.
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - The rate pass is separate from the colourway pass and re-opens the sheet. The two want
+      different cells, are grained differently (a rate is usually the design's, a colourway always
+      the colour's), and one file keeps them on different sheets — bending either to the other's
+      shape costs more than the second read does.
+    - Where a file states no unit, the office's own rows for that supplier are the evidence: C&C
+      Milano is unanimous (fabric and trimming by the metre, wallpaper by the roll) and Colefax's
+      four houses are 180/196 roll for wallpaper. Where a file DOES state one, it wins.
+  - Gotchas for the next iteration:
+    - **The JV drop's DEALER PRICE is exactly TWICE what the office's ledger holds** for five of its
+      six houses — 3,939 rows at a ratio of exactly 2.000 (Jannelli Volpi 2,444, Armani Casa 479,
+      Altagamma 446, JV Design 361, JWall 209) — while Missoni's 323 rows match to the cent. The
+      ledger is discount-inclusive (CLAUDE.md), so importing JV's rates as they stand would replace
+      a net cost with a list price. **Do not import them without asking the supplier.** No discount
+      is applied here: inventing one is exactly the placeholder this story forbids.
+    - **Liberty's two sheets price differently and the ledger settles it**: of the 119 designs in
+      both, all 119 agree with `DISTRIBUTOR PRICE` and only the 29 coincidences agree with `PRICE £
+      EX VAT`. Only `Sheet1` is a rate sheet; the 19 designs that appear solely in "Sheet1 (2)"
+      carry no distributor price and get no rate.
+    - **43 rows would change a unit the office already recorded** (Colefax 12, Liberty 11, Manuel
+      Canovas 6, Pierre Frey 5, Larsen 4, Vervain 4, S Harris 1): the ledger's minority cases —
+      a wallpaper by the metre, a trimming by the piece — which these files give no way to tell
+      apart because they state no unit at all. The upsert would overwrite them.
+    - `rates.csv` is written beside `colourways.json` and is NOT dropped into
+      `incoming/pricing-templates/` by anything here. Copying it there and running
+      `npm run convert:pricing` regenerates the committed `src/seed/data/price-lists.json` — an
+      8 MB diff and a deliberate decision, not a step this converter takes.
+    - A sheet with a `row` mapper must still declare a `wholesale` column; where a file prices two
+      ways (Perennials' yard/roll, Jim Thompson's metre/selling-unit), `wholesale` is the common
+      case and the mapper reaches for the other column by name.
+  - Context: the emitted shape `scripts/lib/colour-adapters/rate-template.js`, the reader
+    `rates.js`, the per-file pass `reading.js`, the declarations in each adapter module, the driver
+    `scripts/convert-colour-files.js`, tests `test/colour-files.test.js`.
+- **Needs human verification:** no screen, route or table is touched — this story writes a second
+  file and prints a report. Four things a person must settle, on top of US-002's three, US-003's
+  four and US-004's three:
+  1. **Jannelli & Volpi's rates must not be imported as they stand.** The file's DEALER PRICE is
+     exactly double the office's own figure for five of its six houses. Ask JV (or the office)
+     whether a 50% distributor discount applies before those 4,285 rows go anywhere.
+  2. **CO.DE and JV Fabrics quote a PUBLIC price** — those two sheets carry no dealer column at all
+     — so 285 of those rows are a list price sitting in a wholesale column. Confirm with the
+     supplier.
+  3. **The 43 rows whose unit disagrees with the ledger** (listed above). Somebody has to say
+     whether a Larsen wallcovering is sold by the roll or by the metre; the file does not.
+  4. **Madeaux's 13 grasscloth wallpapers state two rates in one cell** ("£35/m" and "£350/roll"),
+     so none is written. Which one does the office buy at?
 ---

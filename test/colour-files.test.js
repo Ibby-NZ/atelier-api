@@ -10,10 +10,19 @@ import {
   colourways, sheetColourways, sheetReadings, skip,
   BLANK_ROW, REPEATED_HEADER, UNSTATED,
 } from '../scripts/lib/colour-adapters/records.js'
-import { readSheet, readColourFile } from '../scripts/lib/colour-adapters/reading.js'
+import { readSheet, readColourFile, readRateSheet } from '../scripts/lib/colour-adapters/reading.js'
 import {
   colourwayRow, collectColourways, serialiseColourways, rowSource,
 } from '../scripts/lib/colour-adapters/output.js'
+import {
+  assertRateSheet, stated, NO_RATE, ZERO_RATE,
+} from '../scripts/lib/colour-adapters/rates.js'
+import {
+  RATE_HEADER, RATE_TEMPLATE, assertTemplateHeader, rateCells, collectRates,
+  serialiseRates, verifyRates,
+} from '../scripts/lib/colour-adapters/rate-template.js'
+import { matchTemplate } from '../scripts/lib/price-template.js'
+import { csvRows } from '../scripts/lib/text.js'
 import { openZip } from '../scripts/lib/zip.js'
 
 // The colour-file corpus lives under incoming/, which is gitignored — it is the
@@ -1395,5 +1404,495 @@ describe('colour-files — the normalised output', () => {
     expect(text.split('\n')).toHaveLength(5)
     expect(JSON.parse(text)).toEqual(rows)
     expect(JSON.parse(serialiseColourways([]))).toEqual([])
+  })
+})
+
+// The 2026 rates these files carry, emitted in the office's universal pricing
+// template. `RATE` below is one S. Harris row as the reader produces it, and is
+// what most of these assertions are built from.
+const RATE = Object.freeze({
+  supplier: 'S Harris',
+  brand: 'S. Harris',
+  code: '22042',
+  description: 'A LA CARTE',
+  productRange: 'PARADIGM',
+  itemType: 'Fabrics',
+  packType: 'p/y',
+  contents: '75% Viscose',
+  width: '57',
+  repeat: '28.62',
+  verticalRepeat: '41.25',
+  patternMatch: '',
+  wholesale: '75.2',
+  currency: 'US Dollar',
+  dateEffective: '02/02/2026',
+  dutyRate: '',
+  freightRate: '',
+  dutyPercent: '',
+  sourceFile: 'S Harris 2026 Price List.xlsx',
+  sourceSheet: 'All Colors',
+  sourceRow: 105,
+})
+
+/** Every rate ONE declared rate sheet yields, off the registry's own spec. */
+const ratesOf = (file, name, rows, flavour = 'excel') => {
+  const adapter = matchAdapter(file)
+  const spec = adapter.rateSheets.find((sheet) => sheet.name === name)
+  expect(spec, `${file} declares no rate sheet ${name}`).toBeDefined()
+  const workbook = openColourWorkbook(buildWorkbook([{ name, rows }], flavour), file)
+  return readRateSheet(workbook, spec, adapter.supplier)
+}
+
+/** One rate as its template cells, keyed by column, so a failure reads plainly. */
+const cellsByColumn = (rate) =>
+  Object.fromEntries(RATE_HEADER.map((label, index) => [label, rateCells(rate)[index]]))
+
+describe('colour-rates — the emitted shape IS the pricing template', () => {
+  it('matches a registered template exactly, and it is v2', () => {
+    expect(RATE_TEMPLATE.version).toBe('v2')
+    expect(matchTemplate([...RATE_HEADER])).toBe(RATE_TEMPLATE)
+    expect(RATE_HEADER).toHaveLength(18)
+  })
+
+  it('fails at import if the header ever stops matching a template', () => {
+    expect(() => assertTemplateHeader(['Date Effective', 'Code']))
+      .toThrow(/matches no registered price template/)
+  })
+
+  it('writes each field into its own column, and nothing into the three no file fills', () => {
+    expect(cellsByColumn(RATE)).toEqual({
+      'Date Effective': '02/02/2026',
+      'Product Range': 'PARADIGM',
+      Code: '22042',
+      Description: 'A LA CARTE',
+      'Item Type': 'Fabrics',
+      'Pack Type': 'p/y',
+      Contents: '75% Viscose',
+      Width: '57',
+      Repeat: '28.62',
+      'Vertical Repeat': '41.25',
+      // Nothing is invented into these three. The broker's duty table and the
+      // freight class table are still owed, and a placeholder written here
+      // would be indistinguishable from a rate a supplier quoted.
+      'Duty Rate': '',
+      'Wholesale Rate': '75.2',
+      Currency: 'US Dollar',
+      'Freight Rate': '',
+      Supplier: 'S Harris',
+      Brand: 'S. Harris',
+      'Pattern Match': '',
+      'Duty Percent': '',
+    })
+  })
+
+  it('quotes a cell that carries a comma, a quote or a newline', () => {
+    const awkward = { ...RATE, description: 'A LA CARTE, "PAINT"', contents: 'Linen\nCotton' }
+    const lines = serialiseRates([awkward]).split('\r\n')
+    expect(lines[0]).toBe(RATE_HEADER.join(','))
+    expect(lines[1]).toContain('"A LA CARTE, ""PAINT"""')
+    expect(lines[1]).toContain('"Linen\nCotton"')
+  })
+
+  it("round-trips through the office's own converter, cell for cell", () => {
+    // The strongest thing this story can assert: what the converter writes is
+    // read back by lib/price-template.js itself, not by a copy of its rules.
+    const rows = [...csvRows(serialiseRates([RATE]))]
+    const template = matchTemplate(rows[0][1])
+    expect(template.version).toBe('v2')
+    const errors = []
+    const skipped = []
+    const item = template.map(rows[1][1], {
+      lineNumber: 2,
+      source: 'rates.csv',
+      supplier: null,
+      fileCategory: null,
+      isXlsx: false,
+      errors,
+      skipped,
+    })
+    expect(errors).toEqual([])
+    expect(item).toMatchObject({
+      supplier: 'S Harris',
+      category: 'fabric',
+      code: '22042',
+      unit: 'yard',
+      currency: 'USD',
+      wholesale_rate: 75.2,
+      date_effective: '2026-02-02',
+      brand_name: 'S. Harris',
+      duty_class: null,
+      freight_class: null,
+      duty_percent: null,
+      template_version: 'v2',
+    })
+  })
+
+  it('proves every emitted row maps, and names the one that does not', () => {
+    expect(verifyRates([RATE])).toEqual([])
+    // A pack outside the shared vocabulary can only be built by hand — the
+    // registry rejects a sheet that declares one — and this is the check that
+    // would catch it before the office met it.
+    expect(verifyRates([{ ...RATE, packType: 'p/bolt' }]))
+      .toEqual(['S Harris 2026 Price List.xlsx:All Colors:105: unmappable pack type "p/bolt"'])
+  })
+})
+
+describe('colour-rates — what a rate sheet must declare', () => {
+  const sheet = (fields) => ({
+    name: 'All Colors', brand: 'S. Harris', currency: 'US Dollar', ...fields,
+  })
+  const columns = { wholesale: 'US Export Net Price' }
+  const at = 'adapter "X"'
+
+  it('accepts a sheet whose constants are all in the shared vocabularies', () => {
+    const valid = sheet({ itemType: 'Fabrics', packType: 'p/y', columns })
+    expect(assertRateSheet(valid, at)).toBe(valid)
+  })
+
+  it('rejects a constant the price template would refuse', () => {
+    expect(() => assertRateSheet(sheet({ currency: 'Kina', columns }), at))
+      .toThrow(/declares currency "Kina", which no template cell may say/)
+    expect(() => assertRateSheet(sheet({ itemType: 'Rugs', columns }), at))
+      .toThrow(/declares item type "Rugs", which maps to no category/)
+    expect(() => assertRateSheet(sheet({ packType: 'p/bolt', columns }), at))
+      .toThrow(/declares pack type "p\/bolt", which maps to no unit/)
+  })
+
+  it('rejects a sheet that could not produce a rate at all', () => {
+    expect(() => assertRateSheet(sheet({ columns: {} }), at)).toThrow(/declares no columns/)
+    expect(() => assertRateSheet(sheet({ columns: { code: 'Code' } }), at))
+      .toThrow(/declares no "wholesale" column/)
+    expect(() => assertRateSheet(sheet({
+      columns: { ...columns, price: 'US EXPORT NET PRICE' },
+    }), at)).toThrow(/both declare "us export net price"/)
+    expect(() => assertRateSheet(sheet({
+      columns: { ...columns, unit: 'Unit of Measure' },
+    }), at)).toThrow(/no row mapper, so column\(s\) "unit" name nothing a rate carries/)
+    expect(() => assertRateSheet(sheet({ columns, row: 'not a function' }), at))
+      .toThrow(/row must be a function/)
+  })
+
+  it('holds for every rate sheet in the registry', () => {
+    const declared = ADAPTERS.filter((adapter) => adapter.rateSheets !== undefined)
+    expect(declared.length).toBeGreaterThan(10)
+    for (const adapter of declared) {
+      for (const spec of adapter.rateSheets) {
+        expect(() => assertRateSheet(spec, adapter.prefix)).not.toThrow()
+      }
+    }
+  })
+})
+
+describe('colour-rates — a row with no usable rate is skipped and counted', () => {
+  const FILE = 'Jean Monro Ltd Distributor 2026.xlsx'
+  const ROWS = [
+    ['CODE', 'DESCRIPTION', 'PRICE 2026', 'COMPOSITION', 'WIDTH CM', 'VERT REPEAT CM',
+      'HORI REPEAT CM', 'UNIT OF MEASURE', 'TYPE'],
+    ['JM-1409', 'AGATA, celery', '73.5', '88LI 12NY', '140', '11.5', '22.86', 'METRE', 'FABRIC'],
+    // Nothing stated, "N/A" and a zero are three ways of saying the same thing,
+    // and none of them may reach the ledger as a rate of nothing.
+    ['JM-1410', 'AGATA, dove', '', '88LI 12NY', '140', '11.5', '22.86', 'METRE', 'FABRIC'],
+    ['JM-1411', 'AGATA, ash', 'N/A', '88LI 12NY', '140', '11.5', '22.86', 'METRE', 'FABRIC'],
+    ['JM-1412', 'AGATA, slate', '0', '88LI 12NY', '140', '11.5', '22.86', 'METRE', 'FABRIC'],
+  ]
+
+  it('counts each kind of unpriced row by name and emits none of them', () => {
+    const reading = ratesOf(FILE, 'JM', ROWS)
+    expect(reading.rows).toBe(4)
+    expect(reading.records).toBe(1)
+    expect(reading.entries[0].code).toBe('JM-1409')
+    expect(Object.fromEntries(reading.skips)).toEqual({ [NO_RATE]: 2, [ZERO_RATE]: 1 })
+    // Exhaustive, which is what makes the summary worth reading at all.
+    expect(reading.rows).toBe(reading.records + 3 + reading.errors.length)
+  })
+
+  it('treats a rate that is not a number as a row it cannot map, not as a decline', () => {
+    const rows = ROWS.map((row) => (row[0] === 'JM-1410' ? [row[0], row[1], 'POA', ...row.slice(3)] : row))
+    const reading = ratesOf(FILE, 'JM', rows)
+    expect(reading.errors).toEqual([`${FILE}:JM:3: unusable rate "POA"`])
+  })
+
+  it('reads "N/A" in any cell as the supplier stating nothing', () => {
+    expect(stated('N/A')).toBe('')
+    expect(stated(' n/a ')).toBe('')
+    expect(stated('-')).toBe('')
+    expect(stated(' 140 ')).toBe('140')
+  })
+})
+
+describe('colour-rates — one row per ledger key', () => {
+  const rate = (fields) => ({ ...RATE, ...fields })
+
+  it('drops an exact repeat', () => {
+    const { records, duplicates, collapsed, conflicts } = collectRates([RATE, rate({})])
+    expect(records).toEqual([RATE])
+    expect(duplicates).toBe(1)
+    expect(collapsed).toBe(0)
+    expect(conflicts).toEqual([])
+  })
+
+  it("collapses a design's colourway rows onto its rate", () => {
+    // Same key, same money, a cell belonging to the colourway differs. The
+    // ledger holds one row per key, so both cannot be written.
+    const { records, duplicates, collapsed } = collectRates([
+      RATE, rate({ productRange: 'ANOTHER BOOK', sourceRow: 106 }),
+    ])
+    expect(records).toEqual([RATE])
+    expect(duplicates).toBe(0)
+    expect(collapsed).toBe(1)
+  })
+
+  it('writes NO rate for a code the file prices two ways', () => {
+    const { records, conflicts } = collectRates([RATE, rate({ wholesale: '80.4', sourceRow: 106 })])
+    expect(records).toEqual([])
+    expect(conflicts).toEqual([
+      'S Harris 22042: 75.2 US Dollar per p/y from 02/02/2026 at '
+      + 'S Harris 2026 Price List.xlsx:All Colors:105 vs '
+      + '80.4 US Dollar per p/y from 02/02/2026 at S Harris 2026 Price List.xlsx:All Colors:106',
+    ])
+  })
+
+  it('keeps two codes that differ only by category apart', () => {
+    const trimming = rate({ itemType: 'Trimmings', wholesale: '9' })
+    const { records, conflicts } = collectRates([RATE, trimming])
+    expect(records).toEqual([RATE, trimming])
+    expect(conflicts).toEqual([])
+  })
+})
+
+describe('colour-rates — the adapters', () => {
+  it('prices Jean Monro by the colourway and Nicky Haslam by the design', () => {
+    // The price list keys "Jean Monro" on JM-1409, one row per colourway, and
+    // "Nicky Haslam" on NH-AFTERALLTOO, one per design — and files the second
+    // house as a supplier of its own, which is why the rate says so.
+    const FILE = 'Jean Monro Ltd Distributor 2026.xlsx'
+    const jm = ratesOf(FILE, 'JM', [
+      ['CODE', 'DESCRIPTION', 'PRICE 2026', 'COMPOSITION', 'WIDTH CM', 'VERT REPEAT CM',
+        'HORI REPEAT CM', 'UNIT OF MEASURE', 'TYPE'],
+      ['JM-1409', 'AGATA, celery', '73.5', '88LI 12NY', '140', '11.5', '22.86', 'METRE', 'FABRIC'],
+      ['JM-2001', 'ALTHEA, rose', '96', '100CO', '68', '32', '', 'ROLL', 'WALLPAPER'],
+    ])
+    expect(jm.entries.map((entry) => [entry.supplier, entry.code, entry.itemType, entry.packType]))
+      .toEqual([
+        ['Jean Monro', 'JM-1409', 'Fabrics', 'p/m'],
+        ['Jean Monro', 'JM-2001', 'Wallpaper', 'p/roll'],
+      ])
+    const nh = ratesOf(FILE, 'NH', [
+      ['CODE', 'DESCRIPTION', 'PRICE 2026', 'COMPOSITION', 'WIDTH CM', 'VERT REPEAT CM',
+        'HORI REPEAT CM', 'UNIT OF MEASURE', 'TYPE'],
+      ['NH-AFTERALLTOO-1', 'New-mown Green', '64', '100LI', '138', '3.4', '', 'METRE', 'FABRIC'],
+      ['NH-AFTERALLTOO-2', 'Haystack Yellow', '64', '100LI', '138', '3.4', '', 'METRE', 'FABRIC'],
+    ])
+    // The description has to be the design's too: the row's own would be the
+    // colour, which differs on every row and would turn one rate into six.
+    expect(nh.entries.map((entry) => [entry.supplier, entry.code, entry.description])).toEqual([
+      ['Nicky Haslam', 'NH-AFTERALLTOO', 'AFTERALLTOO'],
+      ['Nicky Haslam', 'NH-AFTERALLTOO', 'AFTERALLTOO'],
+    ])
+    expect(collectRates(nh.entries).records).toHaveLength(1)
+  })
+
+  it("takes Liberty's distributor price and declares nothing past the width", () => {
+    // The wallpaper section reprints the header with `ROLL DIMENSIONS` inserted
+    // after the width, so every later cell is shifted by one — a composition
+    // read at the wrong index would be a repeat filed as a fibre content.
+    const reading = ratesOf('Liberty All collections T3 GBP- 2026.xlsx', 'Sheet1', [
+      ['TYPE', 'COLLECTION', 'FABRIC NAME', 'COLOUR', 'CODE', 'FABRIC TYPE', 'DISTRIBUTOR PRICE',
+        'WIDTH cm / inch', 'VERT REPEAT cm / inch'],
+      ['FABRIC', 'ART COLOURS', 'BENMORE', 'SLIPPER', '08322201L', 'BENMORE', '33',
+        "143 cm/56.2''", 'N/A'],
+      ['', 'WALLPAPER', '-', '-', '-', '-', '-', '-', '-'],
+      ['', 'COLLECTION', 'WALLPAPER NAME', 'COLOUR', 'CODE', 'PAPER TYPE', 'DISTRIBUTOR PRICE',
+        'WIDTH cm / Inch', 'ROLL DIMENSIONS'],
+      ['WALLPAPER', 'BOTANICAL ATLAS', 'BERRY TREE', 'INK', '07282201D', 'NON-WOVEN', '39',
+        '52 cm/ 20.5"', '52 cm x 10.05 Mt'],
+    ])
+    expect(reading.entries.map((entry) =>
+      [entry.code, entry.itemType, entry.packType, entry.wholesale])).toEqual([
+      ['08322201', 'Fabrics', 'p/m', '33'],
+      ['07282201', 'Wallpaper', 'p/roll', '39'],
+    ])
+    expect(Object.fromEntries(reading.skips)).toEqual({
+      'section banner': 1,
+      "a section's own header row": 1,
+    })
+  })
+
+  it("reads Madeaux's sections out of the row, and declines its two-rate cell", () => {
+    const reading = ratesOf('Madeaux UK Export price list.xlsx', 'UK Export', [
+      ['FABRICS'],
+      ['Design Name', 'Colours', 'Trade/m\nEx VAT', 'Export/m', 'Composition & Colours',
+        'Width CM', 'Repeat CM'],
+      ['ALLEGRIA', '01 - 03', '78', '54.6', '100% Linen\nColours: 01 Stone, 02 Straw', '129.5',
+        '84V x 42H'],
+      ['LINEN RUCHE', '01 Charcoal', '28.5', '19.95', '99% LI/1% PL', 'Fringe 38mm'],
+      ['WALLPAPERS'],
+      ['Design Name', 'Colours', 'Trade/ Roll\nEx VAT', 'Export/ Roll', 'Composition & Colours',
+        'Roll Length & Width', 'Repeat (CM)'],
+      ['ACANTHE', '01 - 02', '156', '109.2', 'Non-Woven Paper\nColours: 01 Jadeite', '10m x 52cm',
+        '47.4V x 52H'],
+      ['AUDREY GRASSCLOTH', '01 - 05', '£50/m\n£500/roll', '£35/m\n£350/roll',
+        'Grasscloth\nColours: 01 Pigeon', '10m x 85cm', '1H'],
+    ])
+    expect(reading.entries.map((entry) =>
+      [entry.code, entry.itemType, entry.packType, entry.wholesale])).toEqual([
+      ['ALLEGRIA', 'Fabrics', 'p/m', '54.6'],
+      // A composition naming no colours is a trimming; the three of them put
+      // their colour in the `Colours` cell instead.
+      ['LINEN RUCHE', 'Trimmings', 'p/m', '19.95'],
+      ['ACANTHE', 'Wallpaper', 'p/roll', '109.2'],
+    ])
+    expect(Object.fromEntries(reading.skips)).toEqual({
+      'section banner or note': 1,
+      "a section's own header row": 1,
+      'two rates stated in one cell': 1,
+    })
+  })
+
+  it("reads Jim Thompson's rates off the sheets its colour names are not on", () => {
+    const FILE = 'Jim Thompson Export Price List_USD_2026.xlsx'
+    const fabric = ratesOf(FILE, 'FABRIC', [
+      ['ARTICLE CODE', 'ARTICLE NAME', 'BRAND', 'EXPORT USD 2026 (PER METRE)', 'SELLING UNIT',
+        'CONTENTS', 'PATTERN REPEAT'],
+      ['JT013998001', 'WOODLAND VOYAGE', 'JIM THOMPSON', '39', 'METRE', '100% LINEN',
+        'STRAIGHT MATCH'],
+      ['FL010101001', 'KEMPSFORD', 'FOX LINTON', '256', 'METRE', '100% WOOL', ''],
+      ['JT099001001', 'PANEL SET', 'JIM THOMPSON', '', 'PRICE PER SET (1 SET = 2 PANELS)', '', ''],
+      ['', 'PTO = Print to Order'],
+    ])
+    expect(fabric.entries.map((entry) => [entry.supplier, entry.code, entry.wholesale])).toEqual([
+      ['Jim Thompson', 'JT013998', '39'],
+      // The price list files Fox Linton as a supplier of its own.
+      ['Fox Linton', 'FL010101', '256'],
+    ])
+    expect(Object.fromEntries(fabric.skips)).toEqual({
+      'sold as a set of panels, which no template pack type covers': 1,
+      'note under the table': 1,
+    })
+
+    const wallpaper = ratesOf(FILE, 'WALLPAPER', [
+      ['ARTICLE CODE', 'ARTICLE NAME', 'BRAND', 'EXPORT USD 2026 (BY METRE)',
+        'EXPORT USD BY 2026 (SELLING UNIT)', 'SELLING UNIT', 'GROUND/SUBSTRATE', 'PATTERN MATCH',
+        'WIDTH (CM)'],
+      ['JT021099001', 'WOODLAND VOYAGE', 'JIM THOMPSON', '33', '33',
+        'PRICE PER METRE: 3 METRES MINIMUM', 'NON-WOVEN', 'STRAIGHT MATCH', '150'],
+      ['JT021100001', 'ARAN MURAL', 'JIM THOMPSON', '183', '29.04',
+        'PRICE PER ROLL (6.3m - 2 Panels)', 'NON-WOVEN', 'STRAIGHT MATCH', '150'],
+    ])
+    // A roll row is priced by the selling unit, a metre row by the metre.
+    expect(wallpaper.entries.map((entry) => [entry.code, entry.packType, entry.wholesale]))
+      .toEqual([['JT021099', 'p/m', '33'], ['JT021100', 'p/roll', '29.04']])
+
+    const throws = ratesOf(FILE, 'THROWS', [
+      ['ARTICLE CODE', 'ARTICLE NAME', 'BRAND', 'CONTENT', 'SIZE', 'EXPORT USD 2026'],
+      ['FLTR0001001', 'KEMPSFORD THROW', 'FOX LINTON', '100% Merino Wool', '130cm x 220cm',
+        '249.2'],
+      ['FLTR0001003', 'KEMPSFORD THROW', 'FOX LINTON', '100% Merino Wool', '130cm x 220cm', ''],
+    ])
+    expect(throws.entries.map((entry) => [entry.code, entry.itemType, entry.packType]))
+      .toEqual([['FLTR0001', 'Accessories', 'p/p']])
+    expect(Object.fromEntries(throws.skips)).toEqual({ [NO_RATE]: 1 })
+  })
+
+  it("files each of Colefax's four houses under its own supplier", () => {
+    const reading = ratesOf(
+      'Colefax Group 2026 pricelist Colefax Larsen Manuel Canovas Jane Churchill.xlsx',
+      'Export Prices',
+      [
+        ['Brand', 'Stock-Number', 'Design', 'General-Prod-Type', 'Width', 'Fibre Content',
+          'Pattern-Book-Description', 'Distributors GBP (FF)'],
+        ['C', '01020/01', 'Bowood', 'PRT', '135', 'Cotton 100%', 'Jardine', '41.1'],
+        ['J', 'J0025-01', 'Asta', 'WVE', '140', 'Linen 100%', 'Marlowe', '28.7'],
+        ['L', 'L001W-01', 'Limelight', 'WPR', '68', 'Paper', 'Larsen Wall', '38.8'],
+        ['M', '01286-01', 'Pav de Bidaine', 'TRM', '', 'Cotton', 'Canovas', '65.9'],
+      ],
+    )
+    expect(reading.entries.map((entry) =>
+      [entry.supplier, entry.code, entry.itemType, entry.packType])).toEqual([
+      ['Colefax & Fowler', '01020', 'Fabrics', 'p/m'],
+      ['Jane Churchill', 'J0025', 'Fabrics', 'p/m'],
+      ['Larsen', 'L001W', 'Wallpaper', 'p/roll'],
+      ['Manuel Canovas', '01286', 'Trimmings', 'p/m'],
+    ])
+  })
+
+  it('declines a Jannelli & Volpi sample by the unit it is sold in', () => {
+    const reading = ratesOf('JV_EXPORT DEALER_SET_TV8_1 JUN 2026_agg 19062026.xlsx',
+      'JANNELLI&VOLPI', [
+        ['BRAND', 'COLLECTION', 'FAM', 'ITEM', 'DESIGN', 'SALES UNIT', 'DEALER PRICE 1 JUN 2026',
+          'COMPOSITION/SUPPORT', 'WIDTH/MT', 'PATTERN REPEAT cm', 'MATCH'],
+        ['JANNELLI&VOLPI', 'JV ALABASTER', 'J27', '6570', 'RIBBON GRASS', 'Roll', '65.92',
+          'Vinyl on paper', '0.7', '0', 'Free match'],
+        ['JANNELLI&VOLPI', 'JV MURALS', 'J28', '7000', 'GIARDINO', 'Mural - cm 408 L x 300 H',
+          '327.8', 'Vinyl', '4.08', '0', 'Free match'],
+        ['JANNELLI&VOLPI', 'JV ALABASTER', 'J27', 'JVBOOK', 'SAMPLE BOOK', 'Book', '22', 'Paper',
+          '', '', ''],
+      ])
+    expect(reading.entries.map((entry) => [entry.code, entry.packType, entry.dateEffective]))
+      .toEqual([
+        ['6570', 'p/roll', '01/06/2026'],
+        // A mural is one piece, which is what the office's own JV rows say.
+        ['7000', 'p/p', '01/06/2026'],
+      ])
+    expect(Object.fromEntries(reading.skips))
+      .toEqual({ 'sold by "Book", which no template pack type covers': 1 })
+  })
+
+  it("reads Pierre Frey's five houses and its French units", () => {
+    const reading = ratesOf(
+      'Pierre Frey DISTRIBUTOR - 2026 FABRIC  WPP IN DETAILS '
+      + '- Pierre Frey Boussac Fadini Borghi Le Manach Braquenie.xlsx',
+      '2026-29-01-PF-FICHIER DETAILLE',
+      [
+        ['Ref Pattern', 'Name', 'Unit', 'Brand', 'Type of product', 'USABLEWIDTH (cm)',
+          'Pattern repeat H (cm)', 'Pattern repeat V (cm)', 'COMPOSITION FR',
+          'DISTRIBUTOR € EXW'],
+        ['B063A', 'LES BLEUETS -', 'M', 'Braquenié', 'Tissu', '130', '0', '49', 'Coton 100%',
+          '111'],
+        ['F0556', 'CROISE', 'RL', 'Pierre Frey', 'Papier Peint', '90', '0', '0', 'Papier', '65'],
+        ['BP348', 'LES ARCADES', 'Pa', 'Le Manach', 'Papier Peint', '130', '0', '0', 'Papier',
+          '589'],
+      ],
+    )
+    expect(reading.entries.map((entry) =>
+      [entry.supplier, entry.brand, entry.code, entry.itemType, entry.packType])).toEqual([
+      // The office spells this house without its accent; the Brand column keeps
+      // the file's own spelling, which is what the two columns are for.
+      ['Braquenie', 'Braquenié', 'B063A', 'Fabrics', 'p/m'],
+      ['Pierre Frey', 'Pierre Frey', 'F0556', 'Wallpaper', 'p/roll'],
+      ['Le Manach', 'Le Manach', 'BP348', 'Wallpaper', 'p/p'],
+    ])
+  })
+
+  it("follows Perennials' own \"Sold by the\" cell", () => {
+    const reading = ratesOf('Perennials Wallcoverings Price Guide_Spring26_USA.xlsx', 'ALL SKUS', [
+      ['Type', 'Collection', 'Item Number', 'Design', 'Colorway', 'Net  Price\nper Yard',
+        'Roll Length', 'Sold by the', 'Net Price per Roll', 'Width', 'Vertical\nRepeat',
+        'Horizontal\nRepeat', 'Match'],
+      ['Patterns & Murals', '2024 Summer', 'PD100-191', 'ARIGATO', 'SALT & PEPPER', '34', '9 YDS',
+        'ROLL', '306', '27"', '25.25"', '', 'STRAIGHT'],
+      ['Textures', '2024 Summer', 'TX200-01', 'SISAL', 'BONE', '48', '', 'YARD', '', '36"', '',
+        '', ''],
+    ])
+    expect(reading.entries.map((entry) => [entry.code, entry.packType, entry.wholesale]))
+      .toEqual([['PD100-191', 'p/roll', '306'], ['TX200-01', 'p/y', '48']])
+  })
+
+  it('gives C & C Milano its pack from the type its dictionary rows explain', () => {
+    const reading = ratesOf('C&C Milano 2026 Pricelist.xlsx', 'Listino', [
+      ['Tipo/type', 'Modello', 'Bar1', 'Col-1', 'Prezzo', 'Altezza', 'Composizione', 'RapOrdito',
+        'RapTrama'],
+      ['1 - Tessuti / Fabrics', 'Name', 'Item#', 'Description', 'Price', 'Width', 'Composition',
+        'Vertical Repeat', 'Horizontal Repeat'],
+      ['1', 'AGUILERA', '232119', 'BIANCO', '49', '140', '70% Recycled cotton', '0', '0'],
+      ['2', 'CARTA', '300100', 'AVORIO', '96', '70', 'Paper', '0', '0'],
+      ['0', 'Camp. AGUILERA', '900001', '', '12', '', '', '', ''],
+    ], 'prefixed')
+    expect(reading.entries.map((entry) => [entry.code, entry.itemType, entry.packType])).toEqual([
+      ['232119', 'Fabrics', 'p/m'],
+      ['300100', 'Wallpaper', 'p/roll'],
+    ])
+    expect(Object.fromEntries(reading.skips))
+      .toEqual({ 'header translation': 1, 'sample cutting': 1 })
   })
 })

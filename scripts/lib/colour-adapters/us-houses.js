@@ -18,6 +18,8 @@
  * file them apart, and an unmapped spelling has to reach the import as itself.
  */
 
+import { skip } from './rates.js'
+
 const HOUSES = Object.freeze({
   clarence: 'Clarence House',
   's.harris': 'S. Harris',
@@ -63,14 +65,92 @@ const sheet = (brand) => Object.freeze({
   row: usHouseRecord,
 })
 
-const house = (prefix, brand) => Object.freeze({
+/**
+ * The rate side of the same five files, which differ in three cells and nothing
+ * else: the price column is spelt three ways ("US EXPORT NET PRICE", "US NET
+ * EXPORT PRICE", "US WHOLESALE") and Trend abbreviates its two repeat columns.
+ * Everything else is the one Fabricut layout again.
+ *
+ * The code is the DESIGN's, split off the fabric number the same way the
+ * colourway is, because that is what the office's own rows for these houses are
+ * keyed on. `PRODUCT CATEGORY` gives the item type and `UNIT OF MEASURE` the
+ * pack, both stated per row.
+ */
+const ITEM_TYPES = Object.freeze({
+  FAB: 'Fabrics', TRM: 'Trimmings', WC: 'Wallcovering', RUG: 'Accessories',
+})
+
+/**
+ * `PANL2` and `PANL3` are two- and three-panel SETS, and the template's `panel`
+ * would price one panel — a quantity the file does not state — so they are
+ * declined rather than approximated. A plain `PANEL` is a panel. `SQFT` has no
+ * template pack at all.
+ */
+const PACKS = Object.freeze({ YARD: 'p/y', EACH: 'p/p', PANEL: 'p/panel' })
+
+const usHouseRate = (values) => {
+  const parts = FABRIC_NUMBER.exec(values.code)
+  if (parts === null) throw new Error(`fabric number "${values.code}" carries no colour suffix`)
+  const itemType = ITEM_TYPES[values.type.toUpperCase()]
+  if (itemType === undefined) {
+    return skip(`product category "${values.type}", which no template item type covers`)
+  }
+  const packType = PACKS[values.unit.toUpperCase()]
+  if (packType === undefined) {
+    return skip(`sold by "${values.unit}", which no template pack type covers`)
+  }
+  return {
+    brand: HOUSES[values.brand.toLowerCase()] ?? values.brand,
+    code: parts[1],
+    description: values.design,
+    productRange: values.book,
+    itemType,
+    packType,
+    contents: values.contents,
+    width: values.width,
+    repeat: values.repeat,
+    verticalRepeat: values.verticalRepeat,
+    wholesale: values.wholesale,
+  }
+}
+
+const rateSheet = (brand, supplier, price, repeat, verticalRepeat) => Object.freeze({
+  name: 'All Colors',
+  brand,
+  supplier,
+  currency: 'US Dollar',
+  columns: Object.freeze({
+    brand: 'Brand',
+    code: 'Fabric Number',
+    design: 'Pattern Name',
+    book: 'Book/Collection Name',
+    type: 'Product Category',
+    unit: 'Unit of Measure',
+    contents: 'Contents',
+    width: 'Material Width',
+    repeat,
+    verticalRepeat,
+    wholesale: price,
+  }),
+  row: usHouseRate,
+})
+
+/**
+ * `supplier` is the spelling the office's ledger already uses, which is not the
+ * catalogue's for S. Harris: 899 rows sit under "S Harris", without the point.
+ * The brand keeps the catalogue's spelling — the two columns are for exactly
+ * this — and nothing here renames a house.
+ */
+const house = (prefix, brand, price, supplier = brand,
+  repeat = 'Horizontal Repeat', verticalRepeat = 'Vertl Repeat Len2') => Object.freeze({
   prefix,
   supplier: brand,
   sheets: Object.freeze([sheet(brand)]),
+  rateSheets: Object.freeze([rateSheet(brand, supplier, price, repeat, verticalRepeat)]),
 })
 
-export const CLARENCE_HOUSE = house('ClarenceHouse', 'Clarence House')
-export const S_HARRIS = house('S Harris', 'S. Harris')
-export const STROHEIM = house('Stroheim', 'Stroheim')
-export const TREND = house('Trend', 'Trend')
-export const VERVAIN = house('Vervain', 'Vervain')
+export const CLARENCE_HOUSE = house('ClarenceHouse', 'Clarence House', 'US Export Net Price')
+export const S_HARRIS = house('S Harris', 'S. Harris', 'US Export Net Price', 'S Harris')
+export const STROHEIM = house('Stroheim', 'Stroheim', 'US Net Export Price')
+export const TREND = house('Trend', 'Trend', 'US Wholesale', 'Trend', 'H. Repeat', 'V. Repeat')
+export const VERVAIN = house('Vervain', 'Vervain', 'US Export Net Price')

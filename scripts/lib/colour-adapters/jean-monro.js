@@ -17,6 +17,8 @@
  * from a rule checked against the file's own unlabelled cells (below).
  */
 
+import { skip } from './rates.js'
+
 const SUPPLIER = 'Jean Monro'
 
 /**
@@ -68,9 +70,92 @@ const rscRecord = (values) => {
   return { design, colourCode: values.colourCode, colourName: values.colourName }
 }
 
+/**
+ * The rate side of the same three sheets.
+ *
+ * The file prices every colourway row, in sterling, and states its own unit and
+ * product type per row (`METRE`/`ROLL`, `FABRIC`/`WALLPAPER`), so nothing here
+ * is derived from the filename or the house.
+ *
+ * The CODE each range is priced under is not the same choice on all three, and
+ * the price list is what settles it: `Jean Monro` there holds 321 rows keyed
+ * `JM-1409` — one per colourway, exactly the JM sheet's own CODE — while
+ * `Nicky Haslam` holds 17 keyed `NH-AFTERALLTOO`, the design. So JM and RSC
+ * price by the colourway's code and NH by the design's, which is also why NH's
+ * 152 rows collapse to its handful of designs.
+ */
+const UNITS = Object.freeze({ metre: 'p/m', roll: 'p/roll' })
+const TYPES = Object.freeze({ fabric: 'Fabrics', wallpaper: 'Wallpaper' })
+
+const monroRate = (describe) => (values) => {
+  const packType = UNITS[values.unit.toLowerCase()]
+  if (packType === undefined) {
+    return skip(`sold by "${values.unit}", which no template pack type covers`)
+  }
+  const itemType = TYPES[values.type.toLowerCase()]
+  if (itemType === undefined) {
+    return skip(`product type "${values.type}", which no template item type covers`)
+  }
+  const [code, description] = describe(values)
+  return {
+    code,
+    description,
+    itemType,
+    packType,
+    contents: values.contents,
+    width: values.width,
+    repeat: values.repeat,
+    verticalRepeat: values.verticalRepeat,
+    wholesale: values.wholesale,
+  }
+}
+
+const rateSheet = (name, brand, supplier, describe) => Object.freeze({
+  name,
+  brand,
+  supplier,
+  currency: 'Pound Sterling',
+  columns: Object.freeze({
+    code: 'CODE',
+    description: 'DESCRIPTION',
+    wholesale: 'PRICE 2026',
+    unit: 'UNIT OF MEASURE',
+    type: 'TYPE',
+    contents: 'COMPOSITION',
+    width: 'WIDTH CM',
+    repeat: 'HORI REPEAT CM',
+    verticalRepeat: 'VERT REPEAT CM',
+  }),
+  row: monroRate(describe),
+})
+
+/** JM and RSC price the colourway, so the row's own code and description stand. */
+const perColourway = (values) => [values.code, values.description]
+
+/**
+ * NH prices the DESIGN, so the rate carries the code the NH sheet decomposes —
+ * and its description has to be the design's too. Taking the row's own
+ * description would give the colour ("New-mown Green"), which differs on every
+ * one of a design's rows and would turn one rate into six conflicting ones.
+ */
+const perDesign = (values) => {
+  const parts = NH_CODE.exec(values.code)
+  if (parts === null) throw new Error(`code "${values.code}" is not an NH item code`)
+  return [`${parts[1]}${parts[2]}`, parts[2]]
+}
+
 export const JEAN_MONRO = Object.freeze({
   prefix: 'Jean Monro',
   supplier: SUPPLIER,
+  rateSheets: Object.freeze([
+    rateSheet('JM', 'Jean Monro', SUPPLIER, perColourway),
+    // The price list files this house as its own supplier; the distributor's
+    // name would write a second ledger row beside the office's seventeen.
+    rateSheet('NH', 'Nicky Haslam', 'Nicky Haslam', perDesign),
+    // RSC is unidentified and no price list carries an RSC code, so there is no
+    // supplier to file it under but the distributor who sends the workbook.
+    rateSheet('RSC', 'RSC', SUPPLIER, perColourway),
+  ]),
   sheets: Object.freeze([
     Object.freeze({
       name: 'JM',

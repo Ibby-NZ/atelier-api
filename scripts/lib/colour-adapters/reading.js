@@ -12,31 +12,32 @@
  * writes nothing — see scripts/convert-colour-files.js.
  */
 import { sheetReadings } from './records.js'
+import { sheetRates } from './rates.js'
 
 /** Reason -> how many rows it declined, in first-seen order. */
 const tally = (counts, reason) => counts.set(reason, (counts.get(reason) ?? 0) + 1)
 
 /**
- * One declared sheet: where its header was, how many rows it holds, what they
- * came to and what they were declined for.
+ * Count one opened sheet's readings, whatever they are readings OF.
  *
  * `rows` and `records` differ on purpose. Madeaux prints one row per design and
  * names its colours inside a cell, so a row there is worth several colourways;
- * a banner is worth none.
+ * a banner is worth none. The same counting serves the rate pass, where a row is
+ * worth one rate or none — what makes either summary trustworthy is that it is
+ * exhaustive: rows in = entries out + skips + errors.
  */
-export const readSheet = (workbook, spec) => {
-  const sheet = workbook.open(spec)
+const countReadings = (sheet, readings, toEntry) => {
   const entries = []
   const errors = []
   const skips = new Map()
   let rows = 0
   let previous = 0
-  for (const reading of sheetReadings(sheet, spec, workbook.source)) {
+  for (const reading of readings) {
     if (reading.rowNumber !== previous) rows += 1
     previous = reading.rowNumber
     if (reading.error !== undefined) errors.push(reading.error)
     else if (reading.skip !== undefined) tally(skips, reading.skip)
-    else entries.push({ sheet: sheet.name, rowNumber: reading.rowNumber, record: reading.record })
+    else entries.push(toEntry(reading))
   }
   return Object.freeze({
     name: sheet.name,
@@ -49,6 +50,26 @@ export const readSheet = (workbook, spec) => {
   })
 }
 
+/** One declared colourway sheet. */
+export const readSheet = (workbook, spec) => {
+  const sheet = workbook.open(spec)
+  return countReadings(sheet, sheetReadings(sheet, spec, workbook.source), (reading) => ({
+    sheet: sheet.name,
+    rowNumber: reading.rowNumber,
+    record: reading.record,
+  }))
+}
+
+/** One declared rate sheet. Its entries are rates, which carry their own coordinate. */
+export const readRateSheet = (workbook, spec, supplier) => {
+  const sheet = workbook.open(spec)
+  return countReadings(
+    sheet,
+    sheetRates(sheet, spec, workbook.source, supplier),
+    (reading) => reading.rate,
+  )
+}
+
 /**
  * Every declared sheet of one workbook.
  *
@@ -57,14 +78,14 @@ export const readSheet = (workbook, spec) => {
  * recorded (openSheet's message already begins `file:sheet:`) and the remaining
  * sheets are still read, so one renamed column does not hide the other eight.
  */
-export const readColourFile = (workbook, adapter) => {
+const readSheets = (workbook, adapter, specs, read) => {
   const sheets = []
   const entries = []
   const errors = []
-  for (const spec of adapter.sheets) {
+  for (const spec of specs) {
     let reading
     try {
-      reading = readSheet(workbook, spec)
+      reading = read(workbook, spec)
     } catch (error) {
       errors.push(error.message)
       continue
@@ -81,3 +102,19 @@ export const readColourFile = (workbook, adapter) => {
     errors: Object.freeze(errors),
   })
 }
+
+export const readColourFile = (workbook, adapter) =>
+  readSheets(workbook, adapter, adapter.sheets, readSheet)
+
+/**
+ * Every declared RATE sheet of one workbook, or nothing when the adapter
+ * declares none.
+ *
+ * A file with no `rateSheets` is not an omission to fix here: the de Le Cuona
+ * PDF has no extraction path at all, and a workbook that genuinely prints no
+ * 2026 rate has nothing to emit. The converter reports the count either way, so
+ * a file that silently stopped yielding rates is visible.
+ */
+export const readRateFile = (workbook, adapter) =>
+  readSheets(workbook, adapter, adapter.rateSheets ?? [], (book, spec) =>
+    readRateSheet(book, spec, adapter.supplier))

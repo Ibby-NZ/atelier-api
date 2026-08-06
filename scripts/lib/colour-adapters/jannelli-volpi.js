@@ -75,9 +75,112 @@ const sheet = (name, brand) => Object.freeze({
   row: volpiRecord,
 })
 
+/**
+ * The rate side: the same nine sheets, eight houses, six SUPPLIERS.
+ *
+ * The price list files most of these houses apart — 2,516 rows under "Jannelli
+ * Volpi", 447 "Altagamma", 361 "JV Design", 323 "Missoni", 209 "JWall", 504
+ * "Armani Casa" — all keyed on the item code this file calls `ITEM`, so the
+ * rate's supplier comes off the row through a declared table of the office's own
+ * spellings. CO.DE and JV Fabrics have no supplier row of their own; they fall
+ * back to the drop's, which is where the ledger already holds the JV Fabrics
+ * codes (`F7300`).
+ *
+ * `SALES UNIT` gives the pack and is the only cell that separates stock from
+ * sample. Three units are stock — 2,628 rolls, 1,269 murals and 995 linear
+ * metres — and the murals are pieces, which is what the office's own 1,163
+ * `piece` rows under Jannelli Volpi already say. Everything else (a book, a
+ * hanger, a catalogue, a shop display) is declined by name, so the summary says
+ * how many of each rather than reporting one number nobody can account for.
+ *
+ * Two sheets quote a PUBLIC price where the other seven quote the dealer's, and
+ * neither carries a dealer column at all — see the rate sheets below.
+ */
+const SUPPLIERS = Object.freeze({
+  'jannelli&volpi': 'Jannelli Volpi',
+  altagamma: 'Altagamma',
+  'altagamma modern living': 'Altagamma',
+  'design licence': 'JV Design',
+  'design license': 'JV Design',
+  jwall: 'JWall',
+  'armani casa': 'Armani Casa',
+  'missoni wallcoverings': 'Missoni',
+})
+
+const PACKS = Object.freeze({ roll: 'p/roll', 'linear meter': 'p/m' })
+
+/** A mural or a panel is sold as one piece, whatever its dimensions. */
+const AS_PIECE = /^(mural|panel)\b/
+
+const volpiRate = (spec) => (values) => {
+  const unit = values.unit.toLowerCase().split(/\s+/).filter(Boolean).join(' ')
+  const packType = AS_PIECE.test(unit) ? 'p/p' : PACKS[unit]
+  if (packType === undefined) {
+    return skip(`sold by "${values.unit.split(/\s+/)[0]}", which no template pack type covers`)
+  }
+  if (values.colourCode === '') return skip('substrate price, no item code')
+  return {
+    supplier: SUPPLIERS[values.brand.toLowerCase()],
+    brand: HOUSES[values.brand.toLowerCase()] ?? values.brand,
+    code: values.colourCode,
+    description: values.design,
+    productRange: values.collection,
+    itemType: spec.itemType,
+    packType,
+    contents: values.contents,
+    width: values.width,
+    repeat: values.repeat,
+    patternMatch: values.match,
+    wholesale: values.wholesale,
+  }
+}
+
+/** The label the seven dealer sheets share; the date in it is the file's own. */
+const DEALER_PRICE = 'DEALER PRICE 1 JUN 2026'
+const EFFECTIVE = '01/06/2026'
+
+const rateSheet = (name, brand, price = DEALER_PRICE, itemType = 'Wallcovering') => {
+  const spec = {
+    name,
+    brand,
+    itemType,
+    currency: 'Euro',
+    dateEffective: EFFECTIVE,
+    columns: Object.freeze({
+      brand: 'Brand',
+      colourCode: 'Item',
+      design: 'Design',
+      collection: 'Collection',
+      unit: 'Sales Unit',
+      wholesale: price,
+      contents: 'Composition/Support',
+      width: 'Width/mt',
+      repeat: 'Pattern repeat cm',
+      match: 'Match',
+    }),
+  }
+  return Object.freeze({ ...spec, row: volpiRate(spec) })
+}
+
 export const JANNELLI_VOLPI = Object.freeze({
   prefix: 'JV_EXPORT',
   supplier: 'Jannelli Volpi',
+  // CO.DE and JV FABRICS state a PUBLIC price and no dealer one, so that is what
+  // is emitted and the summary says so: a public price read as a dealer price
+  // would overstate what Atelier pays, and inventing a discount off it would be
+  // worse. Confirm both with the supplier before importing them.
+  rateSheets: Object.freeze([
+    rateSheet('JANNELLI&VOLPI', 'JANNELLI&VOLPI'),
+    rateSheet('ALTAGAMMA MODERN LIVING', 'ALTAGAMMA MODERN LIVING'),
+    rateSheet('JV Contract', 'JANNELLI&VOLPI'),
+    rateSheet('DESIGN LICENCE', 'DESIGN LICENCE'),
+    rateSheet('JWALL', 'JWALL'),
+    rateSheet('ARMANI CASA', 'Armani Casa'),
+    rateSheet('MISSONI', 'Missoni Home'),
+    rateSheet('CO.DE', 'CO.DE', 'PUBLIC PRICE (VAT EXCLUDED) PER ROLL/ LMT/NR 1 JUN 2026'),
+    rateSheet('JV FABRICS', 'JV FABRICS',
+      'PUBLIC PRICE (VAT EXCLUDED) PER LINEAR METER 1 JUN 2026', 'Fabrics'),
+  ]),
   // The sheet's house is the one its rows carry; each row still overrides it,
   // because three of these sheets hold a second spelling of their own house.
   sheets: Object.freeze([

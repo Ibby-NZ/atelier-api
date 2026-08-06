@@ -14,6 +14,8 @@
  * `Name SKU available` — the design and the colour run together in one cell.
  */
 
+import { skip } from './rates.js'
+
 /** A design cell often ends in the separator it would have joined a variant on. */
 const DESIGN_TAIL = /[\s-]+$/
 
@@ -46,9 +48,82 @@ const pierreFreyRecord = (values) => {
   }
 }
 
+/**
+ * The rate side: one sheet, five houses, five SUPPLIERS.
+ *
+ * The price list files each of them apart (1,536 rows under "Pierre Frey", 286
+ * "Le Manach", 222 "Braquenie", 68 "Fadini Borghi", 64 "Boussac"), all keyed on
+ * `Ref Pattern`, so the rate's supplier is the house — through a declared table,
+ * because the office spells Braquenié without its accent. The Brand column
+ * still carries the house as the file writes it; that is what the template's
+ * two columns are for.
+ *
+ * `Unit` is French shorthand: `M` metre, `RL` rouleau, `UN` unité and `Pa`
+ * panneau ("LE GRAND GENOIS - Panneau"). The last two are one pack: the file
+ * prices several designs identically under both (BP348 at 589 under `UN` and
+ * `Pa`), and the office's own Pierre Frey rows carry 84 pieces and no panels at
+ * all.
+ */
+const SUPPLIERS = Object.freeze({
+  'pierre frey': 'Pierre Frey',
+  boussac: 'Boussac',
+  braquenié: 'Braquenie',
+  'fadini borghi': 'Fadini Borghi',
+  'le manach': 'Le Manach',
+})
+
+const ITEM_TYPES = Object.freeze({ tissu: 'Fabrics', 'papier peint': 'Wallpaper' })
+const PACKS = Object.freeze({ m: 'p/m', rl: 'p/roll', un: 'p/p', pa: 'p/p' })
+
+const pierreFreyRate = (values) => {
+  const itemType = ITEM_TYPES[values.type.toLowerCase()]
+  if (itemType === undefined) {
+    return skip(`product type "${values.type}", which no template item type covers`)
+  }
+  const packType = PACKS[values.unit.toLowerCase()]
+  if (packType === undefined) {
+    return skip(`sold by "${values.unit}", which no template pack type covers`)
+  }
+  const design = values.design.replace(DESIGN_TAIL, '')
+  if (design === '') throw new Error(`pattern "${values.code}" names no design`)
+  return {
+    supplier: SUPPLIERS[values.brand.toLowerCase()],
+    brand: values.brand,
+    code: values.code,
+    description: design,
+    itemType,
+    packType,
+    contents: values.contents,
+    width: values.width,
+    repeat: values.repeat,
+    verticalRepeat: values.verticalRepeat,
+    wholesale: values.wholesale,
+  }
+}
+
 export const PIERRE_FREY = Object.freeze({
   prefix: 'Pierre Frey',
   supplier: 'Pierre Frey',
+  rateSheets: Object.freeze([
+    Object.freeze({
+      name: '2026-29-01-PF-FICHIER DETAILLE',
+      brand: 'Pierre Frey',
+      currency: 'Euro',
+      columns: Object.freeze({
+        code: 'Ref Pattern',
+        design: 'Name',
+        brand: 'Brand',
+        type: 'Type of product',
+        unit: 'Unit',
+        wholesale: 'DISTRIBUTOR € EXW',
+        contents: 'COMPOSITION FR',
+        width: 'USABLEWIDTH (cm)',
+        repeat: 'Pattern repeat H (cm)',
+        verticalRepeat: 'Pattern repeat V (cm)',
+      }),
+      row: pierreFreyRate,
+    }),
+  ]),
   sheets: Object.freeze([
     Object.freeze({
       // The sheet is named for the day the export ran.

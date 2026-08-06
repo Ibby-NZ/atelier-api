@@ -36,9 +36,62 @@ const ccMilanoRecord = (values) => {
   }
 }
 
+/**
+ * The rate side of the same sheet. The type cell that tells a fabric from a
+ * wallpaper from a trimming also gives the pack, because this file states no
+ * unit and the office's own 1,682 C&C Milano rows are unanimous: every fabric
+ * and every trimming by the metre, every wallpaper by the roll.
+ *
+ * The item number is the code the price list keys on — those 1,682 rows are
+ * these item numbers — so the rate is the colourway's here, not the design's.
+ */
+const ITEM_TYPES = Object.freeze({ 1: 'Fabrics', 2: 'Wallpaper', 3: 'Trimmings' })
+const PACKS = Object.freeze({ 1: 'p/m', 2: 'p/roll', 3: 'p/m' })
+
+const ccMilanoRate = (values) => {
+  if (!/^\d+$/.test(values.type)) return skip('header translation')
+  if (values.type === '0') return skip('sample cutting')
+  const itemType = ITEM_TYPES[values.type]
+  if (itemType === undefined) {
+    return skip(`product type "${values.type}", which no template item type covers`)
+  }
+  return {
+    code: values.code,
+    description: values.design,
+    itemType,
+    packType: PACKS[values.type],
+    contents: values.contents,
+    width: values.width,
+    repeat: values.repeat,
+    verticalRepeat: values.verticalRepeat,
+    wholesale: values.wholesale,
+  }
+}
+
 export const CC_MILANO = Object.freeze({
   prefix: 'C&C Milano',
   supplier: 'C&C Milano',
+  rateSheets: Object.freeze([
+    Object.freeze({
+      name: 'Listino',
+      brand: 'C & C Milano',
+      currency: 'Euro',
+      // `Prezzo` is the price, `Altezza` the height (width), `RapOrdito` the
+      // warp repeat and `RapTrama` the weft one — the dictionary rows are what
+      // say so.
+      columns: Object.freeze({
+        type: 'Tipo/type',
+        code: 'Bar1',
+        design: 'Modello',
+        wholesale: 'Prezzo',
+        contents: 'Composizione',
+        width: 'Altezza',
+        verticalRepeat: 'RapOrdito',
+        repeat: 'RapTrama',
+      }),
+      row: ccMilanoRate,
+    }),
+  ]),
   sheets: Object.freeze([
     Object.freeze({
       name: 'Listino',

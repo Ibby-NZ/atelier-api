@@ -1,0 +1,68 @@
+# Ralph progress log — w10-pricing-template
+Started: 2026-08-06T02:40:24Z
+
+## Codebase Patterns
+- The workstream DB is `atelier_w10` (set in `atelier-api/.env`). It was already migrated to
+  `1786248000000_trade-accounts` at the start of this workstream, so a new migration is the only
+  thing `npm run migrate` applies.
+- `psql` is not runnable from this harness (permission denied). To inspect the schema, run
+  `node -e "..."` from `atelier-api/` — CommonJS `require('dotenv')`/`require('pg')` resolves off the
+  cwd's node_modules, whereas an ESM script in the scratchpad cannot resolve the package at all.
+- Compound Bash commands with `&&` chains and `head`/`grep` can be denied by the permission layer.
+  Run one command per call.
+- node-pg-migrate names an inline column `check:` constraint `<table>_<column>_check`. To widen one,
+  `pgm.dropConstraint(table, '<table>_<column>_check')` then `pgm.addConstraint(...)` with the same
+  name — do not invent a new name or the next migration cannot find it.
+- A Postgres CHECK is satisfied by NULL (unknown, not false), so a `~ '^[A-Z]$'` check on a nullable
+  column still lets the column stay empty. That is what makes widening the class checks safe for the
+  19.5k existing rows.
+- `npm test` runs 36 files / 560 tests against the real local Postgres in ~22s. `fileParallelism:
+  false` is load-bearing — do not touch it.
+---
+
+## 2026-08-06T14:44:00Z - W10-US-001 - Migration: price_list_items v2 columns
+- Implemented the v2 schema seam on `price_list_items`: added `brand_name text`,
+  `pattern_match text`, `duty_percent numeric(6,3)` and `template_version text NOT NULL DEFAULT
+  'v1'`; widened `price_list_items_freight_class_check` from `IN ('A'..'E')` to `~ '^[A-Z]$'` and
+  added `price_list_items_duty_class_check` with the same shape (duty_class previously had no check
+  at all). No duty or freight VALUE is written anywhere — `duty_percent` stays NULL and the class
+  letters stay raw and uninterpreted.
+- Repos and files changed (atelier-api only):
+  - `migrations/1786334400000_price-list-template-v2.js` (new)
+  - `test/price-lists.test.js` (new `price_list_items template v2 columns` describe block, 12 tests)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (36 files, 560 tests passed),
+  `npm run migrate` -> 0 (applied 1 migration), `npm run migrate` again -> 0 ("No migrations to
+  run!"), and the in-test programmatic runner returns `[]` on the second call.
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - node-pg-migrate's inline column `check:` produces `<table>_<column>_check`; widening means
+      drop-then-add under the SAME name.
+    - A CHECK passes on NULL, so adding one to an existing nullable column never needs a backfill.
+    - `node -e` from the repo root is the way to inspect the schema here; `psql` is blocked.
+  - Gotchas (what will bite the next iteration):
+    - `src/seed/price-lists.js` still has `FREIGHT_CLASSES = Set(['A'..'E'])` and
+      `DUTY_CLASSES = Set(['A'])`, and `test/price-lists.test.js` still asserts `freight_class: 'Z'`
+      is rejected by `validatePriceListItems`. The DB is now wider than the validator on purpose —
+      US-004 owns the validator. Whoever widens it must also update that `it.each` row, or the
+      suite fails.
+    - `src/seed/price-lists.js` `COLUMNS` is the `unnest` column list and does NOT yet include the
+      four new columns, so `importPriceLists` writes none of them. That is why the US-001 schema
+      tests insert with raw SQL. When US-004 adds `template_version` to `COLUMNS`, it MUST be
+      `COALESCE($n, 'v1')`-style in the SELECT — `unnest` binds an explicit NULL for a missing key
+      and an explicit NULL DEFEATS the column DEFAULT, which would violate NOT NULL.
+    - `template_version` has no CHECK deliberately; the accepted set lives in the code registry
+      (US-002). Do not add one — it would make every new template a migration.
+    - `duty_percent` is unconstrained beyond `numeric(6,3)`: no legitimate range has been given, and
+      a guessed CHECK is the same class of mistake as the old freight letter set.
+  - Context (where the relevant code lives):
+    - Table created in `migrations/1785110400000_price-list-items.js`; `archived_at` added by
+      `1785456000000_soft-archive-and-contact.js`.
+    - Validator + upsert: `src/seed/price-lists.js`. CLI: `src/seed/import-price-lists.js`.
+    - Converter: `scripts/convert-price-lists.js` with shared machinery in `scripts/lib/`.
+    - Architecture rationale: `_bmad-output/planning-artifacts/architecture.md` "## Pricing template".
+- **Needs human verification:** none for this story — it is schema only, no screen renders these
+  columns yet. (When US-004/US-005 expose them, the CRM's Price lists screen is what a human should
+  eyeball.)
+---

@@ -199,7 +199,23 @@ Story-specific detail belongs in the per-story entries below, not here.
 - **A source-scan assertion must not match the file's own prose.** `expect(source).not.toContain(
   'useMutation')` failed on a comment *explaining* when a screen calls `useMutation` — the scan sees
   comments. Assert the positive (`toContain('crud.mutation')`) where the negative would be tripped by
-  a sentence, and keep negative scans to symbols a screen would never merely discuss.
+  a sentence, and keep negative scans to symbols a screen would never merely discuss. The general
+  form: scan for the **token a screen could only have by doing the thing** — a path fragment
+  (`'/archive'`), an import name, a call shape — never for the English word, which the file has to
+  be free to use while explaining itself.
+- **A screen whose entity is NOT archivable passes `useCrudScreen` no `archive` option, and that is
+  the entire handling.** `shipping_rates` and `inventory` have no `archived_at` column, so the API's
+  refusal carries `archivable: false`; the kit requires that AND a supplied action, so a Cancel-only
+  409 dialog is already the right rendering. There is nothing to branch on, and the only mistake
+  available is inventing a second button for an endpoint that does not exist. Read it as the mirror
+  of US-009's rule (an archivable entity whose screen forgets the option renders a Cancel-only 409
+  *wrongly*): the same dialog is correct here and a bug there, and which one it is comes from the
+  entity, not the screen.
+- **An advance warning derived from rows already on screen is not the forbidden pre-flight.** The kit
+  bans a second "can I delete this" GET because it races the delete and the 409 is authoritative — it
+  does not ban reading what the list already returned. Grouping the loaded tiers to mark a zone's
+  only tier, or reading a `product_count` off a detail the screen already holds, costs no request
+  and is the only warning staff get before a refusal.
 
 ---
 
@@ -1134,4 +1150,102 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   house is a 409; (6) the Catalogue tab strip shows four tabs and the SideNav stays lit on
   Collections. Carried forward from US-001..009: a real cross-origin DELETE preflight from the CRM at
   :5273, which `app.inject()` cannot prove.
+---
+
+## 2026-08-06T04:35:00Z - W2-US-011 - AdminShipping screen
+
+- **Implemented.** `/admin/shipping` (Orders → Freight rates) is a new live screen over the four
+  routes US-007 added: the tier list, a create form, a per-row rate box with Save, and Delete
+  through `useCrudScreen`. Nothing in the CRM edited `shipping_rates` before this — the tiers were
+  seeded once and could only be changed by the bulk `PUT`, i.e. by hand with curl, which is what the
+  story means by "nothing edits them today". The API half needed no change.
+- Repos and files changed: `atelier-crm` only —
+  `src/screens/adminShipping.js` (new, the pure half: `SHIPPING_LIST_LIMIT`, `formatQty`,
+  `describeShippingRate`, `annotateTiers`, `zonesOf`, `ratePatch`, `tierProblem`),
+  `src/screens/adminShipping.test.js` (new, 28 tests),
+  `src/screens/AdminShipping.jsx` (new, 279 lines),
+  `src/App.jsx` (+1 route, +1 import), `src/components/sectionTabs.jsx` (+1 Orders tab),
+  `src/components/layout.jsx` (Orders nav `match` gains `/admin/shipping`),
+  `CLAUDE.md` (`## CRUD completion`). `atelier-api` carries the bookkeeping only —
+  `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm test` -> 0 (34 files, 447 tests passed; 419 before), `npm run build` -> 0. The API
+  gates were not run: no API source file was touched, and the story's own criteria name the CRM pair
+  — the same posture US-009 and US-010 took.
+- **The screen is where it is because a zone is an order-level charge, not a catalogue property.**
+  Freight rates went into the Orders tab strip beside Web orders (`ordersTabs` gains a fourth tab,
+  and the SideNav's Orders `match` gains the route) rather than becoming a thirteenth top-level nav
+  item: the tiers price the shipping line on a storefront checkout, which is precisely what the tab
+  next to it lists. That also follows the repo's existing grouping rule — a live writable tab sits
+  beside the screens it complements, as Supplier rates does under Price Lists.
+- **Only the rate is an input, and that is the API's identity-key rule made visible.**
+  `(zone, threshold_qty)` is what `getShippingQuote` resolves against and what the seed upserts on,
+  so moving either is a delete plus a create; `PATCH` accepts `rate_cents` alone. The row therefore
+  renders the zone and the floor as text and offers one box. `ratePatch(rate, text)` is the whole
+  rule: an unparseable amount is an error, an **empty box is an error rather than a clear** (the
+  column is NOT NULL and the PATCH names `rate_cents` `required`, so a blank would be a 400 that
+  says nothing useful), an unchanged figure sends no PATCH at all, and 0 is a legitimate rate.
+- **`annotateTiers` exists because a tier's floor is not the band it covers.** `getShippingQuote`
+  takes the highest floor `<= qty` and **falls back to the lowest tier** when the quantity is under
+  every floor, so a zone whose lowest floor is 5 still quotes that tier for a single item. The lowest
+  tier is therefore labelled by its ceiling alone ("under 20 items"), the top one is open-ended
+  ("20 items or more"), a middle one is bounded at both ends, and a zone with one tier reads "any
+  quantity". Getting this wrong would print a band with a gap beneath it that cannot occur.
+- **The last-tier 409 is surfaced twice: before the attempt and after it.** After — the dialog stays
+  open and renders the API's own sentence ("\"Rural\" would be left with no shipping tiers, which
+  stops checkout for that zone. Add a replacement tier first, or edit this one."), with `blockers: []`
+  so there are no count lines and no "Archive instead", because the entity is not archivable. Before
+  — `annotateTiers` marks a zone's only tier `sole` and the row prints "the zone's only tier" in
+  clay. That is derived from the list already fetched, so it is not the pre-flight GET the kit
+  forbids; it is the same job `product_count` does on AdminCollections, done for free.
+- **What the 28 tests assert:** every band case (lowest / middle / top / sole) and that each zone is
+  banded against its own ladder rather than the flat list the API returns; that `annotateTiers`
+  leaves its input untouched; that two zones' tiers at the same floor get different names, which is
+  why `describeShippingRate` carries the zone; `formatQty` dropping pg's `'20.00'` tail while keeping
+  a real fraction and never printing NaN; `ratePatch` for each of change / no-change / blank /
+  non-money / zero / pg's string form; `tierProblem` catching a negative floor before the API's
+  schema phrases it as `body/threshold_qty must be >= 0`; `pageCount(30, SHIPPING_LIST_LIMIT) === 1`;
+  and the source scan — kit delete flow present, none of the flow's internals present, no paginator,
+  no archive path, and the create/patch call shapes actually in the file.
+- **Learnings:**
+  - Patterns: a non-archivable entity's screen supplies no `archive` option (and the resulting
+    Cancel-only dialog is correct, not the bug US-009 warned about); a warning derived from
+    already-loaded rows is not the forbidden pre-flight; a negative source scan must target the
+    token a screen could only have by doing the thing, never the English word. All three promoted to
+    `## Codebase Patterns` above.
+  - Gotcha: `GET /admin/shipping-rates` declares **no querystring schema at all**, so
+    `useAdminList`'s `page`/`limit` are neither honoured nor rejected — they are simply ignored by
+    Fastify. That is why `SHIPPING_LIST_LIMIT` (500) exists: the same unpaged-endpoint rule
+    `CATALOGUE_LIST_LIMIT` carries, for the same reason (`totalPages` must stay 1 over a list whose
+    second page could never be fetched).
+  - Gotcha: the per-row rate boxes are re-seeded from `crud.list.rows` in an effect, which means a
+    reload discards a half-typed edit in any *other* row. Deliberate and the same choice AdminStock
+    makes — the alternative is showing a stale figure over a saved one — but it is why the effect
+    must key on the rows array (`useAdminList` holds it in state, so its identity is stable between
+    renders and the effect does not loop).
+  - Gotcha: a duplicate `(zone, threshold_qty)` is **not** pre-checked here even though the whole
+    list is in memory and the check would be trivial. The API's 409 already names the tier to edit
+    instead, and a check in the screen would race the insert — the same rule the API applies to its
+    own 23505 handling.
+  - Gotcha: `bodyFrom`'s `required` test is `value == null || value === ''`, so `0` passes. That is
+    load-bearing twice over here: a zone's first tier must be at floor 0, and free freight is a real
+    rate. A `required` implemented as falsiness would have rejected both.
+  - Context: the screen is `src/screens/AdminShipping.jsx`, its pure half
+    `src/screens/adminShipping.js` (beside `adminCatalogue.js`/`clientAccounts.js`), and the routes
+    behind it are `src/routes/shipping.js` + `src/shipping/rates.js` in the API. The 409's wording is
+    `shippingRateGuard` in `src/lifecycle/registry.js` (~line 72).
+- **Needs human verification:** **the new screen, in a browser — the contract is visual and there is
+  no e2e harness or `dev-browser` on this machine.** Specifically: (1) Orders → Freight rates shows
+  four tabs, the SideNav stays lit on Orders, and the tiers render grouped-looking (zone, band, floor,
+  rate) with the seeded three zones; (2) edit a rate to a new figure and confirm
+  `GET /shipping/quote?zone=&qty=` follows it — the rate typed in **dollars** must reach the API as
+  whole cents, which is the one arithmetic error this screen could make silently; (3) Delete a
+  non-last tier: gone, toast names the zone; (4) Delete a zone's **last** tier: the dialog stays open,
+  reads the guard's sentence, and shows **Cancel only** — no "Archive instead", because a freight
+  tier cannot be archived; (5) create a tier at a floor that already exists in that zone — a 409
+  naming the existing tier, inline, with the form still filled; (6) create a tier with a brand-new
+  zone name and confirm the zone starts quoting (and that the datalist then offers it). Carried
+  forward from US-001..010: a real cross-origin DELETE preflight from the CRM at :5273, which
+  `app.inject()` cannot prove — this screen is the first one to issue a DELETE against a route whose
+  refusal staff will actually see.
 ---

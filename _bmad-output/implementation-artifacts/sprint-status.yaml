@@ -43,7 +43,7 @@ epics:
       US-008: done      # Inventory create and delete
       US-009: done      # Delete on the products and houses screens
       US-010: done      # Standalone AdminCollections screen
-      US-011: pending   # AdminShipping screen
+      US-011: done      # AdminShipping screen
       US-012: pending   # Delete on stock, supplier rates, orders and users screens
   w3-suppliers:
     name: "W3 Suppliers"

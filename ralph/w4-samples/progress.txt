@@ -79,6 +79,23 @@ Story-specific detail belongs in the per-story entries below, not here.
   `legacy_*` table holds**, so "no legacy table gained a column" is a real assertion: compare
   `information_schema.columns` against the map plus `imported_at`. One pre-existing exception —
   `legacy_sales_orders.owning_business_unit` is staged by the migration and never imported.
+- **A block must name WHICH out-of-bounds file it needs, not just that it is blocked.** The two
+  walls here are independent: `src/app.js` (a route is unreachable without a registration) and
+  `src/lifecycle/registry.js` (a DELETE has nothing to hang its probe on). US-006 needs only the
+  first, US-005 and US-007 need both — so one of the three is materially cheaper to unblock, and a
+  human reading "blocked, same as the others" cannot see that. State the file, and state which
+  acceptance criteria survive without it: naming the ONE criterion of US-006 that is in bounds
+  (`withSampleTxn` itself) is what stops the next iteration re-deriving the whole analysis.
+- **git may be denied at the tool level for a WHOLE iteration — `status`, `log`, `add` and `commit`
+  alike — and that is not the same as the loop's push/rebase ban.** When it happens, working-tree
+  state cannot be queried and the iteration's own bookkeeping cannot be committed: the files land
+  on disk UNCOMMITTED and the next iteration inherits a dirty tree it did not create. Check the
+  bottom of this log before assuming a dirty tree is your own half-done work. Two consequences
+  worth planning for: find a block BEFORE writing any source, so Step 6's "revert partial code" has
+  nothing to revert and needs no `git checkout --` you may not be able to run; and if git IS
+  available, commit the bookkeeping for any uncommitted entry you find here alongside your own.
+  To look at `atelier_w4`, `node -e` with `require('dotenv')` + `require('pg')` against
+  `process.env.DATABASE_URL` remains the way in (`psql` is denied too).
 
 ---
 
@@ -420,5 +437,77 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
       with the entity name as a single-quoted literal.
 - **Needs human verification:** none — no code was written and no screen exists. What a human owes
   is the decision in `BLOCKED.md`, not a browser check.
+---
+
+## 2026-08-06T19:26:00Z - W4-US-006 - BLOCKED - Check-out and check-in verb routes
+
+- Nothing was implemented. The wall was re-checked before a line was written, exactly as the
+  US-005 entry below instructed the next iteration to do, and the file list has NOT been widened.
+  Full detail and the one decision a human owes are in `ralph/w4-samples/BLOCKED.md`.
+- The story needs ONE file this workstream may not touch: **`src/app.js`**. It does NOT need
+  `src/lifecycle/registry.js` — the check-out/check-in pair has no DELETE — so this is the
+  cheapest of the three route stories to unblock, and decision 1 alone clears it.
+- Three of the four acceptance criteria are statements about a ROUTE (both verbs are routes; two
+  distinct 409s), and `architecture.md:191-193` says so normatively: "Check-out and check-in are
+  verb routes, not a status PATCH". Only `withSampleTxn` itself is reachable inside
+  `src/samples/**`, and shipping that alone would leave both 409 criteria unassertable.
+- No gate was run: there was no code to gate. The evidence is two read-only commands.
+
+  ```
+  $ grep -n "routes/" src/app.js
+  7:import { authRoutes } from './routes/auth.js'
+  … 18 route modules, none of them samples …
+  164:  app.register(webhookRoutes, { pool, stripe, stripeWebhookSecret, mailer })
+
+  $ ls src/routes/ | grep -i sample
+  (no output)
+  ```
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the entry added to `## Codebase Patterns`
+    above — a blocked route story states WHICH of the two out-of-bounds files it needs, because
+    they are not needed together and a story blocked on one is cheaper to unblock than a story
+    blocked on both.
+  - Gotchas:
+    - **git was denied at the tool level for this ENTIRE iteration** — `status`, `log`, `add` and
+      `commit` all returned "This command requires approval", so **the four bookkeeping files below
+      are written to disk but NOT COMMITTED**. They are `ralph/w4-samples/prd.json`,
+      `ralph/w4-samples/progress.txt`, `ralph/w4-samples/BLOCKED.md` and
+      `_bmad-output/implementation-artifacts/sprint-status.yaml`, and they are the only paths this
+      iteration touched — no source file was written, so a dirty tree here is bookkeeping and
+      nothing else. The next iteration that HAS git should commit them as
+      `chore(api): [W4-US-006] - blocked, needs human input`, either on its own or folded into its
+      own commit, and must not treat them as half-done code to revert.
+    - Corollary: a block found BEFORE implementation is what made that survivable. Had source been
+      written, Step 6's `git checkout -- <files>` would have been unavailable too.
+    - **`sprint-status.yaml` already declares `blocked` (line 6)** — `US-005: blocked` is the
+      precedent to copy, with the `# … — see ralph/w4-samples/BLOCKED.md` trailing comment.
+    - **US-007 is the third route story and needs BOTH files** (`src/app.js` for the routes,
+      `src/lifecycle/registry.js` for its "DELETE is refused unless requested or cancelled"
+      criterion). It is deliberately left unblocked: the loop runs one story per iteration, and an
+      iteration reaching it must re-run the same two-command check first.
+    - **US-008 and US-009 are CRM stories and are NOT blocked by this.**
+      `atelier-crm/src/screens/AdminSamples.jsx`, `AdminShowrooms.jsx`, `AdminSampleOrders.jsx`,
+      `sampleFlow.js`, `SampleScanner.jsx`, `src/App.jsx` (sample routes only) and
+      `sectionTabs.jsx` (samplesTabs only) are all inside this workstream's allowed files. Their
+      gates are `( cd atelier-crm && npm test && npm run build )`, which do not need a running API.
+      An iteration reaching them builds against the endpoint CONTRACT (the shapes recorded under
+      `## Samples` in `atelier-api/CLAUDE.md`), not against a live server — so the loop still has
+      two stories it can finish while the three route stories wait on a human.
+  - Context:
+    - The read models US-006's routes would sit on are already written and tested
+      (`src/samples/admin-samples.js`, W4-US-004). What US-006 itself owes is `withSampleTxn` —
+      mirroring `withOrderTxn` at `src/orders/admin-orders.js:207` (BEGIN, `SELECT … FOR UPDATE`
+      the parent, run `fn(client, row)`, COMMIT, re-read through the read model) — plus the two
+      handlers. `sample_loans_open_unique` is the constraint the "already out" 23505 lands on
+      (`rethrowConflict`, exported from `src/catalogue/admin-brands.js`); "not out" has no
+      constraint behind it and is an ordinary `requireStatus`-style 409 on the row the transaction
+      already holds locked.
+    - `_bmad-output/planning-artifacts/architecture.md` § *Samples domain* lines 191-193 is the
+      normative sentence; `epics.md:102` is the epic row ("Check-out / check-in verb routes through
+      `withSampleTxn`", api).
+- **Needs human verification:** none — no code was written and no screen exists. What a human owes
+  is decision 1 in `BLOCKED.md` (widen the file list to `src/app.js`, or nominate an owner for the
+  registration), which clears US-005, US-006 and US-007 in one move.
 ---
 

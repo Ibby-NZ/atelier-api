@@ -1,0 +1,15 @@
+# Ralph progress log — Atelier — August 6th updates — W1 Foundations
+
+## Codebase Patterns
+
+General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
+Story-specific detail belongs in the per-story entries below, not here.
+
+- (nothing yet — the first iteration adds to this)
+
+---
+
+## Story log
+
+Appended by each iteration, newest last. Never rewrite an existing entry.
+

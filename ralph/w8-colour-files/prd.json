@@ -1,0 +1,114 @@
+{
+  "project": "Atelier — August 6th updates — W8 Colour files",
+  "branchName": "aug6/w8-colour-files",
+  "description": "Import the 18 supplier colour spreadsheets into the colourway catalogue, with 2026 rates as a secondary output.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 8)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: nothing — runs in Wave 1 alongside W1; the file footprints are disjoint\nBlocks: nothing",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Adapter registry and the row-extraction harness",
+      "description": "As the platform, I want each supplier layout declared rather than guessed.",
+      "acceptanceCriteria": [
+        "A registry keyed by filename prefix declares sheet names, header row and column map",
+        "The header row is located by MATCHING LABELS, never a fixed index — Jim Thompson header is on row 2, Clarence House is buried under terms text",
+        "The harness reuses scripts/lib/{zip,xml,xlsx,text}.js and adds no dependency",
+        "An unknown file is reported as unsupported, never silently skipped",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Adapters for the single-sheet, single-brand files",
+      "description": "As the platform, I want the straightforward files importing first.",
+      "acceptanceCriteria": [
+        "Covers at least Jean Monro, Madeaux, Liberty, Maria Flora and the Perennials pair",
+        "Each adapter yields brand, design, supplier colour code and colour name",
+        "A fixture test asserts the first three rows of each file map correctly",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Adapters for the multi-sheet and multi-brand files",
+      "description": "As the platform, I want the awkward files handled explicitly.",
+      "acceptanceCriteria": [
+        "Colefax carries four brands in one sheet, keyed by its Brand column",
+        "Jannelli & Volpi spans ten sheets and eight brands",
+        "Pierre Frey carries five houses; Jim Thompson has a banner row above the header",
+        "Clarence House has two sheets and a terms preamble",
+        "The de Le Cuona PDF is reported as unsupported with a clear reason",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Normalised output, loud failure, per-file summary",
+      "description": "As an operator, I want a run that either succeeds completely or tells me exactly what is wrong.",
+      "acceptanceCriteria": [
+        "Any unmappable row aborts THAT FILE with a file:sheet:row list and writes nothing",
+        "A summary reports rows in, colourways out, and skips by reason",
+        "Output lands under incoming/ (gitignored), never in src/seed/data/ — this is client data",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Rates as a secondary output",
+      "description": "As the office, I want the 2026 rates these files carry, in the pricing template shape.",
+      "acceptanceCriteria": [
+        "Rate rows are emitted in the universal template column order",
+        "A row with no usable rate is skipped and counted, not defaulted to zero",
+        "duty and freight class letters are carried RAW and uninterpreted — no placeholder is invented",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Import colourways into products and colourways",
+      "description": "As the platform, I want the extracted colourways in the database.",
+      "acceptanceCriteria": [
+        "Upserts on the colourway SKU, matching the existing seed posture",
+        "The supplier colour code is NEVER joined to price_list_items.code — they are different codes",
+        "Validation rejects the batch before any SQL, as the legacy import does",
+        "The whole import is one transaction and re-running changes nothing",
+        "Brands that do not exist are reported, never created silently",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

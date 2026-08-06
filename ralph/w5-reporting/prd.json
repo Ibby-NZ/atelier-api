@@ -1,0 +1,154 @@
+{
+  "project": "Atelier — August 6th updates — W5 Reporting",
+  "branchName": "aug6/w5-reporting",
+  "description": "Real aggregation endpoints with filter-before-export, product performance by brand, and server-side masking that actually fires.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 5)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: W2 merged (read models), W3 merged (suppliers and category)\nBlocks: nothing",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Extract the hardened CSV writer to src/lib/csv.js",
+      "description": "As a maintainer, I want one CSV writer, so that the formula-injection guard is not forked.",
+      "acceptanceCriteria": [
+        "FORMULA_PREFIXES, csvCell and csvRow move verbatim, comments included",
+        "trade-price-lists.js imports them and keeps CSV_HEADER and csvFilename unchanged",
+        "test/price-list-exposure.test.js passes untouched — that is the proof this was a move",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Migration: reporting index and finance access",
+      "description": "As the platform, I want date-ranged reports to scan efficiently and finance visibility to be explicit.",
+      "acceptanceCriteria": [
+        "An index on orders.created_at — the date range is the primary scan and only user_id and status are indexed today",
+        "users.can_view_finance boolean NOT NULL DEFAULT false, backfilled true for directors",
+        "It joins the PATCH whitelist with the same discipline as trade_approved: moving a role off backoffice/director clears it",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Report filter layer",
+      "description": "As back-office staff, I want to narrow a report before I export it.",
+      "acceptanceCriteria": [
+        "A frozen whitelist maps filter names to trusted columns; values are always $n placeholders",
+        "Filters: from, to, brand (multi), product_type, collection, kind, status",
+        "The module is pure with no database access and is unit-tested",
+        "An unknown filter name is ignored; an invalid value is a 400 naming it",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Revenue scope CTE and the masking module",
+      "description": "As a director, I want cost figures hidden from staff who may not see them.",
+      "acceptanceCriteria": [
+        "The scope CTE is the seam where future D365 line data unions in",
+        "Default population is status IN (paid, shipped), all kinds, overridable by filter",
+        "Request-kind lines contribute quantity at zero value with an unpriced_lines count",
+        "Finance columns are DELETED from columns, every row and totals — not nulled",
+        "meta.masked_columns carries labels only",
+        "A finance-end-to-end report answers 403 with a reason, never 200 with an empty table",
+        "Access is derived from request.user only — never a query param, header or body value",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Product performance by brand",
+      "description": "As a director, I want to see which houses and designs sell, so that buying decisions have evidence.",
+      "acceptanceCriteria": [
+        "Grouped by brand and product, summing qty and qty x unit_price_cents",
+        "The response envelope is consumable by the CRM buildReport cell pipeline without rewriting reportBuilders.js",
+        "The payload states its coverage window and that historic D365 data is header-only, so no pre-launch sale is included",
+        "Rate-limited",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Server-side CSV export",
+      "description": "As back-office staff, I want the exported file to match what I filtered.",
+      "acceptanceCriteria": [
+        "The export shares one query builder with the table, so they cannot disagree",
+        "It is NOT limited to the current page",
+        "export.csv is its own path segment, never a suffix on a param",
+        "maskReport runs before the writer sees a row; a non-finance caller gets no finance header",
+        "A product name beginning = is neutralised",
+        "A tighter rate-limit bucket than the read routes",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Stock and not-invoiced reports",
+      "description": "As the office, I want the two live-data reports the current fixtures only pretend to show.",
+      "acceptanceCriteria": [
+        "Stock reads live inventory; not-invoiced reads live orders",
+        "Both accept the shared filter layer and both export",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "report_access on /auth/me and CRM consumption",
+      "description": "As a director, I want the CRM to know what a login may see, because today it assumes everyone is a director.",
+      "acceptanceCriteria": [
+        "GET /auth/me returns a DERIVED report_access; it is never stored on the session",
+        "accessOf prefers user.report_access and falls back to the demo caps so offline and break-glass still work",
+        "The CRM reports screen reads the live endpoints and shows the masked-columns note",
+        "A masked table is visibly labelled partial, never silently short",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-api",
+        "atelier-crm"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

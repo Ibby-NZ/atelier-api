@@ -1,0 +1,116 @@
+# Sprint status — Atelier "August 6th updates"
+#
+# One key per story. A Ralph iteration flips its story to done in the same
+# commit as the code. This is the single-screen project status board.
+#
+# Values: pending | in_progress | done | blocked
+
+epics:
+  w1-foundations:
+    name: "W1 Foundations"
+    branch: aug6/w1-foundations
+    status: pending
+    stories:
+      US-001: pending   # Lifecycle registry and deleteOrExplain
+      US-002: pending   # setArchived replaces the eight duplicated archive helpers
+      US-003: pending   # Registry safety tests
+      US-004: pending   # CRM list kit: list.js, useAdminList, Pagination
+      US-005: pending   # CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
+      US-006: pending   # CI workflows for all three repos
+  w2-crud:
+    name: "W2 CRUD completion"
+    branch: aug6/w2-crud
+    status: pending
+    stories:
+      US-001: pending   # DELETE for brand and collection
+      US-002: pending   # DELETE for product and colourway
+      US-003: pending   # DELETE for price-list item and contact enquiry
+      US-004: pending   # DELETE for user with the self-delete guard
+      US-005: pending   # Missing admin reads: brand, collection, price-list item by id
+      US-006: pending   # Colourway list and detail endpoints
+      US-007: pending   # Shipping-rate CRUD with the last-tier guard
+      US-008: pending   # Inventory create and delete
+      US-009: pending   # Delete on the products and houses screens
+      US-010: pending   # Standalone AdminCollections screen
+      US-011: pending   # AdminShipping screen
+      US-012: pending   # Delete on stock, supplier rates, orders and users screens
+  w3-suppliers:
+    name: "W3 Suppliers"
+    branch: aug6/w3-suppliers
+    status: pending
+    stories:
+      US-001: pending   # Migration: suppliers, aliases and the two FK columns
+      US-002: pending   # Migration: supplier brand terms and discount tiers
+      US-003: pending   # Migration: products.category
+      US-004: pending   # Supplier read models and admin module
+      US-005: pending   # Supplier routes including DELETE
+      US-006: pending   # Backfill suppliers from existing data
+      US-007: pending   # AdminSuppliers CRM screen
+  w4-samples:
+    name: "W4 Samples"
+    branch: aug6/w4-samples
+    status: pending
+    stories:
+      US-001: pending   # Migration: showrooms and samples
+      US-002: pending   # Migration: sample_loans with the one-open-loan index
+      US-003: pending   # Migration: sample_orders
+      US-004: pending   # Sample read models, filters and overdue derivation
+      US-005: pending   # Sample CRUD routes and by-barcode lookup
+      US-006: pending   # Check-out and check-in verb routes
+      US-007: pending   # Sample-order lifecycle module and routes
+      US-008: pending   # AdminSamples and AdminShowrooms screens
+      US-009: pending   # AdminSampleOrders, live scanner, retired-route redirects
+  w5-reporting:
+    name: "W5 Reporting"
+    branch: aug6/w5-reporting
+    status: pending
+    stories:
+      US-001: pending   # Extract the hardened CSV writer to src/lib/csv.js
+      US-002: pending   # Migration: reporting index and finance access
+      US-003: pending   # Report filter layer
+      US-004: pending   # Revenue scope CTE and the masking module
+      US-005: pending   # Product performance by brand
+      US-006: pending   # Server-side CSV export
+      US-007: pending   # Stock and not-invoiced reports
+      US-008: pending   # report_access on /auth/me and CRM consumption
+  w6-category-export:
+    name: "W6 Category export"
+    branch: aug6/w6-category-export
+    status: pending
+    stories:
+      US-001: pending   # Extract the encoding-sniffing CSV reader
+      US-002: pending   # Product sheet export with an empty Category column
+      US-003: pending   # Re-import parse and validate
+      US-004: pending   # Apply validated categories
+      US-005: pending   # CRM export and import panel
+  w7-featured:
+    name: "W7 Featured"
+    branch: aug6/w7-featured
+    status: pending
+    stories:
+      US-001: pending   # Migration: featured_rank on brands and collections
+      US-002: pending   # Admin patch support and whole-list reorder endpoints
+      US-003: pending   # Public read-model ordering
+      US-004: pending   # Seed test: featured survives a reseed
+      US-005: pending   # CRM featured panel
+      US-006: pending   # Storefront homepage reads featured
+      US-007: pending   # Storefront brands page reads featured
+  w8-colour-files:
+    name: "W8 Colour files"
+    branch: aug6/w8-colour-files
+    status: pending
+    stories:
+      US-001: pending   # Adapter registry and the row-extraction harness
+      US-002: pending   # Adapters for the single-sheet, single-brand files
+      US-003: pending   # Adapters for the multi-sheet and multi-brand files
+      US-004: pending   # Normalised output, loud failure, per-file summary
+      US-005: pending   # Rates as a secondary output
+      US-006: pending   # Import colourways into products and colourways
+  w9-scanner-spike:
+    name: "W9 Scanner spike"
+    branch: aug6/w9-scanner-spike
+    status: pending
+    stories:
+      US-001: pending   # Options matrix
+      US-002: pending   # Recommendation
+      US-003: pending   # ADR appended to architecture.md

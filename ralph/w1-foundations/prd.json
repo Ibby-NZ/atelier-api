@@ -1,0 +1,126 @@
+{
+  "project": "Atelier — August 6th updates — W1 Foundations",
+  "branchName": "aug6/w1-foundations",
+  "description": "The shared delete/archive lifecycle module in the API and the CRM CRUD kit that every other workstream consumes. Runs alone; nothing else starts until this merges.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 1)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: nothing — this is first\nBlocks: W2, W3, W4, W5, W6, W7",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Lifecycle registry and deleteOrExplain",
+      "description": "As the back office, I want a single mechanism that decides whether a row can be deleted, so that a delete can never silently destroy commercial history.",
+      "acceptanceCriteria": [
+        "A frozen registry declares table, id column, archivability and dependency probes per entity",
+        "The parent row is locked SELECT ... FOR UPDATE (never FOR NO KEY UPDATE) before probes run",
+        "Probes run as one round trip, each LIMIT 101, reporting { count: 100, capped: true } past that",
+        "Probes count archived rows too",
+        "A blocked delete returns status 409 with blockers and archivable; it is a return value, never a thrown error",
+        "A pg 23503 is caught and mapped to the same 409 shape as a backstop",
+        "Success is 200 { deleted: { entity, id } }",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "setArchived replaces the eight duplicated archive helpers",
+      "description": "As a maintainer, I want one archive implementation, so that the now()/NULL fragment and its 404 stop being copied per module.",
+      "acceptanceCriteria": [
+        "All eight callers delegate to setArchived and keep their own return shape",
+        "The order state machine keeps withOrderTxn and its terminal-state guard",
+        "Existing archive tests pass untouched — that is the proof this was a move, not a rewrite",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Registry safety tests",
+      "description": "As a reviewer, I want the registry itself proven safe, so that a malformed probe cannot reach production.",
+      "acceptanceCriteria": [
+        "Every probe matches /^SELECT 1 FROM [a-z_ ]/ and contains exactly one $1",
+        "Every relation name matches /^[a-z][a-z0-9_]*$/",
+        "Every declared table and id column exists in information_schema.columns",
+        "A test asserts no route registers an entity name from a path parameter",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "CRM list kit: list.js, useAdminList, Pagination",
+      "description": "As a CRM developer, I want one list hook and one paginator, so that eight new screens do not copy-paste a ninth.",
+      "acceptanceCriteria": [
+        "buildListQuery drops null, undefined and empty string so an \"All\" select never sends role=",
+        "useAdminList depends on the serialised query string, not the filters object",
+        "Changing a filter resets page to 1",
+        "Emptying the last page steps back one page",
+        "The active flag guards StrictMode double-mount",
+        "Pagination returns null when totalPages <= 1",
+        "Pure logic is unit-tested in .js siblings; the .jsx holds no rules",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete",
+      "description": "As back-office staff, I want a blocked delete explained in place, so that I can archive instead without losing my place.",
+      "acceptanceCriteria": [
+        "apiDelete sends no body and no JSON content-type, so Fastify cannot answer FST_ERR_CTP_EMPTY_JSON_BODY",
+        "There is no pre-flight can-I-delete request",
+        "On 409 the dialog stays open and renders the blocker lines plus an Archive instead action",
+        "describeBlockers falls back to messageOf when the body is missing",
+        "ConfirmDialog sets role=\"dialog\" aria-modal=\"true\"; Escape cancels; focus lands on Cancel",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "CI workflows for all three repos",
+      "description": "As a reviewer, I want gates verified independently of the agent that wrote the code, so that a self-reported green is not the only evidence.",
+      "acceptanceCriteria": [
+        "Each workflow triggers on pull requests targeting august-6th-updates",
+        "The api workflow runs a postgres:14 service container and sets DATABASE_URL",
+        "The crm workflow runs npm test and npm run build (there is no ESLint in that repo)",
+        "No workflow references a typecheck step",
+        "No workflow can push or write to main/master",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`",
+        "Gates green: `( cd atelier-storefront && npm run lint && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-api",
+        "atelier-crm",
+        "atelier-storefront"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

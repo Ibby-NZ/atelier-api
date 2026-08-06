@@ -1,0 +1,133 @@
+{
+  "project": "Atelier — August 6th updates — W7 Featured",
+  "branchName": "aug6/w7-featured",
+  "description": "The office controls which houses and collections the storefront features, replacing hardcoded slug arrays.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 7)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: W1 merged\nBlocks: nothing",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Migration: featured_rank on brands and collections",
+      "description": "As the office, I want to choose what the storefront features, in an order I control.",
+      "acceptanceCriteria": [
+        "featured_rank integer NULL on both tables, with a CHECK that it is null or positive",
+        "NULL means not featured",
+        "The migration seeds the storefront current hardcoded choice so nothing moves on deploy",
+        "The seeding UPDATE matches on (brand_slug, slug) PAIRS — collection slugs are unique per brand, never globally",
+        "A test with two houses sharing a collection slug proves only the intended one is featured",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Admin patch support and whole-list reorder endpoints",
+      "description": "As the office, I want to set and reorder the featured lists.",
+      "acceptanceCriteria": [
+        "featured_rank joins the brand and collection update whitelists",
+        "It is absent from create — a house is not featured at birth",
+        "An explicit null clears it, distinct from an absent key",
+        "PUT /admin/brands/featured takes slugs; PUT /admin/collections/featured takes brand+slug PAIRS",
+        "An unknown slug returns 422 naming it, never a silent drop",
+        "Each is one transaction that clears then re-applies",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Public read-model ordering",
+      "description": "As a visitor, I want the featured houses and collections first.",
+      "acceptanceCriteria": [
+        "ORDER BY featured_rank ASC NULLS LAST, name ASC, id ASC — deterministic even with duplicate ranks",
+        "No unique index is added",
+        "Featuring interacts correctly with trade_only: a featured house a guest cannot see leaves no hole",
+        "featured_rank is exposed on both public read models",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Seed test: featured survives a reseed",
+      "description": "As the office, I want my featuring decision to outlive a catalogue reseed.",
+      "acceptanceCriteria": [
+        "featured_rank is absent from the upsert DO UPDATE set lists",
+        "A test seeds, features a house, reseeds and asserts the rank is unchanged",
+        "The test names the same posture as trade_only, inventory and shipping_rates",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "CRM featured panel",
+      "description": "As the office, I want to reorder featuring without a developer.",
+      "acceptanceCriteria": [
+        "Ordering logic is pure in featuredOrder.js with a .test.js sibling",
+        "Move up and down behave correctly at the ends; duplicates are impossible; the list is capped",
+        "A standing note states that featured houses appear on /brands immediately while featured collections appear at the next site build",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Storefront homepage reads featured",
+      "description": "As the office, I want the homepage to follow my choice.",
+      "acceptanceCriteria": [
+        "FEATURED_COLLECTIONS, FEATURED_SLUG and LATEST_SLUGS are gone",
+        "The hero takes the first three featured collections in rank order",
+        "A featured collection with no committed artwork renders a defined fallback, never a broken image",
+        "The page keeps prerender = true and the build still survives an API outage via safeFetch",
+        "Gates green: `( cd atelier-storefront && npm run lint && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-storefront"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Storefront brands page reads featured",
+      "description": "As a visitor, I want the In focus strip to reflect the office choice, not a derived guess.",
+      "acceptanceCriteria": [
+        "The In focus strip reads featured_rank instead of the is_international and design-count heuristic",
+        "The full directory below stays alphabetical",
+        "The artwork fallback chain applies here too",
+        "Gates green: `( cd atelier-storefront && npm run lint && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-storefront"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

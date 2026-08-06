@@ -14,3 +14,8 @@ incoming/
 # ignored. A dump lands here on its way to a server and must never reach GitHub.
 sql/
 .DS_Store
+
+# Ralph loop scratch. prd.json, progress.txt, CLAUDE.md and the verify logs ARE
+# committed — they are the audit trail. These two are per-run machine state.
+ralph/*/.last-branch
+ralph/*/archive/

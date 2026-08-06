@@ -6,7 +6,14 @@ import {
 import {
   ADAPTERS, assertAdapter, assertRegistry, matchAdapter, selectAdapter, registeredPrefixes,
 } from '../scripts/lib/colour-adapters/index.js'
-import { colourways, sheetColourways } from '../scripts/lib/colour-adapters/records.js'
+import {
+  colourways, sheetColourways, sheetReadings, skip,
+  BLANK_ROW, REPEATED_HEADER, UNSTATED,
+} from '../scripts/lib/colour-adapters/records.js'
+import { readSheet, readColourFile } from '../scripts/lib/colour-adapters/reading.js'
+import {
+  colourwayRow, collectColourways, serialiseColourways, rowSource,
+} from '../scripts/lib/colour-adapters/output.js'
 import { openZip } from '../scripts/lib/zip.js'
 
 // The colour-file corpus lives under incoming/, which is gitignored — it is the
@@ -385,6 +392,12 @@ const sheetRecords = (file, name, rows, flavour = 'excel') => {
   const spec = matchAdapter(file).sheets.find((sheet) => sheet.name === name)
   const workbook = openColourWorkbook(buildWorkbook([{ name, rows }], flavour), file)
   return [...sheetColourways(workbook.open(spec), spec, file)].map(([, record]) => record)
+}
+
+/** The same, counted: rows in, colourways out, and what was declined and why. */
+const sheetReading = (file, name, rows, flavour = 'excel') => {
+  const spec = matchAdapter(file).sheets.find((sheet) => sheet.name === name)
+  return readSheet(openColourWorkbook(buildWorkbook([{ name, rows }], flavour), file), spec)
 }
 
 /** The first `limit` records each declared sheet yields, keyed by sheet name. */
@@ -1169,5 +1182,218 @@ describe('colour-adapters — what every adapter shares', () => {
     const spec = { ...SPEC, row: () => { throw new Error('nothing to map') } }
     expect(() => [...sheetColourways(sheet, spec, 'fixture.xlsx')])
       .toThrow('fixture.xlsx:All Colors:8: nothing to map')
+  })
+})
+
+describe('colour-adapters — declining a row states why', () => {
+  const SPEC = Object.freeze({ name: 'All Colors', brand: 'Clarence House', columns: COLUMNS })
+  const readings = (rows, row) => {
+    const spec = { ...SPEC, row }
+    return [...sheetReadings(openFixture(rows).open(SPEC), spec, 'fixture.xlsx')]
+  }
+
+  it('carries the reason a mapper declined the row', () => {
+    const found = readings(COLOUR_ROWS, (values) =>
+      (values.colourName === 'AEGEAN' ? skip('sample cutting') : values))
+    expect(found.map((reading) => reading.skip ?? reading.record.colourName))
+      .toEqual(['sample cutting', 'ANTIQUE'])
+  })
+
+  it('refuses a decline with no reason to state', () => {
+    // The summary counts by reason, so an empty one would report rows the file
+    // cannot account for.
+    expect(() => skip('  ')).toThrow(/a declined row must state a reason/)
+  })
+
+  it('owns the two skips no adapter should have to declare', () => {
+    const found = readings([
+      ['BRAND', 'FABRIC NUMBER', 'PATTERN NAME', 'COLOR NAME'],
+      [],
+      ['BRAND', 'FABRIC NUMBER', 'PATTERN NAME', 'COLOR NAME'],
+      ['CLARENCE', '6978401', 'ABREO PIPING', 'AEGEAN'],
+    ], (values) => values)
+    expect(found.map((reading) => reading.skip)).toEqual([BLANK_ROW, REPEATED_HEADER, undefined])
+  })
+
+  it('counts a reasonless decline rather than absorbing it', () => {
+    // A mapper that returns nothing at all is still declining a row; bucketing
+    // it is what keeps rows-in equal to records-out plus skips plus errors.
+    expect(readings(COLOUR_ROWS, () => null).map((reading) => reading.skip))
+      .toEqual([UNSTATED, UNSTATED])
+    expect(readings(COLOUR_ROWS, () => []).map((reading) => reading.skip))
+      .toEqual([UNSTATED, UNSTATED])
+  })
+
+  it('reads on past a row it could not map, so every bad row is reported', () => {
+    // The strict view stops at the first; the reading view collects them all,
+    // because a supplier who changed one thing usually changed several.
+    const found = readings(COLOUR_ROWS, (values) => {
+      if (values.colourName === '') throw new Error('no colour')
+      throw new Error(`cannot map ${values.colourCode}`)
+    })
+    expect(found.map((reading) => reading.error)).toEqual([
+      'fixture.xlsx:All Colors:8: cannot map 6978401',
+      'fixture.xlsx:All Colors:9: cannot map 6978402',
+    ])
+  })
+
+  it('states a reason on every decline the registry makes', () => {
+    // Each of these is a real non-stock row mixed into a stock sheet. None may
+    // reach the catalogue, and none may be confused with a row that failed.
+    const milano = sheetReading('C&C Milano 2026 Pricelist.xlsx', 'Listino', [
+      ['Tipo/type', 'Modello', 'Bar1', 'Col-1'],
+      ['1 - Tessuti / Fabrics', 'Name', 'Item#', 'Description'],
+      ['0', 'Camp. AGUILERA', '232374', ''],
+      ['1', 'AGUILERA', '232119', 'Milk'],
+    ], 'prefixed')
+    expect(milano.skips).toEqual([['header translation', 1], ['sample cutting', 1]])
+    expect(milano.records).toBe(1)
+
+    const volpi = sheetReading('JV_EXPORT DEALER_SET_TV8_1 JUN 2026_agg 19062026.xlsx', 'CO.DE', [
+      ['BRAND', 'COLLECTION', 'FAM', 'ITEM', 'DESIGN', 'SALES UNIT'],
+      ['CO.DE', 'CO.DE 01', 'C1A', 'CA700', 'SAMPLE CARD', 'Card'],
+      ['CO.DE', 'CO.DE 01', 'C1A', '', 'BASIC', 'Linear meter'],
+      ['CO.DE', 'FABULA', 'C1A', 'D0001', 'MELOGRANO', 'Roll'],
+    ])
+    expect(volpi.skips).toEqual([
+      ['sample, sold by the unit', 1], ['substrate price, no item code', 1],
+    ])
+
+    const madeaux = sheetReading('Madeaux UK Export price list.xlsx', 'UK Export', [
+      ['Design Name', 'Colours', 'Composition & Colours'],
+      ['WALLPAPERS', '', ''],
+      ['ALLEGRIA', '01', '100% Linen\nColours: 01 Stone'],
+    ])
+    expect(madeaux.skips).toEqual([['section banner or note', 1]])
+  })
+
+})
+
+describe('colour-files — reading a whole file', () => {
+  const FILE = 'Madeaux UK Export price list.xlsx'
+  const HEADER = ['Design Name', 'Colours', 'Trade/m', 'Export/m', 'Composition & Colours', 'Width CM']
+
+  it('counts rows in, colourways out and skips by reason, per sheet', () => {
+    // One row is worth three colourways here and a banner is worth none, which
+    // is exactly why the two counts are reported separately.
+    const reading = sheetReading(FILE, 'UK Export', [
+      HEADER,
+      ['WALLPAPERS', '', '', '', '', ''],
+      ['ALLEGRIA', '01 - 03', '78', '54.6',
+        '100% Linen\nColours: 01 Stone, 02 Straw, 03 Marine', '129.5'],
+      [],
+    ])
+    expect(reading.name).toBe('UK Export')
+    expect(reading.headerRow).toBe(1)
+    expect(reading.rows).toBe(3)
+    expect(reading.records).toBe(3)
+    expect(reading.skips).toEqual([['section banner or note', 1], [BLANK_ROW, 1]])
+    expect(reading.errors).toEqual([])
+    expect(reading.entries.map((entry) => entry.rowNumber)).toEqual([3, 3, 3])
+  })
+
+  it('collects a file\'s bad rows without throwing, so the caller lists them all', () => {
+    const workbook = openColourWorkbook(buildWorkbook([{
+      name: 'UK Export',
+      rows: [
+        HEADER,
+        ['ALLEGRIA', '01 - 03', '78', '54.6', '100% Linen', '129.5'],
+        ['ANTHEA', '01 - 05', '78', '54.6', '100% Silk', '130'],
+      ],
+    }]), FILE)
+    const reading = readColourFile(workbook, matchAdapter(FILE))
+    expect(reading.errors).toEqual([
+      `${FILE}:UK Export:2: no colours in "100% Linen" or "01 - 03"`,
+      `${FILE}:UK Export:3: no colours in "100% Silk" or "01 - 05"`,
+    ])
+    expect(reading.supplier).toBe('Madeaux')
+  })
+
+  it('records a sheet that will not open and still reads the others', () => {
+    // One renamed column must not hide the other eight sheets — a nine-sheet
+    // file reported one sheet at a time is a file fixed one release at a time.
+    const jv = 'JV_EXPORT DEALER_SET_TV8_1 JUN 2026_agg 19062026.xlsx'
+    const columns = ['BRAND', 'COLLECTION', 'FAM', 'ITEM', 'DESIGN', 'SALES UNIT']
+    const sheets = matchAdapter(jv).sheets.map((spec) => ({
+      name: spec.name,
+      rows: spec.name === 'JWALL'
+        ? [['BRAND', 'COLLECTION', 'FAM', 'CODE', 'DESIGN', 'SALES UNIT']]
+        : [columns, ['JV', 'C', 'F', '6570', 'RIBBON GRASS', 'Roll']],
+    }))
+    const reading = readColourFile(openColourWorkbook(buildWorkbook(sheets), jv), matchAdapter(jv))
+    expect(reading.errors).toEqual([
+      `${jv}:JWALL: no header row in the first 250 rows; never saw "item"`,
+    ])
+    expect(reading.sheets).toHaveLength(8)
+    expect(reading.entries).toHaveLength(8)
+  })
+})
+
+describe('colour-files — the normalised output', () => {
+  const entry = (fields) => ({
+    sheet: 'All Colors',
+    rowNumber: 8,
+    record: {
+      brand: 'Clarence House',
+      design: 'ABREO PIPING',
+      designCode: '69784',
+      colourCode: '6978401',
+      colourName: 'AEGEAN',
+      ...fields,
+    },
+  })
+
+  it('writes snake_case fields and keeps the coordinate the row came from', () => {
+    // Provenance is the one thing that cannot be recovered later: a row that
+    // turns out to be wrong is a row somebody has to find in a spreadsheet.
+    const row = colourwayRow('ClarenceHouse 2026 Price List.xlsx', 'Clarence House', entry())
+    expect(row).toEqual({
+      supplier: 'Clarence House',
+      brand: 'Clarence House',
+      design: 'ABREO PIPING',
+      design_code: '69784',
+      colour_code: '6978401',
+      colour_name: 'AEGEAN',
+      source_file: 'ClarenceHouse 2026 Price List.xlsx',
+      source_sheet: 'All Colors',
+      source_row: 8,
+    })
+    expect(rowSource(row)).toBe('ClarenceHouse 2026 Price List.xlsx:All Colors:8')
+  })
+
+  it('drops an exact repeat from another file, keeping the first', () => {
+    // Jim Thompson's spring drop is a strict subset of its annual one and
+    // Liberty's two sheets overlap; the same colourway must land once.
+    const first = colourwayRow('Jim Thompson Export Price List_USD_2026.xlsx', 'Jim Thompson', entry())
+    const again = colourwayRow("Jim Thompson Export Price List_USD_2026 - SS'26.xlsx", 'Jim Thompson',
+      { ...entry(), sheet: 'CODE LIST 2026', rowNumber: 4 })
+    const { records, duplicates, clashes } = collectColourways([first, again])
+    expect(records).toEqual([first])
+    expect(duplicates).toBe(1)
+    expect(clashes).toEqual([])
+  })
+
+  it('keeps both rows when one colour code carries two names, and reports it', () => {
+    // Madeaux reprints a design in a second section as "Bluegrass" for "Blue
+    // Grass". Choosing between them names a colourway, which is the import's
+    // decision on a key nothing has ratified yet — not this file's.
+    const first = colourwayRow('Madeaux UK Export price list.xlsx', 'Madeaux',
+      entry({ colourName: 'Blue Grass' }))
+    const second = colourwayRow('Madeaux UK Export price list.xlsx', 'Madeaux',
+      { ...entry({ colourName: 'Bluegrass' }), rowNumber: 136 })
+    const { records, duplicates, clashes } = collectColourways([first, second])
+    expect(records).toEqual([first, second])
+    expect(duplicates).toBe(0)
+    expect(clashes).toEqual([{ row: second, earlier: first }])
+  })
+
+  it('writes one record per line, and nothing but records', () => {
+    const rows = [colourwayRow('f.xlsx', 'S', entry()), colourwayRow('f.xlsx', 'S', entry({
+      colourCode: '6978402', colourName: 'ANTIQUE',
+    }))]
+    const text = serialiseColourways(rows)
+    expect(text.split('\n')).toHaveLength(5)
+    expect(JSON.parse(text)).toEqual(rows)
+    expect(JSON.parse(serialiseColourways([]))).toEqual([])
   })
 })

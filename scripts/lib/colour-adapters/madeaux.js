@@ -13,6 +13,7 @@
  * for. Over the whole file: 193 rows -> 452 colourways, 43 rows declined, none
  * unparseable.
  */
+import { skip } from './records.js'
 
 /**
  * `01 Stone` in a comma- or newline-separated list.
@@ -42,7 +43,7 @@ const madeauxRecords = (values) => {
   // merged banner-and-header row above the trimmings all leave `Colours` empty,
   // and no data row in the file does. Declining them is not the same as failing
   // to map one: a row that should have yielded and did not throws, below.
-  if (values.colours === '') return []
+  if (values.colours === '') return skip('section banner or note')
   const design = designName(values.design)
   if (design === '') throw new Error('row names colours but no design')
   // Most sections list the colours against the composition; the trimmings put

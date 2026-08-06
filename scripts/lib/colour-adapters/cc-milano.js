@@ -19,12 +19,13 @@
  * This is also the workbook whose writer emits `<x:workbook>` and an absolute
  * unnumbered sheet target — handled once in lib/colour-sheet.js, not here.
  */
+import { skip } from './records.js'
 
 const ccMilanoRecord = (values) => {
   // A dictionary row: the type cell spells the type out instead of numbering it.
-  if (!/^\d+$/.test(values.type)) return null
+  if (!/^\d+$/.test(values.type)) return skip('header translation')
   // Sample cuttings, priced but not stock, and the only rows with no colour.
-  if (values.type === '0') return null
+  if (values.type === '0') return skip('sample cutting')
   if (values.design === '' || values.colourCode === '') {
     throw new Error(`type ${values.type} row has no design or item number`)
   }

@@ -48,6 +48,29 @@ Story-specific detail belongs in the per-story entries below, not here.
   rows with no item code). A mapper DECLINES those by a stated, measured property and THROWS on
   anything else it cannot map. Importing them puts a sample book in the catalogue as a colourway;
   throwing on them fails a file that is perfectly well formed.
+- **A DECLINED row must state WHY, and the reason names a KIND of row, not that row.** A summary
+  reading "1,604 rows skipped" is a number nobody can account for; "587 sample cutting, 262 sample
+  sold by the unit, 45 substrate price, 684 blank" is a file someone can check. `skip(reason)` in
+  `colour-adapters/records.js` is the mechanism, and a decline with no reason still lands in its own
+  counted bucket rather than vanishing — rows in ALWAYS equals colourways out plus skips plus errors,
+  which is what makes the summary auditable at all.
+- **Collect every bad row, do not stop at the first.** A supplier who renamed one column usually
+  renamed three, and a converter that dies on the first one is fixed one release per row. The reader
+  yields a bad row as data (`{ rowNumber, error }`) and the caller decides; the strict view over it
+  still throws, so a caller that only wants records cannot walk past one. Same for a sheet that will
+  not open: record it and read the remaining eight.
+- **Loud failure means the WHOLE run writes nothing, not just the bad file.** A half-written
+  catalogue is worse than none — the missing houses look exactly like houses the supplier stopped
+  carrying. Both existing converters have this posture; keep it.
+- **An exact repeat is dropped; a CLASH is reported and both rows kept.** 1,159 of the 47,082
+  colourways are exact repeats (Liberty's overlapping sheets, Jim Thompson's spring subset, Maria
+  Flora's 73 reprints) and dropping them is safe because nothing is chosen. Seven rows share a
+  (house, design, colour code) with a DIFFERENT name — the supplier's own two spellings ("Blue
+  Grass"/"Bluegrass", "Lino"/"Linen") — and dropping one of those is choosing, on an identity key
+  nothing has ratified. Report and keep.
+- **A converter whose output lands in its own input directory must filter directories out of the
+  walk.** `readdirSync(dir, { withFileTypes: true })` + `isFile()`: otherwise the second run meets
+  the `normalized/` directory it wrote and reports it as a drop nobody has mapped.
 - **Verify a derivation against the file's own redundancy before shipping it.** Several of these
   sheets decompose a value into extra columns they then leave blank further down (Jean Monro splits
   its item codes across three unlabelled cells for the first 102 rows of one sheet and none of the
@@ -287,4 +310,79 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
      names (or a decision not to carry them) before US-006 can import them.
   4. **The de Le Cuona PDF** is refused by declaration. Somebody has to ask the supplier for the
      spreadsheet it was printed from; 139 of its rows are already in the price list.
+---
+
+## 2026-08-06T16:55:00Z - W8-US-004 - Normalised output, loud failure, per-file summary
+
+- **What was implemented**
+  - `scripts/lib/colour-adapters/records.js` — `skip(reason)`, `skipReason`, the three reader-owned
+    reasons (`BLANK_ROW`, `REPEATED_HEADER`, `UNSTATED`) and a new `sheetReadings` generator that
+    classifies EVERY data row as exactly one of `record` / `skip` / `error` and never throws.
+    `sheetColourways` is now the strict view over it (throws on the first error), so US-001–003's
+    contract and their tests are untouched.
+  - `scripts/lib/colour-adapters/reading.js` (new) — `readSheet` / `readColourFile`: one workbook
+    read end to end, returning per sheet `{ headerRow, rows, records, skips, entries, errors }`. A
+    sheet that will not OPEN is recorded like a bad row and the remaining sheets are still read.
+  - `scripts/lib/colour-adapters/output.js` (new) — the normalised row (`snake_case`, plus
+    `source_file`/`source_sheet`/`source_row`), `collectColourways` (exact-repeat dedupe keep-first,
+    clash detection) and `serialiseColourways` (one record per line, plain `JSON.stringify` — there
+    is no Python byte-history to reproduce here, unlike price-lists.json).
+  - `scripts/convert-colour-files.js` — now WRITES. Per-sheet summary lines, per-file abort with the
+    full `file:sheet:row` list (capped at 50 reported, the count always in full), the run-level
+    totals and skip breakdown, the clash report, then the write. Any aborted or unknown file means
+    the run writes nothing and exits 1. Output defaults to
+    `incoming/colour-files/normalized/colourways.json` — gitignored, never `src/seed/data/`, the
+    same rule the D365 exports follow.
+  - Four adapters now state their decline reasons: `cc-milano.js` (header translation / sample
+    cutting), `jannelli-volpi.js` (sample, sold by the unit / substrate price, no item code),
+    `madeaux.js` (section banner or note).
+  - `test/colour-files.test.js` — 59 -> 72 tests.
+- **Repos and files changed** — atelier-api only: `scripts/convert-colour-files.js`,
+  `scripts/lib/colour-adapters/{reading,output}.js` (new), `scripts/lib/colour-adapters/records.js`,
+  `scripts/lib/colour-adapters/{cc-milano,jannelli-volpi,madeaux}.js`, `test/colour-files.test.js`,
+  `CLAUDE.md`. `package.json` needed no change — `convert:colour` already existed.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 821 tests, 72 in colour-files).
+- **Corpus result** (`node scripts/convert-colour-files.js incoming/colour-files <scratch>.json`,
+  exit 0): 18 files, 17 read + 1 declared refusal, **48,384 rows in, 47,082 colourways out, 1,604
+  rows skipped, 1,159 exact duplicates dropped, 45,923 written** (12 MB, 15 suppliers, 37 brand
+  spellings). Skips by reason: 684 blank row, 587 sample cutting, 262 sample sold by the unit, 45
+  substrate price no item code, 16 section banner or note, 7 repeats the header, 3 header
+  translation. **Zero reasonless declines** — every decline in the registry states its kind.
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - One classification path, two views. `sheetReadings` decides what a row IS; `sheetColourways`
+      throws on an error and the converter collects it. Writing the lenient reader as a second
+      implementation of the same rules is how the two drift apart.
+    - The counts are only trustworthy because they are exhaustive: rows in = colourways out + skips
+      + errors, per sheet. That is why a reasonless decline gets its own bucket instead of being
+      absorbed, and why blank rows and repeated headers are counted as skips rather than ignored.
+  - Gotchas for the next iteration:
+    - **US-005 and US-006 both read the normalised file, not the workbooks.** It carries `supplier`,
+      `brand`, `design`, `design_code`, `colour_code`, `colour_name` and the three `source_*` fields.
+      `design_code` is empty for Jannelli & Volpi (FAM is the collection's code), C&C Milano, Liberty
+      and Madeaux; `colour_name` is empty for all 4,917 JV records and 299 Pierre Frey ones.
+    - **The output is NOT deduped on any identity key** — only on the whole record. US-006 must
+      decide the SKU shape and will meet the seven clashes listed by the run (six Madeaux, one Maria
+      Flora); if its upsert batches must be key-unique, that is where the choice gets made.
+    - The default output path is inside the read-only drop directory (`normalized/` beside the
+      files). This iteration never ran the default form — every corpus run went to an explicit
+      scratch path — so `incoming/` is still exactly as the client left it. A human running
+      `npm run convert:colour` is what creates that directory.
+    - The converter walk now filters to FILES, because its own `normalized/` output directory would
+      otherwise be reported as an unmapped drop on the second run.
+    - `MAX_REPORTED = 50` caps the printed error and clash lists, never the counts.
+- Context: reader `scripts/lib/colour-adapters/records.js`, per-file reading `reading.js`, the
+    written file `output.js`, driver `scripts/convert-colour-files.js`, tests
+    `test/colour-files.test.js`.
+- **Needs human verification:** no screen, route or table is touched — this story writes a file and
+  prints a report. Three things a person must look at, on top of US-002's three and US-003's four:
+  1. **The seven colour codes carrying two names.** Six are Madeaux reprinting a design in a second
+     section ("Blue Grass"/"Bluegrass", "Duck Egg On Ecru"/"Duck Egg", "Red Earth"/"Clay", "Jewel
+     Tones"/"Moonstone", "Taupe & Teal"/"Taupe and Teal") and one is Maria Flora's Filigrana 102
+     ("Lino"/"Linen"). Both rows are kept; somebody has to say which name the catalogue carries.
+  2. **1,159 exact duplicates dropped.** Expected (Liberty's overlap, Jim Thompson's spring subset,
+     Maria Flora's 73 reprints), but worth one eyeball against the printed totals before import.
+  3. **Run `npm run convert:colour` once by hand** to create `incoming/colour-files/normalized/` and
+     confirm the file lands where the office expects it — this loop deliberately never wrote into
+     `incoming/`.
 ---

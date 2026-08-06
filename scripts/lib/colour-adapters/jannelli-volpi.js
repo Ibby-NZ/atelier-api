@@ -26,6 +26,7 @@
  * `ALTAGAMMA`/`ALTAGAMMA MODERN LIVING`); both spellings are emitted as they
  * are found, because choosing between them is naming a house.
  */
+import { skip } from './records.js'
 
 const HOUSES = Object.freeze({
   'armani casa': 'Armani Casa',
@@ -49,11 +50,11 @@ const SAMPLE_UNITS = Object.freeze(new Set([
 ]))
 
 const volpiRecord = (values) => {
-  if (SAMPLE_UNITS.has(values.unit.toLowerCase())) return null
+  if (SAMPLE_UNITS.has(values.unit.toLowerCase())) return skip('sample, sold by the unit')
   // The CO.DE sheet ends in 45 rows that price its substrates by the metre —
   // "BASIC", "ESSENTIAL METALLIC" — and they are the only rows in the file with
   // no item code at all. Nothing can be filed under a code that is not there.
-  if (values.colourCode === '') return null
+  if (values.colourCode === '') return skip('substrate price, no item code')
   if (values.design === '') throw new Error(`item "${values.colourCode}" names no design`)
   return {
     brand: HOUSES[values.brand.toLowerCase()] ?? values.brand,

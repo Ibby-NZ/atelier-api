@@ -18,6 +18,7 @@
 //     back to a number before it reaches the client.
 
 import { buildUpdate } from '../catalogue/admin-brands.js'
+import { setArchived } from '../lifecycle/archive.js'
 
 export const DEFAULT_PAGE = 1
 export const DEFAULT_LIMIT = 50
@@ -323,13 +324,9 @@ export const updatePriceListItem = async (pool, id, input) => {
  * @returns {Promise<object|null>}
  */
 export const setPriceListItemArchived = async (pool, id, archived) => {
-  const { rows } = await pool.query(
-    `UPDATE price_list_items
-        SET archived_at = CASE WHEN $2::boolean THEN now() ELSE NULL END,
-            updated_at = now()
-      WHERE id = $1
-      RETURNING ${ROW_COLUMNS}`,
-    [id, archived]
-  )
-  return rows[0] ? toPriceListItem(rows[0]) : null
+  const row = await setArchived(pool, 'price_list_item', id, archived, {
+    extraSets: ['updated_at = now()'],
+    returning: ROW_COLUMNS,
+  })
+  return row ? toPriceListItem(row) : null
 }

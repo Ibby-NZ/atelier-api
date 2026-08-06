@@ -10,6 +10,7 @@
 //     without stock tracking.
 
 import { slugFrom, rethrowConflict, buildUpdate } from './admin-brands.js'
+import { setArchived } from '../lifecycle/archive.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -417,14 +418,12 @@ export const updateColourway = async (pool, id, input) => {
  * @returns {Promise<object>}
  */
 export const setProductArchived = async (pool, id, archived) => {
-  const extra = archived ? ', show_on_website = false' : ''
-  const { rows } = await pool.query(
-    `UPDATE products SET archived_at = ${archived ? 'now()' : 'NULL'}${extra}
-      WHERE id = $1
-      RETURNING id`,
-    [id]
-  )
-  if (rows.length === 0) {
+  const row = await setArchived(pool, 'product', id, archived, {
+    // Archiving unpublishes; restoring deliberately leaves it unpublished, so
+    // staff choose when it goes back on the website.
+    extraSets: archived ? ['show_on_website = false'] : [],
+  })
+  if (!row) {
     throw httpError(404, `Product ${id} not found.`)
   }
   return getAdminProduct(pool, id)
@@ -441,13 +440,8 @@ export const setProductArchived = async (pool, id, archived) => {
  * @returns {Promise<object>}
  */
 export const setColourwayArchived = async (pool, id, archived) => {
-  const { rows } = await pool.query(
-    `UPDATE colourways SET archived_at = ${archived ? 'now()' : 'NULL'}
-      WHERE id = $1
-      RETURNING id`,
-    [id]
-  )
-  if (rows.length === 0) {
+  const row = await setArchived(pool, 'colourway', id, archived)
+  if (!row) {
     throw httpError(404, `Colourway ${id} not found.`)
   }
   return getAdminColourway(pool, id)

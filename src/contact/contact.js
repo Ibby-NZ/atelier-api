@@ -9,6 +9,8 @@
 // add the field-level 422s the storefront renders inline — a valid email and
 // non-whitespace name/message.
 
+import { setArchived } from '../lifecycle/archive.js'
+
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
 
 // Columns returned to the back-office inbox — the whole row is safe to expose
@@ -98,13 +100,5 @@ export const listEnquiries = async (db, { includeArchived = false } = {}) => {
  * @param {number} id
  * @param {boolean} archived  true -> archive (set now()), false -> restore (null)
  */
-export const setEnquiryArchived = async (db, id, archived) => {
-  const { rows } = await db.query(
-    `UPDATE contact_enquiries
-        SET archived_at = ${archived ? 'now()' : 'NULL'}
-      WHERE id = $1
-      RETURNING ${ENQUIRY_COLUMNS}`,
-    [id]
-  )
-  return rows[0] ?? null
-}
+export const setEnquiryArchived = (db, id, archived) =>
+  setArchived(db, 'contact_enquiry', id, archived, { returning: ENQUIRY_COLUMNS })

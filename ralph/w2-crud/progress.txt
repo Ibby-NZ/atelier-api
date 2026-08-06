@@ -5,18 +5,19 @@
 General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
 Story-specific detail belongs in the per-story entries below, not here.
 
-- **This branch does not contain W1.** `aug6/w2-crud` is cut from `main` plus the Ralph scaffold
-  (`38868e1`), not from `august-6th-updates`. So none of W1's deliverables exist here:
-  `atelier-api/src/lifecycle/` is absent entirely, and `atelier-crm/src/admin/` holds only
-  `drafts.js`, `orderFlow.js`, `parts.jsx`, `stock.js` — no `list.js`, `useAdminList.js`,
-  `Pagination.jsx`, `ConfirmDialog.jsx`, `deleteFlow.js`, `useCrudScreen.js`, and `src/lib/api.js`
-  has no `apiDelete`. Verify with a `ls`/grep before assuming otherwise; do not author those files,
-  they belong to W1.
-- **Which W2 stories that gates.** Every story whose deliverable is a DELETE (US-001..004, and the
-  delete half of US-007/US-008) needs `deleteOrExplain`/`replyDelete` + a registry entry; every CRM
-  story (US-009..012) needs `useCrudScreen`/`Pagination`/`apiDelete`. The read-only stories
-  (US-005 admin reads by id, US-006 colourway list/detail) have **no** W1 dependency and are
-  implementable on this branch today.
+- **W1 IS on this branch now** (api `2b75fae`/`560c13b`, crm `74fd824`), superseding the three
+  BLOCKED entries below — they were written before the merge and are kept as the audit trail, not
+  as current fact. `atelier-api/src/lifecycle/` (`registry.js`, `delete.js`, `archive.js`) and
+  `atelier-crm/src/admin/` (`list.js`, `useAdminList.js`, `Pagination.jsx`, `ConfirmDialog.jsx`,
+  `deleteFlow.js`, `useCrudScreen.js`) all exist, and `src/lib/api.js` has `apiDelete`. A human
+  cleared the `BLOCKED:` prefixes in prd.json in the same commit, so US-001..003 are live again.
+- **The registry already carries every W2 entity.** `LIFECYCLE_ENTITIES` in
+  `src/lifecycle/registry.js` ships entries for brand, collection, product, colourway, inventory,
+  price_list_item, user, shipping_rate, contact_enquiry and order — with the probes, guards and
+  `archivable` flags architecture.md § *Delete policy* specifies. So a W2 delete story is **routes
+  and tests only**: two `app.delete` handlers piping `deleteOrExplain` into `replyDelete`. Do not
+  add a registry entry (the file is W1's), and check what is already there before scoping the work
+  — epics.md's "Registry entries + DELETE routes" line overstates what is left to do.
 - Story pick order is by `priority`, so a blocked low-priority story does not stop the loop — it is
   marked BLOCKED and the next iteration moves down the list.
 - **A story's file footprint is the ROUTE file plus the DOMAIN module it calls.** `src/routes/*` is
@@ -27,7 +28,21 @@ Story-specific detail belongs in the per-story entries below, not here.
   "dependency absent" is a statement about the branch at that moment, and another workstream can
   land it in between. Two commands settle it in seconds — `ls atelier-api/src` for `lifecycle/`,
   `ls atelier-crm/src/admin` for the CRUD kit — and they are cheaper than either blocking a story
-  that has become implementable or building on one that has not arrived.
+  that has become implementable or building on one that has not arrived. This is exactly what
+  happened: three stories were blocked on a dependency that landed the same day.
+- **The DELETE route shape, once, for every remaining delete story.** Handler is a one-liner:
+  `async (request, reply) => replyDelete(reply, await deleteOrExplain(pool, '<entity>',
+  request.params.id, { user: request.user }))`, with `{ preHandler: backoffice, schema: { params:
+  idParamsSchema } }`. Three fixed points: the entity name must be a **single-quoted literal**
+  (`test/lifecycle-registry.test.js` scans `src/` and fails on an expression — the registry is not
+  an authorisation boundary, so a `:entity` param would let a client pick the table); `ctx.user`
+  comes from `request.user`, which the role guard has already loaded; and the result is *returned*,
+  never thrown, because Fastify's error serializer drops `blockers` off a thrown error.
+- **CORS already lists DELETE** (`allowedMethods` in `src/app.js`, guarded by `test/cors.test.js`).
+  A new DELETE route needs no CORS change — but note the preflight is the only place this is
+  provable; `app.inject()` does not preflight.
+- **`sprint-status.yaml` can lag prd.json.** Story pick reads prd.json only, so a stale `blocked`
+  in the yaml does not stall the loop; fix your own story's line and leave the others.
 
 ---
 
@@ -209,5 +224,62 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
     `src/contact/contact.js` (110). `ENQUIRY_COLUMNS` is the single SELECT list for enquiry reads.
 - **Needs human verification:** none — no behaviour changed. The planning gap (who owns
   `src/contact/**`) is new and needs an answer; see `ralph/w2-crud/BLOCKED.md`.
+---
+
+## 2026-08-06T03:09:33Z - W2-US-001 - DELETE for brand and collection
+
+- **Implemented.** `DELETE /admin/brands/:id` and `DELETE /admin/collections/:id`, both
+  backoffice-only, both piping `deleteOrExplain(pool, '<entity>', id, { user: request.user })`
+  straight into `replyDelete`. No registry work was needed — W1's `LIFECYCLE_ENTITIES` already
+  carries the `brand` and `collection` entries with the probes architecture.md § *Delete policy*
+  specifies, so this story was routes + tests only. The three earlier BLOCKED entries above were
+  written before W1 landed on this branch; a human merged it (`2b75fae`, `560c13b`) and cleared the
+  `BLOCKED:` prefixes, so US-001 was live again this iteration.
+- Repos and files changed: `atelier-api` only —
+  `src/routes/admin-catalogue.js` (+2 routes, +1 import, header note),
+  `test/admin-catalogue.test.js` (+11 tests in two describe blocks),
+  `CLAUDE.md` (new `## CRUD completion` section), `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 666 tests passed; 655 before).
+- **What the tests actually assert** (the acceptance criteria, one for one):
+  - A house holding one product AND one collection: 409 whose `blockers` carries BOTH rows with
+    `count: 1, capped: false`, whose `message` names both counts, and `archivable: true` — plus the
+    house and its product still exist afterwards, which is the point of probing before deleting.
+  - A collection holding a product: 409, and `products.collection_id` is **unchanged** afterwards.
+    That FK is SET NULL, so without the probe the delete returns success and silently uncollects
+    every product in it with nothing logged.
+  - An unreferenced house / an empty collection: 200 `{ deleted: { entity, id } }`, gone from the
+    admin list, and the collection's house survives its collection.
+  - 401 anonymous, 403 customer (row still present in both), 404 unknown id with `blockers: []`.
+  - An **archived** product still blocks its house. Not in the acceptance criteria, but it is the
+    first thing staff will hit ("I archived everything, why can't I delete the house?") and the
+    probes deliberately ignore `archived_at` — a delete must never destroy the archive.
+- **Learnings:**
+  - Pattern: the DELETE route shape and the single-quoted-literal rule — promoted to
+    `## Codebase Patterns` above, because US-002/003/004 and the delete halves of US-007/US-008 all
+    repeat it verbatim.
+  - Pattern: `epics.md` says "Registry entries + DELETE routes for X"; the registry entries already
+    exist for every W2 entity. Read `src/lifecycle/registry.js` before scoping a delete story —
+    what is left is roughly 12 lines of route and a test block.
+  - Gotcha: `POST /admin/<entity>/:id/archive` takes no body, and `app.inject` with an undefined
+    payload is the right way to call it from a test (`test/admin-archive.test.js` does the same).
+    Sending `{}` would be a different request.
+  - Gotcha: `test/admin-catalogue.test.js` registers its two users ONCE in `beforeAll` and cleans
+    only brands (by slug prefix) in `beforeEach`. New tests must create their own brand fixture
+    inside the test body; a fixture hoisted to `beforeAll` would be deleted before it is used.
+  - Gotcha: `sprint-status.yaml` still marks US-002 and US-003 `blocked` with a "waits on W1"
+    comment that is no longer true. prd.json is what the loop reads, so this does not stall
+    anything, but a human reading the status board will be misled until those lines are touched by
+    their own stories.
+  - Context: the delete machinery is `src/lifecycle/delete.js` (`deleteOrExplain`, `replyDelete`,
+    `lockSql`, `constraintBlockers`) and `src/lifecycle/registry.js` (`LIFECYCLE_ENTITIES`,
+    `requireDeletableEntity`). The refusal envelope is built by `refusal()`/`blocked()` in
+    delete.js — that is where the `message` wording and the `blockers` shape come from, so a CRM
+    story rendering them should read those two functions rather than guess.
+- **Needs human verification:** none for this story — the API has no screen yet. There is no e2e
+  harness and no `dev-browser` on this machine, so the browser-side half of this contract (the
+  delete dialog staying open on a 409 and offering "Archive instead") gets eyeballed when W2-US-009
+  wires `useCrudScreen` into AdminProducts/AdminBrands. Worth checking then: a real cross-origin
+  DELETE preflight from the CRM at :5273, which `app.inject()` cannot prove.
 ---
 

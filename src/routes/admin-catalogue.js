@@ -11,7 +11,12 @@
 //     attempt into a 400.
 //   - `product_type` is likewise create-only: the inventory unit is derived from
 //     it, so changing it later would leave stock in the wrong unit.
+//   - Hard DELETE goes through the lifecycle registry, never a bare SQL delete:
+//     every child edge out of brands and collections is CASCADE or SET NULL, so
+//     the database would report success while destroying (or silently
+//     uncollecting) the catalogue underneath it.
 
+import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import {
   listAdminBrands,
   createBrand,
@@ -380,5 +385,37 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
     async (request) => ({
       colourway: await setColourwayArchived(pool, request.params.id, false),
     })
+  )
+
+  // Hard delete. The counterpart to archive above, for a row created in error
+  // that no commerce record has touched yet — a test house, a mistyped
+  // collection. `deleteOrExplain` probes first and *returns* its refusal, so the
+  // handler pipes the result straight to `replyDelete`: a 409 has to carry
+  // `blockers`, and Fastify's error serializer drops custom properties off a
+  // thrown error.
+  //
+  // The entity name is a code literal in each call, never `:entity` from the
+  // URL — the registry knows 'brand' and 'user' alike, so it is not an
+  // authorisation boundary (test/lifecycle-registry.test.js asserts the literal).
+  app.delete(
+    '/admin/brands/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'brand', request.params.id, { user: request.user })
+      )
+  )
+
+  app.delete(
+    '/admin/collections/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'collection', request.params.id, {
+          user: request.user,
+        })
+      )
   )
 }

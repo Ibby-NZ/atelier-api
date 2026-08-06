@@ -31,9 +31,9 @@ epics:
   w2-crud:
     name: "W2 CRUD completion"
     branch: aug6/w2-crud
-    status: pending
+    status: in_progress
     stories:
-      US-001: blocked   # DELETE for brand and collection — waits on W1 US-001 (src/lifecycle)
+      US-001: done      # DELETE for brand and collection
       US-002: blocked   # DELETE for product and colourway — waits on W1 US-001 (src/lifecycle)
       US-003: blocked   # DELETE for price-list item and contact enquiry — waits on W1 US-001 (src/lifecycle); contact files unallocated
       US-004: pending   # DELETE for user with the self-delete guard

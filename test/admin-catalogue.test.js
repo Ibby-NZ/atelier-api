@@ -1011,4 +1011,173 @@ describe('back-office catalogue admin', () => {
       expect(response.statusCode).toBe(404)
     })
   })
+
+  // Hard delete, wired to the lifecycle registry. The point of these tests is
+  // the refusal: every child edge out of brands and collections is CASCADE or
+  // SET NULL, so a bare `DELETE FROM brands` returns success while destroying
+  // the catalogue under it. Probe semantics themselves are W1's
+  // test/lifecycle-delete.test.js; what is asserted here is the HTTP contract
+  // the CRM's delete dialog reads.
+  describe('DELETE /admin/brands/:id', () => {
+    const blockerFor = (body, relation) =>
+      body.blockers.find((blocker) => blocker.relation === relation)
+
+    const brandExists = async (id) => {
+      const { rows } = await pool.query('SELECT 1 FROM brands WHERE id = $1', [id])
+      return rows.length === 1
+    }
+
+    it('rejects an anonymous delete with 401', async () => {
+      const brand = await createBrandFixture('Anon Delete')
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, null)
+      expect(response.statusCode).toBe(401)
+      expect(await brandExists(brand.id)).toBe(true)
+    })
+
+    it('rejects a customer delete with 403', async () => {
+      const brand = await createBrandFixture('Shopper Delete')
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, customerCookie)
+      expect(response.statusCode).toBe(403)
+      expect(await brandExists(brand.id)).toBe(true)
+    })
+
+    it('deletes an unreferenced house and returns 200', async () => {
+      const brand = await createBrandFixture('Empty House')
+
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({ deleted: { entity: 'brand', id: brand.id } })
+      expect(await brandExists(brand.id)).toBe(false)
+    })
+
+    // Both counts, in one refusal: staff need to know everything in the way, not
+    // the first thing the server tripped over.
+    it('refuses a house with products AND collections, naming both counts', async () => {
+      const brand = await createBrandFixture('Stocked House')
+      await createCollectionFixture(brand.id, 'Spring')
+      await createProductFixture(brand.id)
+
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(409)
+
+      const body = response.json()
+      expect(blockerFor(body, 'products')).toMatchObject({
+        label: 'products',
+        count: 1,
+        capped: false,
+      })
+      expect(blockerFor(body, 'collections')).toMatchObject({
+        label: 'collections',
+        count: 1,
+        capped: false,
+      })
+      expect(body.message).toContain('1 products')
+      expect(body.message).toContain('1 collections')
+      // The dialog offers "Archive instead" on the strength of this flag.
+      expect(body.archivable).toBe(true)
+      // Nothing was destroyed: the whole point of probing before deleting.
+      expect(await brandExists(brand.id)).toBe(true)
+      const listed = await inject('GET', `/admin/products?brand_id=${brand.id}`, backofficeCookie)
+      expect(listed.json().products).toHaveLength(1)
+    })
+
+    // The trap staff hit first: archiving the catalogue does not unblock the
+    // house, because archiving is not deletion and a delete must never destroy
+    // the archive.
+    it('still refuses when the only product is archived', async () => {
+      const brand = await createBrandFixture('Archived Stock')
+      const product = await createProductFixture(brand.id)
+      const archived = await inject(
+        'POST',
+        `/admin/products/${product.id}/archive`,
+        backofficeCookie
+      )
+      expect(archived.statusCode).toBe(200)
+
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(409)
+      expect(blockerFor(response.json(), 'products').count).toBe(1)
+    })
+
+    it('returns 404 for an unknown house id', async () => {
+      const response = await inject('DELETE', '/admin/brands/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+      expect(response.json().blockers).toEqual([])
+    })
+  })
+
+  describe('DELETE /admin/collections/:id', () => {
+    const collectionIdFor = async (productId) => {
+      const { rows } = await pool.query('SELECT collection_id FROM products WHERE id = $1', [
+        productId,
+      ])
+      return rows[0]?.collection_id ?? null
+    }
+
+    it('rejects a customer delete with 403', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Autumn')
+      const response = await inject(
+        'DELETE',
+        `/admin/collections/${collection.id}`,
+        customerCookie
+      )
+      expect(response.statusCode).toBe(403)
+    })
+
+    it('deletes an empty collection and leaves its house alone', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Autumn')
+
+      const response = await inject(
+        'DELETE',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({
+        deleted: { entity: 'collection', id: collection.id },
+      })
+
+      const remaining = await inject(
+        'GET',
+        `/admin/collections?brand_id=${brand.id}`,
+        backofficeCookie
+      )
+      expect(remaining.json().collections).toEqual([])
+      const houses = await inject('GET', '/admin/brands', backofficeCookie)
+      expect(houses.json().brands.map((row) => row.id)).toContain(brand.id)
+    })
+
+    // products.collection_id is SET NULL, so the database raises nothing here:
+    // without the probe this delete would succeed and silently uncollect every
+    // product in the collection, with nothing logged.
+    it('refuses a collection holding products, and uncollects nothing', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Autumn')
+      const product = await createProductFixture(brand.id, { collection_id: collection.id })
+      expect(await collectionIdFor(product.id)).toBe(collection.id)
+
+      const response = await inject(
+        'DELETE',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(409)
+
+      const body = response.json()
+      expect(body.blockers).toEqual([
+        { relation: 'products', label: 'products', count: 1, capped: false },
+      ])
+      expect(body.message).toContain('1 products')
+      expect(body.archivable).toBe(true)
+      // The SET NULL that did not happen.
+      expect(await collectionIdFor(product.id)).toBe(collection.id)
+    })
+
+    it('returns 404 for an unknown collection id', async () => {
+      const response = await inject('DELETE', '/admin/collections/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+    })
+  })
 })

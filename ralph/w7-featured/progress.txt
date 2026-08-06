@@ -36,6 +36,16 @@ Story-specific detail belongs in the per-story entries below, not here.
   tie-break is never exercised), and archive the LOWEST-ranked row (or an implementation that
   treats rank N as slot N passes). Assert the same list twice, too — a non-total ORDER BY is free
   to return a different permutation each time and a single call cannot see that.
+- **A reseed test must use a row the seed ACTUALLY upserts, and prove it did.** The seed only
+  touches rows from the vendored catalogue, so a prefix-namespaced fixture is never visited and
+  "the column survived a reseed" passes vacuously — including against a set list that clears it.
+  Feature a real seeded slug, and in the same test overwrite a column the seed DOES refresh
+  (`story`): its return is the proof the row was upserted rather than skipped.
+- **Assert the SET LIST, not the file.** A file-wide `includes('<column>')` cannot tell an INSERT
+  column from a refreshed one, and those are two different mistakes. Parse each
+  `INSERT INTO <t> (<cols>) … ON CONFLICT (…) DO UPDATE SET <list>` out of the source, keep
+  `DO NOTHING` as a distinct (null) case, and assert the extraction found every table first — a
+  regex that matches nothing passes every per-statement check.
 - **Filter a shared-database assertion to the fixture's own prefix and assert RELATIVE order.**
   `atelier_w7` is seeded and the migration already featured real rows, so any absolute position or
   `toHaveLength` over a public listing is asserting about the seed as much as the fixture.
@@ -257,4 +267,60 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
     grid to a signed-out visitor).
   - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
     be started.)
+---
+
+## 2026-08-06T16:43:06Z - W7-US-004 - Seed test: featured survives a reseed
+
+- No production code changed — `featured_rank` was already absent from `src/seed/` entirely (US-001
+  deliberately never added it). This story is the two assertions that keep it that way, one
+  behavioural and one structural, because neither alone covers the regression:
+  - `test/seed.test.js` — "never moves a featured house or collection, on any later reseed":
+    snapshots `pierre-frey` / `pierre-frey-cappuccino`, sets ranks 99 and 98 plus a `story` probe,
+    runs `runSeed`, asserts both ranks stood and the story came back, then restores the snapshot.
+    The collection is addressed by the `(brand_slug, slug)` PAIR. It sits directly after the
+    `trade_only` reseed test and names the same posture as `trade_only`, inventory and shipping
+    rates, which is what the story asked for.
+  - `test/featured-seed.test.js` (new, 3 tests, no database) — parses every
+    `INSERT … ON CONFLICT … DO UPDATE SET` out of `src/seed/seed.js` and asserts `featured_rank`
+    is in neither the INSERT column list nor the set list of `brands`/`collections`; that
+    `trade_only` IS an INSERT column but NOT refreshed; and that `inventory`/`shipping_rates` are
+    `DO NOTHING`. The extraction is asserted to have found all six tables first.
+- Why both: the behavioural test can only see what the seed did to a row it upserts, so a
+  `featured_rank` added to an INSERT list with a null beside it (harmless today, an invitation to
+  extend the set list tomorrow) passes it. The structural test cannot see whether the office's
+  decision actually survived. Verified the structural one is not vacuous by applying the regex to a
+  mutated in-memory copy of `seed.js` carrying `featured_rank = EXCLUDED.featured_rank`: the
+  assertion flips. `src/seed/seed.js` on disk was never edited.
+- Repos and files changed: atelier-api only — `test/featured-seed.test.js` (new),
+  `test/seed.test.js` (one added `it`, nothing existing touched), `CLAUDE.md` (`## Featured` → new
+  `### Seed`), `ralph/w7-featured/prd.json`, `ralph/w7-featured/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (940 passed, 50 files). The two untouched repos were
+  run as well: `( cd atelier-crm && npm test && npm run build )` -> 0,
+  `( cd atelier-storefront && npm run lint && npm test && npm run build )` -> 0.
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only) — promoted to `## Codebase Patterns` above:
+    a reseed test must use a row the seed actually upserts and prove it did; assert the parsed SET
+    LIST rather than doing a file-wide `includes`.
+  - Gotchas:
+    - `pierre-frey` is the house the rest of `test/seed.test.js` already probes (website COALESCE,
+      `trade_only`), so its `story` and `website_url` are churned by neighbouring tests. Its BRAND
+      rank is NULL but its collection `pierre-frey-cappuccino` is rank **6** from the migration,
+      which `test/featured-rank.test.js` asserts — hence snapshot-and-restore rather than
+      "restore to NULL". Any future test that features a seeded row must do the same.
+    - The seed refreshes `story = EXCLUDED.story` unconditionally, which is what makes it usable as
+      a "did the upsert reach this row" probe. Do not switch it to COALESCE without noticing that
+      this test leans on it.
+    - Vitest runs a file's `it`s in declaration order, so the restore at the end of one test is what
+      the next one sees; `fileParallelism: false` means the same is true across files.
+  - Context:
+    - Seed upserts: `src/seed/seed.js` (`upsertBrands`, `upsertCollections`).
+    - The sibling posture assertions: `test/seed.test.js` "never re-closes a house the office
+      opened" (`trade_only`) and "seed fills a blank brand website but never overwrites a
+      staff-entered one" (`website_url` COALESCE).
+    - Architecture: `_bmad-output/planning-artifacts/architecture.md` § "Featured ordering",
+      last paragraph before the storefront asymmetry note.
+- **Needs human verification:** none — this story adds tests only and renders nothing. The screens
+  already queued for a human eyeball by US-001..003 are unchanged.
 ---

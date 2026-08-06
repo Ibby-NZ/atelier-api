@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { dumps } from '../scripts/lib/python-format.js'
 import {
   TEMPLATES, mapV1, mapV2, matchTemplate, normaliseHeader, acceptedHeaders,
   CATEGORIES, UNITS, CURRENCIES, CATEGORY_BY_ITEM_TYPE, UNIT_BY_PACK, CURRENCY_MAP,
@@ -393,5 +394,56 @@ describe('mapV2', () => {
     expect(mapV2(row, context)).toBe(null)
     expect(context.errors).toEqual([])
     expect(context.skipped[0]).toMatch(/has no wholesale rate/)
+  })
+})
+
+/**
+ * The byte pin. Every assertion above compares OBJECTS, and an object comparison
+ * is blind to the two drifts that actually cost 8 MB: a reordered key and a
+ * float printed the way JavaScript prints it (115) rather than the way Python's
+ * repr does (115.0). The 19.5k committed records were written by `json.dumps`
+ * over Python floats, so what has to hold is the serialised STRING — pinned here
+ * against `dumps`, at a level that costs nothing, instead of by regenerating the
+ * committed file to find out.
+ */
+describe('byte pin', () => {
+  // The cells behind the FIRST record of src/seed/data/price-lists.json. Its
+  // Item Type cell is blank, so the category comes from the filename's WPPR
+  // token, and its vertical repeat is prose rather than a measurement.
+  const COMMITTED_ROW = [
+    '1/06/2026', 'ALTAGAMMA', '14511', 'MATRIX', '', 'p/roll', 'Vinyl on non-woven',
+    '0.53', '', '70 Offset match', '', '20.76', 'Euro', 'B',
+  ]
+
+  // Line 2 of src/seed/data/price-lists.json verbatim, minus its trailing comma
+  // (the converter writes one record per line). Do not reformat this string —
+  // it is the committed bytes, not a description of them.
+  const COMMITTED_LINE = '{"supplier": "Altagamma", "product_range": "ALTAGAMMA", "category": "wallpaper", "code": "14511", "code_normalized": "14511", "description": "MATRIX", "contents": "Vinyl on non-woven", "unit": "roll", "width": "0.53", "repeat": null, "vertical_repeat": "70 Offset match", "duty_class": null, "wholesale_rate": 20.76, "currency": "EUR", "freight_class": "B", "date_effective": "2026-06-01", "source_file": "ALTAGAMMA WPPR PL JUNE 2026.csv"}'
+
+  it("reproduces the committed file's first record byte for byte", () => {
+    const context = contextOf({
+      source: 'ALTAGAMMA WPPR PL JUNE 2026.csv',
+      supplier: 'Altagamma',
+      fileCategory: 'wallpaper',
+    })
+    expect(dumps(mapV1(COMMITTED_ROW, context))).toBe(COMMITTED_LINE)
+    expect(context.errors).toEqual([])
+  })
+
+  it('writes a whole rate as a Python float and collapses float noise', () => {
+    // 115 must serialise as 115.0 and 256.60000000000002 as "256.6"; JSON.stringify
+    // would write 115 and Number(x.toFixed(4)) would write 256.6 as a number.
+    const row = [...V1_ROW]
+    row[11] = '115'
+    expect(dumps(mapV1(row, contextOf()))).toBe('{"supplier": "Pierre Frey", "product_range": "ATLAS", "category": "fabric", "code": "F3518-003", "code_normalized": "F3518-003", "description": "Atlas Velvet", "contents": "100% Linen", "unit": "metre", "width": "140", "repeat": "64", "vertical_repeat": "256.6", "duty_class": "A", "wholesale_rate": 115.0, "currency": "EUR", "freight_class": "B", "date_effective": "2025-07-01", "source_file": "PIERRE FREY PL.csv"}')
+  })
+
+  it('pins v2 output too — new bytes, pinned to this implementation', () => {
+    // No Python ever wrote a v2 row, so this pin fixes the shape going forward
+    // rather than reproducing history: v1's keys first and unchanged, the four
+    // appended after them, and a non-ASCII name written raw (ensure_ascii=False).
+    const row = [...V2_ROW]
+    row[11] = '115'
+    expect(dumps(mapV2(row, contextOf()))).toBe('{"supplier": "Pierre Frey Paris", "product_range": "ATLAS", "category": "fabric", "code": "F3518-003", "code_normalized": "F3518-003", "description": "Atlas Velvet", "contents": "100% Linen", "unit": "metre", "width": "140", "repeat": "64", "vertical_repeat": "256.6", "duty_class": "A", "wholesale_rate": 115.0, "currency": "EUR", "freight_class": "B", "date_effective": "2025-07-01", "source_file": "PIERRE FREY PL.csv", "brand_name": "Braquenié", "pattern_match": "V x 70H", "duty_percent": 7.5, "template_version": "v2"}')
   })
 })

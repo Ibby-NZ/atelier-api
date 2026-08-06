@@ -357,15 +357,44 @@ describe('price list import — v2 fields', () => {
   })
 })
 
+// The key order every committed record carries, which is also mapV1's emit
+// order (scripts/lib/price-template.js). A regeneration that reordered one key
+// rewrites the whole 8 MB file.
+const COMMITTED_KEYS = [
+  'supplier', 'product_range', 'category', 'code', 'code_normalized', 'description',
+  'contents', 'unit', 'width', 'repeat', 'vertical_repeat', 'duty_class',
+  'wholesale_rate', 'currency', 'freight_class', 'date_effective', 'source_file',
+]
+
 describe('universal price list file', () => {
-  it('parses, validates and has no duplicate (supplier, category, code)', async () => {
+  // 8 MB, so it is read and parsed once for every test in here.
+  let items = null
+
+  beforeAll(async () => {
     const raw = await readFile(new URL('../src/seed/data/price-lists.json', import.meta.url), 'utf8')
-    const items = JSON.parse(raw)
+    items = JSON.parse(raw)
+  })
+
+  it('parses, validates and has no duplicate (supplier, category, code)', () => {
     expect(items.length).toBeGreaterThan(18000)
     validatePriceListItems(items)
     const keys = new Set(items.map((i) => `${i.supplier} ${i.category} ${i.code}`))
     expect(keys.size).toBe(items.length)
     const suppliers = new Set(items.map((i) => i.supplier))
     expect(suppliers.size).toBeGreaterThanOrEqual(35)
+  })
+
+  it('carries none of the v2 keys — the regeneration tripwire', () => {
+    // This file is regenerated in its OWN commit, converter unchanged. A v2
+    // mapper that wrote `brand_name: null` onto v1 rows — or reordered a key —
+    // would rewrite all 19.5k records, and a reviewer facing an 8 MB diff cannot
+    // tell that from a legitimate rate refresh. The first record is enough to
+    // catch it, and stays a v1 record: it sorts first on (supplier, category,
+    // code), so a genuine v2 drop landing later does not falsify this.
+    const [first] = items
+    for (const key of ['brand_name', 'pattern_match', 'duty_percent', 'template_version']) {
+      expect(Object.hasOwn(first, key)).toBe(false)
+    }
+    expect(Object.keys(first)).toEqual(COMMITTED_KEYS)
   })
 })

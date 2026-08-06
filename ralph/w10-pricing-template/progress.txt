@@ -16,7 +16,7 @@ Started: 2026-08-06T02:40:24Z
 - A Postgres CHECK is satisfied by NULL (unknown, not false), so a `~ '^[A-Z]$'` check on a nullable
   column still lets the column stay empty. That is what makes widening the class checks safe for the
   19.5k existing rows.
-- `npm test` runs 37 files / 636 tests against the real local Postgres in ~32s. `fileParallelism:
+- `npm test` runs 37 files / 640 tests against the real local Postgres in ~25-32s. `fileParallelism:
   false` is load-bearing — do not touch it.
 - **`incoming/pricing-templates/` does NOT exist in this worktree** — `incoming/` is gitignored, so
   the corpus lives only in the main checkout, which the sandbox refuses to read. `npm run
@@ -64,6 +64,19 @@ Started: 2026-08-06T02:40:24Z
   output exists, therefore no source row carried a value the old vocabulary lacked — so a widened
   vocabulary cannot change a single committed byte. That argument holds even where the corpus
   cannot be read, and it is worth writing down instead of re-deriving.
+- **Pin a byte-pinned artefact as a STRING, not as an object.** `toEqual` on a mapper's return
+  value passes happily through a reordered key and through `115` where the file says `115.0`;
+  only `dumps(map(row))` against a hardcoded literal catches either. Build the literal by
+  reproducing a real committed line (here, the cells behind record 1 of price-lists.json) so the
+  pin is the committed bytes rather than a description of them, and verify it with `node -e`
+  against the file before committing.
+- **A tripwire on a generated artefact should assert what a WRONG regeneration would change, not
+  what the artefact contains.** Checking record 1 for the absence of the new keys and for the old
+  key order catches an accidental regeneration in the same commit as a mapper change, while
+  staying true after a legitimate refresh — a whole-file scan would instead fail the first time a
+  real new-format drop legitimately lands.
+- An 8 MB fixture read by more than one test belongs in a `beforeAll` inside its describe, parsed
+  once. Two `it`s that each `readFile` + `JSON.parse` it pay for it twice for no isolation gain.
 ---
 
 ## 2026-08-06T14:44:00Z - W10-US-001 - Migration: price_list_items v2 columns
@@ -388,4 +401,65 @@ Started: 2026-08-06T02:40:24Z
   still outstanding from US-002/US-003/US-004 and not runnable from any worktree:
   `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` in the main
   checkout, which is the only place `incoming/pricing-templates/` exists.
+---
+
+## 2026-08-06T16:20:00Z - W10-US-006 - Byte-pin unit test and regeneration tripwire
+- Added the two guards that make a converter change reviewable without regenerating 8 MB.
+  (1) A `byte pin` describe in `test/price-template.test.js`: `dumps(mapV1(row))` compared to a
+  hardcoded string. The first pin's string is **line 2 of `src/seed/data/price-lists.json`
+  verbatim** (minus its trailing comma — the converter writes one record per line), reproduced
+  from the cells behind the committed file's first record (Altagamma 14511, blank Item Type so
+  the category comes from the filename's WPPR token, prose vertical repeat, null duty class); a
+  second pin exercises a whole rate (`115` -> `115.0`) and float noise
+  (`256.60000000000002` -> `"256.6"`); a third pins `dumps(mapV2(row))`, which reproduces no
+  history — v2 bytes are new and pinned to this implementation, including `Braquenié` written raw.
+  (2) A regeneration tripwire in `test/price-lists.test.js`'s `universal price list file` describe:
+  the committed file's FIRST record must carry none of `brand_name`/`pattern_match`/
+  `duty_percent`/`template_version` and must keep mapV1's exact 17-key order. The 8 MB file moved
+  into a `beforeAll` so both tests in that describe share one parse.
+- Repos and files changed (atelier-api only):
+  - `test/price-template.test.js` (+3 tests: the `byte pin` describe; imports `dumps`)
+  - `test/price-lists.test.js` (+1 test: the tripwire; `COMMITTED_KEYS`, shared `beforeAll` parse)
+  - `CLAUDE.md` (`## Pricing template`: the unit-level pin, why the Python-faithful float
+    formatting stays, v2 pinned to the Node implementation, and the tripwire attached to the
+    existing own-commit regeneration rule)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml` (US-006 done, epic status done),
+    `ralph/w10-pricing-template/prd.json`, `ralph/w10-pricing-template/progress.txt`,
+    `ralph/w10-pricing-template/PR-BODY.md` (new)
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 640 tests passed; was 636). The pin was
+  derived and checked with `node -e` against the committed file before it was hardcoded:
+  `line === dumps(mapV1(row)) + ','` -> true. `src/seed/data/price-lists.json` untouched
+  (`git status` clean for it) — no test writes to it and nothing regenerated it.
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - Pin a byte-pinned artefact as a STRING, not an object; build the literal from a real
+      committed line. See the Codebase Patterns block.
+    - A tripwire should assert what a WRONG regeneration would change, not what the file contains,
+      so it survives a legitimate refresh. Also in Codebase Patterns.
+  - Gotchas (what will bite the next iteration):
+    - **Editing anything to do with the first record's cells now breaks a string comparison, by
+      design.** If `mapV1` legitimately changes, the pin must be re-derived from the file with
+      `node -e` — never hand-edited to match the new output, or the pin stops meaning anything.
+    - The tripwire deliberately checks ONLY record 1, not every record. A whole-file scan would
+      fail the first time a real v2 drop legitimately lands in the corpus; record 1 sorts first on
+      `(supplier, category, code)` and is Altagamma, so it stays a v1 record either way.
+    - `test/price-lists.test.js` contains literal NUL bytes on the dedupe-key line inside the
+      `universal price list file` describe (rendered as spaces by every reader). Both edits here
+      were anchored above and below it — an exact-match edit ON that line will always fail.
+    - The whole-file `beforeAll` leaves `items` null if the read throws; that surfaces as a
+      TypeError in each test rather than a clean message, which is the normal vitest shape here.
+  - Context (where the relevant code lives):
+    - Pinned mappers and the registry: `scripts/lib/price-template.js`. Serialiser:
+      `scripts/lib/python-format.js` (`dumps` = `json.dumps` separators + `repr(float)`), guarded
+      independently by `test/converters.test.js`.
+    - The converter's write line (`[\n${ordered.map(dumps).join(',\n')}\n]\n`) is what makes one
+      record one line, which is what makes a line-level pin possible:
+      `scripts/convert-price-lists.js`.
+    - Committed corpus: `src/seed/data/price-lists.json` (19,514 records, 40 suppliers).
+- **Needs human verification:** none from this change — it adds tests only, no runtime code path
+  moved. Still outstanding for the whole workstream and not runnable from any worktree (see
+  US-002/003/004/005): `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json`
+  in the main checkout, which is the only place `incoming/pricing-templates/` exists. And from
+  US-005, the CRM's back-office **Supplier rates** screen: its duty-class field now accepts a
+  single uppercase letter where the API previously took any text up to 200 characters.
 ---

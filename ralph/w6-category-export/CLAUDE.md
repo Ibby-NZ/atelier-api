@@ -38,6 +38,7 @@ Follow existing patterns. Small files. Immutable updates. Explicit errors. No ha
 Match the surrounding code's idiom and comment density.
 
 ### Files you MAY touch
+- atelier-api SHARED FILES — additive only, and only for THIS workstream's own entries: `src/app.js` (register your route plugin; do not reorder or touch another's) and `src/lifecycle/registry.js` (add your own entities; W1 deliberately left suppliers and samples to the workstreams that create their tables)
 - atelier-api: `src/lib/csv-text.js`, `src/products/product-sheet.js`, `src/routes/admin-product-sheet.js`, `scripts/lib/text.js` (re-export only), `test/product-sheet.test.js`
 - atelier-crm: new `src/screens/AdminProductSheet.jsx` + a pure sibling module, `src/lib/api.js` (append only)
 - Both repos: `CLAUDE.md` under a `## Category export` heading

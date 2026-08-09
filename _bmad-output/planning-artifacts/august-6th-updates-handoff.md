@@ -593,6 +593,7 @@ A real samples register and showroom stocking domain, replacing three demo scree
 - **Blocks:** nothing
 
 ## Files you MAY touch
+- atelier-api SHARED FILES — additive only, and only for THIS workstream's own entries: `src/app.js` (register your route plugin; do not reorder or touch another's) and `src/lifecycle/registry.js` (add your own entities; W1 deliberately left suppliers and samples to the workstreams that create their tables)
 - atelier-api: `migrations/*samples*`, `src/samples/**`, `src/routes/admin-samples.js`, `test/samples*.test.js`
 - atelier-crm: new `src/screens/AdminSamples.jsx`, `AdminShowrooms.jsx`, `AdminSampleOrders.jsx`, `src/screens/sampleFlow.js`; `src/screens/SampleScanner.jsx`; `src/App.jsx` (sample routes and redirects only), `src/components/sectionTabs.jsx` (samplesTabs only)
 - Both repos: `CLAUDE.md` under a `## Samples` heading
@@ -703,6 +704,7 @@ Real aggregation endpoints with filter-before-export, product performance by bra
 - **Blocks:** nothing
 
 ## Files you MAY touch
+- atelier-api SHARED FILES — additive only, and only for THIS workstream's own entries: `src/app.js` (register your route plugin; do not reorder or touch another's) and `src/lifecycle/registry.js` (add your own entities; W1 deliberately left suppliers and samples to the workstreams that create their tables)
 - atelier-api: `src/lib/csv.js`, `src/reports/**`, `src/routes/admin-reports.js`, `migrations/*reporting*`, `migrations/*finance-access*`, `test/admin-reports.test.js`, `test/report-filters.test.js`; `src/routes/auth.js` + `src/auth/user-columns.js` (report_access only); `src/users/admin-users.js` (can_view_finance whitelist only)
 - atelier-crm: `src/screens/Reporting.jsx`, `ReportLibrary.jsx`, `src/utils/reportBuilders.js`, `src/utils/exporters.js`, `src/auth/reportPolicy.js`, `src/auth/roles.js`, `src/auth/AuthContext.jsx`
 - Both repos: `CLAUDE.md` under a `## Reporting` heading
@@ -812,6 +814,7 @@ A spreadsheet round trip letting the office assign product categories, generalis
 - **Blocks:** nothing
 
 ## Files you MAY touch
+- atelier-api SHARED FILES — additive only, and only for THIS workstream's own entries: `src/app.js` (register your route plugin; do not reorder or touch another's) and `src/lifecycle/registry.js` (add your own entities; W1 deliberately left suppliers and samples to the workstreams that create their tables)
 - atelier-api: `src/lib/csv-text.js`, `src/products/product-sheet.js`, `src/routes/admin-product-sheet.js`, `scripts/lib/text.js` (re-export only), `test/product-sheet.test.js`
 - atelier-crm: new `src/screens/AdminProductSheet.jsx` + a pure sibling module, `src/lib/api.js` (append only)
 - Both repos: `CLAUDE.md` under a `## Category export` heading

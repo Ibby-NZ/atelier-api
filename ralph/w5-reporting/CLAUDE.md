@@ -38,6 +38,7 @@ Follow existing patterns. Small files. Immutable updates. Explicit errors. No ha
 Match the surrounding code's idiom and comment density.
 
 ### Files you MAY touch
+- atelier-api SHARED FILES — additive only, and only for THIS workstream's own entries: `src/app.js` (register your route plugin; do not reorder or touch another's) and `src/lifecycle/registry.js` (add your own entities; W1 deliberately left suppliers and samples to the workstreams that create their tables)
 - atelier-api: `src/lib/csv.js`, `src/reports/**`, `src/routes/admin-reports.js`, `migrations/*reporting*`, `migrations/*finance-access*`, `test/admin-reports.test.js`, `test/report-filters.test.js`; `src/routes/auth.js` + `src/auth/user-columns.js` (report_access only); `src/users/admin-users.js` (can_view_finance whitelist only)
 - atelier-crm: `src/screens/Reporting.jsx`, `ReportLibrary.jsx`, `src/utils/reportBuilders.js`, `src/utils/exporters.js`, `src/auth/reportPolicy.js`, `src/auth/roles.js`, `src/auth/AuthContext.jsx`
 - Both repos: `CLAUDE.md` under a `## Reporting` heading

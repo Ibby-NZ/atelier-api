@@ -303,6 +303,7 @@ const WORKSTREAMS = [
     requires: 'W1 merged; W3 merged (supplier FK)',
     blocks: 'nothing',
     allowed: [
+      'atelier-api SHARED FILES — additive only, and only for THIS workstream\'s own entries: `src/app.js` (register your route plugin; do not reorder or touch another\'s) and `src/lifecycle/registry.js` (add your own entities; W1 deliberately left suppliers and samples to the workstreams that create their tables)',
       'atelier-api: `migrations/*samples*`, `src/samples/**`, `src/routes/admin-samples.js`, ' +
         '`test/samples*.test.js`',
       'atelier-crm: new `src/screens/AdminSamples.jsx`, `AdminShowrooms.jsx`, ' +
@@ -381,6 +382,7 @@ const WORKSTREAMS = [
     requires: 'W2 merged (read models), W3 merged (suppliers and category)',
     blocks: 'nothing',
     allowed: [
+      'atelier-api SHARED FILES — additive only, and only for THIS workstream\'s own entries: `src/app.js` (register your route plugin; do not reorder or touch another\'s) and `src/lifecycle/registry.js` (add your own entities; W1 deliberately left suppliers and samples to the workstreams that create their tables)',
       'atelier-api: `src/lib/csv.js`, `src/reports/**`, `src/routes/admin-reports.js`, ' +
         '`migrations/*reporting*`, `migrations/*finance-access*`, `test/admin-reports.test.js`, ' +
         '`test/report-filters.test.js`; `src/routes/auth.js` + `src/auth/user-columns.js` ' +
@@ -461,6 +463,7 @@ const WORKSTREAMS = [
     requires: 'W3 merged (products.category)',
     blocks: 'nothing',
     allowed: [
+      'atelier-api SHARED FILES — additive only, and only for THIS workstream\'s own entries: `src/app.js` (register your route plugin; do not reorder or touch another\'s) and `src/lifecycle/registry.js` (add your own entities; W1 deliberately left suppliers and samples to the workstreams that create their tables)',
       'atelier-api: `src/lib/csv-text.js`, `src/products/product-sheet.js`, ' +
         '`src/routes/admin-product-sheet.js`, `scripts/lib/text.js` (re-export only), ' +
         '`test/product-sheet.test.js`',

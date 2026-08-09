@@ -557,3 +557,43 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   valuation until A1 (the cost source) is settled, and whether the invoice queue should carry a
   value at all given that request lines never receive a price on this platform.
 ---
+
+## 2026-08-06T19:50:00Z - W5-US-008 - report_access on /auth/me and CRM consumption
+- (Entry reconstructed 2026-08-10: the story's code and prd flip were complete but the loop died on
+  the account's monthly spend limit before committing — iterations 8-10 stalled with no output.
+  Gates were re-run green before this was committed by the supervising session.)
+- API: `SESSION_USER_COLUMNS` (`src/auth/user-columns.js`) = PUBLIC + `can_view_finance`, used ONLY
+  by the /auth/me session read; `publicUser(row)` projects a row back down to the public keys, so
+  the flag itself never reaches the payload — /auth/me returns
+  `{ user: { ...public, report_access: reportAccess(row) } }`, the DERIVED statement, re-computed on
+  every read. A finance grant revoked in the back office takes effect on the CRM's next /auth/me,
+  not at next sign-in.
+- API: `loadReportAccess(db, user)` (`src/reports/access.js`) — the report layer's own resolution of
+  the same rule for callers whose `request.user` came through PUBLIC_USER_COLUMNS (guards do not
+  select the flag, so `reportAccess(request.user)` alone would answer finance:false forever). PK
+  lookup keyed on the session-resolved id, never on caller input; fails closed.
+- CRM: `toCrmUser` carries `report_access` through verbatim (`|| null` — an older API or the
+  break-glass offline user falls back to the capability map rather than being locked out by an
+  invented `{ reports: false }`); `accessOf` in `src/auth/roles.js` prefers the API's statement over
+  the demo caps; `ReportLibrary.jsx`/`reportBuilders.js`/`exporters.js` consume it so masking fires
+  for a non-finance login even though STAFF_ROLE_MAP hands every staff login the director caps.
+- Repos and files changed: atelier-api — `src/auth/user-columns.js`, `src/routes/auth.js`,
+  `src/reports/access.js`, `src/routes/admin-reports.js`, `test/admin-reports.test.js` (+170 lines),
+  `CLAUDE.md`; atelier-crm — `src/auth/AuthContext.jsx`, `src/auth/roles.js` (+test),
+  `src/screens/ReportLibrary.jsx`, `src/utils/reportBuilders.js` (+test), `src/utils/exporters.js`,
+  `CLAUDE.md`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (api: 53 files, 1395 tests), crm `npm test` -> 0,
+  crm `npm run build` -> 0.
+- **Learnings:**
+  - Pattern: a session payload may SELECT a private column to derive a public statement from it, but
+    the projection back to public keys must be structural (`publicUser`), not a `delete` — a key
+    never declared public cannot survive a projection, while a delete removes only what somebody
+    remembered to name.
+  - Gotcha: `request.user` is loaded through PUBLIC_USER_COLUMNS everywhere, so any rule derived
+    from a non-public column must re-fetch it by the session-resolved id (`loadReportAccess`), or
+    the rule silently evaluates against `undefined`.
+- **Needs human verification:** a back-office login whose `can_view_finance` is false must see the
+  masked report library in the CRM — every CRM login maps to the demo director caps, so the masked
+  state only appears with a live API session. Same open product decisions as US-007 (stock report
+  without valuation until A1; whether the invoice queue carries a value).
+---

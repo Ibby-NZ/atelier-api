@@ -83,7 +83,7 @@ epics:
       US-005: done      # Product performance by brand
       US-006: done      # Server-side CSV export
       US-007: done      # Stock and not-invoiced reports
-      US-008: pending   # report_access on /auth/me and CRM consumption
+      US-008: done      # report_access on /auth/me and CRM consumption
   w6-category-export:
     name: "W6 Category export"
     branch: aug6/w6-category-export

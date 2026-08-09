@@ -7,7 +7,10 @@
 // it is what puts `meta.masked_columns` on the payload, and a route that skipped
 // it would be the one that silently ships a finance column the day its report
 // declares one. Access comes from `request.user` alone (src/reports/access.js);
-// nothing a caller can send reaches it.
+// nothing a caller can send reaches it. `loadReportAccess` rather than
+// `reportAccess`, because the guard's projection carries no `can_view_finance`
+// and a route reading it off `request.user` would answer `finance: false` to
+// everyone — see that function's own note.
 //
 // ERRORS TRAVEL AS THEMSELVES. `parseReportFilters` throws a 400 and
 // `maskReport` a 403, both as `Object.assign(new Error(msg), { statusCode })`,
@@ -27,7 +30,7 @@
 // every row, it accepts no `limit`, and it has its own tighter bucket.
 
 import { parseReportFilters, PRODUCT_TYPES, ORDER_KINDS, ORDER_STATUSES } from '../reports/filters.js'
-import { reportAccess, maskReport } from '../reports/access.js'
+import { loadReportAccess, maskReport } from '../reports/access.js'
 import {
   toReportCsv,
   reportCsvFilename,
@@ -125,7 +128,7 @@ export const adminReportRoutes = async (app, { pool }) => {
       async (request) => {
         const filters = parseReportFilters(request.query)
         const report = await build(pool, filters, { limit: request.query.limit })
-        return maskReport(report, reportAccess(request.user))
+        return maskReport(report, await loadReportAccess(pool, request.user))
       }
     )
 
@@ -148,7 +151,7 @@ export const adminReportRoutes = async (app, { pool }) => {
         // Masked BEFORE the writer sees a row, and before either header is set:
         // maskReport throws 403 for a report a caller may not have, and that
         // refusal has to leave as JSON rather than as a CSV attachment.
-        const masked = maskReport(report, reportAccess(request.user))
+        const masked = maskReport(report, await loadReportAccess(pool, request.user))
 
         reply
           .header('content-type', REPORT_CSV_CONTENT_TYPE)

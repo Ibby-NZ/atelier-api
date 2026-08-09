@@ -22,3 +22,31 @@ export const ACTIVE_USER_CONDITION = 'archived_at IS NULL'
 // paths (/auth/me and the guards), killing any cookie the moment approval is
 // revoked, exactly like archiving.
 export const SESSION_USER_CONDITION = `${ACTIVE_USER_CONDITION} AND NOT (role = 'trade' AND trade_approved = false)`
+
+// /auth/me selects ONE column beyond the public projection — `can_view_finance`,
+// the fact behind the report access it derives (src/reports/access.js) — and must
+// not return it. The payload states what the login may SEE, never the flag behind
+// it: two statements of one rule in one body invite a client to read the flag and
+// re-derive the rule itself, which is the arrangement `report_access` exists to
+// end. Login and register keep PUBLIC_USER_COLUMNS untouched; nothing outside the
+// session read has any use for the flag.
+export const SESSION_USER_COLUMNS = `${PUBLIC_USER_COLUMNS}, can_view_finance`
+
+// The keys PUBLIC_USER_COLUMNS selects, derived from that list rather than
+// retyped, so a column added there becomes a key here with no second edit — the
+// same reason the list is a single source of truth in the first place.
+const PUBLIC_USER_KEYS = Object.freeze(
+  PUBLIC_USER_COLUMNS.split(',').map((column) => column.trim())
+)
+
+/**
+ * The public shape of a user row, whatever else the query selected beside it.
+ * Projection rather than deletion, the posture maskReport takes: a key that was
+ * never declared public cannot survive a projection, where a `delete` can only
+ * remove what somebody remembered to name.
+ *
+ * @param {object} row
+ * @returns {object}
+ */
+export const publicUser = (row) =>
+  Object.fromEntries(PUBLIC_USER_KEYS.map((key) => [key, row?.[key]]))

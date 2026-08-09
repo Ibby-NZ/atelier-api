@@ -11,6 +11,7 @@ import {
   parseReportFilters,
 } from '../src/reports/filters.js'
 import { listRevenueLines, summariseRevenue } from '../src/reports/revenue-lines.js'
+import { loadReportAccess } from '../src/reports/access.js'
 import {
   productPerformanceReport,
   PRODUCT_PERFORMANCE_COLUMNS,
@@ -1633,6 +1634,175 @@ describe('W5-US-007 — stock and not-invoiced', () => {
     // and is widened in src/lib/csv.js or not at all.
     it('neutralise a negative available, because a leading - is a formula lead-in', () => {
       expect(stockCsv.body).toContain("'-2")
+    })
+  })
+})
+
+// The CRM has mapped every staff login to full director access since the day it
+// was wired to this API, so its masking has never fired. What closes that is a
+// DERIVED statement on /auth/me — never a stored one, and never one the caller
+// supplies — plus the report routes resolving finance from the same fact.
+describe('W5-US-008 — report_access on /auth/me', () => {
+  let pool
+  let app
+  let bossCookie
+  let shopperCookie
+
+  const BOSS_EMAIL = `${PREFIX}-me-boss@example.test`
+  const SHOPPER_EMAIL = `${PREFIX}-me-shopper@example.test`
+
+  const sessionCookieFrom = (response) => {
+    const setCookie = response.headers['set-cookie']
+    const header = Array.isArray(setCookie) ? setCookie[0] : setCookie
+    return header.split(';')[0]
+  }
+
+  const me = (cookie) =>
+    app.inject({ method: 'GET', url: '/auth/me', headers: cookie ? { cookie } : {} })
+
+  const userFrom = async (cookie) => JSON.parse((await me(cookie)).body).user
+
+  const setFinance = (email, value) =>
+    pool.query('UPDATE users SET can_view_finance = $2 WHERE email = $1', [email, value])
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    await runMigrations(config.databaseUrl)
+    pool = createPool(config.databaseUrl)
+    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+    await app.ready()
+
+    await cleanup(pool)
+
+    // Registered once, as everywhere here: /auth/register is 10 per 15 min per
+    // IP and this app instance's bucket has to last the whole block.
+    const boss = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: BOSS_EMAIL, password: PASSWORD, name: 'Boss' },
+    })
+    bossCookie = sessionCookieFrom(boss)
+    await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [BOSS_EMAIL])
+
+    const shopper = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: SHOPPER_EMAIL, password: PASSWORD },
+    })
+    shopperCookie = sessionCookieFrom(shopper)
+  })
+
+  afterAll(async () => {
+    await app.close()
+    await cleanup(pool)
+    await pool.end()
+  })
+
+  beforeEach(async () => {
+    await setFinance(BOSS_EMAIL, false)
+  })
+
+  it('states what a back-office login may read, and withholds the flag behind it', async () => {
+    const user = await userFrom(bossCookie)
+
+    expect(user.report_access).toEqual({ reports: true, finance: false })
+    // The payload carries the STATEMENT, not the fact it was derived from: two
+    // versions of one rule in one body invite a client to read the flag and
+    // re-derive the rule for itself, which is what report_access exists to end.
+    expect(user).not.toHaveProperty('can_view_finance')
+    expect(user).toMatchObject({ email: BOSS_EMAIL, role: 'backoffice' })
+  })
+
+  it('follows a grant given and taken away, on the same session', async () => {
+    expect((await userFrom(bossCookie)).report_access.finance).toBe(false)
+
+    await setFinance(BOSS_EMAIL, true)
+    expect((await userFrom(bossCookie)).report_access.finance).toBe(true)
+
+    // And back: a role-derived answer could be handed out and never taken back,
+    // which is why finance is the column rather than the role.
+    await setFinance(BOSS_EMAIL, false)
+    expect((await userFrom(bossCookie)).report_access.finance).toBe(false)
+  })
+
+  // If it were stored, the cookie would have to be re-issued for the grant above
+  // to move — and a revocation would wait for the account's next sign-in.
+  it('never writes it to the session', async () => {
+    await setFinance(BOSS_EMAIL, true)
+    const response = await me(bossCookie)
+
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(JSON.parse(response.body).user.report_access.finance).toBe(true)
+  })
+
+  it('gives a client account no report access at all', async () => {
+    const user = await userFrom(shopperCookie)
+
+    expect(user.report_access).toEqual({ reports: false, finance: false })
+    expect(user.role).toBe('customer')
+  })
+
+  it('answers an anonymous caller 401 with no statement to read', async () => {
+    const response = await me(null)
+
+    expect(response.statusCode).toBe(401)
+    expect(JSON.parse(response.body)).not.toHaveProperty('user')
+  })
+
+  // The statement and the gate have to be the same answer. `reports` is what the
+  // CRM draws the library from; requireRole('backoffice') is what actually
+  // refuses, and a drift between them would offer a screen that 403s on open.
+  it('agrees with what the report routes actually serve', async () => {
+    const path = '/admin/reports/product-performance'
+
+    const staff = await app.inject({ method: 'GET', url: path, headers: { cookie: bossCookie } })
+    const client = await app.inject({ method: 'GET', url: path, headers: { cookie: shopperCookie } })
+
+    expect((await userFrom(bossCookie)).report_access.reports).toBe(true)
+    expect(staff.statusCode).toBe(200)
+    expect((await userFrom(shopperCookie)).report_access.reports).toBe(false)
+    expect(client.statusCode).toBe(403)
+  })
+
+  // The guard loads request.user through PUBLIC_USER_COLUMNS, which carries no
+  // can_view_finance — so a route reading it straight off the record would mask
+  // as though nobody had finance, while /auth/me told the CRM somebody did.
+  describe('loadReportAccess — the same fact on both sides', () => {
+    const staffRecord = (id) => ({ id, role: 'backoffice', trade_approved: false })
+
+    it('resolves the flag the guard did not select', async () => {
+      const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [BOSS_EMAIL])
+      const id = rows[0].id
+
+      expect(await loadReportAccess(pool, staffRecord(id))).toEqual({ reports: true, finance: false })
+      await setFinance(BOSS_EMAIL, true)
+      expect(await loadReportAccess(pool, staffRecord(id))).toEqual({ reports: true, finance: true })
+    })
+
+    // The lookup exists because the projection is short. A record that already
+    // carries the flag must not pay for it — which is also how this disappears
+    // if the guard ever widens.
+    it('does not query for a record that already carries it', async () => {
+      const refuses = {
+        query: () => {
+          throw new Error('should not query')
+        },
+      }
+
+      expect(
+        await loadReportAccess(refuses, { ...staffRecord(1), can_view_finance: true })
+      ).toEqual({ reports: true, finance: true })
+      expect(await loadReportAccess(refuses, null)).toEqual({ reports: false, finance: false })
+    })
+
+    // Fails closed: an account deleted between the session guard and the report
+    // has no finance, rather than a `finance: undefined` a reader would coerce.
+    it('fails closed when the row has gone', async () => {
+      expect(await loadReportAccess(pool, staffRecord(-1))).toEqual({
+        reports: true,
+        finance: false,
+      })
     })
   })
 })

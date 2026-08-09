@@ -69,6 +69,37 @@ export const reportAccess = (user) => {
   })
 }
 
+/**
+ * The same statement as reportAccess, resolved against the database when the
+ * caller's own record does not carry the flag.
+ *
+ * `src/auth/guards.js` loads `request.user` through PUBLIC_USER_COLUMNS, which
+ * is `id, email, name, role, trade_approved` and no more — so a route calling
+ * `reportAccess(request.user)` reads `can_view_finance` as `undefined` and
+ * answers `finance: false` to everyone, for ever. Nothing shows it today (no
+ * report in Epic 5 declares a finance column), but /auth/me now publishes a
+ * DERIVED report_access to the CRM, and a payload that says "you may see costs"
+ * while the report route masks as though you may not is the exact drift this
+ * layer exists to prevent — two statements of one rule, disagreeing.
+ *
+ * So the report layer fetches the one column it needs, keyed on the id the
+ * SESSION resolved and never on anything the caller sent. It is a primary-key
+ * lookup beside an unbounded aggregate, and it disappears of its own accord the
+ * day the guard's projection carries the flag: a record that already has it is
+ * used as-is. Fails closed — a row that has gone has no finance.
+ *
+ * @param {{ query: Function }} db pool or open client
+ * @param {object|null} user request.user
+ * @returns {Promise<Readonly<{ reports: boolean, finance: boolean }>>}
+ */
+export const loadReportAccess = async (db, user) => {
+  if (!user || Object.hasOwn(user, 'can_view_finance')) {
+    return reportAccess(user)
+  }
+  const { rows } = await db.query('SELECT can_view_finance FROM users WHERE id = $1', [user.id])
+  return reportAccess({ ...user, can_view_finance: rows[0]?.can_view_finance === true })
+}
+
 // How a cell is meant to be read. The CSV writer and the CRM's cell pipeline
 // both need to know a figure from a name, and the column is the only place that
 // is stated once for the table and the file alike. `finance` is independent of

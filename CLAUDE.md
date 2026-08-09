@@ -17,6 +17,7 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 ## Migrations
 
 - `migrate:create` emits a CommonJS template (`exports.up`) — rewrite to ESM (`export const up/down`) because this package is `"type": "module"`.
+- **Check the timestamp is free before creating a migration** (`ls migrations | grep <prefix>`): the concurrent August-2026 workstreams collided twice — `1786334400000` (`price-list-template-v2` + `suppliers`) and `1786680000000` (`reporting-finance-access` + `samples-register`). Both are harmless-by-luck: node-pg-migrate breaks a timestamp tie by `localeCompare` on the full filename (deterministic), `pgmigrations` keys on the full name, and each pair touches disjoint tables. **Do NOT "fix" them by renaming** — a migration that has already run is recorded under its filename, so a rename makes every already-migrated database treat it as unrun and re-execute `createTable` into a crash. The pairs stay; new collisions must not.
 - Tests run migrations themselves via the programmatic runner: `import runner from 'node-pg-migrate'` with `{ databaseUrl, dir: 'migrations', direction: 'up', migrationsTable: 'pgmigrations', log: () => {} }`. Runner returns the array of applied migrations — empty array proves a re-run is a no-op.
 - `vitest.config.js` sets `fileParallelism: false` — the runner takes a Postgres advisory lock, so parallel test files throw "Another migration is already running". Keep it serialized.
 - Schema: one `inventory` row per colourway (`colourway_id` unique). Check constraints: `products.product_type IN ('fabric','finished_good')`, `inventory.unit IN ('metres','units')`. Upsert targets for the seed: `brands.slug`, `products.slug`, `colourways.sku`, `collections (brand_id, slug)` — all unique.
@@ -914,11 +915,14 @@ migrations.
 - **Fixture cleanup order is `samples` → `brands` → `suppliers` → `showrooms`.**
   `samples.colourway_id` is RESTRICT, so it stops a brand cascade dead and the *cleanup itself*
   raises 23503 in the next test's `beforeEach` — the same trap `order_lines.colourway_id` sets.
-- **The delete registry is not wired up yet.** `src/lifecycle/registry.js` has no `sample` entry
-  and neither the `product` nor the `colourway` entry probes `samples`, so a product delete does
-  not yet see them. The registry's `information_schema` safety test means a probe could not have
-  been stubbed before the table existed; adding one now is a cross-workstream ownership question
-  (E2 owns `src/lifecycle/`), not a tidy-up.
+- **The delete registry IS wired up** (this note once said otherwise — later stories and the
+  post-merge review closed it): `src/lifecycle/registry.js` carries `sample`, `sample_order` and
+  `showroom` entries, the `product` and `colourway` entries probe `samples` AND `sample_orders`
+  (through the colourway join for product, direct for colourway — the order_lines shape), and
+  `CONSTRAINT_BLOCKERS` in `src/lifecycle/delete.js` names all four RESTRICT edges
+  (`samples_colourway_id_fkey`, `sample_orders_colourway_id_fkey`,
+  `sample_orders_showroom_id_fkey`, `sample_loans_sample_id_fkey`) so even a lost-race 23503 says
+  "samples", never "related records".
 
 ### `sample_loans` (`migrations/1786766400000_samples-loans.js`)
 

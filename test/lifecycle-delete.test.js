@@ -72,6 +72,9 @@ const cleanup = async (pool) => {
   await pool.query(`DELETE FROM orders WHERE order_number LIKE $1`, [`${PREFIX}-%`])
   await pool.query(`DELETE FROM contact_enquiries WHERE email LIKE $1`, [`%@${DOMAIN}`])
   await pool.query(`DELETE FROM users WHERE email LIKE $1`, [`%@${DOMAIN}`])
+  // samples.colourway_id is RESTRICT, so like orders they must go before the
+  // brand cascade or the cleanup itself 23503s.
+  await pool.query(`DELETE FROM samples WHERE barcode LIKE $1`, [`${PREFIX}-%`])
   await pool.query(`DELETE FROM brands WHERE slug LIKE $1`, [`${PREFIX}-%`])
   await pool.query(`DELETE FROM shipping_rates WHERE zone LIKE $1`, [`${PREFIX}-%`])
 }
@@ -144,6 +147,38 @@ describe('deleteOrExplain against the database', () => {
     expect(
       await countRows('SELECT count(*) FROM inventory WHERE colourway_id = $1', [colourwayId])
     ).toBe(1)
+  })
+
+  it('refuses a product and a colourway that samples were cut from, naming the samples', async () => {
+    // samples.colourway_id is RESTRICT, so without the probes the delete died
+    // mid-cascade on a bare 23503 and the refusal read "related records"
+    // instead of naming what blocks it. The product probe goes through the
+    // colourway join; the colourway probe is direct — the order_lines shape.
+    const brandId = await seedBrand(pool)
+    const productId = await seedProduct(pool, brandId)
+    const colourwayId = await seedColourway(pool, productId)
+    await pool.query(`INSERT INTO samples (barcode, colourway_id) VALUES ($1, $2)`, [
+      `${PREFIX}-BARCODE-1`,
+      colourwayId,
+    ])
+
+    const viaColourway = await deleteOrExplain(pool, 'colourway', colourwayId)
+    expect(viaColourway.deleted).toBe(false)
+    expect(viaColourway.status).toBe(409)
+    expect(viaColourway.blockers).toEqual([
+      { relation: 'samples', label: 'samples', count: 1, capped: false },
+    ])
+
+    const viaProduct = await deleteOrExplain(pool, 'product', productId)
+    expect(viaProduct.deleted).toBe(false)
+    expect(viaProduct.status).toBe(409)
+    expect(viaProduct.blockers).toEqual([
+      { relation: 'samples', label: 'samples', count: 1, capped: false },
+    ])
+
+    // Nothing was destroyed on either path.
+    expect(await countRows('SELECT count(*) FROM samples WHERE colourway_id = $1', [colourwayId])).toBe(1)
+    expect(await countRows('SELECT count(*) FROM colourways WHERE id = $1', [colourwayId])).toBe(1)
   })
 
   it('refuses a collection that still holds products, which the SET NULL FK would silently uncollect', async () => {

@@ -49,9 +49,10 @@ const STATUS_TEXT = Object.freeze({
   409: 'Conflict',
 })
 
-// Only a RESTRICT foreign key can raise 23503 here; today that is exactly two
-// edges. An unknown constraint degrades the *detail*, never the status — the
-// same posture as rethrowConflict's handling of an unrecognised 23505.
+// Only a RESTRICT foreign key can raise 23503 here — order_lines, the supplier
+// link and the samples domain's four edges. An unknown constraint degrades the
+// *detail*, never the status — the same posture as rethrowConflict's handling
+// of an unrecognised 23505.
 const CONSTRAINT_BLOCKERS = Object.freeze({
   order_lines_colourway_id_fkey: Object.freeze({
     relation: 'order_lines',
@@ -64,6 +65,24 @@ const CONSTRAINT_BLOCKERS = Object.freeze({
   brands_supplier_id_fkey: Object.freeze({
     relation: 'brands',
     label: 'houses',
+  }),
+  // The samples domain's RESTRICT edges (W4). The corresponding probes report
+  // these first; the entries keep a lost race naming the actual blocker.
+  samples_colourway_id_fkey: Object.freeze({
+    relation: 'samples',
+    label: 'samples',
+  }),
+  sample_orders_colourway_id_fkey: Object.freeze({
+    relation: 'sample_orders',
+    label: 'sample orders',
+  }),
+  sample_orders_showroom_id_fkey: Object.freeze({
+    relation: 'sample_orders',
+    label: 'sample orders',
+  }),
+  sample_loans_sample_id_fkey: Object.freeze({
+    relation: 'sample_loans',
+    label: 'sample loans',
   }),
 })
 

@@ -270,12 +270,31 @@ export const LIFECYCLE_ENTITIES = defineEntities({
            WHERE c.product_id = $1
              AND (i.qty_available > 0 OR i.qty_reserved > 0)`
       ),
+      // samples.colourway_id and sample_orders.colourway_id are both RESTRICT,
+      // so without these two the delete dies mid-cascade on a bare 23503 and
+      // the refusal reads "related records" instead of naming the samples cut
+      // from this design. Through the colourway join, same shape as order_lines.
+      probe(
+        'samples',
+        'samples',
+        `SELECT 1 FROM samples s
+            JOIN colourways c ON c.id = s.colourway_id
+           WHERE c.product_id = $1`
+      ),
+      probe(
+        'sample_orders',
+        'sample orders',
+        `SELECT 1 FROM sample_orders so
+            JOIN colourways c ON c.id = so.colourway_id
+           WHERE c.product_id = $1`
+      ),
     ],
   },
 
-  // order_lines.colourway_id is the one RESTRICT edge in the schema, so this
-  // probe and the 23503 backstop agree; the probe wins because it can also
-  // report how many, and because it runs before anything is destroyed.
+  // order_lines.colourway_id, samples.colourway_id and
+  // sample_orders.colourway_id are the RESTRICT edges here, so these probes and
+  // the 23503 backstop agree; the probes win because they can also report how
+  // many, and because they run before anything is destroyed.
   colourway: {
     table: 'colourways',
     idColumn: 'id',
@@ -293,6 +312,12 @@ export const LIFECYCLE_ENTITIES = defineEntities({
         `SELECT 1 FROM inventory
            WHERE colourway_id = $1
              AND (qty_available > 0 OR qty_reserved > 0)`
+      ),
+      probe('samples', 'samples', 'SELECT 1 FROM samples WHERE colourway_id = $1'),
+      probe(
+        'sample_orders',
+        'sample orders',
+        'SELECT 1 FROM sample_orders WHERE colourway_id = $1'
       ),
     ],
   },

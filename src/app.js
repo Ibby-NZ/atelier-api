@@ -18,6 +18,7 @@ import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
+import { adminSampleRoutes } from './routes/admin-samples.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
@@ -147,6 +148,10 @@ export const buildApp = ({
     // only admin routes here that opt into the rate limiter (a report is an
     // unbounded aggregate over the order ledger).
     api.register(adminReportRoutes, { pool })
+    // /admin/samples — the physical sample register (what is on the shelf, what
+    // is out, what is late back) plus the scanner's by-barcode lookup. Back
+    // office only, same CORS allowance as every other CRM screen.
+    api.register(adminSampleRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })

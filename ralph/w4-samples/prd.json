@@ -18,8 +18,8 @@
         "atelier-api"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T06:19:01Z"
     },
     {
       "id": "US-002",
@@ -36,8 +36,8 @@
         "atelier-api"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T18:26:00Z"
     },
     {
       "id": "US-003",
@@ -53,8 +53,8 @@
         "atelier-api"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T18:34:00Z"
     },
     {
       "id": "US-004",
@@ -70,8 +70,8 @@
         "atelier-api"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T18:44:00Z"
     },
     {
       "id": "US-005",
@@ -87,8 +87,8 @@
         "atelier-api"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T19:05:00Z"
     },
     {
       "id": "US-006",
@@ -105,8 +105,8 @@
         "atelier-api"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T19:14:00Z"
     },
     {
       "id": "US-007",
@@ -122,8 +122,8 @@
         "atelier-api"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T07:25:43Z"
     },
     {
       "id": "US-008",
@@ -136,11 +136,12 @@
         "Gates green: `( cd atelier-crm && npm test && npm run build )`"
       ],
       "repos": [
+        "atelier-api",
         "atelier-crm"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Needed the showroom API no story creates (routes, module, registry entry) — all in-bounds files | done 2026-08-06T07:45:45Z"
     },
     {
       "id": "US-009",
@@ -156,8 +157,8 @@
         "atelier-crm"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-09T20:34:50Z"
     }
   ]
 }

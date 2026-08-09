@@ -74,7 +74,7 @@ epics:
   w5-reporting:
     name: "W5 Reporting"
     branch: aug6/w5-reporting
-    status: pending
+    status: done
     stories:
       US-001: done      # Extract the hardened CSV writer to src/lib/csv.js
       US-002: done      # Migration: reporting index and finance access

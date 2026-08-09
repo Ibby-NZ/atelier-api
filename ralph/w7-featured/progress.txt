@@ -85,6 +85,28 @@ Story-specific detail belongs in the per-story entries below, not here.
   inlined at BUILD time even for SSR code, so the rebuild is required), then re-serve the same
   build while mutating the fixture's data between requests — one build covers every scenario.
   `express` cannot be imported from the scratchpad (no node_modules there); the raw handler can.
+- **A screen-level feature is only as durable as a test that names where it LIVES.** A panel added
+  to a screen another workstream also owns is lost wholesale when that screen is rewritten — the
+  pure module survives (it is a file of its own, and nothing conflicts) while nothing fails to say
+  the screen stopped importing it. The source scan that asserts the panel is ON the screen is the
+  only guard this repo can have, because there is no jsdom.
+- **When two workstreams' source scans disagree, the dangerous one is the one that keeps PASSING.**
+  Moving a path constant out of the scanned file silences a `not.toContain('/admin/x')` scan without
+  changing a byte of behaviour. If a feature genuinely falsifies another workstream's stated
+  invariant, write down the narrower invariant that actually survives and assert THAT in your own
+  test file, next to a note naming the stale assertion — a green tick whose comment is false is
+  worse than a red one.
+- **A negative source scan must match a syntax SHAPE, not a word.** `not.toContain('featured_rank')`
+  fails against the comment explaining that the screen never touches it;
+  `not.toMatch(/\.featured_rank|featured_rank\s*[:=]/)` is a property read or write and cannot be
+  written in prose. Same family as the `/archive` and `useMutation` scans already recorded in the
+  CRM's CLAUDE.md.
+- **A panel that cannot share its screen's list needs its own load, keyed on that list's rows.**
+  Every mutation on a `useCrudScreen` screen ends in `list.reload()` — including the delete, which
+  lives inside the kit and a screen cannot hook — so keying the second load on `crud.list.rows` is
+  how it follows all of them through one cycle, with no second reload path and no loop (the second
+  load does not write the first list's state). Skip it while the list reports `loading` or a mount
+  costs two round trips instead of one.
 - **Verify a build-time-fetching page against a fixture API on a spare port**, not against the
   shared one: `node <scratch>/fixture-api.mjs` serving the three catalogue endpoints, then a
   wrapper that spawns `npm run build` with `PUBLIC_API_BASE_URL` pointed at it, then parse
@@ -647,4 +669,99 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
     three.
   - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
     be started. The render harness above proves the markup, not how it looks.)
+---
+
+## 2026-08-06T17:43:00Z - W7-US-005 - CRM featured panel (re-applied after the W2 merge)
+
+- The story was REOPENED because W2 rewrote `AdminBrands.jsx` — collections moved to their own
+  screen and the whole thing now runs through `useCrudScreen` — and the merge took W2's screen
+  wholesale, so the featured panel was gone. `featuredOrder.js` survived untouched (a file of its
+  own, no conflict) and is REUSED as-is: not one rule in it changed.
+- The panel is back on `AdminBrands`, between "Add a house" and the houses list: the standing
+  timing note, an error line and two `FeaturedList` strips (houses, collections) parameterised by
+  `BRAND_LIST` / `COLLECTION_LIST`. The sub-component is the old one verbatim — Up/Down disabled at
+  the ends, Remove, an add picker over `candidates`, and one "Save order" per strip.
+- **What had to change for W2's structure**, and it is the whole of the re-application:
+  - The old screen loaded both catalogue lists itself, archive-inclusive, and applied "Show
+    archived" locally. W2's screen loads houses through the kit with `brandListFilters(showArchived)`
+    and loads no collections at all. So the panel now does **its own** archive-inclusive read of
+    both lists (`FEATURED_SOURCE_PATHS`, new in `featuredOrder.js`). It cannot share the kit's list:
+    that one is filtered, and a featured list built from only the visible rows silently unfeatures
+    an archived house on the next whole-list save.
+  - That load effect is keyed on `crud.list.rows`, so the panel follows every mutation on the
+    screen — including the kit's delete, which a screen cannot hook. The featured save goes through
+    `crud.mutation.run` for the same reason: reloading the houses list is what pulls the saved ranks
+    back into the strips.
+  - `crud.mutation` was previously unused on this screen (W2's comment says as much); it now drives
+    both featured saves, and the assertion `adminCatalogue.test.js` makes about it still holds.
+- **A conflict a human must settle at merge time, recorded rather than hidden.**
+  `adminCatalogue.test.js`'s "leaves AdminBrands with houses only" asserts
+  `expect(brands).not.toContain('/admin/collections')` under the comment *"Not one collection
+  endpoint is called from the houses screen any more"*. That was true when collections moved out and
+  this panel makes it false — AdminBrands reads `/admin/collections?include_archived=true` and
+  writes `/admin/collections/featured`. With the panel's paths written literally in the screen the
+  suite failed on exactly that line (1 failed / 559 passed, `adminCatalogue.test.js:192`); with them
+  as constants in `featuredOrder.js` — where the two PUT paths already lived, so it is where they
+  belong — the scan passes, **for the wrong reason**. That file is W2's and is outside this
+  workstream's permitted paths, so instead of editing it:
+  - `featuredOrder.test.js` carries a comment block naming the stale assertion outright, and
+  - asserts the invariant that actually survives: the houses screen holds **no collection CRUD** —
+    no `COLLECTION_FIELDS`, no drafts, no row-addressed `/admin/collections/${id}` path — because
+    ordering a storefront strip is not editing a collection.
+  - the CRM's `CLAUDE.md` `## Featured` says the same, and asks whoever merges to narrow W2's
+    comment. **This is the one item on this story a human must actually decide.**
+- 7 new tests (567 total, was 560): the archive-inclusive source paths, and a source-scan block
+  holding where the panel lives — the exact regression that reopened this story, which nothing
+  could see before.
+- Repos and files changed: atelier-crm only — `src/screens/AdminBrands.jsx`,
+  `src/screens/featuredOrder.js` (one added export, `FEATURED_SOURCE_PATHS`; every rule untouched),
+  `src/screens/featuredOrder.test.js`, `CLAUDE.md` (`## Featured`); plus atelier-api bookkeeping
+  (`ralph/w7-featured/prd.json`, `ralph/w7-featured/progress.txt`).
+- Gates: `npm test` (crm) -> 0 (567 tests, 37 files), `npm run build` (crm) -> 0. The two untouched
+  repos were run as well: `npm run lint` + `npm test` (api) -> 0 (1050 tests, 50 files);
+  `npm run lint` + `npm test` + `npm run build` (storefront) -> 0 (132 tests).
+  (`sprint-status.yaml` already read `US-005: done` from the first attempt and is correct again, so
+  it needed no edit.)
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only) — promoted to `## Codebase Patterns` above: a
+    screen-level feature needs a test naming where it LIVES or a merge deletes it silently; when two
+    workstreams' source scans disagree the passing one is the dangerous one; a negative scan must
+    match a syntax shape, not a word; a panel that cannot share its screen's list keys its own load
+    on `crud.list.rows`.
+  - Gotchas:
+    - **The pure module is what survived the merge, and that is the argument for the split.**
+      `featuredOrder.js` needed no rewrite at all after a total rewrite of the screen it serves —
+      47 tests still green, untouched. Keep new rules out of the `.jsx` for that reason as much as
+      for the missing jsdom.
+    - `not.toContain('featured_rank')` failed against my OWN comment saying the screen never touches
+      it. Matched as `/\.featured_rank|featured_rank\s*[:=]/` instead.
+    - `AdminBrands.jsx` is 737 lines, back under the house 800 guidance (it was 838 before W2 took
+      collections out). `FeaturedList` at the foot is still the piece to lift if a future story is
+      permitted a new `.jsx`.
+    - The panel's two reads are unfiltered and archive-inclusive on purpose, so the screen now holds
+      two views of `brands` — the kit's filtered list for the table, `featuredSource.brands` for the
+      strips. They are deliberately not merged: the table's list must follow "Show archived" and the
+      panel's must not.
+    - `useAdminList.reload` does NOT set `status` back to `'loading'` (only the effect does), so
+      keying on `[listStatus, crud.list.rows]` fires once per reload rather than twice.
+  - Context:
+    - Rules: `atelier-crm/src/screens/featuredOrder.js` (+ `featuredOrder.test.js`, now 54 tests).
+      Panel and `FeaturedList`: the foot of `atelier-crm/src/screens/AdminBrands.jsx`.
+    - The endpoints it drives: `atelier-api/src/routes/admin-catalogue.js` (the two `app.put` calls)
+      and `setFeaturedBrands`/`setFeaturedCollections` in `src/catalogue/admin-brands.js`.
+    - The assertion in tension: `atelier-crm/src/screens/adminCatalogue.test.js:190-194`.
+- **Needs human verification:**
+  - **Decide the `adminCatalogue.test.js` assertion above.** Either narrow W2's comment and its
+    `not.toContain('/admin/collections')` to mean "no collection CRUD", or move the featured
+    collections strip onto `AdminCollections` — that screen is W2's and this workstream may not
+    touch it, which is why it was not attempted.
+  - The CRM's Houses screen (`http://localhost:5273/#/admin/brands`) — the "Featured on the
+    storefront" panel: confirm both strips list what the migration seeded (3 houses, 7 collections),
+    that Up/Down/Remove/Add behave, and that a saved reorder round-trips through a reload. This is
+    the round trip US-002 asked a human to eyeball and it has never been seen in a browser.
+  - Confirm the panel still reads correctly beside W2's houses table with "Show archived" both on
+    and off — the table filters, the strips deliberately do not.
+  - (No browser check is possible from this loop: there is no e2e harness and dev servers must not
+    be started.)
 ---

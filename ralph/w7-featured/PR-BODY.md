@@ -24,11 +24,19 @@ storefront's existing hardcoded choice, so nothing moved on deploy.
 | US-002 | Admin patch support and the whole-list reorder endpoints | api | `8857d86` |
 | US-003 | Public read-model ordering, respecting the trade-only gate | api | `fe56de9` |
 | US-004 | Seed test asserting `featured_rank` survives a reseed | api | `2ae55e9` |
-| US-005 | CRM featured panel plus the pure ordering module | crm (+ api bookkeeping) | crm `8cabf10`, api `f1be510` |
+| US-005 | CRM featured panel plus the pure ordering module | crm (+ api bookkeeping) | crm `8cabf10` then `dbfec89`, api `f1be510` then `6fc82a4` |
 | US-006 | Storefront homepage reads featured instead of the slug arrays | store (+ api bookkeeping) | store `600b84d`, api `17d8f92` |
 | US-007 | Storefront brands page "In focus" reads featured; artwork fallback chain | store (+ api bookkeeping) | store `cece6c7`, api `b9417cf` |
 
 All seven pass. None is blocked; `ralph/w7-featured/BLOCKED.md` does not exist.
+
+**US-005 has two commits per repo because it was reopened.** W2's CRUD-completion branch rewrote
+`AdminBrands.jsx` — collections moved to their own screen and the whole thing now runs through
+`useCrudScreen` — and the merge (`4e9b2c4`) took W2's screen wholesale, which deleted the featured
+panel `8cabf10` had added to the old structure. `featuredOrder.js` survived untouched, being a file
+of its own, and **nothing failed**, which is the reason `dbfec89` also adds a source scan asserting
+where the panel lives. It reuses every rule in the module unchanged; what it had to rework is how
+the panel gets its rows (see the reviewer note at the foot).
 
 ## The decisions worth reviewing
 
@@ -58,13 +66,14 @@ All seven pass. None is blocked; `ralph/w7-featured/BLOCKED.md` does not exist.
 
 ## Gates
 
-Run at the end of US-007, all three repos, all exit 0:
+Re-run at the end of the US-005 re-application, all three repos, all exit 0. The api and crm totals
+include the W2 and W3 work merged into this worktree in the meantime:
 
 | Repo | Command | Result |
 |---|---|---|
 | atelier-api | `npm run lint` | 0 |
-| atelier-api | `npm test` | 0 — 940 tests, 50 files (44 new across the epic) |
-| atelier-crm | `npm test` | 0 — 459 tests, 34 files (47 new) |
+| atelier-api | `npm test` | 0 — 1050 tests, 50 files (44 new across this epic) |
+| atelier-crm | `npm test` | 0 — 567 tests, 37 files (54 new across this epic) |
 | atelier-crm | `npm run build` | 0 |
 | atelier-storefront | `npm run lint` | 0 |
 | atelier-storefront | `npm test` | 0 — 132 tests (36 new) |
@@ -85,12 +94,23 @@ empty case and an API outage.
 No browser check was possible from this loop: there is no e2e harness in any repo and dev servers
 must not be started. These are the screens a person has to look at.
 
-1. **The CRM's Houses & collections screen** (`/#/admin/brands`) — the new "Featured on the
-   storefront" panel. Confirm both strips list what the migration seeded (3 houses, 7 collections),
-   that Up/Down/Remove/Add behave, and that a saved reorder round-trips through a reload. Also check
-   the Houses list with "Show archived" both on and off: the toggle no longer refetches, because the
-   screen loads archive-inclusive rows so a whole-list save cannot silently unfeature an archived
-   house.
+0. **A decision, not a check: one assertion in W2's `adminCatalogue.test.js` is now stale.** Its
+   "leaves AdminBrands with houses only" test asserts `not.toContain('/admin/collections')` under
+   the comment *"Not one collection endpoint is called from the houses screen any more"* — true when
+   W2 moved collections out, and false once the featured panel exists, because the panel reads
+   `/admin/collections?include_archived=true` and writes `/admin/collections/featured`. Both paths
+   are constants in `featuredOrder.js` (where the two PUT paths already lived), so **that scan still
+   passes, for the wrong reason** — it was left that way deliberately rather than edited, because
+   `adminCatalogue.test.js` belongs to W2 and is outside this workstream's permitted paths. The
+   invariant that actually survives is asserted in `featuredOrder.test.js`: the houses screen holds
+   **no collection CRUD** — no fields, no drafts, no row-addressed path. Either narrow W2's comment
+   and assertion to say that, or move the featured-collections strip onto `AdminCollections`.
+1. **The CRM's Houses screen** (`/#/admin/brands`) — the "Featured on the storefront" panel.
+   Confirm both strips list what the migration seeded (3 houses, 7 collections), that
+   Up/Down/Remove/Add behave, and that a saved reorder round-trips through a reload. Check it
+   alongside the houses table with "Show archived" both on and off: the table filters and the strips
+   deliberately do not — an archived row stays featured, and a list built from only the visible rows
+   would silently unfeature it on the next whole-list save.
 2. **The homepage** after a build against a live API — the hero, the latest-collections row and the
    featured band should look exactly as they do today.
 3. **`/brands`** against a live API — the "in focus" strip.
@@ -131,3 +151,11 @@ must not be started. These are the screens a person has to look at.
   concurrent workstreams editing the same file do not collide.
 - A story touching two repos produced two commits carrying the same `[W7-US-XXX]` tag; that tag is
   how the cross-repo halves reassemble.
+- **The featured panel takes its rows from its own reads, not from the screen's list**, and that is
+  the substance of the US-005 re-application. W2's houses list is filtered by "Show archived" and no
+  longer carries collections at all, so the panel fetches both catalogue lists archive-inclusive
+  (`FEATURED_SOURCE_PATHS`) and keys that load on `crud.list.rows` — every mutation on the screen
+  ends in `list.reload()`, including the kit's delete, which a screen cannot hook, so one cycle
+  keeps the strips in step with a rename, an archive or a delete. The featured saves go through
+  `crud.mutation.run` for the same reason: reloading is what pulls the server's renumbered ranks
+  back into the panel.

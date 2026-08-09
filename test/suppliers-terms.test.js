@@ -4,6 +4,7 @@ import path from 'node:path'
 import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
+import { deleteOrExplain } from '../src/lifecycle/delete.js'
 import {
   applyDiscountChain,
   chainMultiplier,
@@ -15,8 +16,17 @@ const TERMS_TABLES = ['supplier_brand_terms', 'supplier_discount_tiers']
 const PREFIX = 'w3-terms-test'
 
 // The suppliers domain is the only place these tables may be named. Anything
-// under src/catalogue/, src/account/ or src/pricing/ answers a client.
-const TERMS_OWNERS = ['src/suppliers/', 'src/routes/admin-suppliers.js']
+// under src/catalogue/, src/account/ or src/pricing/ answers a client. The one
+// exception is the lifecycle registry: its brand entity probes
+// supplier_brand_terms so a house carrying negotiated terms refuses hard
+// deletion instead of CASCADE-destroying them — a read-only existence check
+// (SELECT 1) whose result is a count in a staff-facing 409, never the terms
+// themselves.
+const TERMS_OWNERS = [
+  'src/suppliers/',
+  'src/routes/admin-suppliers.js',
+  'src/lifecycle/registry.js',
+]
 
 const runMigrations = (databaseUrl) =>
   runner({
@@ -334,5 +344,30 @@ describe('supplier brand terms migration', () => {
       (file) => !TERMS_OWNERS.some((owner) => file.startsWith(owner))
     )
     expect(strays).toEqual([])
+  })
+
+  it('blocks the hard delete of a house whose only record is its terms', async () => {
+    // The catalogue probes cannot save this brand: it has no product and no
+    // collection — the represented-only shape, 17 of the 41 seeded houses.
+    // Before the terms probe, deleteOrExplain saw nothing and the CASCADE took
+    // the negotiated terms and every tier under them, silently.
+    const supplierId = await insertSupplier(pool, 'del-probe')
+    const brandId = await insertBrand(pool, 'del-probe', supplierId)
+    const termsId = await insertTerms(pool, { supplierId, brandId, discount: 0.45 })
+    await insertTier(pool, { termsId, label: 'Wallpaper', pct: 0.4 })
+
+    const result = await deleteOrExplain(pool, 'brand', brandId)
+
+    expect(result.deleted).toBe(false)
+    expect(result.status).toBe(409)
+    expect(result.archivable).toBe(true)
+    expect(result.blockers).toEqual([
+      { relation: 'supplier_brand_terms', label: 'supplier terms', count: 1, capped: false },
+    ])
+    const { rows: survivors } = await pool.query(
+      `SELECT id FROM supplier_brand_terms WHERE id = $1`,
+      [termsId]
+    )
+    expect(survivors).toHaveLength(1)
   })
 })

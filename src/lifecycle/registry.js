@@ -177,8 +177,16 @@ const defineEntities = (entities) => {
  * `label` is the plural noun used in the blocker line beside its count.
  */
 export const LIFECYCLE_ENTITIES = defineEntities({
-  // Both child edges are CASCADE, so without these probes deleting a stocked
-  // house destroys its whole catalogue and returns 200.
+  // All three child edges are CASCADE, so without these probes deleting a
+  // stocked house destroys its whole catalogue and returns 200. The terms probe
+  // is not redundant with the first two: a house can carry negotiated
+  // commercial terms while holding zero products and zero collections — 17 of
+  // the 41 seeded houses are represented-only — and such a brand sailed past
+  // the catalogue probes while the CASCADE took its supplier_brand_terms row
+  // (and every discount tier under it) silently. Naming the table here is
+  // allow-listed by test/suppliers-terms.test.js's source scan: a probe is a
+  // read-only existence check protecting the terms, not a path that serves
+  // them.
   brand: {
     table: 'brands',
     idColumn: 'id',
@@ -187,6 +195,11 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     probes: [
       probe('products', 'products', 'SELECT 1 FROM products WHERE brand_id = $1'),
       probe('collections', 'collections', 'SELECT 1 FROM collections WHERE brand_id = $1'),
+      probe(
+        'supplier_brand_terms',
+        'supplier terms',
+        'SELECT 1 FROM supplier_brand_terms WHERE brand_id = $1'
+      ),
     ],
   },
 
@@ -282,10 +295,10 @@ export const LIFECYCLE_ENTITIES = defineEntities({
   // live commercial relationship), `price_list_items.supplier_id` is SET NULL —
   // so without the second probe, deleting a supplier silently unlinks its whole
   // rate ledger and reports success. The per-brand commercial terms need no
-  // probe: they CASCADE from both sides, and a terms row does not outlive the
-  // relationship it describes. (Naming those tables here would also trip the
-  // source scan in test/suppliers-terms.test.js, which keeps them inside
-  // src/suppliers/.)
+  // probe on THIS side: the brands probe already refuses any supplier with a
+  // linked house, and a terms row cannot exist without one (brand_id NOT NULL),
+  // so the terms are unreachable while the supplier is deletable. The BRAND
+  // side is the reachable path, probed on the brand entity above.
   supplier: {
     table: 'suppliers',
     idColumn: 'id',

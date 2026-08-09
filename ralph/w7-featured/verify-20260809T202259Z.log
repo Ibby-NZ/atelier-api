@@ -1,0 +1,592 @@
+verify.sh — workstream w7-featured
+root: /Users/verumoffice/atelier-worktrees/w7-featured
+utc:  2026-08-09T20:22:59Z
+
+===================================================
+ atelier-api  @ aug6/w7-featured 0625a3b
+===================================================
+
+--- atelier-api: npm run lint
+
+> atelier-api@0.1.0 lint
+> eslint .
+
+    exit 0
+
+--- atelier-api: npm test
+
+> atelier-api@0.1.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api
+
+(node:56893) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-catalogue.test.js (117 tests) 1172ms
+(node:56916) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-users.test.js (39 tests) 556ms
+(node:56935) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:56935) DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0. Use async/await or an external async flow control mechanism instead.
+ ✓ test/suppliers-backfill.test.js (23 tests) 164ms
+(node:56942) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/suppliers-routes.test.js (39 tests) 423ms
+(node:56955) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/shipping.test.js (33 tests) 337ms
+(node:56967) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-inventory.test.js (25 tests) 487ms
+(node:56983) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/account-portal.test.js (22 tests) 927ms
+(node:56997) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/suppliers-admin.test.js (38 tests) 382ms
+(node:57015) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/lifecycle-delete.test.js (23 tests) 130ms
+ ✓ test/price-template.test.js (62 tests) 11ms
+(node:57021) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-price-lists.test.js (30 tests) 468ms
+(node:57034) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/trade-catalogue.test.js (22 tests) 685ms
+(node:57052) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/catalogue-listing.test.js (28 tests) 549ms
+(node:57063) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/featured-admin.test.js (17 tests) 404ms
+(node:57067) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-panel.test.js (22 tests) 2037ms
+(node:57102) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/price-lists.test.js (44 tests) 227ms
+(node:57124) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/seed.test.js (19 tests) 206ms
+(node:57128) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/suppliers-terms.test.js (19 tests) 314ms
+(node:57148) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/trade-accounts.test.js (18 tests) 429ms
+(node:57159) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/featured-public.test.js (12 tests) 286ms
+(node:57163) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/guards.test.js (18 tests) 547ms
+(node:57174) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/email.test.js (18 tests) 208ms
+(node:57185) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-orders.test.js (14 tests) 414ms
+(node:57196) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/contact.test.js (14 tests) 297ms
+(node:57201) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/checkout.test.js (15 tests) 370ms
+(node:57212) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/legacy-import-api.test.js (22 tests) 360ms
+(node:57223) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/webhooks.test.js (9 tests) 347ms
+(node:57227) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/trade-applications.test.js (18 tests) 421ms
+(node:57238) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/auth.test.js (17 tests) 924ms
+   ✓ login rate limiting > returns 429 on the 11th login attempt from one IP 324ms
+(node:57259) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/catalogue-collections.test.js (15 tests) 234ms
+(node:57263) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/catalogue-detail.test.js (12 tests) 353ms
+(node:57375) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/featured-rank.test.js (12 tests) 114ms
+(node:57383) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-archive.test.js (4 tests) 382ms
+(node:57395) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/lifecycle-registry.test.js (87 tests) 75ms
+(node:57399) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/price-list-exposure.test.js (15 tests) 329ms
+ ✓ test/converters.test.js (16 tests) 6ms
+(node:57420) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/legacy-import.test.js (10 tests) 102ms
+(node:57440) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/orders.test.js (9 tests) 364ms
+(node:57500) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/suppliers-schema.test.js (12 tests) 275ms
+(node:57576) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/orders-history.test.js (8 tests) 518ms
+(node:57675) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/catalogue.test.js (9 tests) 260ms
+(node:57709) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-legacy.test.js (7 tests) 468ms
+ ✓ test/cors.test.js (8 tests) 216ms
+(node:57769) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/suppliers-product-category.test.js (7 tests) 89ms
+(node:57777) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/lifecycle-archive.test.js (7 tests) 54ms
+(node:57788) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/seed-staff.test.js (3 tests) 351ms
+ ✓ test/featured-seed.test.js (3 tests) 2ms
+(node:57806) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/schema.test.js (3 tests) 71ms
+(node:57812) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/commerce-schema.test.js (4 tests) 77ms
+ ✓ test/health.test.js (2 tests) 159ms
+
+ Test Files  50 passed (50)
+      Tests  1050 passed (1050)
+   Start at  08:23:01
+   Duration  30.21s (transform 347ms, setup 0ms, collect 4.89s, tests 18.58s, environment 5ms, prepare 1.57s)
+
+    exit 0
+
+===================================================
+ atelier-crm  @ aug6/w7-featured dbfec89
+===================================================
+
+--- atelier-crm: npm test
+
+> atelier-platform-demo@0.1.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /Users/verumoffice/atelier-worktrees/w7-featured/atelier-crm
+
+ ✓ src/screens/adminSuppliers.test.js (23 tests) 7ms
+ ✓ src/admin/drafts.test.js (28 tests) 17ms
+ ✓ src/screens/featuredOrder.test.js (54 tests) 27ms
+ ✓ src/screens/adminCatalogue.test.js (30 tests) 8ms
+ ✓ src/screens/adminLists.test.js (42 tests) 15ms
+ ✓ src/screens/adminShipping.test.js (28 tests) 9ms
+ ✓ src/utils/reportBuilders.test.js (58 tests) 79ms
+ ✓ src/auth/breakGlass.test.js (16 tests) 9ms
+ ✓ src/auth/roles.test.js (18 tests) 20ms
+ ✓ src/utils/importer.test.js (16 tests) 7ms
+ ✓ src/screens/clientAccounts.test.js (16 tests) 29ms
+ ✓ src/lib/legacyImport.test.js (16 tests) 170ms
+ ✓ src/admin/orderFlow.test.js (17 tests) 51ms
+ ✓ src/admin/deleteFlow.test.js (13 tests) 5ms
+ ✓ src/store/storage.test.js (12 tests) 6ms
+ ✓ src/admin/stock.test.js (14 tests) 4ms
+ ✓ src/store/records.test.js (9 tests) 55ms
+ ✓ src/auth/leaks.test.js (7 tests) 191ms
+ ✓ src/admin/list.test.js (15 tests) 6ms
+ ✓ src/utils/units.test.js (14 tests) 6ms
+ ✓ src/screens/clientView.test.js (7 tests) 4ms
+ ✓ src/utils/sku.test.js (12 tests) 5ms
+ ✓ src/data/discounts.test.js (9 tests) 4ms
+ ✓ src/auth/clientAccess.test.js (8 tests) 11ms
+ ✓ src/auth/userRecords.test.js (10 tests) 13ms
+ ✓ src/admin/Pagination.test.js (7 tests) 7ms
+ ✓ src/admin/useAdminList.test.js (8 tests) 6ms
+ ✓ src/data/pricing.test.js (8 tests) 3ms
+ ✓ src/data/fx.test.js (6 tests) 3ms
+ ✓ src/utils/csv.test.js (7 tests) 3ms
+ ✓ src/data/importStore.test.js (6 tests) 63ms
+ ✓ src/utils/backorders.test.js (5 tests) 4ms
+ ✓ src/admin/ConfirmDialog.test.js (7 tests) 4ms
+ ✓ src/admin/useCrudScreen.test.js (5 tests) 3ms
+ ✓ src/data/ownership.test.js (7 tests) 4ms
+ ✓ src/data/fabricutDesigns.test.js (5 tests) 12ms
+ ✓ src/utils/packingSlip.test.js (4 tests) 4ms
+
+ Test Files  37 passed (37)
+      Tests  567 passed (567)
+   Start at  08:23:32
+   Duration  2.31s (transform 505ms, setup 0ms, collect 2.47s, tests 872ms, environment 6ms, prepare 3.95s)
+
+    exit 0
+
+--- atelier-crm: npm run build
+
+> atelier-platform-demo@0.1.0 build
+> vite build
+
+vite v5.4.21 building for production...
+transforming...
+✓ 140 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   1.88 kB │ gzip:   0.94 kB
+dist/assets/index-BTlcGM1l.css    5.22 kB │ gzip:   1.57 kB
+dist/assets/index-CDts6Kze.js   707.48 kB │ gzip: 187.94 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 1.34s
+    exit 0
+
+===================================================
+ atelier-storefront  @ aug6/w7-featured cece6c7
+===================================================
+
+--- atelier-storefront: npm run lint
+
+> atelier-store@0.1.0 lint
+> eslint .
+
+    exit 0
+
+--- atelier-storefront: npm test
+
+> atelier-store@0.1.0 test
+> node --test "src/**/*.test.js"
+
+✔ tradeStatus: logged out and non-trade roles are "none" (0.979583ms)
+✔ tradeStatus: an applicant is pending until the flag is flipped (0.121209ms)
+✔ isApprovedTrade is true only for an approved trade account (0.146166ms)
+✔ tradeStatusNote: a pending applicant is told they are pending (0.155ms)
+✔ tradeStatusNote: an approved account is told it is approved (0.078959ms)
+✔ tradeStatusNote: nothing to say to a customer or a guest (0.064125ms)
+✔ a non-trade account sees only the non-trade sections (0.995875ms)
+✔ a linked trade account sees samples and invoices (0.154208ms)
+✔ price lists appear only when the API says the feature is on (0.12575ms)
+✔ an unlinked trade account still sees the panels, marked pending (0.182583ms)
+✔ link state is read strictly — anything but true is unlinked (0.805584ms)
+✔ sectionFromHash honours a known section and falls back otherwise (0.136458ms)
+✔ sectionFromHash falls back when the hash names a section this account cannot see (0.117792ms)
+✔ sha256Hex matches the published FIPS 180-4 vectors (2.861292ms)
+✔ sha256Hex handles inputs that straddle the 64-byte block boundary (0.273083ms)
+✔ digestsMatch is false for different or differently-sized digests (0.12725ms)
+✔ the feature is off unless both an email and a 64-char digest are supplied (0.104666ms)
+✔ config normalises the email and digest, and defaults the display name (0.211584ms)
+✔ isApiUnreachable is true only for a transport failure or a server collapse (0.093625ms)
+✔ isApiUnreachable is false when the API answered — a bad password is not an outage (0.159917ms)
+✔ verifyBreakGlass accepts the configured pair, ignoring email case and space (0.16125ms)
+✔ verifyBreakGlass rejects a wrong passphrase, a wrong email and an empty password (0.502708ms)
+✔ verifyBreakGlass rejects everything when the feature is not configured (0.329834ms)
+✔ the offline session round-trips through storage (0.389833ms)
+✔ the offline session expires on its own, and clears itself when it does (0.119375ms)
+✔ the offline session is void once the credential is rotated or switched off (0.068167ms)
+✔ a hand-written or corrupted storage entry is ignored (0.116334ms)
+✔ absent storage means "no emergency access" (2.625666ms)
+✔ signing out removes the offline session (0.105167ms)
+✔ trade price wins, and is always formatted in NZD, not the supplier currency (18.284ms)
+✔ a visible retail price is struck through beside the trade price (0.195417ms)
+✔ a guest with no visible price is invited to sign in (0.146667ms)
+✔ a signed-in shopper is never told to sign in (0.117625ms)
+✔ a pending applicant is told approval is what is missing (0.078125ms)
+✔ an approved trade user sees "price on request" where there is no trade figure (0.11525ms)
+✔ a visible retail price renders for everyone, viewer or not (0.198ms)
+✔ the viewer argument is optional and defaults to the guest view (0.080625ms)
+✔ a missing product yields empty copy rather than throwing (0.320625ms)
+✔ productSummary never leaks a price (0.381625ms)
+✔ weaveBackground and toneList tolerate junk hex_tones (0.501375ms)
+✔ EVERY live collection tiles — assigned, unassigned, or a house holding nothing yet (2.027542ms)
+✔ a tile lands on its own collection where it has members, else the house grid (0.1035ms)
+✔ the season is split off the name onto its own label (0.08ms)
+✔ splitCollectionName splits on the first pipe and never leaves a nameless tile (0.090333ms)
+✔ API editorial fills the tile; a matching CMS card wins over it (1.01ms)
+✔ a pre-join card still matches when its heading equals the collection name (0.111375ms)
+✔ a card matching no live collection renders nothing (0.107583ms)
+✔ slugs are URL-encoded into the href and inputs default safely (0.084ms)
+✔ brandDesignCounts counts by brand slug and ignores brandless rows (1.007958ms)
+✔ brandDesignCounts does not mutate its input (0.084792ms)
+✔ a collection with products deep-links into the library (0.092125ms)
+✔ a memberless collection falls back to its house grid (0.055916ms)
+✔ a house we hold no designs from falls back to the house page (0.056083ms)
+✔ collectionHref encodes slugs and survives a brandless collection (0.054958ms)
+✔ collectionKey is the (house, collection) pair, never the slug alone (0.140666ms)
+✔ collectionKey yields null for a collection with no house to pair it to (0.050167ms)
+✔ featuredCollections takes only the featured rows, in the office order (0.602ms)
+✔ featuredCollections breaks a shared rank on the order the API gave (0.402959ms)
+✔ featuredCollections treats a rank that is not a positive integer as unfeatured (0.174542ms)
+✔ featuredCollections caps the list and leaves its input alone (0.161875ms)
+✔ pickCollections keeps the order it is handed (0.097208ms)
+✔ pickCollections tops the row up and never repeats a collection (0.061458ms)
+✔ pickCollections never repeats a collection shown elsewhere on the page (0.0855ms)
+✔ pickCollections excludes on the pair, so two houses "2024" are two tiles (0.078209ms)
+✔ pickCollections returns what it can when the catalogue is short or empty (0.063958ms)
+✔ bandPhotographs prefers collection photography over product shots (0.112792ms)
+✔ bandPhotographs never repeats a picture already on the page (0.0445ms)
+✔ bandPhotographs never hands the same picture to two bands (0.109541ms)
+✔ bandPhotographs skips missing images and pads to the requested count (0.057708ms)
+✔ houseLabel drops the house when the collection name already starts with it (0.225917ms)
+✔ houseLabel keeps the house when the name only mentions it later, or not at all (0.125667ms)
+✔ houseLabel yields null for a missing house rather than an empty line (0.039458ms)
+✔ collectionArtwork prefers the art commissioned for that collection (0.063375ms)
+✔ collectionArtwork falls back to the collection own catalogue photograph (0.033541ms)
+✔ collectionArtwork reports no photograph rather than an empty src (0.036834ms)
+✔ collectionArtwork keys on the pair, so a same-slug collection is not handed the art (0.030792ms)
+✔ pickFeature takes the collection the portrait was shot for, not the top rank (0.053167ms)
+✔ pickFeature falls back to the first featured collection with a picture (0.039708ms)
+✔ pickFeature yields null when nothing featured has a photograph at all (0.078333ms)
+✔ featuredHouses takes only the featured houses, in the office order (1.449584ms)
+✔ featuredHouses ignores the old heuristic entirely (0.102125ms)
+✔ featuredHouses breaks a shared rank on the order the API gave (0.469459ms)
+✔ featuredHouses treats a rank that is not a positive integer as unfeatured (0.226375ms)
+✔ featuredHouses caps the strip and leaves its input alone (0.595916ms)
+✔ featuredHouses is empty when the office has featured nothing (0.086042ms)
+✔ houseArtwork shows the house its own editorial photograph first (0.16925ms)
+✔ houseArtwork falls back to a design of the house own (0.053542ms)
+✔ houseArtwork never borrows another house photograph (0.312042ms)
+✔ houseArtwork ignores a blank or non-string entry rather than emitting it (0.312917ms)
+✔ houseArtwork survives a missing house, slug or source map (0.130959ms)
+✔ toRequestLines maps a fabric line onto the request-list shape (0.943125ms)
+✔ toRequestLines never carries stock state forward (0.186125ms)
+✔ toRequestLines coerces the pg numeric string, and never yields zero metres (0.137791ms)
+✔ toRequestLines ignores finished goods and lines with no SKU (0.094667ms)
+✔ toCartLines maps a finished good onto the cart shape (0.118125ms)
+✔ toCartLines floors a fractional quantity to at least one unit (0.067333ms)
+✔ reorderPlan splits a mixed order and lands on the request list (0.097791ms)
+✔ reorderPlan sends a finished-goods-only order to the cart (0.143959ms)
+✔ reorderPlan has no destination for an order with nothing reorderable (0.355792ms)
+✔ hasQuotedTotal is false for the placeholder zero a fabric request carries (0.3215ms)
+✔ hasQuotedTotal stays false once a zero-total order is confirmed or shipped (0.179125ms)
+✔ hasQuotedTotal is true for a real paid checkout (0.047083ms)
+✔ metres round to 2dp, clamp to the maximum, and reject the unusable (1.437458ms)
+✔ adding builds a line and never mutates the array it was given (0.641917ms)
+✔ a repeat add sums metres on the same SKU rather than duplicating the row (0.1035ms)
+✔ a repeat add refreshes the cloth but keeps the cut requirements typed against it (0.099375ms)
+✔ an unusable metres value on add falls back to 1 instead of dropping the add (0.085458ms)
+✔ an item with no SKU is refused (0.058584ms)
+✔ unknown stock state reads as made-to-order, not as in stock (0.067834ms)
+✔ editing metres to a blank or zero leaves the line alone — only Remove removes (0.144333ms)
+✔ a cut requirement is stored verbatim — trimming it on the way in eats the space you just typed (0.313334ms)
+✔ an empty cut requirement clears back to null, never an empty string (0.3255ms)
+✔ the payload is where a note is trimmed, and whitespace-only becomes null (0.293166ms)
+✔ a refresh updates stock, name and image from the live product (0.190917ms)
+✔ a refresh flags a SKU the live product no longer lists (0.085875ms)
+✔ a refresh flags a product the API confirms is gone (0.0485ms)
+✔ a slug missing from the refresh is left untouched — a dead API deletes nothing (0.042375ms)
+✔ counts are lines, totals are metres (0.075084ms)
+✔ the payload carries only what POST /orders/request accepts (0.073875ms)
+✔ one short line makes the whole request a backorder (0.064542ms)
+✔ a 403 carrying trade_only is the gate (0.550625ms)
+✔ a 404, an outage and a bare 403 are all NOT the gate (0.133792ms)
+✔ the flag is read strictly, and a missing error never throws (0.062625ms)
+✔ meta.trade_gated tells the grid it is holding the public subset (0.095791ms)
+✔ an absent or unparsed body is not gated (0.136042ms)
+✔ sign-in carries the shopper back to where they were gated (0.073875ms)
+✔ an off-site or missing return path degrades to a plain sign-in (0.125291ms)
+✔ every surface has a heading, a body and the actions its audience needs (0.508416ms)
+✔ the entitled note never asks for an account or a sign-in (0.411916ms)
+✔ the house grid link is the library filtered to that house (0.296708ms)
+✔ no copy offers an account the storefront cannot create (0.196208ms)
+✔ the two destinations are the real routes (0.078625ms)
+ℹ tests 132
+ℹ suites 0
+ℹ pass 132
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 204.975459
+    exit 0
+
+--- atelier-storefront: npm run build
+
+> atelier-store@0.1.0 build
+> astro build
+
+08:23:39 [@astrojs/node] Enabling sessions with filesystem storage
+
+
+  [1m[36m— E M D A S H —[39m[22m  [2mv0.29.0[22m
+   
+08:23:39 [vite] Re-optimizing dependencies because vite config has changed
+08:23:40 [vite] [optimizer] bundling dependencies...
+08:23:41 [content] Syncing content
+08:23:41 [content] Astro config changed
+08:23:41 [content] Clearing content store
+08:23:41 [content] Synced content
+08:23:41 [types] Generated 2.15s
+08:23:41 [build] output: "server"
+08:23:41 [build] mode: "server"
+08:23:41 [build] directory: /Users/verumoffice/atelier-worktrees/w7-featured/atelier-storefront/dist/
+08:23:41 [build] adapter: @astrojs/node
+08:23:41 [build] Collecting build info...
+08:23:41 [build] ✓ Completed in 2.26s.
+08:23:41 [build] Building server entrypoints...
+08:23:42 [assets] Copying fonts (16 files)...
+08:23:42 [WARN] [vite] [33m[IMPORT_IS_UNDEFINED] [0mImport `createCoalescingDialect` will always be undefined because there is no matching export in '../../../atelier-storefront/node_modules/emdash/dist/db/sqlite.mjs'
+   [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m \0virtual:emdash/dialect:4:40 [38;5;246m][0m
+   [38;5;246m│[0m
+ [38;5;246m4 │[0m [38;5;249me[0m[38;5;249mx[0m[38;5;249mp[0m[38;5;249mo[0m[38;5;249mr[0m[38;5;249mt[0m[38;5;249m [0m[38;5;249mc[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249ms[0m[38;5;249mt[0m[38;5;249m [0m[38;5;249mc[0m[38;5;249mr[0m[38;5;249me[0m[38;5;249ma[0m[38;5;249mt[0m[38;5;249me[0m[38;5;249mC[0m[38;5;249mo[0m[38;5;249ma[0m[38;5;249ml[0m[38;5;249me[0m[38;5;249ms[0m[38;5;249mc[0m[38;5;249mi[0m[38;5;249mn[0m[38;5;249mg[0m[38;5;249mD[0m[38;5;249mi[0m[38;5;249ma[0m[38;5;249ml[0m[38;5;249me[0m[38;5;249mc[0m[38;5;249mt[0m[38;5;249m [0m[38;5;249m=[0m[38;5;249m [0m_dialectModule.createCoalescingDialect[38;5;249m;[0m
+ [38;5;240m  │[0m                                        ───────────────────┬──────────────────  
+ [38;5;240m  │[0m                                                           ╰──────────────────── 
+[38;5;246m───╯[0m
+
+08:23:42 [vite] ✓ built in 820ms
+08:23:43 [WARN] [vite] [33m[IMPORT_IS_UNDEFINED] [0mImport `createCoalescingDialect` will always be undefined because there is no matching export in '../../../atelier-storefront/node_modules/emdash/dist/db/sqlite.mjs'
+   [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0m \0virtual:emdash/dialect:4:40 [38;5;246m][0m
+   [38;5;246m│[0m
+ [38;5;246m4 │[0m [38;5;249me[0m[38;5;249mx[0m[38;5;249mp[0m[38;5;249mo[0m[38;5;249mr[0m[38;5;249mt[0m[38;5;249m [0m[38;5;249mc[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249ms[0m[38;5;249mt[0m[38;5;249m [0m[38;5;249mc[0m[38;5;249mr[0m[38;5;249me[0m[38;5;249ma[0m[38;5;249mt[0m[38;5;249me[0m[38;5;249mC[0m[38;5;249mo[0m[38;5;249ma[0m[38;5;249ml[0m[38;5;249me[0m[38;5;249ms[0m[38;5;249mc[0m[38;5;249mi[0m[38;5;249mn[0m[38;5;249mg[0m[38;5;249mD[0m[38;5;249mi[0m[38;5;249ma[0m[38;5;249ml[0m[38;5;249me[0m[38;5;249mc[0m[38;5;249mt[0m[38;5;249m [0m[38;5;249m=[0m[38;5;249m [0m_dialectModule.createCoalescingDialect[38;5;249m;[0m
+ [38;5;240m  │[0m                                        ───────────────────┬──────────────────  
+ [38;5;240m  │[0m                                                           ╰──────────────────── 
+[38;5;246m───╯[0m
+
+08:23:43 [vite] ✓ built in 670ms
+08:23:44 [WARN] [vite] [plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+08:23:44 [vite] ✓ built in 1.50s
+
+ prerendering static routes 
+08:23:44   ├─ /404.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/404.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/404.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+[emdash] runtime init failed (page renders without CMS data): TypeError: Cannot open database because the directory does not exist
+    at new Database (/Users/verumoffice/atelier-storefront/node_modules/better-sqlite3/lib/database.js:65:9)
+    at Object.createDialect$1 [as createDialect] (file:///Users/verumoffice/atelier-worktrees/w7-featured/atelier-storefront/dist/server/.prerender/chunks/dialect_Cy6E8i1i.mjs:15:39)
+    at initWithLock.deadlineMs (file:///Users/verumoffice/atelier-worktrees/w7-featured/atelier-storefront/dist/server/.prerender/chunks/_virtual_astro_middleware_BWHZCMUd.mjs:10550:19)
+    at file:///Users/verumoffice/atelier-worktrees/w7-featured/atelier-storefront/dist/server/.prerender/chunks/field-defs-cache-BVrNCgSj_CN9hULSU.mjs:50:54
+ (+404ms) 
+08:23:45   ├─ /account/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/account.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/account.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+10ms) 
+08:23:45   ├─ /cart/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/cart.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/cart.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+6ms) 
+08:23:45   ├─ /checkout/success/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/checkout/success.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/checkout/success.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+6ms) 
+08:23:45   ├─ /checkout/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/checkout.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/checkout.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+5ms) 
+08:23:45   ├─ /contact/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/contact.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/contact.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+7ms) 
+08:23:45   ├─ /login/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/login.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/login.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+17ms) 
+08:23:45   ├─ /order-lookup/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/order-lookup.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/order-lookup.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+11ms) 
+08:23:45   ├─ /order-request/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/order-request.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/order-request.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+9ms) 
+08:23:45   ├─ /privacy/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/privacy.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/privacy.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+Entry page → privacy was not found.
+ (+10ms) 
+08:23:45   ├─ /products/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/products.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/products.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+9ms) 
+08:23:45   ├─ /robots.txt08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/robots.txt.js'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/robots.txt.js'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+EmDash middleware error: TypeError: Cannot open database because the directory does not exist
+    at new Database (/Users/verumoffice/atelier-storefront/node_modules/better-sqlite3/lib/database.js:65:9)
+    at Object.createDialect$1 [as createDialect] (file:///Users/verumoffice/atelier-worktrees/w7-featured/atelier-storefront/dist/server/.prerender/chunks/dialect_Cy6E8i1i.mjs:15:39)
+    at initWithLock.deadlineMs (file:///Users/verumoffice/atelier-worktrees/w7-featured/atelier-storefront/dist/server/.prerender/chunks/_virtual_astro_middleware_BWHZCMUd.mjs:10550:19)
+    at file:///Users/verumoffice/atelier-worktrees/w7-featured/atelier-storefront/dist/server/.prerender/chunks/field-defs-cache-BVrNCgSj_CN9hULSU.mjs:50:54
+ (+4ms) 
+08:23:45   ├─ /story/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/story.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/story.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+7ms) 
+08:23:45   ├─ /terms/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/terms.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/terms.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+Entry page → terms was not found.
+ (+4ms) 
+08:23:45   ├─ /trade-application/index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/trade-application.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/trade-application.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+6ms) 
+08:23:45   ├─ /index.html08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/index.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+08:23:45 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/index.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` or by setting `output` to `"server"` in your Astro config to make all your pages server-rendered by default.
+ (+347ms) 
+08:23:45 ✓ Completed in 1.05s.
+
+ generating optimized images 
+08:23:45   ▶ /_astro/sign-in-bg.UD-eMLMH_BAcOe.webp (reused cache entry) (+3ms) (1/5)
+08:23:45   ▶ /_astro/explore-application-bg.b7_dGOnO_1Cj4Y8.webp (reused cache entry) (+3ms) (2/5)
+08:23:45   ▶ /_astro/explore-type-bg.DZW_ajlp_5L9v.webp (reused cache entry) (+3ms) (3/5)
+08:23:45   ▶ /_astro/design-brands-banner-bg.Dl-Gyy4k_eI7xC.webp (reused cache entry) (+3ms) (4/5)
+08:23:45   ▶ /_astro/aterlier-about-bg.cAePOJXC_Z1kKXWG.webp (reused cache entry) (+4ms) (5/5)
+08:23:45 ✓ Completed in 5ms.
+
+08:23:45 [build] Rearranging server assets...
+08:23:45 [build] ✓ Completed in 4.13s.
+08:23:45 [emdash] Build complete
+08:23:45 [build] Server built in 6.44s
+08:23:45 [build] Complete!
+    exit 0
+
+--- atelier-api: converter byte-identity
+
+> atelier-api@0.1.0 convert:pricing
+> node scripts/convert-price-lists.js
+
+ENOENT: no such file or directory, scandir '/Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/incoming/pricing-templates'
+    price-lists.json unchanged — exit 0
+
+ALL GATES GREEN
+log: /Users/verumoffice/atelier-worktrees/w7-featured/atelier-api/ralph/w7-featured/verify-20260809T202259Z.log

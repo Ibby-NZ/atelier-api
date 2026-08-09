@@ -17,8 +17,8 @@
         "atelier-api"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T18:20:00Z"
     },
     {
       "id": "US-002",
@@ -34,8 +34,8 @@
         "atelier-api"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T18:25:00Z"
     },
     {
       "id": "US-003",
@@ -52,8 +52,8 @@
         "atelier-api"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T18:35:00Z"
     },
     {
       "id": "US-004",
@@ -73,8 +73,8 @@
         "atelier-api"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T18:50:00Z"
     },
     {
       "id": "US-005",
@@ -91,8 +91,8 @@
         "atelier-api"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T19:05:00Z"
     },
     {
       "id": "US-006",
@@ -111,8 +111,8 @@
         "atelier-api"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T19:15:00Z"
     },
     {
       "id": "US-007",
@@ -127,8 +127,8 @@
         "atelier-api"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T19:30:00Z"
     },
     {
       "id": "US-008",
@@ -147,8 +147,8 @@
         "atelier-crm"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": " | done 2026-08-06T19:50:00Z"
     }
   ]
 }

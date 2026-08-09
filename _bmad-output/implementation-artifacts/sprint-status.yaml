@@ -48,7 +48,7 @@ epics:
   w3-suppliers:
     name: "W3 Suppliers"
     branch: aug6/w3-suppliers
-    status: in_progress
+    status: done
     stories:
       US-001: done      # Migration: suppliers, aliases and the two FK columns
       US-002: done      # Migration: supplier brand terms and discount tiers
@@ -109,7 +109,7 @@ epics:
   w8-colour-files:
     name: "W8 Colour files"
     branch: aug6/w8-colour-files
-    status: pending
+    status: done
     stories:
       US-001: done      # Adapter registry and the row-extraction harness
       US-002: done      # Adapters for the single-sheet, single-brand files

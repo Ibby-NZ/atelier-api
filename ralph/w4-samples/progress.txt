@@ -183,6 +183,12 @@ Story-specific detail belongs in the per-story entries below, not here.
   `WRITABLE_SAMPLE_STATUSES.map` alone, so a test asserting "the form offers the writable set and
   the filter the full one" can pass with the filter deleted. Anchor on the surrounding character
   (`{SAMPLE_STATUSES.map`). The same trap as the prose-ban one, inverted.
+- **The endpoint-quote scan matches router Link targets too, and a navigation literal is not an
+  endpoint call.** `<Link to="/admin/samples">` carries exactly the token the scan hunts for, so a
+  screen that links to a sibling screen fails a scan expecting the empty set. Expect the Link's
+  path IN the set and pin the actual traffic separately: assert every `apiFetch`/`apiSend` in the
+  file takes an IMPORTED path builder (`apiFetch(byBarcodePath(`), which is the stronger claim
+  anyway — the quoted-literal scan then only polices strays.
 - **A CRM source scan for endpoints must anchor on the opening QUOTE.** `/\/admin\/[a-z-]+/`
   matches every relative kit import (`'../admin/drafts.js'`, `'../admin/parts.jsx'`) and reports
   `/admin/drafts` as an endpoint the screen calls. `/['"`]\/admin\/[a-z-]+/` then `.slice(1)` is
@@ -967,4 +973,83 @@ Appended by each iteration, newest last. Never rewrite an existing entry.
   ones (see the `layout.jsx` gotcha). Two judgement calls a person should confirm: that recording a
   check-out from the register screen (not only from the scanner) is what the counter wants, and
   that a colourway is acceptable as a typed id until a picker exists.
+---
+
+## 2026-08-09T20:34:50Z - W4-US-009 - AdminSampleOrders, live scanner, retired-route redirects
+
+- The last story: the showroom-stocking screen, the scanner rewired to the real endpoints, and the
+  two demo routes retired into redirects. atelier-crm only — the API surface it consumes was all
+  built by US-005..US-008.
+- `src/screens/sampleFlow.js` (new) mirrors the API's `src/samples/sample-order-states.js`:
+  `SAMPLE_ORDER_STATUSES`, `ALLOWED_TRANSITIONS`, `STATUS_STAMPS`,
+  `DELETABLE_SAMPLE_ORDER_STATUSES`/`isDeletableStatus`, plus the screen's own rules — paths,
+  `availableMoves` (buttons; archived and terminal rows offer none), `stampEntries`/`stampDate`
+  (the history line, machine-ordered, dates sliced from the API's strings — no Date is ever
+  constructed), `SAMPLE_ORDER_FIELDS` (the PATCH whitelist mirror; `status` deliberately absent),
+  `sampleOrderFilters`, `orderTitle`/`orderMeta`/`describeSampleOrder`. `sampleFlow.test.js`
+  carries a literal second copy of the transition map, so a hand-edit cannot half-change it.
+- `AdminSampleOrders.jsx` (new) composes `useCrudScreen` (key `sample_orders`, archive action
+  supplied); create always lands `requested`; moves go through
+  `POST /admin/sample-orders/:id/transition` from `availableMoves`, so the UI never offers a move
+  the API would 409; Delete is greyed outside requested/cancelled (`isDeletableStatus`) rather
+  than discovered as a refusal — the 409 stays authoritative if a row moves underneath.
+- `SampleScanner.jsx` rewritten live: one autofocused input (a wedge scanner is a keyboard — it
+  types the code and its Enter submits the form), `GET /admin/samples/by-barcode/:barcode` via
+  `byBarcodePath`, then whichever of check-out/check-in `movementVerb` says the open loan allows.
+  The 404 is rendered as an outcome (a real tag the register has never heard of, offering the
+  register screen), not an error — `isNotFound` added to `adminSamples.js`. The check-out body
+  goes through the same `checkOutBody` the register uses.
+- `App.jsx`: `/samples` → `/admin/samples` and `/showroom-samples` → `/admin/sample-orders` as
+  `<Navigate replace>` (a bookmark must not fall into the catch-all and read as a deleted
+  screen); `/admin/sample-orders` routed; `SampleTracking`/`ShowroomSamples` imports removed
+  (files left on disk untouched). `sectionTabs.jsx`: `samplesTabs` loses `tracking` (its route now
+  redirects — a tab pointing at it would bounce) and gains `orders`; strip is register /
+  showrooms / orders / scanner.
+- Repos and files changed: atelier-crm — `src/screens/sampleFlow.js`, `sampleFlow.test.js`,
+  `AdminSampleOrders.jsx` (all new), `SampleScanner.jsx` (rewritten), `adminSamples.js` (one
+  helper appended), `adminSamples.test.js` (scanner scans + isNotFound), `src/App.jsx` (sample
+  routes/redirects only), `src/components/sectionTabs.jsx` (samplesTabs only), `CLAUDE.md`;
+  atelier-api — bookkeeping only (`prd.json`, `sprint-status.yaml`, `progress.txt`, `PR-BODY.md`).
+- Gates: `( cd atelier-crm && npm test && npm run build )` -> 0 (40 files, 661 tests; build 146
+  modules); `( cd atelier-api && npm run lint && npm test )` -> 0 (59 files, 1438 tests) — no API
+  source touched, run to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the entry added to `## Codebase
+    Patterns` above — the endpoint-quote scan matches router Link targets, and the stronger claim
+    is pinning every apiFetch/apiSend to an imported path builder.
+  - Gotchas:
+    - **A tab strip and a redirect must retire together.** Leaving the Tracking tab while its
+      `/samples` route redirects to the register would make the tab a button that bounces to a
+      different tab — the strip edit is part of the redirect story, not polish.
+    - **The scanner cannot reuse `useMutation` for its lookup.** The by-barcode 404 is an OUTCOME
+      to render (offer the register), and useMutation's catch would flatten it into the red error
+      line. The movements could use it but then the file would mix two mutation idioms; it
+      hand-rolls one small busy/error pair instead, with the reason commented.
+    - **`stampEntries` is machine-ordered, not chronological, and `.at(-1)` is therefore "the
+      furthest the order has been"** — which is what the list's Moved column wants even when
+      stamps were back-dated out of order. `cancelled` sorts last in the vocabulary, so a
+      cancelled order's latest entry is always the cancellation.
+    - `availableMoves` returns `[]` for an unknown status rather than throwing — a CHECK widened
+      on the API side must degrade the CRM to "no buttons", not a crash.
+  - Context:
+    - The machine's authority is `atelier-api/src/samples/sample-order-states.js`; the endpoint
+      contract is recorded under `## Samples` in both repos' CLAUDE.md. The transition endpoint
+      answers `{ sample_order }`, the same envelope every other write returns.
+    - `SampleTracking.jsx` and `ShowroomSamples.jsx` still exist on disk, unrouted and unlinked —
+      they are outside this workstream's allowed files, so deleting them is a decision for
+      whoever owns the demo screens.
+    - `layout.jsx` is still outside this workstream's list: its SideNav `match` array carries
+      `/samples` and `/sample-scanner` only, so the nav item lights on the scanner and on the two
+      redirects mid-flight but not on `/admin/samples`, `/admin/showrooms` or
+      `/admin/sample-orders`. Same one-line fix flagged by US-008, now three routes wide.
+- **Needs human verification:** all three US-009 surfaces, in a browser — there is no jsdom and no
+  e2e harness on this machine. Specifically: (1) `/#/sample-scanner` — scan or type a barcode,
+  check a sample out and back in, and confirm a wedge scanner's Enter submits the lookup; the 404
+  card for an unknown tag; (2) `/#/admin/sample-orders` — raise a request, advance it
+  requested → ordered → … and confirm each move stamps its date in the History line; that Delete
+  is greyed once past `requested`; a cancelled order offers nothing; (3) the old bookmarks
+  `/#/samples` and `/#/showroom-samples` land on the register and sample orders respectively, and
+  the samples strip shows register / showrooms / orders / scanner. One judgement call to confirm:
+  the demo Tracking screen is now unreachable by design — if the office still wants its mock
+  reporting view, that is a product decision to reverse the tab, not a bug.
 ---

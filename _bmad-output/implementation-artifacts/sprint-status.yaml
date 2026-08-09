@@ -60,7 +60,7 @@ epics:
   w4-samples:
     name: "W4 Samples"
     branch: aug6/w4-samples
-    status: in_progress
+    status: done
     stories:
       US-001: done      # Migration: showrooms and samples
       US-002: done      # Migration: sample_loans with the one-open-loan index
@@ -70,7 +70,7 @@ epics:
       US-006: done      # Check-out and check-in verb routes
       US-007: done      # Sample-order lifecycle module and routes
       US-008: done      # AdminSamples and AdminShowrooms screens (+ the showroom API they needed)
-      US-009: pending   # AdminSampleOrders, live scanner, retired-route redirects
+      US-009: done      # AdminSampleOrders, live scanner, retired-route redirects
   w5-reporting:
     name: "W5 Reporting"
     branch: aug6/w5-reporting

@@ -107,6 +107,10 @@ describe('cost-side exposure', () => {
 
   const asTrade = (url) => app.inject({ method: 'GET', url, headers: { cookie: tradeCookie } })
 
+  // Any well-formed guid: the guard runs before the record is looked up, so the
+  // assertion is about the refusal and never about what exists.
+  const SAMPLE_GUID = '00000000-0000-4000-8000-000000000000'
+
   describe('guards that must never be widened', () => {
     it('refuses an approved trade account the supplier price-list API', async () => {
       expect((await asTrade('/admin/price-list-items')).statusCode).toBe(403)
@@ -129,6 +133,33 @@ describe('cost-side exposure', () => {
         )
         expect(res.statusCode).toBe(403)
       })
+
+      // The override routes (migration 1787025600000) write client records —
+      // a name, an email, a credit limit, a payment term — and suppress them
+      // from the back office's view. A sweep that enumerated only GET would
+      // leave every one of them outside the negative-security net this file
+      // exists to be.
+      //
+      // Every payload here is schema-VALID on purpose: Fastify validates BEFORE
+      // it runs a preHandler, so a malformed body asserts a 400 and would pass
+      // with the guard deleted.
+      const writes = [
+        ['POST', `/admin/legacy/${entity}`, { values: { name: 'x' } }],
+        ['PATCH', `/admin/legacy/${entity}/${SAMPLE_GUID}`, { set: { name: 'x' } }],
+        ['DELETE', `/admin/legacy/${entity}/${SAMPLE_GUID}`, undefined],
+        ['POST', `/admin/legacy/${entity}/${SAMPLE_GUID}/restore`, undefined],
+      ]
+      for (const [method, url, payload] of writes) {
+        it(`refuses an approved trade account ${method} ${url}`, async () => {
+          const res = await app.inject({
+            method,
+            url,
+            headers: { cookie: tradeCookie },
+            ...(payload === undefined ? {} : { payload }),
+          })
+          expect(res.statusCode).toBe(403)
+        })
+      }
     }
 
     it('refuses an approved trade account the legacy import', async () => {

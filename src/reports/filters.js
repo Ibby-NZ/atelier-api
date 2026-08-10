@@ -49,6 +49,7 @@ export const ORDER_KINDS = Object.freeze([
   'checkout',
   'order_request',
   'backorder_request',
+  'manual',
 ])
 
 // `status` deliberately reuses the orders module's own frozen list rather than

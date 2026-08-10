@@ -99,23 +99,41 @@ describe('setArchived', () => {
   })
 })
 
-describe('never-hard-deletable entities', () => {
-  it('an order is archivable but can never reach deleteOrExplain', async () => {
-    expect(LIFECYCLE_ENTITIES.order.archivable).toBe(true)
-    expect(LIFECYCLE_ENTITIES.order.deletable).toBe(false)
+// `order` carried `deletable: false` until the CRM gained manual sales orders:
+// an order the office keyed by mistake, and a request nobody priced, have to be
+// removable. The two dangers that flag stood for did not go away — they moved
+// into the entry, which is a stronger place for them, because the flag refused
+// EVERY order where the guard refuses only the ones that are financial records.
+describe('an order is deletable only through its own rules', () => {
+  it('states the rule in a guard and the release in beforeDelete', () => {
+    const order = LIFECYCLE_ENTITIES.order
 
-    // CASCADE would take the lines, the delete would not release qty_reserved,
-    // and the row carries xero_invoice_ref / stripe_session_id. No pool is
-    // touched: the refusal happens before anything connects.
-    await expect(deleteOrExplain(null, 'order', 1)).rejects.toThrow(
-      /"order" is never hard-deletable/
-    )
+    expect(order.archivable).toBe(true)
+    expect(order.deletable).toBeUndefined()
+    // The guard is what refuses a checkout / paid / shipped order.
+    expect(typeof order.guard).toBe('function')
+    // Lines CASCADE, so the reservation must be handed back before the DELETE
+    // or the stock is spoken for by an order that no longer exists.
+    expect(typeof order.beforeDelete).toBe('function')
   })
 
-  it('every other registry entry is deletable', () => {
+  // `deletable: false` itself stays supported (assertEntity still type-checks it,
+  // requireDeletableEntity still refuses it) for the next entity that has to be
+  // in the registry for setArchived's sake and must never be hard-deleted. What
+  // this asserts is that nothing needs it today — so a flag appearing here again
+  // is a decision somebody made, not a leftover.
+  it('leaves no entity permanently undeletable', () => {
     const blocked = Object.entries(LIFECYCLE_ENTITIES)
       .filter(([, entity]) => entity.deletable === false)
       .map(([name]) => name)
-    expect(blocked).toEqual(['order'])
+    expect(blocked).toEqual([])
+  })
+
+  // Absence from the registry is still the normal protection: order_lines,
+  // webhook_events and every legacy_* table are unreachable by name.
+  it('still refuses a name it does not know, before connecting', async () => {
+    await expect(deleteOrExplain(null, 'order_lines', 1)).rejects.toThrow(
+      /Unknown lifecycle entity/
+    )
   })
 })

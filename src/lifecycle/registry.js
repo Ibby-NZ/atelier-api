@@ -3,8 +3,9 @@
 // One frozen entry per entity the back office may hard-delete. An entry declares
 // where the row lives (`table` + `idColumn`), whether a soft archive is offered
 // instead (`archivable`), an optional `guard` for rules that are not "something
-// else still points at this", and the dependency `probes` that decide whether a
-// delete would destroy commercial history.
+// else still points at this", the dependency `probes` that decide whether a
+// delete would destroy commercial history, and an optional `beforeDelete` for
+// state the DELETE's own cascade cannot unwind (see delete.js's (C2)).
 //
 // **Registry keys are literals used at route registration — never a path
 // parameter.** `requireEntity` throws a plain Error (a 500) rather than a 404 for
@@ -30,6 +31,7 @@
 // reach production — the server refuses to boot instead.
 
 import { DELETABLE_SAMPLE_ORDER_STATUSES } from '../samples/sample-order-states.js'
+import { isDeletableOrder, holdsReservation } from '../orders/order-states.js'
 
 // A probe body must be a bare existence select over one relation, taking the
 // parent id as its only parameter. delete.js wraps it in `count(*)` + LIMIT, so
@@ -120,6 +122,77 @@ const sampleOrderGuard = async (client, id) => {
 }
 
 /**
+ * An order stops being deletable the moment it becomes a financial record.
+ *
+ * Two different facts refuse it, and neither implies the other. A `checkout`
+ * order was paid at Stripe: it carries a session id, its stock was already
+ * decremented, and the row is the platform's only record of the payment — so it
+ * is refused whatever its status. Everything else is refused once it reaches
+ * `paid` or `shipped`: money has moved, `xero_invoice_ref` names the invoice the
+ * office raised against it, and a shipped order is what its stock decrement was
+ * justified by. What is left — a request nobody has priced, a confirmed order
+ * before payment, and a declined one — destroys nothing when removed.
+ *
+ * The predicate lives in `src/orders/order-states.js`, the leaf module the CRM
+ * mirrors, so the button and the guard cannot disagree about which orders offer
+ * a Delete.
+ */
+const orderGuard = async (client, id) => {
+  const { rows } = await client.query(
+    `SELECT kind, status FROM orders WHERE id = $1`,
+    [id]
+  )
+  const order = rows[0]
+  // The row exists — (A) locked it — so a missing row here would be a 404 the
+  // caller already got.
+  if (!order || isDeletableOrder(order)) return null
+  if (order.kind === 'checkout') {
+    return refuse(
+      409,
+      'This is a card checkout, so it is the record of a payment taken at ' +
+        'Stripe. Archive it instead to hide it without losing that.'
+    )
+  }
+  return refuse(
+    409,
+    `This order is "${order.status}", so money has moved against it. ` +
+      'Archive it instead to hide it without losing the record.'
+  )
+}
+
+/**
+ * Hand an order's reservation back BEFORE its lines cascade away.
+ *
+ * `order_lines.order_id` is CASCADE, so the lines are gone the instant the
+ * DELETE runs and there is nothing left to release `inventory.qty_reserved`
+ * against — the stock stays spoken for by an order that no longer exists, with
+ * no error and nothing to point at. This is the whole reason `beforeDelete`
+ * exists (delete.js's (C2)).
+ *
+ * `holdsReservation` is what stops a double release: a shipped order converted
+ * its reservation into a real decrement and a declined one already handed it
+ * back, so releasing again would inflate availability. (Shipped is unreachable
+ * here anyway — the guard refuses it — but the predicate is the rule, not the
+ * guard's side effect.) A colourway with no inventory row reserved nothing, so
+ * the join simply matches nothing; same UPDATE shape as `declineOrder`.
+ */
+const releaseOrderReservation = async (client, id) => {
+  const { rows } = await client.query(
+    `SELECT kind, status FROM orders WHERE id = $1`,
+    [id]
+  )
+  if (!rows[0] || !holdsReservation(rows[0])) return
+  await client.query(
+    `UPDATE inventory i
+        SET qty_reserved = i.qty_reserved - ol.qty
+       FROM order_lines ol
+      WHERE ol.order_id = $1
+        AND i.colourway_id = ol.colourway_id`,
+    [id]
+  )
+}
+
+/**
  * Self-delete is a 403, not a 409: nothing is referencing the row, the caller is
  * simply not allowed. It mirrors the existing self-protection rules in
  * src/routes/admin-users.js (you cannot change your own role or archive
@@ -164,6 +237,9 @@ export const assertEntity = (name, entity) => {
   }
   if (entity.guard !== undefined && typeof entity.guard !== 'function') {
     bad('guard must be a function when present.')
+  }
+  if (entity.beforeDelete !== undefined && typeof entity.beforeDelete !== 'function') {
+    bad('beforeDelete must be a function when present.')
   }
   if (!Array.isArray(entity.probes)) bad('probes must be an array.')
 
@@ -464,20 +540,31 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     probes: [],
   },
 
-  // Present ONLY so setArchived can reach it — an order is never hard-deletable.
-  // CASCADE would take its lines with it; the delete would not release
-  // qty_reserved, permanently corrupting stock; and the row carries
-  // xero_invoice_ref and stripe_session_id, which are the audit trail. Absence
-  // from this registry is the normal protection (requireEntity throws on an
-  // unknown name), so order_lines, webhook_events, trade applications, trade
-  // accounts and every legacy_* table need no entry at all; `deletable: false`
-  // exists for the one entity that has to be here for another reason.
+  // An order is deletable only while it is not yet a financial record — a
+  // mis-keyed sales order, a request nobody priced, a declined one. `orderGuard`
+  // draws that line (checkout ever, paid/shipped always: Stripe session,
+  // xero_invoice_ref, a stock decrement already taken); everything it refuses
+  // archives instead, which is why this stays `archivable: true`.
+  //
+  // The two dangers a bare `DELETE FROM orders` carries are both handled above
+  // rather than by the schema. Its lines CASCADE, so the reservation must be
+  // released BEFORE the delete or the stock is spoken for by an order that no
+  // longer exists — that is `releaseOrderReservation`, and it is the reason
+  // `beforeDelete` exists at all. And an order that has been invoiced or shipped
+  // is the audit trail, which is what the guard protects.
+  //
+  // No probes: nothing in the schema references `orders` except `order_lines`,
+  // which the order owns outright. `order_lines`, `webhook_events`, trade
+  // applications, trade accounts and every legacy_* table still need no entry —
+  // absence from this registry is the normal protection, since requireEntity
+  // throws on an unknown name.
   order: {
     table: 'orders',
     idColumn: 'id',
     label: 'order',
     archivable: true,
-    deletable: false,
+    guard: orderGuard,
+    beforeDelete: releaseOrderReservation,
     probes: [],
   },
 })

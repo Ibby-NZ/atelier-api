@@ -11,9 +11,19 @@
 //     SELECT <id> FROM <table> WHERE <id> = $1 FOR UPDATE   (A)  0 rows -> 404
 //     entity.guard?.(client, id, ctx)                       (B)  refusal -> its status
 //     one probe query covering every relation               (C)  any count > 0 -> 409
+//     entity.beforeDelete?.(client, id, ctx)                (C2) the only pre-DELETE write
 //     DELETE FROM <table> WHERE <id> = $1                   (D)
 //   COMMIT
 //   catch 23503 -> constraintBlockers(error) -> the same 409 shape
+//
+// **(C2) exists for state a CASCADE cannot unwind.** Deleting an order that
+// still holds a reservation must hand `inventory.qty_reserved` back first: the
+// lines CASCADE away, so after the DELETE there is nothing left to release
+// against and the stock is stranded for good. It runs AFTER the guard and the
+// probes so a refusal never writes, and inside the same transaction so a later
+// failure rolls the release back with everything else. Guards and probes stay
+// strictly read-only — this hook is the one exception, and a guard that wrote
+// would break the ROLLBACK-on-refusal reasoning below.
 //
 // **Why probe-then-delete is not a TOCTOU race.** The parent row is locked
 // `FOR UPDATE` before the probes run. Postgres takes `FOR KEY SHARE` on a
@@ -199,6 +209,11 @@ const runDelete = async (client, entity, entityName, id, ctx) => {
   const blockers = await runProbes(client, entity, id)
   if (blockers.length > 0) return blocked(entity, blockers)
 
+  // (C2) Unwind state the DELETE's own cascade cannot (see the header).
+  if (entity.beforeDelete) {
+    await entity.beforeDelete(client, id, ctx)
+  }
+
   // (D) Nothing is in the way.
   await client.query(
     `DELETE FROM ${entity.table} WHERE ${entity.idColumn} = $1`,
@@ -228,8 +243,10 @@ export const deleteOrExplain = async (pool, entityName, id, ctx = {}) => {
   try {
     await client.query('BEGIN')
     const result = await runDelete(client, entity, entityName, id, ctx)
-    // A refusal rolls back: the guard and the probes may have read, and (D) is
-    // the only statement that writes, so there is nothing to keep either way.
+    // A refusal rolls back: the guard and the probes only read, and the two
+    // statements that write — beforeDelete (C2) and the DELETE (D) — run only
+    // after every refusal path has been passed, so there is nothing to keep
+    // either way.
     await client.query(result.deleted ? 'COMMIT' : 'ROLLBACK')
     return result
   } catch (error) {

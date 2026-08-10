@@ -360,13 +360,21 @@ describe('deleteOrExplain against the database', () => {
 // A pool stub records the exact statements the module issues. This is the only
 // way to assert the lock mode and the ordering, and the only deterministic way to
 // reach the 23503 backstop (whose real trigger is a concurrent insert).
-const stubPool = ({ locked = [{ id: 1 }], probeRows = [], failDelete = null } = {}) => {
+const stubPool = ({
+  locked = [{ id: 1 }],
+  probeRows = [],
+  failDelete = null,
+  // What a guard's or a beforeDelete's own SELECT sees. The order entity reads
+  // kind + status twice (once for each), so the stub has to answer them.
+  rowState = null,
+} = {}) => {
   const log = []
   const client = {
     query: async (sql) => {
       const text = String(sql)
       log.push(text)
       if (text.includes('FOR UPDATE')) return { rows: locked }
+      if (rowState && text.includes('SELECT kind, status')) return { rows: [rowState] }
       if (text.includes('count(*)')) return { rows: probeRows }
       if (text.startsWith('DELETE FROM') && failDelete) throw failDelete
       return { rows: [] }
@@ -418,6 +426,48 @@ describe('deleteOrExplain transaction shape', () => {
     ])
     expect(pool.log).toContain('ROLLBACK')
     expect(pool.log.some((sql) => sql.startsWith('DELETE FROM'))).toBe(false)
+  })
+
+  // beforeDelete is the ONE statement that writes before the DELETE, and where it
+  // sits in the sequence is the whole contract: after every refusal path (so a
+  // refusal never writes), before the DELETE (so the lines it reads still exist),
+  // inside the same transaction (so a later failure takes it back).
+  it('runs beforeDelete after the guard and the probes, and before the DELETE', async () => {
+    const pool = stubPool({ rowState: { kind: 'order_request', status: 'requested' } })
+
+    expect((await deleteOrExplain(pool, 'order', 12)).deleted).toBe(true)
+
+    const steps = pool.log
+    const release = steps.findIndex((sql) => sql.includes('UPDATE inventory'))
+    const remove = steps.findIndex((sql) => sql.startsWith('DELETE FROM orders'))
+    expect(steps[0]).toBe('BEGIN')
+    expect(steps[1]).toContain('FROM orders WHERE id = $1 FOR UPDATE')
+    expect(steps[1]).not.toContain('FOR NO KEY UPDATE')
+    expect(release).toBeGreaterThan(1)
+    expect(release).toBeLessThan(remove)
+    expect(steps.at(-2)).toBe('COMMIT')
+  })
+
+  it('issues no release and no DELETE when the guard refuses an order', async () => {
+    const pool = stubPool({ rowState: { kind: 'order_request', status: 'paid' } })
+
+    const result = await deleteOrExplain(pool, 'order', 12)
+
+    expect(result.status).toBe(409)
+    expect(result.archivable).toBe(true)
+    expect(pool.log.some((sql) => sql.includes('UPDATE inventory'))).toBe(false)
+    expect(pool.log.some((sql) => sql.startsWith('DELETE FROM'))).toBe(false)
+    expect(pool.log).toContain('ROLLBACK')
+  })
+
+  // A shipped order converted its reservation and a declined one released it, so
+  // releasing again would hand the same stock back twice.
+  it('deletes a declined order without re-releasing its reservation', async () => {
+    const pool = stubPool({ rowState: { kind: 'order_request', status: 'declined' } })
+
+    expect((await deleteOrExplain(pool, 'order', 12)).deleted).toBe(true)
+    expect(pool.log.some((sql) => sql.includes('UPDATE inventory'))).toBe(false)
+    expect(pool.log.some((sql) => sql.startsWith('DELETE FROM orders'))).toBe(true)
   })
 
   it('rolls back on a 404 without probing', async () => {

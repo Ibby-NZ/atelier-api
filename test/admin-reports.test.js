@@ -20,7 +20,11 @@ import {
 } from '../src/reports/product-performance.js'
 import { MAX_ROW_LIMIT } from '../src/reports/limits.js'
 import { STOCK_COLUMNS, STOCK_TITLE } from '../src/reports/stock.js'
-import { NOT_INVOICED_COLUMNS, NOT_INVOICED_TITLE } from '../src/reports/not-invoiced.js'
+import {
+  NOT_INVOICED_COLUMNS,
+  NOT_INVOICED_TITLE,
+  INVOICEABLE_KINDS,
+} from '../src/reports/not-invoiced.js'
 import { buildApp } from '../src/app.js'
 
 // Fixtures are prefix-namespaced and cleaned up by prefix, like every other suite
@@ -1517,7 +1521,13 @@ describe('W5-US-007 — stock and not-invoiced', () => {
       const report = await payloadOf(QUEUE_PATH, '&kind=checkout')
 
       expect(report.rows).toEqual([])
-      expect([...report.meta.kinds]).toEqual(['order_request', 'backorder_request'])
+      // Against the constant rather than a retyped list: the set grows as the
+      // platform gains kinds (a staff-keyed 'manual' order is invoiced exactly
+      // like a request), and the assertion that matters is that 'checkout' is
+      // never in it. The schema-vs-boundary-copy drift is caught separately, by
+      // the pg_get_constraintdef test.
+      expect([...report.meta.kinds]).toEqual([...INVOICEABLE_KINDS])
+      expect(report.meta.kinds).not.toContain('checkout')
     })
 
     // The lifecycle window is a default, and a status filter replaces it.

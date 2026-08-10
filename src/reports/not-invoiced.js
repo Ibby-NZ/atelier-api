@@ -49,7 +49,14 @@ export const NOT_INVOICED_STATUSES = Object.freeze([
 
 // The kinds this platform invoices at all. A definition of the report, not a
 // default — see the header.
-export const INVOICEABLE_KINDS = Object.freeze(['order_request', 'backorder_request'])
+// 'manual' belongs here: a sales order the office keyed is invoiced through Xero
+// exactly like a request. Only 'checkout' is absent — it was paid at Stripe and
+// is never invoiced through this platform.
+export const INVOICEABLE_KINDS = Object.freeze([
+  'order_request',
+  'backorder_request',
+  'manual',
+])
 
 // No `finance` column: what is owed is not a cost, and this report carries no
 // money figure at all (see the header).

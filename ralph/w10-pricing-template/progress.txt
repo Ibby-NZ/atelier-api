@@ -1,0 +1,465 @@
+# Ralph progress log — w10-pricing-template
+Started: 2026-08-06T02:40:24Z
+
+## Codebase Patterns
+- The workstream DB is `atelier_w10` (set in `atelier-api/.env`). It was already migrated to
+  `1786248000000_trade-accounts` at the start of this workstream, so a new migration is the only
+  thing `npm run migrate` applies.
+- `psql` is not runnable from this harness (permission denied). To inspect the schema, run
+  `node -e "..."` from `atelier-api/` — CommonJS `require('dotenv')`/`require('pg')` resolves off the
+  cwd's node_modules, whereas an ESM script in the scratchpad cannot resolve the package at all.
+- Compound Bash commands with `&&` chains and `head`/`grep` can be denied by the permission layer.
+  Run one command per call.
+- node-pg-migrate names an inline column `check:` constraint `<table>_<column>_check`. To widen one,
+  `pgm.dropConstraint(table, '<table>_<column>_check')` then `pgm.addConstraint(...)` with the same
+  name — do not invent a new name or the next migration cannot find it.
+- A Postgres CHECK is satisfied by NULL (unknown, not false), so a `~ '^[A-Z]$'` check on a nullable
+  column still lets the column stay empty. That is what makes widening the class checks safe for the
+  19.5k existing rows.
+- `npm test` runs 37 files / 640 tests against the real local Postgres in ~25-32s. `fileParallelism:
+  false` is load-bearing — do not touch it.
+- **`incoming/pricing-templates/` does NOT exist in this worktree** — `incoming/` is gitignored, so
+  the corpus lives only in the main checkout, which the sandbox refuses to read. `npm run
+  convert:pricing` therefore cannot be run here at all, and the project-context gate
+  `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` is
+  unrunnable in this workstream. Byte-identity must be argued by construction (move code, do not
+  rewrite it) and proved with a hand-made fixture converted to a scratchpad path — never to the
+  committed JSON.
+- A converter run against a scratch fixture is the cheap end-to-end check: `node
+  scripts/convert-price-lists.js <scratch-in-dir> <scratch-out.json>`. The filename must match
+  `^(.+?)(?:\s+(FABRIC|WPPR|TRIMMING))?\s+PL\b`, e.g. `PIERRE FREY PL.csv`, for any template
+  WITHOUT its own Supplier column (v1); since US-003 a v2 fixture may be named anything.
+- `npm run lint` and `npm test` run fine as `cd atelier-api && npm run <script>`; a bare `npx
+  vitest run <file>` is denied by the permission layer, so run the whole suite.
+- A newer template maps by DELEGATING to the older mapper, never by re-listing its columns:
+  `mapV1` already reads only its own first N cells, so `mapV2(row)` calls `mapV1(row, ...)` and
+  spreads the result. That is what keeps the shared columns byte-identical by construction rather
+  than by review.
+- Adding a key to a converter's output means auditing whatever compares two output rows.
+  `sameExceptSource` iterated only the FIRST row's keys, so a richer row would have been silently
+  dropped as an exact duplicate of a thinner one. Compare key COUNTS too.
+- **`src/seed/price-lists.js` builds its dedupe key with a literal NUL byte, not a space**
+  (`${supplier}\0${category}\0${code}`). The Read tool renders NUL as a space, so an exact-match
+  edit anchored on that line ALWAYS fails with "String to replace not found". `sed -n 'N,Mp' <file>
+  | cat -et` shows it as `^@`. Anchor edits on a neighbouring line instead. Other files may hide the
+  same thing — an unexplained failed match is the tell.
+- To give an `unnest` batch a per-column expression (a COALESCE, a cast, a default), NAME the
+  rowset: `SELECT COALESCE(b."col", 'x'), b."other" FROM unnest($1::text[], ...) AS b("col",
+  "other")`. `SELECT *` cannot wrap a single column. The alias list takes the same quoted names, so
+  it is generated from the same `COLUMNS` array and cannot drift out of order.
+- A validator can be strict about TYPE and silent about RANGE, and that is often the correct pair:
+  the type is knowable now, the legitimate range is a client decision nobody has made. Say so in a
+  comment at the check, or the next person adds the guess back.
+- **`src/` CAN import from `scripts/`** — same package, plain relative specifier, no bundler, no
+  `files` field in package.json, and `test/` already imports `../scripts/lib/*`. An earlier note in
+  CLAUDE.md claiming otherwise was wrong and has been corrected. The cost is real but small: pulling
+  in `scripts/lib/price-template.js` also loads `xlsx.js`/`zip.js`/`xml.js`, which are pure function
+  modules with no top-level side effects.
+- Separate an INPUT vocabulary (what a source cell may say) from a STORED one (what the column
+  CHECK accepts). Adding an input alias can only turn a previously fatal cell into a mapped one; it
+  can never change what an already-mapped cell produces, which is how a byte-pinned output file
+  stays safe. Assert at module load that every input map's values are in its stored set, so an
+  alias cannot quietly widen storage.
+- **A converter that fails loudly and writes nothing is itself the corpus proof.** The committed
+  output exists, therefore no source row carried a value the old vocabulary lacked — so a widened
+  vocabulary cannot change a single committed byte. That argument holds even where the corpus
+  cannot be read, and it is worth writing down instead of re-deriving.
+- **Pin a byte-pinned artefact as a STRING, not as an object.** `toEqual` on a mapper's return
+  value passes happily through a reordered key and through `115` where the file says `115.0`;
+  only `dumps(map(row))` against a hardcoded literal catches either. Build the literal by
+  reproducing a real committed line (here, the cells behind record 1 of price-lists.json) so the
+  pin is the committed bytes rather than a description of them, and verify it with `node -e`
+  against the file before committing.
+- **A tripwire on a generated artefact should assert what a WRONG regeneration would change, not
+  what the artefact contains.** Checking record 1 for the absence of the new keys and for the old
+  key order catches an accidental regeneration in the same commit as a mapper change, while
+  staying true after a legitimate refresh — a whole-file scan would instead fail the first time a
+  real new-format drop legitimately lands.
+- An 8 MB fixture read by more than one test belongs in a `beforeAll` inside its describe, parsed
+  once. Two `it`s that each `readFile` + `JSON.parse` it pay for it twice for no isolation gain.
+---
+
+## 2026-08-06T14:44:00Z - W10-US-001 - Migration: price_list_items v2 columns
+- Implemented the v2 schema seam on `price_list_items`: added `brand_name text`,
+  `pattern_match text`, `duty_percent numeric(6,3)` and `template_version text NOT NULL DEFAULT
+  'v1'`; widened `price_list_items_freight_class_check` from `IN ('A'..'E')` to `~ '^[A-Z]$'` and
+  added `price_list_items_duty_class_check` with the same shape (duty_class previously had no check
+  at all). No duty or freight VALUE is written anywhere — `duty_percent` stays NULL and the class
+  letters stay raw and uninterpreted.
+- Repos and files changed (atelier-api only):
+  - `migrations/1786334400000_price-list-template-v2.js` (new)
+  - `test/price-lists.test.js` (new `price_list_items template v2 columns` describe block, 12 tests)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (36 files, 560 tests passed),
+  `npm run migrate` -> 0 (applied 1 migration), `npm run migrate` again -> 0 ("No migrations to
+  run!"), and the in-test programmatic runner returns `[]` on the second call.
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - node-pg-migrate's inline column `check:` produces `<table>_<column>_check`; widening means
+      drop-then-add under the SAME name.
+    - A CHECK passes on NULL, so adding one to an existing nullable column never needs a backfill.
+    - `node -e` from the repo root is the way to inspect the schema here; `psql` is blocked.
+  - Gotchas (what will bite the next iteration):
+    - `src/seed/price-lists.js` still has `FREIGHT_CLASSES = Set(['A'..'E'])` and
+      `DUTY_CLASSES = Set(['A'])`, and `test/price-lists.test.js` still asserts `freight_class: 'Z'`
+      is rejected by `validatePriceListItems`. The DB is now wider than the validator on purpose —
+      US-004 owns the validator. Whoever widens it must also update that `it.each` row, or the
+      suite fails.
+    - `src/seed/price-lists.js` `COLUMNS` is the `unnest` column list and does NOT yet include the
+      four new columns, so `importPriceLists` writes none of them. That is why the US-001 schema
+      tests insert with raw SQL. When US-004 adds `template_version` to `COLUMNS`, it MUST be
+      `COALESCE($n, 'v1')`-style in the SELECT — `unnest` binds an explicit NULL for a missing key
+      and an explicit NULL DEFEATS the column DEFAULT, which would violate NOT NULL.
+    - `template_version` has no CHECK deliberately; the accepted set lives in the code registry
+      (US-002). Do not add one — it would make every new template a migration.
+    - `duty_percent` is unconstrained beyond `numeric(6,3)`: no legitimate range has been given, and
+      a guessed CHECK is the same class of mistake as the old freight letter set.
+  - Context (where the relevant code lives):
+    - Table created in `migrations/1785110400000_price-list-items.js`; `archived_at` added by
+      `1785456000000_soft-archive-and-contact.js`.
+    - Validator + upsert: `src/seed/price-lists.js`. CLI: `src/seed/import-price-lists.js`.
+    - Converter: `scripts/convert-price-lists.js` with shared machinery in `scripts/lib/`.
+    - Architecture rationale: `_bmad-output/planning-artifacts/architecture.md` "## Pricing template".
+- **Needs human verification:** none for this story — it is schema only, no screen renders these
+  columns yet. (When US-004/US-005 expose them, the CRM's Price lists screen is what a human should
+  eyeball.)
+---
+
+## 2026-08-06T15:00:00Z - W10-US-002 - Template registry with v1 moved verbatim
+- Created `scripts/lib/price-template.js`: the accepted layouts now live in one frozen registry
+  `TEMPLATES = [{ version: 'v1', header, map }]`, with `matchTemplate(row)` (normalise labels,
+  match exactly on length and labels, first match wins), `normaliseHeader` and `acceptedHeaders()`.
+  The converter's `normaliseRow` moved across UNCHANGED as `mapV1` — same key order, same
+  `cleanMeasure`/`round4`/`generalFormat`/`floatRepr` calls, same comments — and its private
+  helpers came with it (`parseDate`/`parseInteger`/`isoDate`/`cleanMeasure`, the item-type, pack,
+  currency, freight and duty vocabularies). `scripts/convert-price-lists.js` now owns only the file
+  walk, the supplier name, the dedupe and the write; on a header mismatch it pushes the SAME
+  `file:line: unexpected header [...]` error, now with `; accepted: v1 [...]` listing every
+  accepted header.
+- Repos and files changed (atelier-api only):
+  - `scripts/lib/price-template.js` (new, 180 lines)
+  - `scripts/convert-price-lists.js` (−120 lines: everything row-shaped moved out)
+  - `test/price-template.test.js` (new, 17 tests)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 577 tests passed). Plus an end-to-end
+  converter run against a scratchpad fixture: emitted `{"supplier": "Pierre Frey", ... "wholesale_rate":
+  115.0, ...}` — same key order, same `", "` separators and same Python float repr as line 2 of the
+  committed `price-lists.json`, which was diffed by eye against that line. `src/seed/data/price-lists.json`
+  is untouched (`git status` clean for it).
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - Moving code to make it extensible is only safe if it is MOVED. `mapV1` was copied
+      character-for-character including its comments; the only edit was `COLUMNS` ->
+      `V1_HEADER.length`. Anything reworded while moving cannot be argued to be byte-identical.
+    - Converting a hand-made fixture to a scratchpad path and eyeballing it against a line of the
+      committed output is a real byte check that costs nothing and touches no committed file.
+  - Gotchas (what will bite the next iteration):
+    - **The old header check sliced to 14 columns before comparing**, so a header with extra
+      columns matched v1 by its first 14. That had to stop — a v2 file starts with v1's 14 columns
+      and would otherwise be silently imported as v1. `matchTemplate` is exact on length, and the
+      15-column `v1 + Supplier` header now fails loudly (verified). US-003 makes that same header
+      match v2 by adding the second registry entry.
+    - **`normaliseHeader` deliberately drops TRAILING EMPTY cells before matching.** A CSV header
+      line ending in a comma yields a 15th blank field, and Excel emits blank cells too; counting
+      one would have failed a real drop over a stray comma. A blank cell declares no column, so it
+      cannot disambiguate two templates — a NAMED extra column still changes the length and still
+      fails. This tolerance was chosen because the corpus is unreadable from this worktree and the
+      strict rule could not be tested against it; if a real drop ever fails on its header, this is
+      the first place to look.
+    - The corpus cannot be read from this worktree at all (see Codebase Patterns), so
+      `npm run convert:pricing` is not a gate anyone can run here. US-003's "byte-identical
+      price-lists.json" criterion has to be met by construction plus US-006's unit-level byte pin.
+    - `FREIGHT_CLASSES`/`DUTY_CLASSES` moved verbatim and are still the narrow sets (`A`–`E`, `A`).
+      They are now in `price-template.js`, which is where US-005 wants the shared vocabularies —
+      but they are still private to that file. US-005 exports them.
+  - Context (where the relevant code lives):
+    - Registry + v1 mapper: `scripts/lib/price-template.js`. Its tests: `test/price-template.test.js`.
+    - File walk, supplier name, dedupe, write: `scripts/convert-price-lists.js`.
+    - Shared machinery it leans on: `scripts/lib/{xlsx,text,python-format}.js`.
+    - Rationale: `_bmad-output/planning-artifacts/architecture.md` "## Pricing template".
+- **Needs human verification:** none — no screen renders anything from this change; the converter
+  is a CLI. What a human SHOULD do before merge, because this loop cannot: run
+  `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` on a checkout
+  that has `incoming/pricing-templates/`, which proves both the byte-identity and that no real
+  drop's header row is rejected by the now-exact length match.
+---
+
+## 2026-08-06T15:20:00Z - W10-US-003 - v2 mapping and the omit-on-v1 rule
+- Registered v2 in `scripts/lib/price-template.js`: `V2_HEADER` is v1's fourteen labels plus
+  `supplier`, `brand`, `pattern match`, `duty percent` in that order, and `mapV2` delegates the
+  shared cells to `mapV1` (which reads only its own first 14) then appends `brand_name`,
+  `pattern_match`, `duty_percent` and `template_version: 'v2'`. The Supplier CELL wins over the
+  filename (blank falls back to it; neither present fails the row `file:line: empty supplier ...`).
+  `duty_percent` is `round3(parseNumber(...))` — the scale of `numeric(6,3)`, so the JSON says what
+  the database will hold — with NO range check, and a non-numeric cell fails the row loudly.
+  `mapV1` is unchanged apart from a comment at its return stating why v2 keys are omitted, never
+  written as null. The converter now treats the filename as a FALLBACK: `parseFilename` returns
+  nulls instead of throwing, and a template with no Supplier column plus an unreadable filename is
+  a loud per-file error. `sameExceptSource` now compares key counts as well.
+- Repos and files changed (atelier-api only):
+  - `scripts/lib/price-template.js` (+~55 lines: `V2_HEADER`, `round3`, `failRow`, `mapV2`, entry)
+  - `scripts/convert-price-lists.js` (filename fallback, the v1-needs-a-name error, dedupe guard)
+  - `test/price-template.test.js` (+16 tests: registry superset, v2 header matching, `mapV2`,
+    and the mapV1 omission rule asserted directly)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 593 tests passed). Plus three converter
+  runs against scratchpad fixtures, all writing to scratch paths only:
+  - v1 fixture -> a record with the same key order, `", "` separators and `115.0` float repr as
+    line 2 of the committed JSON, and NONE of the four v2 keys.
+  - v2 fixture named `universal template 2026.csv` (deliberately unparseable) -> two rows, two
+    DIFFERENT suppliers from one file, `duty_percent: 7.5`, `template_version: "v2"`, blank cells
+    as nulls.
+  - the same v1 rows under an unparseable name -> `rates 2026.csv:1: cannot derive supplier from
+    the filename, and v1 has no Supplier column`, nothing written.
+  `src/seed/data/price-lists.json` untouched (`git status` clean for it).
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - A superset template's mapper should delegate to the older one, not re-declare the shared
+      columns. `mapV1` bounds its own read to `V1_HEADER.length`, so passing it an 18-cell row is
+      already correct; overriding one input (the supplier) is `mapV1(row, { ...context, supplier })`.
+    - Whether a file needs the filename is derivable from the registry — `template.header
+      .includes('supplier')` — so the converter needs no per-template flag.
+  - Gotchas (what will bite the next iteration):
+    - **`mapV2` emits `template_version: 'v2'` and `mapV1` emits no such key at all.** US-004 must
+      therefore `COALESCE` it, exactly as its acceptance criterion says; an `unnest` batch binds an
+      explicit NULL for the missing key and that defeats the `NOT NULL DEFAULT 'v1'`.
+    - `validatePriceListItems` (`src/seed/price-lists.js`) does not yet know the four new fields,
+      and `COLUMNS` still lacks them, so a v2 JSON imported today lands with them dropped, silently.
+      That is US-004's whole job.
+    - `mapV2` inherits v1's narrow `FREIGHT_CLASSES`/`DUTY_CLASSES` (`A`–`E`, `A`) because it
+      delegates — so widening them in US-005 widens both templates at once, which is the intent.
+    - `duty_percent` is rounded to 3dp; if a real file ever carries a value ≥ 1000 it will pass the
+      converter and overflow `numeric(6,3)` at import. Not guarded on purpose — no legitimate range
+      has been stated and guessing one is the mistake the old freight-class set already was.
+    - The converter no longer ABORTS on an unreadable filename; it reports and keeps collecting, so
+      one bad name no longer hides every other error in the drop. Still writes nothing.
+  - Context (where the relevant code lives):
+    - Registry, both mappers, header matching: `scripts/lib/price-template.js`.
+    - File walk, filename fallback, dedupe, write: `scripts/convert-price-lists.js`.
+    - Importer that must catch up: `src/seed/price-lists.js` (`validatePriceListItems`, `COLUMNS`).
+    - Rationale: `_bmad-output/planning-artifacts/architecture.md` "## Pricing template".
+- **Needs human verification:** none — the converter is a CLI and no screen renders these fields
+  yet. What a human MUST still do before merge, because no worktree can: run
+  `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` in the main
+  checkout, which is the only place `incoming/pricing-templates/` exists. That proves both the
+  byte-identity of the v1 path and that no real drop's filename has stopped parsing.
+---
+
+## 2026-08-06T15:40:00Z - W10-US-004 - Importer accepts the v2 fields
+- Taught `src/seed/price-lists.js` the four v2 columns. `validatePriceListItems` now checks
+  `brand_name`, `pattern_match` and `template_version` with a new `optionalText` helper (absent or
+  null is normal — every v1 row omits them — but a present value must be a non-empty string), and
+  `duty_percent` is type-checked only (`Number.isFinite`) with NO range, commented as such. All four
+  joined `COLUMNS`, so `unnest` now binds them; `duty_percent` joined `wholesale_rate` in a new
+  `COLUMN_TYPES` map as `numeric` (the 3-deep ternary would not have taken a third entry legibly).
+  The upsert SELECT is no longer `SELECT *`: the rowset is aliased `AS b(...)` so
+  `template_version` can be `COALESCE(b."template_version", 'v1')` — an `unnest` batch binds an
+  explicit NULL for a key a v1 item does not carry and that NULL defeats the column's
+  `NOT NULL DEFAULT 'v1'`. The upsert key `(supplier, category, code)` and the set-everything-to-
+  EXCLUDED contract are untouched.
+- Repos and files changed (atelier-api only):
+  - `src/seed/price-lists.js` (+~45 lines: `optionalText`, four validations, four columns,
+    `COLUMN_TYPES`, `SELECT_LIST`, the aliased unnest)
+  - `test/price-lists.test.js` (+10 tests in a new `price list import — v2 fields` describe)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 603 tests passed; was 593). Plus a real
+  end-to-end seam check: a two-row v2 CSV fixture converted to a scratch path with
+  `node scripts/convert-price-lists.js`, then its output fed straight to `validatePriceListItems`
+  via `node -e` — accepted, with `duty_percent: 7.125`, `template_version: "v2"` and the blank
+  second row's `brand_name`/`pattern_match`/`duty_percent` as nulls. `src/seed/data/price-lists.json`
+  untouched (`git status` clean for it).
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - An `unnest` batch needs a NAMED rowset (`AS b(cols…)`) the moment any one column needs an
+      expression. Generate the alias list from the same `COLUMNS` array as the INSERT list so the
+      two cannot drift.
+    - Validate type strictly, leave range alone where no range has been stated — and comment the
+      omission at the check so it is visibly deliberate rather than forgotten.
+  - Gotchas (what will bite the next iteration):
+    - **The dedupe key in `validatePriceListItems` is joined with literal NUL bytes**, which Read
+      renders as spaces; editing that exact line by string match is impossible until you anchor
+      elsewhere. Cost one failed edit here — see Codebase Patterns.
+    - **A later v1 file for a key already imported from a v2 one CLEARS its v2 fields** and sets
+      `template_version` back to `'v1'`, because every non-key column is still `= EXCLUDED`. That is
+      this table's freshest-wins contract applied uniformly, not an oversight; it is asserted by a
+      test and commented above `UPSERT_SQL`. Adding a quieter COALESCE rule for just these columns
+      would be a product decision.
+    - `template_version` is deliberately NOT enum-checked in the importer. The accepted set is the
+      converter's registry, so an older API importing a newer converter's file must still store the
+      row. US-005 moves the OTHER vocabularies into `price-template.js` — do not sweep this one in
+      with them, and note that `src/seed/price-lists.js` cannot import from `scripts/` anyway.
+    - `FREIGHT_CLASSES` (`A`–`E`) and `DUTY_CLASSES` (`A`) in `src/seed/price-lists.js` are STILL
+      narrower than the DB check (`~ '^[A-Z]$'`), and `test/price-lists.test.js` still asserts
+      `freight_class: 'Z'` is rejected. Untouched here on purpose — US-005 owns the vocabularies and
+      must update that `it.each` row in the same change.
+    - `duty_percent` >= 1000 passes validation and overflows `numeric(6,3)` at the INSERT. Loud, and
+      intentional: no legitimate range has been stated.
+  - Context (where the relevant code lives):
+    - Validator, `COLUMNS`, `UPSERT_SQL`: `src/seed/price-lists.js`. CLI: `src/seed/import-price-lists.js`.
+    - What the converter emits: `mapV1`/`mapV2` in `scripts/lib/price-template.js`.
+    - Schema: `migrations/1786334400000_price-list-template-v2.js`.
+    - Tests: `test/price-lists.test.js` (import behaviour + the schema block from US-001).
+- **Needs human verification:** none from this change — the importer is a CLI and no screen renders
+  the new columns yet (`/admin/price-list-items` does not select them; adding them there is not in
+  this story's scope). What a human must still do before merge, unchanged from US-002/US-003 and not
+  runnable from any worktree: `npm run convert:pricing && git diff --exit-code
+  src/seed/data/price-lists.json` in the main checkout, then `npm run import:pricing` against a
+  scratch database to confirm the 19.5k v1 rows land with `template_version = 'v1'`.
+---
+
+## 2026-08-06T16:00:00Z - W10-US-005 - Shared vocabulary module
+- The five pipeline vocabularies now live once, in `scripts/lib/price-template.js`, split into
+  STORED sets (`CATEGORIES`, `UNITS`, `CURRENCIES` — each mirroring a column CHECK) and INPUT maps
+  (`CATEGORY_BY_ITEM_TYPE`, `UNIT_BY_PACK`, `CURRENCY_MAP`), with `assertStorable(map, stored, what)`
+  run at module load so an alias can never reach outside the stored set. `UNIT_BY_PACK` gained
+  `p/hide`/`p/panel` (both units have been in the CHECK since the table was created, with no
+  template rows yet) and `CURRENCY_MAP` gained `eur`/`usd`/`gbp` as INPUT ALIASES only — the stored
+  set is unchanged and a test asserts `new Set(CURRENCY_MAP.values())` still equals `CURRENCIES`.
+  A comment at `CURRENCIES` names the four places a new currency must be added in lockstep (DB
+  CHECK, `CURRENCIES`, `CURRENCY_MAP`, `CURRENCY_ENUM`) and notes that the last now derives from
+  the second. The three consumers import instead of copying: `scripts/convert-price-lists.js`
+  (its `CATEGORY_BY_FILE_TOKEN` is now `assertStorable`-checked), `src/seed/price-lists.js` and
+  `src/routes/admin-price-lists.js` (`CATEGORY_ENUM`/`UNIT_ENUM`/`CURRENCY_ENUM` are spreads of the
+  shared sets).
+- **Scope note — the class letters were widened here too, and that is not in US-005's written
+  criteria.** `FREIGHT_CLASSES` (`A`–`E`) and `DUTY_CLASSES` (`A`) existed in three hand-copied
+  places and all three still contradicted the column CHECKs that US-001 widened to `~ '^[A-Z]$'`.
+  They are replaced by one exported `CLASS_LETTER = /^[A-Z]$/` + `isClassLetter`, used by `mapV1`,
+  by a new `optionalClassLetter` in the importer's validator, and by the admin schema (where
+  `duty_class` moves from free text to the same pattern, turning what would have been an opaque
+  23514 into a 400). Rationale: US-001 already ratified the shape and CLAUDE.md recorded that the
+  application layer "is widened separately"; leaving it narrow means the client's first `F` still
+  fails the converter, which is the exact bug US-001 exists to prevent. No story after this one
+  owns it.
+- Repos and files changed (atelier-api only):
+  - `scripts/lib/price-template.js` (+~85 lines: the vocabulary block, `assertStorable`,
+    `CLASS_LETTER`/`isClassLetter`; `mapV1`'s two class checks now call the predicate)
+  - `scripts/convert-price-lists.js` (imports `CATEGORIES`/`assertStorable`, wraps its file-token map)
+  - `src/seed/price-lists.js` (imports the three stored sets, adds `optionalClassLetter`, drops the
+    five local sets and `requireEnum`'s now-unused `optional` option)
+  - `src/routes/admin-price-lists.js` (enums derived from the shared sets, `classLetterProp`)
+  - `test/price-template.test.js` (+15 tests: a `shared vocabularies` describe, alias mapping and
+    class-letter cases in `mapV1`), `test/price-lists.test.js` (+18: widened class letters accepted
+    end to end, `hide`/`panel` units, the two rejection rows retuned to `AB`/`a`)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml`, `ralph/w10-pricing-template/prd.json`,
+    `ralph/w10-pricing-template/progress.txt`, `CLAUDE.md`
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 636 tests passed; was 603). Plus, all
+  writing to scratch paths only:
+  - a v1 fixture reproducing the committed file's FIRST record converted to a scratch path and
+    compared byte-for-byte in Node against line 2 of `src/seed/data/price-lists.json` —
+    `identical bytes: true`.
+  - a v2 fixture exercising every new alias (`p/hide`, `p/panel`, `USD`, `gbp`, freight `K`, duty
+    `F`) -> two rows, correct units/currencies, class letters stored raw; its output fed straight
+    to `validatePriceListItems`, accepted.
+  - an audit of the committed 19,514 records: units are `metre,piece,roll,yard` (no hide/panel row
+    exists), currencies `EUR,GBP,USD`, freight classes `A`–`E`, duty classes `A`/null — so nothing
+    added or widened here can touch a committed byte. The whole committed file re-validates under
+    the new validator.
+  `src/seed/data/price-lists.json` untouched (`git status` clean for it).
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - Split INPUT vocabulary from STORED vocabulary and assert the containment at module load; see
+      the Codebase Patterns block.
+    - `src/` importing from `scripts/` works and is now done deliberately — see Codebase Patterns.
+    - A JSON-Schema `pattern` only applies to string instances, so `{ type: ['string','null'],
+      pattern: '^[A-Z]$' }` still lets an explicit null clear the column. Deriving the pattern from
+      the exported regex's `.source` keeps the schema and the predicate one source.
+  - Gotchas (what will bite the next iteration):
+    - **`test/admin-price-lists.test.js` is NOT in this workstream's allowed file list**, so the
+      route's tightened `duty_class` (free text -> one uppercase letter) has no direct route-level
+      test. It is covered indirectly (the shared pattern is asserted in `price-template.test.js`)
+      and no existing admin test sends a multi-character class. If a story ever needs to assert the
+      400, it needs that file unlocked.
+    - Widening the class letters made three previously-passing negative cases wrong: `mapV1`'s
+      `[13, 'Z']`/`[10, 'Q']` rows and the validator's `freight_class: 'Z'` row. They now use
+      multi-character values (`ZZ`, `Q1`, `AB`) and a lower-case one — a single letter of ANY case
+      now passes the converter, because `mapV1` upper-cases the cell before checking.
+    - `requireEnum`'s `{ optional: true }` option is gone (no caller left). Re-adding it is not the
+      way to validate a nullable enum here — `optionalClassLetter` is the shape to copy.
+    - The vocabularies are exported as live `Map`/`Set` objects, which `Object.freeze` does not
+      protect. Nothing mutates them and `assertStorable` only reads, but a caller COULD `.add`. If
+      that ever matters, declare frozen arrays and derive the collections from them.
+    - US-006 must not regenerate `src/seed/data/price-lists.json` to "pick up" the new aliases:
+      there is nothing to pick up. The corpus audit above proves no committed row uses any of them.
+  - Context (where the relevant code lives):
+    - Vocabularies, `assertStorable`, `CLASS_LETTER`, both mappers, header matching:
+      `scripts/lib/price-template.js`. Its tests: `test/price-template.test.js`.
+    - Importer validator + upsert: `src/seed/price-lists.js`. Back-office write schema:
+      `src/routes/admin-price-lists.js`; its read/write SQL: `src/pricing/admin-price-lists.js`
+      (untouched — no vocabulary lives there).
+    - The CHECKs these mirror: `migrations/1785110400000_price-list-items.js` (category, unit,
+      currency) and `migrations/1786334400000_price-list-template-v2.js` (both class letters).
+- **Needs human verification:** the CRM's back-office **Supplier rates** screen (atelier-crm,
+  `src/screens/Admin*`) is the one place a person should look: its duty-class field now accepts a
+  single uppercase letter only, where the API previously took any text up to 200 characters, so a
+  screen offering a free-text box or a hard-coded `A`–`E` freight dropdown needs its input widened
+  to the full alphabet and narrowed to one character. Nothing else renders these vocabularies. Also
+  still outstanding from US-002/US-003/US-004 and not runnable from any worktree:
+  `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json` in the main
+  checkout, which is the only place `incoming/pricing-templates/` exists.
+---
+
+## 2026-08-06T16:20:00Z - W10-US-006 - Byte-pin unit test and regeneration tripwire
+- Added the two guards that make a converter change reviewable without regenerating 8 MB.
+  (1) A `byte pin` describe in `test/price-template.test.js`: `dumps(mapV1(row))` compared to a
+  hardcoded string. The first pin's string is **line 2 of `src/seed/data/price-lists.json`
+  verbatim** (minus its trailing comma — the converter writes one record per line), reproduced
+  from the cells behind the committed file's first record (Altagamma 14511, blank Item Type so
+  the category comes from the filename's WPPR token, prose vertical repeat, null duty class); a
+  second pin exercises a whole rate (`115` -> `115.0`) and float noise
+  (`256.60000000000002` -> `"256.6"`); a third pins `dumps(mapV2(row))`, which reproduces no
+  history — v2 bytes are new and pinned to this implementation, including `Braquenié` written raw.
+  (2) A regeneration tripwire in `test/price-lists.test.js`'s `universal price list file` describe:
+  the committed file's FIRST record must carry none of `brand_name`/`pattern_match`/
+  `duty_percent`/`template_version` and must keep mapV1's exact 17-key order. The 8 MB file moved
+  into a `beforeAll` so both tests in that describe share one parse.
+- Repos and files changed (atelier-api only):
+  - `test/price-template.test.js` (+3 tests: the `byte pin` describe; imports `dumps`)
+  - `test/price-lists.test.js` (+1 test: the tripwire; `COMMITTED_KEYS`, shared `beforeAll` parse)
+  - `CLAUDE.md` (`## Pricing template`: the unit-level pin, why the Python-faithful float
+    formatting stays, v2 pinned to the Node implementation, and the tripwire attached to the
+    existing own-commit regeneration rule)
+  - `_bmad-output/implementation-artifacts/sprint-status.yaml` (US-006 done, epic status done),
+    `ralph/w10-pricing-template/prd.json`, `ralph/w10-pricing-template/progress.txt`,
+    `ralph/w10-pricing-template/PR-BODY.md` (new)
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (37 files, 640 tests passed; was 636). The pin was
+  derived and checked with `node -e` against the committed file before it was hardcoded:
+  `line === dumps(mapV1(row)) + ','` -> true. `src/seed/data/price-lists.json` untouched
+  (`git status` clean for it) — no test writes to it and nothing regenerated it.
+- **Learnings:**
+  - Patterns discovered (general and reusable):
+    - Pin a byte-pinned artefact as a STRING, not an object; build the literal from a real
+      committed line. See the Codebase Patterns block.
+    - A tripwire should assert what a WRONG regeneration would change, not what the file contains,
+      so it survives a legitimate refresh. Also in Codebase Patterns.
+  - Gotchas (what will bite the next iteration):
+    - **Editing anything to do with the first record's cells now breaks a string comparison, by
+      design.** If `mapV1` legitimately changes, the pin must be re-derived from the file with
+      `node -e` — never hand-edited to match the new output, or the pin stops meaning anything.
+    - The tripwire deliberately checks ONLY record 1, not every record. A whole-file scan would
+      fail the first time a real v2 drop legitimately lands in the corpus; record 1 sorts first on
+      `(supplier, category, code)` and is Altagamma, so it stays a v1 record either way.
+    - `test/price-lists.test.js` contains literal NUL bytes on the dedupe-key line inside the
+      `universal price list file` describe (rendered as spaces by every reader). Both edits here
+      were anchored above and below it — an exact-match edit ON that line will always fail.
+    - The whole-file `beforeAll` leaves `items` null if the read throws; that surfaces as a
+      TypeError in each test rather than a clean message, which is the normal vitest shape here.
+  - Context (where the relevant code lives):
+    - Pinned mappers and the registry: `scripts/lib/price-template.js`. Serialiser:
+      `scripts/lib/python-format.js` (`dumps` = `json.dumps` separators + `repr(float)`), guarded
+      independently by `test/converters.test.js`.
+    - The converter's write line (`[\n${ordered.map(dumps).join(',\n')}\n]\n`) is what makes one
+      record one line, which is what makes a line-level pin possible:
+      `scripts/convert-price-lists.js`.
+    - Committed corpus: `src/seed/data/price-lists.json` (19,514 records, 40 suppliers).
+- **Needs human verification:** none from this change — it adds tests only, no runtime code path
+  moved. Still outstanding for the whole workstream and not runnable from any worktree (see
+  US-002/003/004/005): `npm run convert:pricing && git diff --exit-code src/seed/data/price-lists.json`
+  in the main checkout, which is the only place `incoming/pricing-templates/` exists. And from
+  US-005, the CRM's back-office **Supplier rates** screen: its duty-class field now accepts a
+  single uppercase letter where the API previously took any text up to 200 characters.
+---

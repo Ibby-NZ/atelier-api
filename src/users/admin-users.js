@@ -18,16 +18,20 @@
 import { PUBLIC_USER_COLUMNS } from '../auth/user-columns.js'
 import { buildUpdate } from '../catalogue/admin-brands.js'
 import { hashPassword } from '../auth/passwords.js'
+import { setArchived } from '../lifecycle/archive.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
 
 const PG_UNIQUE_VIOLATION = '23505'
 
-// Reads add the two admin-only columns on top of the public set. created_at and
+// Reads add the admin-only columns on top of the public set. created_at and
 // archived_at are staff context (when the account was made, whether it's been
 // archived); customers never see them, but the back office lists on them.
-const USER_READ_COLUMNS = `${PUBLIC_USER_COLUMNS}, created_at, archived_at`
+// `can_view_finance` is here rather than in PUBLIC_USER_COLUMNS because it is a
+// staff permission the back office edits — a client's own /auth/me has no use
+// for it. (Reporting derives its access from it; see the whitelist note below.)
+const USER_READ_COLUMNS = `${PUBLIC_USER_COLUMNS}, created_at, archived_at, can_view_finance`
 
 // Only these columns are ever writable via updateUser. password_hash stays with
 // the auth endpoints (a reset is a password flow, not a field edit) and
@@ -38,7 +42,23 @@ const USER_READ_COLUMNS = `${PUBLIC_USER_COLUMNS}, created_at, archived_at`
 // down over the phone otherwise leaves an account nobody can reach and no way
 // to fix it short of SQL. It is normalised to lower case on the way in (login
 // looks up `lower(email)`) and a collision is the same 409 create answers with.
-const USER_UPDATE_COLUMNS = Object.freeze(['role', 'trade_approved', 'name', 'email'])
+//
+// `can_view_finance` joins it under the same discipline as `trade_approved`: it
+// only means anything on a staff row, so moving a login off backoffice/director
+// clears it (see updateUser).
+const USER_UPDATE_COLUMNS = Object.freeze([
+  'role',
+  'trade_approved',
+  'name',
+  'email',
+  'can_view_finance',
+])
+
+// The roles for which `can_view_finance` is meaningful. Reporting masks cost and
+// margin columns server-side and derives the answer from this flag, never from
+// the role — `backoffice` covers the showroom and the accounts desk alike, which
+// is exactly why a second, explicit permission exists.
+const FINANCE_ROLES = Object.freeze(['backoffice', 'director'])
 
 // The two halves of the account roster the CRM presents separately: the Clients
 // section manages the people who buy, Users & permissions manages the staff who
@@ -62,6 +82,7 @@ const toUser = (row) =>
     trade_approved: row.trade_approved,
     created_at: row.created_at,
     archived_at: row.archived_at,
+    can_view_finance: row.can_view_finance,
   })
 
 /**
@@ -162,7 +183,8 @@ export const getUser = async (pool, id) => {
 }
 
 /**
- * Patch an account's role / trade_approved / name / email from a whitelisted
+ * Patch an account's role / trade_approved / name / email / can_view_finance
+ * from a whitelisted
  * body. buildUpdate only ever writes the listed columns and always binds values
  * as placeholders. 404 when the id is unknown, 409 when the new email is taken.
  *
@@ -186,10 +208,24 @@ export const updateUser = async (pool, id, input) => {
   // for the CRM, the AdminJS panel and any future caller. An explicit
   // `trade_approved: true` in the same body loses: the role is the stronger
   // statement, and the two together are a contradiction, not an instruction.
-  const patch =
+  const demoted =
     Object.hasOwn(emailed, 'role') && emailed.role !== 'trade'
       ? { ...emailed, trade_approved: false }
       : emailed
+
+  // The same discipline for `can_view_finance`. It grants a staff login sight of
+  // cost and margin in every report, so a role change off backoffice/director
+  // must revoke it: leaving it set strands a true flag on a customer or trade row
+  // where nothing displays it, and re-promoting that login to backoffice months
+  // later hands back finance visibility with no review having happened — the
+  // exact shape of the trade_approved regression above. An explicit
+  // `can_view_finance: true` in the same body loses for the same reason: the role
+  // is the stronger statement, and the two together are a contradiction rather
+  // than an instruction.
+  const patch =
+    Object.hasOwn(demoted, 'role') && !FINANCE_ROLES.includes(demoted.role)
+      ? { ...demoted, can_view_finance: false }
+      : demoted
 
   const { sets, params } = buildUpdate(patch, USER_UPDATE_COLUMNS)
   let rows
@@ -224,12 +260,8 @@ export const updateUser = async (pool, id, input) => {
  * @returns {Promise<object|null>}
  */
 export const setUserArchived = async (pool, id, archived) => {
-  const archivedExpr = archived ? 'now()' : 'NULL'
-  const { rows } = await pool.query(
-    `UPDATE users SET archived_at = ${archivedExpr}
-      WHERE id = $1
-      RETURNING ${USER_READ_COLUMNS}`,
-    [id]
-  )
-  return rows[0] ? toUser(rows[0]) : null
+  const row = await setArchived(pool, 'user', id, archived, {
+    returning: USER_READ_COLUMNS,
+  })
+  return row ? toUser(row) : null
 }

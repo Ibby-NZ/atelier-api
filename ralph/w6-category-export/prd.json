@@ -1,0 +1,95 @@
+{
+  "project": "Atelier — August 6th updates — W6 Category export",
+  "branchName": "aug6/w6-category-export",
+  "description": "A spreadsheet round trip letting the office assign product categories, generalised into a reusable per-brand template.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 6)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: W3 merged (products.category)\nBlocks: nothing",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Extract the encoding-sniffing CSV reader",
+      "description": "As a maintainer, I want one CSV reader, so that the encoding sniff is not reimplemented.",
+      "acceptanceCriteria": [
+        "decodeText and csvRows move verbatim to src/lib/csv-text.js",
+        "scripts/lib/text.js re-exports them",
+        "test/converters.test.js passes unchanged — that is the proof this was a move",
+        "npm run convert:pricing still produces a byte-identical price-lists.json",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": " | done 2026-08-06T18:17:00Z"
+    },
+    {
+      "id": "US-002",
+      "title": "Product sheet export with an empty Category column",
+      "description": "As the office, I want a spreadsheet I can fill in, so that categorising products does not need a developer.",
+      "acceptanceCriteria": [
+        "Defaults to brand atelier-textiles-nz and accepts any ?brand=",
+        "The header row is a documented contract, with Category present and empty",
+        "A stable server key is included so re-import never depends on row order",
+        "Uses the hardened CSV writer; a staff-typed name beginning = is neutralised",
+        "The filename derives from the brand slug, so nothing user-typed reaches the header",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": " | done 2026-08-06T18:40:00Z"
+    },
+    {
+      "id": "US-003",
+      "title": "Re-import parse and validate",
+      "description": "As the office, I want to be told exactly what is wrong before anything is written.",
+      "acceptanceCriteria": [
+        "A file saved by Excel on Windows (cp1252) parses correctly",
+        "An unknown category value is reported with its row number",
+        "An unmatched key is reported, not guessed",
+        "Nothing is written when any row fails",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": " | done 2026-08-06T18:38:28+12:00"
+    },
+    {
+      "id": "US-004",
+      "title": "Apply validated categories",
+      "description": "As the office, I want my edits to land.",
+      "acceptanceCriteria": [
+        "All updates run in one transaction",
+        "The response reports counts changed, unchanged and skipped",
+        "Re-uploading the same file changes nothing",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": " | done 2026-08-06T18:47:00Z"
+    },
+    {
+      "id": "US-005",
+      "title": "CRM export and import panel",
+      "description": "As the office, I want to do this from the CRM.",
+      "acceptanceCriteria": [
+        "Download, then upload with a validation report shown before applying",
+        "The brand selector makes the template generalisation visible",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": " | done 2026-08-06T19:05:00Z"
+    }
+  ]
+}

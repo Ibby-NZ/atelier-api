@@ -1,0 +1,120 @@
+{
+  "project": "Atelier — August 6th updates — W10 Pricing template",
+  "branchName": "aug6/w10-pricing-template",
+  "description": "One universal pricing template for every supplier going forward: v2 as a strict superset of the existing 14 columns, versioned by its header row so v1 drops keep importing forever.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 10)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: nothing — runs in Wave 1 alongside W1; the file footprints are disjoint\nBlocks: W8 (its rate output is emitted in this template shape)",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Migration: price_list_items v2 columns",
+      "description": "As the office, I want the template to carry brand, pattern match and duty percent, so that the fields the client asked for have a home.",
+      "acceptanceCriteria": [
+        "Adds brand_name text, pattern_match text, duty_percent numeric(6,3), template_version text NOT NULL DEFAULT v1",
+        "brand_name is TEXT and deliberately NOT a foreign key to brands — supplier names do not reliably match the 41 houses and a broken FK would fail whole imports over a naming difference",
+        "Widens the freight_class CHECK to a single uppercase letter (^[A-Z]$) and adds the same for duty_class",
+        "Those sets today encode a guess about a broker table we do not have; the first B from the broker would otherwise reject the client own file as a bug in ours",
+        "No placeholder duty or freight VALUE is written anywhere — the letters stay raw and uninterpreted",
+        "Re-running the migration is a no-op",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": " | done 2026-08-06T14:44:00Z"
+    },
+    {
+      "id": "US-002",
+      "title": "Template registry with v1 moved verbatim",
+      "description": "As a maintainer, I want the accepted headers declared in one place, so that adding v3 is one entry.",
+      "acceptanceCriteria": [
+        "scripts/lib/price-template.js exports TEMPLATES as a frozen array of { version, header, map }",
+        "THE HEADER ROW IS THE VERSION — no version column, no preamble line, no marker cell. A version column can be misdeclared by deleting a column; a header mismatch fails loudly",
+        "matchTemplate normalises labels (lowercase, collapsed whitespace) and matches EXACTLY on length and labels; first match wins",
+        "No match produces the existing loud error, now listing every accepted header",
+        "mapV1 is the current normaliseRow MOVED, not rewritten — same emitted key order, same cleanMeasure/round4/generalFormat calls",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": " | done 2026-08-06T15:00:00Z"
+    },
+    {
+      "id": "US-003",
+      "title": "v2 mapping and the omit-on-v1 rule",
+      "description": "As the platform, I want v2 files to import without disturbing a single v1 row.",
+      "acceptanceCriteria": [
+        "v2 appends Supplier, Brand, Pattern Match and Duty Percent to the 14 v1 columns, in that order",
+        "A Supplier cell WINS over the filename, removing the most fragile input in the pipeline",
+        "v2-only fields are OMITTED ENTIRELY on v1 rows, never written as null — writing null would grow all 19.5k committed records and make the next regeneration a total diff",
+        "A comment states that reason at the emit site, or someone will tidy it into explicit nulls",
+        "npm run convert:pricing still produces a byte-identical src/seed/data/price-lists.json",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": " | done 2026-08-06T15:20:00Z"
+    },
+    {
+      "id": "US-004",
+      "title": "Importer accepts the v2 fields",
+      "description": "As the platform, I want v2 rows to land with their new columns.",
+      "acceptanceCriteria": [
+        "validatePriceListItems accepts and validates the four new fields before any SQL",
+        "template_version uses COALESCE — unnest binds an explicit NULL for a missing key, which DEFEATS the column DEFAULT and would write NULL into a NOT NULL column",
+        "The upsert key stays (supplier, category, code)",
+        "A v1 import is unchanged; a re-import is still how new season rates land",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": " | done 2026-08-06T15:40:00Z"
+    },
+    {
+      "id": "US-005",
+      "title": "Shared vocabulary module",
+      "description": "As a maintainer, I want the enum vocabularies in one place, because they are currently duplicated by hand in at least three.",
+      "acceptanceCriteria": [
+        "Item type, pack type and currency vocabularies live in price-template.js and are imported by the converter, src/seed/price-lists.js and src/routes/admin-price-lists.js",
+        "Pack type gains p/hide and p/panel — both already exist in the DB CHECK with no template rows yet",
+        "Currency accepts ISO codes as INPUT ALIASES only; the stored value set is NOT widened",
+        "A comment lists all four places that must change in lockstep to add a currency: the DB CHECK, CURRENCIES, CURRENCY_MAP and CURRENCY_ENUM",
+        "Added aliases can only ADD successful mappings — verify against the corpus that no existing row uses them, so the committed JSON is untouched",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": " | done 2026-08-06T16:00:00Z"
+    },
+    {
+      "id": "US-006",
+      "title": "Byte-pin unit test and regeneration tripwire",
+      "description": "As a reviewer, I want converter drift caught without regenerating 8 MB.",
+      "acceptanceCriteria": [
+        "A test asserts dumps(mapV1(sampleRow)) equals a hardcoded string — a unit-level byte pin catching key-order or float-format drift",
+        "A tripwire test asserts the first item of the committed price-lists.json carries NONE of the four v2 keys, so a buggy v2 mapper that regenerated the file fails immediately",
+        "CLAUDE.md is updated: v1 output is byte-pinned and the Python-faithful float formatting stays because the 19.5k committed rows were produced by it; v2 rows are new output pinned to the Node implementation",
+        "CLAUDE.md records that regenerating price-lists.json happens in its own commit, converter unchanged",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": " | done 2026-08-06T16:20:00Z"
+    }
+  ]
+}

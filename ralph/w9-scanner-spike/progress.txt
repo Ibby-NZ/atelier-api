@@ -1,0 +1,102 @@
+# Ralph progress log — Atelier — August 6th updates — W9 Scanner spike
+
+## Codebase Patterns
+
+General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
+Story-specific detail belongs in the per-story entries below, not here.
+
+- **`BarcodeDetector` is unavailable on iOS, in every browser.** Safari does not implement it and
+  every iOS browser is WebKit underneath, so Chrome and Firefox on an iPhone or iPad do not either.
+  The constructor is simply absent, so a feature-detect is mandatory and the failure is silent
+  otherwise. Any browser-camera scanning in this platform means a WebAssembly decoder, not the
+  native API — treat "PWA scanning" as carrying that dependency, never as a free browser feature.
+- **W9 was run supervised, not under Ralph, and that is by design.** A research workstream has no
+  gates to verify against, so a loop has nothing to stop on and burns its budget. The handoff says
+  so explicitly. Consequence for anyone reading this file: the commit landed before the bookkeeping,
+  which is the reverse of the Ralph invariant.
+
+---
+
+## Story log
+
+Appended by each iteration, newest last. Never rewrite an existing entry.
+
+## 2026-08-06T03:08:26Z - W9-US-001 - Options matrix
+- Wrote `_bmad-output/planning-artifacts/research-sample-scanner.md` — four options (A Bluetooth
+  keyboard wedge, B PWA with a WebAssembly decoder, C off-the-shelf inventory app, D native app),
+  each with hardware, offline behaviour, cost and integration effort.
+- The matrix is framed by one finding stated before the options: `BarcodeDetector` is not available
+  on iOS, so option B means "PWA plus a WASM decoder" and its cost is counted that way rather than
+  as a footnote.
+- Accounts for the existing `SampleScanner.jsx` phone-frame preview: option A's integration effort
+  is "near zero" precisely because that screen already has the input, and the document records that
+  the screen writes nothing today.
+- Repos and files changed: atelier-api — `_bmad-output/planning-artifacts/research-sample-scanner.md`
+  (new). Delivered in commit `0fc323e`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0. Documents only; no source file was touched.
+- **Learnings:**
+  - Pattern: an options matrix is only decision-useful if one constraint is hoisted above the list.
+    Here the iOS `BarcodeDetector` gap removes an entire option's cheap path, and stating it once at
+    the top stops it being re-argued per option.
+  - Context: the demo barcode format is `ATL-0049-217` — Atelier-issued, not a supplier EAN. Atelier
+    controls the symbology, so no option has to cope with damaged retail barcodes.
+- **Needs human verification:** none — a document. The decision it asks for is in US-002.
+---
+
+## 2026-08-06T03:08:26Z - W9-US-002 - Recommendation
+- Same document, `## Recommendation`: start with A (Bluetooth keyboard wedge), keep B as the
+  documented fallback, with four numbered reasons and the conditions under which the call holds.
+- Each rejected option carries what would have to be true for it to win: B if staff must scan away
+  from a counter, C if sample tracking should leave the platform entirely (a strategy decision that
+  contradicts W4), D only for offline scanning with no Wi-Fi, which nobody has asked for.
+- Names the integration point W4 owns — `GET /admin/samples/by-barcode/:barcode` plus the
+  `check-out` / `check-in` verb routes — and notes that A and B both hit it, so choosing A wastes
+  nothing if B is added later.
+- Records three things needed from Atelier (confirm the showroom device, confirm who prints the
+  labels, decide whether loan holders may be named in a third-party system) and one open dependency:
+  `SampleScanner.jsx` still refers to a "Dataverse-vs-PWA backend call (§6.1)", which W4 answers for
+  this platform by putting the register in Postgres.
+- Repos and files changed: atelier-api — `_bmad-output/planning-artifacts/research-sample-scanner.md`.
+  Delivered in commit `0fc323e`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0.
+- **Learnings:**
+  - Pattern: a recommendation that also states the falsifying condition for every rejected option is
+    re-runnable. When the showroom device is confirmed, the reader checks one line instead of
+    re-doing the comparison.
+  - Gotcha for W4: the recommendation assumes `by-barcode` returns one deterministic 200 or 404
+    rather than a filtered list. A wedge scanner types a code and presses Enter, so an ambiguous
+    result has no interaction to disambiguate it.
+- **Needs human verification:** the showroom device question (iPad vs laptop) is the single input
+  that most changes the answer, and only Atelier can answer it. The ADR is therefore `proposed`,
+  not `accepted`.
+---
+
+## 2026-08-06T03:08:26Z - W9-US-003 - ADR appended to architecture.md
+- Appended `## ADR 001 — Sample scanning uses a keyboard-wedge scanner, not a camera` to
+  `_bmad-output/planning-artifacts/architecture.md` (35 lines): Date 2026-08-06, Status
+  "proposed, awaiting confirmation of the showroom device", and a `**Full analysis:**` line linking
+  `research-sample-scanner.md`. Context, decision and consequences are all present, and the
+  consequences state the cost as well as the win (scanning is tied to wherever the scanner sits;
+  shelf-walking with a phone is not supported).
+- Carries the open item forward rather than closing it silently: the `/sample-scanner` screen's
+  "Dataverse-vs-PWA (§6.1)" comment is named in the ADR's **Open** paragraph.
+- Repos and files changed: atelier-api — `_bmad-output/planning-artifacts/architecture.md` (append
+  only, no existing section restructured). Delivered in commit `0fc323e`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0.
+- **Learnings:**
+  - Pattern: an ADR whose Status is `proposed, awaiting <specific fact>` is honest about a decision
+    made without one input. `accepted` here would have implied the showroom device was known.
+  - Gotcha: the ADR duplicates none of the options matrix — it links to it. Appending the analysis
+    into architecture.md as well would make two documents drift.
+- **Needs human verification:** none for the document itself. Flip the ADR to `accepted` once the
+  showroom device is confirmed.
+---
+
+## 2026-08-06 — bookkeeping reconciliation (no code)
+- The three stories above were delivered by the supervised session in commit `0fc323e`, but that
+  commit carried only the two documents: `prd.json` still read `passes: false` for all three and
+  `sprint-status.yaml` still read `pending`, so the status board under-reported a finished
+  workstream. This entry, the flag flips and `PR-BODY.md` are that gap closed after the fact.
+- Nothing in the deliverables changed. Each story was checked against its acceptance criteria in the
+  committed documents before its flag was flipped.
+---

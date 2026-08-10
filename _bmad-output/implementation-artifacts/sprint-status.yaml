@@ -1,0 +1,127 @@
+# Sprint status — Atelier "August 6th updates"
+#
+# One key per story. A Ralph iteration flips its story to done in the same
+# commit as the code. This is the single-screen project status board.
+#
+# Values: pending | in_progress | done | blocked
+
+epics:
+  w1-foundations:
+    name: "W1 Foundations"
+    branch: aug6/w1-foundations
+    status: done
+    stories:
+      US-001: done      # Lifecycle registry and deleteOrExplain
+      US-002: done      # setArchived replaces the eight duplicated archive helpers
+      US-003: done      # Registry safety tests
+      US-004: done      # CRM list kit: list.js, useAdminList, Pagination
+      US-005: done      # CRM delete kit: ConfirmDialog, deleteFlow, useCrudScreen, apiDelete
+      US-006: done      # CI workflows for all three repos
+  w10-pricing-template:
+    name: "W10 Pricing template"
+    branch: aug6/w10-pricing-template
+    status: done
+    stories:
+      US-001: done      # Migration: price_list_items v2 columns
+      US-002: done      # Template registry with v1 moved verbatim
+      US-003: done      # v2 mapping and the omit-on-v1 rule
+      US-004: done      # Importer accepts the v2 fields
+      US-005: done      # Shared vocabulary module
+      US-006: done      # Byte-pin unit test and regeneration tripwire
+  w2-crud:
+    name: "W2 CRUD completion"
+    branch: aug6/w2-crud
+    status: done
+    stories:
+      US-001: done      # DELETE for brand and collection
+      US-002: done      # DELETE for product and colourway
+      US-003: done      # DELETE for price-list item and contact enquiry
+      US-004: done      # DELETE for user with the self-delete guard
+      US-005: done      # Missing admin reads: brand, collection, price-list item by id
+      US-006: done      # Colourway list and detail endpoints
+      US-007: done      # Shipping-rate CRUD with the last-tier guard
+      US-008: done      # Inventory create and delete
+      US-009: done      # Delete on the products and houses screens
+      US-010: done      # Standalone AdminCollections screen
+      US-011: done      # AdminShipping screen
+      US-012: done      # Delete on stock, supplier rates, orders and users screens
+  w3-suppliers:
+    name: "W3 Suppliers"
+    branch: aug6/w3-suppliers
+    status: done
+    stories:
+      US-001: done      # Migration: suppliers, aliases and the two FK columns
+      US-002: done      # Migration: supplier brand terms and discount tiers
+      US-003: done      # Migration: products.category
+      US-004: done      # Supplier read models and admin module
+      US-005: done      # Supplier routes including DELETE
+      US-006: done      # Backfill suppliers from existing data
+      US-007: done      # AdminSuppliers CRM screen
+  w4-samples:
+    name: "W4 Samples"
+    branch: aug6/w4-samples
+    status: done
+    stories:
+      US-001: done      # Migration: showrooms and samples
+      US-002: done      # Migration: sample_loans with the one-open-loan index
+      US-003: done      # Migration: sample_orders
+      US-004: done      # Sample read models, filters and overdue derivation
+      US-005: done      # Sample CRUD routes and by-barcode lookup
+      US-006: done      # Check-out and check-in verb routes
+      US-007: done      # Sample-order lifecycle module and routes
+      US-008: done      # AdminSamples and AdminShowrooms screens (+ the showroom API they needed)
+      US-009: done      # AdminSampleOrders, live scanner, retired-route redirects
+  w5-reporting:
+    name: "W5 Reporting"
+    branch: aug6/w5-reporting
+    status: done
+    stories:
+      US-001: done      # Extract the hardened CSV writer to src/lib/csv.js
+      US-002: done      # Migration: reporting index and finance access
+      US-003: done      # Report filter layer
+      US-004: done      # Revenue scope CTE and the masking module
+      US-005: done      # Product performance by brand
+      US-006: done      # Server-side CSV export
+      US-007: done      # Stock and not-invoiced reports
+      US-008: done      # report_access on /auth/me and CRM consumption
+  w6-category-export:
+    name: "W6 Category export"
+    branch: aug6/w6-category-export
+    status: done
+    stories:
+      US-001: done      # Extract the encoding-sniffing CSV reader
+      US-002: done      # Product sheet export with an empty Category column
+      US-003: done      # Re-import parse and validate
+      US-004: done      # Apply validated categories
+      US-005: done      # CRM export and import panel
+  w7-featured:
+    name: "W7 Featured"
+    branch: aug6/w7-featured
+    status: done
+    stories:
+      US-001: done      # Migration: featured_rank on brands and collections
+      US-002: done      # Admin patch support and whole-list reorder endpoints
+      US-003: done      # Public read-model ordering
+      US-004: done      # Seed test: featured survives a reseed
+      US-005: done      # CRM featured panel
+      US-006: done      # Storefront homepage reads featured
+      US-007: done      # Storefront brands page reads featured
+  w8-colour-files:
+    name: "W8 Colour files"
+    branch: aug6/w8-colour-files
+    status: done
+    stories:
+      US-001: done      # Adapter registry and the row-extraction harness
+      US-002: done      # Adapters for the single-sheet, single-brand files
+      US-003: done      # Adapters for the multi-sheet and multi-brand files
+      US-004: done      # Normalised output, loud failure, per-file summary
+      US-005: done      # Rates as a secondary output
+      US-006: done      # Import colourways into products and colourways
+  w9-scanner-spike:
+    name: "W9 Scanner spike"
+    branch: aug6/w9-scanner-spike
+    status: done
+    stories:
+      US-001: done      # Options matrix
+      US-002: done      # Recommendation
+      US-003: done      # ADR appended to architecture.md

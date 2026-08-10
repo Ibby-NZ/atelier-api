@@ -1,0 +1,37 @@
+Converter byte-identity — run from the MAIN CHECKOUT, 2026-08-06
+
+Why this file exists
+--------------------
+verify.sh's converter byte-identity gate is VACUOUS in a worktree. `incoming/`
+is gitignored, so `incoming/pricing-templates/` exists only in the main
+checkout; `npm run convert:pricing` therefore ENOENTs, writes nothing, and the
+gate's `git diff --quiet src/seed/data/price-lists.json` then passes because
+nothing ran. verify-20260806T032804Z.log records exactly that:
+
+    ENOENT: no such file or directory, scandir
+      '.../w10-pricing-template/atelier-api/incoming/pricing-templates'
+        price-lists.json unchanged — exit 0
+
+W10 rewrote the converter, so that gate is the one that mattered. Re-run here
+against the real corpus, with the branch's converter and an explicit output
+path so neither `incoming/` nor the committed JSON was touched:
+
+    node scripts/convert-price-lists.js \
+      /Users/verumoffice/atelier-api/incoming/pricing-templates \
+      <scratch>/w10-price-lists.json
+
+Result
+------
+    Wrote 19514 items from 74 files (40 suppliers, 2 exact duplicate rows dropped)
+    cmp <scratch>/w10-price-lists.json src/seed/data/price-lists.json
+      -> BYTE IDENTICAL   (8641248 bytes both sides)
+    git -C /Users/verumoffice/atelier-api status --porcelain  -> clean
+      (incoming/ untouched, committed JSON untouched)
+
+The zero-rate skips reported to stderr (Colefax & Fowler price-on-application
+rows, etc.) are the documented behaviour, unchanged.
+
+Gates re-run on the main checkout after the follow-up duty_class fix:
+    npm run lint   -> 0
+    npm test       -> 0   (40 files, 749 tests)
+    npm run migrate -> 0, twice, second run "No migrations to run!"

@@ -1,0 +1,133 @@
+{
+  "project": "Atelier — August 6th updates — W3 Suppliers",
+  "branchName": "aug6/w3-suppliers",
+  "description": "Suppliers become a first-class domain linkable to brands, and products gain the category column that unblocks W6.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 3)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: W1 merged into august-6th-updates in both repos\nBlocks: W6 (needs products.category)",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Migration: suppliers, aliases and the two FK columns",
+      "description": "As the platform, I want a canonical supplier record, so that a house can be linked to who invoices it.",
+      "acceptanceCriteria": [
+        "suppliers has a unique name and slug, a d365_token, and archived_at with a partial live index",
+        "currency is the supplier INVOICING currency, not the country default — Jim Thompson is Thailand but USD",
+        "supplier_aliases is unique on lower(btrim(alias))",
+        "brands.supplier_id references suppliers ON DELETE RESTRICT",
+        "price_list_items.supplier_id references suppliers ON DELETE SET NULL, beside the retained free-text supplier",
+        "NO cost column is added to brands — brand rows are served to anonymous visitors",
+        "Re-running the migration is a no-op",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": " | done 2026-08-06T03:10:15Z"
+    },
+    {
+      "id": "US-002",
+      "title": "Migration: supplier brand terms and discount tiers",
+      "description": "As the office, I want per-brand commercial terms recorded where they cannot leak.",
+      "acceptanceCriteria": [
+        "supplier_brand_terms holds discount, discount_chain (array) and markup, unique per brand",
+        "A test proves a {0.4, 0.4} chain evaluates to x0.36, not -80%",
+        "Terms tables are never joined into any client-facing read model",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": " | done 2026-08-06T15:22:40Z"
+    },
+    {
+      "id": "US-003",
+      "title": "Migration: products.category",
+      "description": "As the office, I want products categorised on the same axis as supplier rates, so that the catalogue and the rate ledger are joinable.",
+      "acceptanceCriteria": [
+        "category is text with CHECK (category IN ('fabric','wallpaper','trimming','accessory'))",
+        "It is nullable — existing products are uncategorised, not wrong",
+        "It matches price_list_items.category exactly",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": " | done 2026-08-06T15:24:30Z"
+    },
+    {
+      "id": "US-004",
+      "title": "Supplier read models and admin module",
+      "description": "As the CRM, I want to list and read suppliers.",
+      "acceptanceCriteria": [
+        "List supports q, include_archived and pagination",
+        "The column whitelist is frozen and in-code, as buildUpdate requires",
+        "Cost-bearing fields are present here (this is back-office only) but a test asserts they never appear in any /catalogue/* response",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": " | done 2026-08-06T15:33:10Z"
+    },
+    {
+      "id": "US-005",
+      "title": "Supplier routes including DELETE",
+      "description": "As back-office staff, I want to manage suppliers and be told when one cannot be removed.",
+      "acceptanceCriteria": [
+        "requireRole backoffice on every route",
+        "DELETE is blocked by brands and price_list_items, each with a count",
+        "brands.supplier_id is RESTRICT, so the 23503 backstop is exercised by a test",
+        "Duplicate name returns 409 from the database, never a pre-check",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": " | done 2026-08-06T15:42:10Z"
+    },
+    {
+      "id": "US-006",
+      "title": "Backfill suppliers from existing data",
+      "description": "As the office, I want the supplier list populated from what we already hold, so that nobody retypes 40 names.",
+      "acceptanceCriteria": [
+        "Sources: SELECT DISTINCT price_list_items.supplier and src/seed/data/suppliers.js",
+        "SUPPLIER_OVERRIDES (JV, JWall, C&C) become supplier_aliases rows",
+        "price_list_items.supplier_id is populated by matching name then alias",
+        "Rows that cannot be matched are reported, not guessed",
+        "Re-running changes nothing",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": " | done 2026-08-06T15:58:40Z"
+    },
+    {
+      "id": "US-007",
+      "title": "AdminSuppliers CRM screen",
+      "description": "As back-office staff, I want to manage suppliers in the CRM.",
+      "acceptanceCriteria": [
+        "Uses useAdminList, Pagination and useCrudScreen from W1",
+        "The existing demo Suppliers screen is untouched and reachable via a suppliersTabs strip",
+        "Cost fields respect CAPS.FINANCE_VIEW masking",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": " | done 2026-08-06T16:12:30Z"
+    }
+  ]
+}

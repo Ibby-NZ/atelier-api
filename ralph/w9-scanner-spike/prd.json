@@ -1,0 +1,57 @@
+{
+  "project": "Atelier — August 6th updates — W9 Scanner spike",
+  "branchName": "aug6/w9-scanner-spike",
+  "description": "A written recommendation on sample and showroom-sample scanning. Research only — no code. DO NOT RUN THIS UNDER RALPH: a research task has no gates, so a loop has nothing to verify against. Run it as one supervised session.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 9)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: nothing\nBlocks: nothing",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Options matrix",
+      "description": "As the office, I want to know what scanning actually costs and requires.",
+      "acceptanceCriteria": [
+        "Covers off-the-shelf scanner apps, a PWA using BarcodeDetector and getUserMedia, and native",
+        "Each option states hardware, offline behaviour, cost and integration effort",
+        "Accounts for the existing SampleScanner.jsx phone-frame preview",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "done 2026-08-06 — delivered by the supervised session in commit 0fc323e; bookkeeping reconciled after the fact"
+    },
+    {
+      "id": "US-002",
+      "title": "Recommendation",
+      "description": "As the office, I want a decision I can act on.",
+      "acceptanceCriteria": [
+        "One recommendation, with the conditions under which it holds",
+        "Names what would have to be true for each rejected option to win",
+        "References W4 GET /admin/samples/by-barcode/:barcode as the integration point",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "done 2026-08-06 — delivered by the supervised session in commit 0fc323e; bookkeeping reconciled after the fact"
+    },
+    {
+      "id": "US-003",
+      "title": "ADR appended to architecture.md",
+      "description": "As a future maintainer, I want the reasoning recorded.",
+      "acceptanceCriteria": [
+        "Context, decision, consequences",
+        "Dated and linked to the research document",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "done 2026-08-06 — delivered by the supervised session in commit 0fc323e; bookkeeping reconciled after the fact"
+    }
+  ]
+}

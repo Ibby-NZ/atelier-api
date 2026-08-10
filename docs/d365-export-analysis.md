@@ -73,7 +73,7 @@ often arrive newline-wrapped (`"\nELLA STRIPE\n"`), and the header row lives on 
 ## 2. Product Prices — the §3.5 gold dataset
 
 51 columns, all requested ones present. The 14-column supplier price-list template already handled by
-[`scripts/convert-price-lists.py`](../scripts/convert-price-lists.py) maps one-to-one onto this entity,
+[`scripts/convert-price-lists.js`](../scripts/convert-price-lists.js) maps one-to-one onto this entity,
 plus the waterfall outputs and the FX/override fields.
 
 Corpus size cross-check: this export has **19,327** rows; the committed
@@ -494,7 +494,8 @@ Mirrors the ratified price-list pipeline — same two-step shape, same fail-loud
 ```
 incoming/data-exports/*.xlsx              the raw D365 pulls (incoming/ is gitignored)
 incoming/data-exports/normalized/*.json   npm run convert:legacy
-scripts/convert-d365-exports.py           stdlib-only, same posture as convert-price-lists.py
+scripts/convert-d365-exports.js           dependency-free, same posture as convert-price-lists.js
+scripts/lib/                              shared zip/XML/xlsx readers + the D365 column map
 src/seed/legacy-import.js                 validate-before-SQL, chunked unnest, one transaction
 src/seed/import-legacy.js                 npm run import:legacy
 migrations/1785542400000_legacy-d365-staging.js
@@ -598,8 +599,10 @@ items · 7,575 item locations · 7,002 sales invoices · 5,268 purchase orders �
 
 ## 9. Reproducing this analysis
 
-Parsing is stdlib-only (zipfile + ElementTree), identical in approach to
-[`scripts/convert-price-lists.py`](../scripts/convert-price-lists.py): read `xl/sharedStrings.xml`,
+Parsing is dependency-free (`node:zlib` for the zip members, a tag scanner for the XML — see
+[`scripts/lib/`](../scripts/lib/)), identical in approach to
+[`scripts/convert-price-lists.js`](../scripts/convert-price-lists.js): read `xl/sharedStrings.xml`,
 then `xl/worksheets/sheet2.xml` for the data grid (`sheet.xml` holds the schema map). Header cells
 arrive as inline strings; body cells as shared-string indices or raw numerics. Excel serial dates use
-the 1899-12-30 epoch.
+the 1899-12-30 epoch. D365 writes its SpreadsheetML with an `x:` element prefix while Excel writes the
+default namespace, so tags are resolved through the document's prefix, never matched bare.

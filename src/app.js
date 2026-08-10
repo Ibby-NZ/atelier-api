@@ -15,6 +15,10 @@ import { adminUsersRoutes } from './routes/admin-users.js'
 import { adminTradeApplicationRoutes } from './routes/admin-trade-applications.js'
 import { adminInventoryRoutes } from './routes/admin-inventory.js'
 import { adminPriceListRoutes } from './routes/admin-price-lists.js'
+import { adminSupplierRoutes } from './routes/admin-suppliers.js'
+import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
+import { adminReportRoutes } from './routes/admin-reports.js'
+import { adminSampleRoutes } from './routes/admin-samples.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
@@ -132,6 +136,22 @@ export const buildApp = ({
     api.register(adminTradeAccountRoutes, { pool })
     api.register(adminInventoryRoutes, { pool })
     api.register(adminPriceListRoutes, { pool })
+    // /admin/suppliers — who INVOICES Atelier, and which houses they invoice.
+    // Back-office only: the record carries the freight terms, the PO address and
+    // each house's discount, none of which may reach a client-facing response.
+    api.register(adminSupplierRoutes, { pool })
+    // /admin/product-sheet/* — the spreadsheet round trip that fills in
+    // products.category. Backoffice-only; the export is a CSV download.
+    api.register(adminProductSheetRoutes, { pool })
+    // /admin/reports/* — the report library the CRM's Reporting screen reads.
+    // Back-office only, masked server-side before the payload exists, and the
+    // only admin routes here that opt into the rate limiter (a report is an
+    // unbounded aggregate over the order ledger).
+    api.register(adminReportRoutes, { pool })
+    // /admin/samples — the physical sample register (what is on the shelf, what
+    // is out, what is late back) plus the scanner's by-barcode lookup. Back
+    // office only, same CORS allowance as every other CRM screen.
+    api.register(adminSampleRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })

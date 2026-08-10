@@ -14,6 +14,7 @@
 // rethrowConflict) so both halves of the catalogue behave identically.
 
 import { slugify } from '../seed/slugify.js'
+import { setArchived } from '../lifecycle/archive.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -88,7 +89,7 @@ export const buildUpdate = (input, columns) => {
   return { sets, params }
 }
 
-const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, archived_at, created_at`
+const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, featured_rank, archived_at, created_at`
 
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
@@ -102,9 +103,15 @@ const BRAND_UPDATE_COLUMNS = Object.freeze([
   // overwrites it, so an office change survives every reseed.
   'trade_only',
   'website_url',
+  // Where this house sits in the storefront's featured order; NULL means not
+  // featured. Patchable one house at a time as well as through the whole-list
+  // reorder below, because correcting a single rank should not require the
+  // caller to restate the entire list. Absent from create on purpose — a house
+  // is not featured at birth.
+  'featured_rank',
 ])
 
-const toBrand = (row) =>
+const toBrand = (row, extra) =>
   Object.freeze({
     id: row.id,
     name: row.name,
@@ -115,8 +122,10 @@ const toBrand = (row) =>
     is_international: row.is_international,
     trade_only: row.trade_only,
     website_url: row.website_url ?? null,
+    featured_rank: row.featured_rank ?? null,
     archived_at: row.archived_at ?? null,
     created_at: row.created_at,
+    ...extra,
   })
 
 /**
@@ -149,7 +158,7 @@ export const websiteUrlFrom = (value, label = 'Website') => {
   return trimmed
 }
 
-const toCollection = (row) =>
+const toCollection = (row, extra) =>
   Object.freeze({
     id: row.id,
     brand_id: row.brand_id,
@@ -158,8 +167,19 @@ const toCollection = (row) =>
     slug: row.slug,
     description: row.description ?? null,
     image_url: row.image_url ?? null,
+    featured_rank: row.featured_rank ?? null,
     archived_at: row.archived_at ?? null,
+    ...extra,
   })
+
+// Split into columns + FROM (the shape admin-products.js uses) so the detail
+// read can slot a count subquery in between them.
+const COLLECTION_COLUMNS = `c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.featured_rank, c.archived_at, b.name AS brand_name`
+
+const COLLECTION_FROM = `FROM collections c
+       JOIN brands b ON b.id = c.brand_id`
+
+const COLLECTION_SELECT = `SELECT ${COLLECTION_COLUMNS} ${COLLECTION_FROM}`
 
 /**
  * Every brand, alphabetically. Unlike the public list this carries ids, because
@@ -173,7 +193,52 @@ export const listAdminBrands = async (pool, { includeArchived = false } = {}) =>
   const { rows } = await pool.query(
     `SELECT ${BRAND_COLUMNS} FROM brands ${where} ORDER BY name ASC, id ASC`
   )
-  return rows.map(toBrand)
+  // Arrow, not a bare `map(toBrand)`: the mapper takes a second `extra`
+  // argument, and map would hand it the array index.
+  return rows.map((row) => toBrand(row))
+}
+
+/**
+ * One brand by id with its collections and the two child counts, or null when it
+ * does not exist. This is what the CRM re-reads after a write, so that
+ * server-generated fields (the slug) and anything a trigger touched appear
+ * without refetching the whole list.
+ *
+ * Two deliberate choices, both about matching what a DELETE would do:
+ *   - The counts are the same question the lifecycle probes ask — every child
+ *     row, **archived included** — so a house reading 0/0 is exactly a house
+ *     `DELETE /admin/brands/:id` accepts, and one reading 3/1 is one it refuses
+ *     with those numbers. A count that skipped archived rows would tell staff a
+ *     house was empty and then be contradicted by the 409.
+ *   - Archived collections are listed too, each carrying its `archived_at`, the
+ *     same way getAdminProduct returns every colourway. Filtering here would
+ *     hide the rows that block the delete.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @returns {Promise<object|null>}
+ */
+export const getAdminBrand = async (pool, id) => {
+  const { rows } = await pool.query(
+    `SELECT ${BRAND_COLUMNS},
+            (SELECT COUNT(*)::int FROM products WHERE brand_id = brands.id) AS product_count
+       FROM brands
+      WHERE id = $1`,
+    [id]
+  )
+  const row = rows[0]
+  if (!row) {
+    return null
+  }
+  const { rows: collections } = await pool.query(
+    `${COLLECTION_SELECT} WHERE c.brand_id = $1 ORDER BY c.name ASC, c.id ASC`,
+    [id]
+  )
+  return toBrand(row, {
+    product_count: row.product_count,
+    collection_count: collections.length,
+    collections: collections.map((row) => toCollection(row)),
+  })
 }
 
 /**
@@ -243,10 +308,6 @@ export const updateBrand = async (pool, id, input) => {
   }
 }
 
-const COLLECTION_SELECT = `SELECT c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.archived_at, b.name AS brand_name
-       FROM collections c
-       JOIN brands b ON b.id = c.brand_id`
-
 /**
  * Collections, optionally narrowed to one brand, with the owning brand's name.
  *
@@ -272,7 +333,30 @@ export const listAdminCollections = async (
     `${COLLECTION_SELECT} ${where} ORDER BY b.name ASC, c.name ASC, c.id ASC`,
     params
   )
-  return rows.map(toCollection)
+  return rows.map((row) => toCollection(row))
+}
+
+/**
+ * One collection by id with its house's name and its product count, or null when
+ * it does not exist. The count follows the same rule as getAdminBrand's: it
+ * counts archived products too, because `products.collection_id` is SET NULL and
+ * the delete probe counts them — an unprobed delete would report success while
+ * silently uncollecting every one of them.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @returns {Promise<object|null>}
+ */
+export const getAdminCollection = async (pool, id) => {
+  const { rows } = await pool.query(
+    `SELECT ${COLLECTION_COLUMNS},
+            (SELECT COUNT(*)::int FROM products WHERE collection_id = c.id) AS product_count
+       ${COLLECTION_FROM}
+      WHERE c.id = $1`,
+    [id]
+  )
+  const row = rows[0]
+  return row ? toCollection(row, { product_count: row.product_count }) : null
 }
 
 /**
@@ -298,7 +382,7 @@ export const createCollection = async (pool, input) => {
     const { rows } = await pool.query(
       `INSERT INTO collections (brand_id, name, slug, description, image_url)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, brand_id, name, slug, description, image_url`,
+       RETURNING id, brand_id, name, slug, description, image_url, featured_rank`,
       [
         brand.id,
         name,
@@ -313,7 +397,15 @@ export const createCollection = async (pool, input) => {
   }
 }
 
-const COLLECTION_UPDATE_COLUMNS = Object.freeze(['name', 'description', 'image_url'])
+// `featured_rank` joins the patch whitelist for the same reason it does on
+// brands: a single-rank correction should not have to restate the whole list.
+// It is absent from COLLECTION create.
+const COLLECTION_UPDATE_COLUMNS = Object.freeze([
+  'name',
+  'description',
+  'image_url',
+  'featured_rank',
+])
 
 /**
  * Patch a collection: name and/or the storefront tile editorial (description,
@@ -336,7 +428,7 @@ export const updateCollection = async (pool, id, input) => {
     `UPDATE collections c SET ${sets.join(', ')}
        FROM brands b
       WHERE c.id = $${params.length + 1} AND b.id = c.brand_id
-      RETURNING c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, b.name AS brand_name`,
+      RETURNING c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.featured_rank, b.name AS brand_name`,
     [...params, id]
   )
   if (rows.length === 0) {
@@ -356,16 +448,13 @@ export const updateCollection = async (pool, id, input) => {
  * @returns {Promise<object>}
  */
 export const setBrandArchived = async (pool, id, archived) => {
-  const { rows } = await pool.query(
-    `UPDATE brands SET archived_at = ${archived ? 'now()' : 'NULL'}
-      WHERE id = $1
-      RETURNING ${BRAND_COLUMNS}`,
-    [id]
-  )
-  if (rows.length === 0) {
+  const row = await setArchived(pool, 'brand', id, archived, {
+    returning: BRAND_COLUMNS,
+  })
+  if (!row) {
     throw httpError(404, `Brand ${id} not found.`)
   }
-  return toBrand(rows[0])
+  return toBrand(row)
 }
 
 /**
@@ -378,15 +467,203 @@ export const setBrandArchived = async (pool, id, archived) => {
  * @returns {Promise<object>}
  */
 export const setCollectionArchived = async (pool, id, archived) => {
-  const { rows } = await pool.query(
-    `UPDATE collections c SET archived_at = ${archived ? 'now()' : 'NULL'}
-       FROM brands b
-      WHERE c.id = $1 AND b.id = c.brand_id
-      RETURNING c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.archived_at, b.name AS brand_name`,
-    [id]
-  )
-  if (rows.length === 0) {
+  // The join is here only to decorate the projection with the house name, which
+  // toCollection needs; it is not part of the write.
+  const row = await setArchived(pool, 'collection', id, archived, {
+    alias: 'c',
+    from: 'FROM brands b',
+    filter: 'AND b.id = c.brand_id',
+    returning: `c.id, c.brand_id, c.name, c.slug, c.description, c.image_url, c.featured_rank, c.archived_at, b.name AS brand_name`,
+  })
+  if (!row) {
     throw httpError(404, `Collection ${id} not found.`)
   }
-  return toCollection(rows[0])
+  return toCollection(row)
+}
+
+// ---------------------------------------------------------------------------
+// Featured ordering (whole-list reorder)
+//
+// A reorder is the office saying "this IS the featured list, in this order", so
+// POSITION IN THE ARRAY IS THE RANK and anything absent from it is cleared. That
+// is why each write clears every rank first and then re-applies from the
+// submitted order, in one transaction: a diff would have to sequence its updates
+// to avoid colliding halfway through a swap, and the column deliberately carries
+// no unique index precisely so nobody has to.
+//
+// An entry naming a row that does not exist is a 422 naming it, never a silent
+// drop. A whole-list write that quietly kept four of five is indistinguishable
+// from success to the caller, who now believes it featured something it did not.
+// ---------------------------------------------------------------------------
+
+// Boundary sanity limit, not a product rule. The homepage leads with three and
+// its latest row shows four, so a list this long is already a mistake somebody
+// should see as a 400. The CRM's own ordering module caps at the same number.
+export const FEATURED_LIMIT = 12
+
+/**
+ * Refuse a list that names the same thing twice. `UPDATE … FROM` picks one of
+ * the matching source rows non-deterministically rather than raising, so a
+ * duplicate would silently resolve to an arbitrary rank.
+ *
+ * @param {readonly string[]} keys
+ * @param {string} label
+ */
+const assertNoDuplicates = (keys, label) => {
+  const seen = new Set()
+  for (const key of keys) {
+    if (seen.has(key)) {
+      throw httpError(422, `${label} "${key}" is listed twice.`)
+    }
+    seen.add(key)
+  }
+}
+
+/**
+ * Run `fn` inside one transaction, rolling back on any throw — including the
+ * 422 raised when an entry named nothing, so a partly-applied reorder can never
+ * commit.
+ *
+ * @template T
+ * @param {import('pg').Pool} pool
+ * @param {(client: import('pg').PoolClient) => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+const withTransaction = async (pool, fn) => {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await fn(client)
+    await client.query('COMMIT')
+    return result
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+/**
+ * Report the entries whose key never came back from the applying UPDATE. An
+ * unknown slug simply matches no row, so the RETURNING set is the only evidence
+ * that anything was dropped.
+ *
+ * @param {readonly string[]} requested
+ * @param {Set<string>} matched
+ * @param {{ one: string, many: string }} label
+ */
+const assertAllMatched = (requested, matched, label) => {
+  const unknown = requested.filter((key) => !matched.has(key))
+  if (unknown.length > 0) {
+    const noun = unknown.length === 1 ? label.one : label.many
+    throw httpError(422, `Unknown ${noun}: ${unknown.join(', ')}.`)
+  }
+}
+
+/**
+ * The featured houses, in rank order. The `name`/`id` tie-break is the same one
+ * the public read model uses, so two houses sharing a rank still order the same
+ * way in both places.
+ *
+ * @param {import('pg').Pool} pool
+ * @returns {Promise<object[]>}
+ */
+export const listFeaturedBrands = async (pool) => {
+  const { rows } = await pool.query(
+    `SELECT ${BRAND_COLUMNS} FROM brands
+      WHERE featured_rank IS NOT NULL
+      ORDER BY featured_rank ASC, name ASC, id ASC`
+  )
+  return rows.map(toBrand)
+}
+
+/**
+ * The featured collections, in rank order, each with its house name.
+ *
+ * @param {import('pg').Pool} pool
+ * @returns {Promise<object[]>}
+ */
+export const listFeaturedCollections = async (pool) => {
+  const { rows } = await pool.query(
+    `${COLLECTION_SELECT}
+      WHERE c.featured_rank IS NOT NULL
+      ORDER BY c.featured_rank ASC, c.name ASC, c.id ASC`
+  )
+  return rows.map(toCollection)
+}
+
+/**
+ * Replace the featured house list with `slugs`, ranked by position. An empty
+ * list features nothing, which is how the office turns the strip off.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {readonly string[]} slugs
+ * @returns {Promise<object[]>}
+ */
+export const setFeaturedBrands = async (pool, slugs) => {
+  assertNoDuplicates(slugs, 'Brand')
+  await withTransaction(pool, async (client) => {
+    await client.query(`UPDATE brands SET featured_rank = NULL WHERE featured_rank IS NOT NULL`)
+    if (slugs.length === 0) {
+      return
+    }
+    // WITH ORDINALITY turns the array's position into the rank, so the order the
+    // office submitted is the order stored — nothing re-derives it.
+    const { rows } = await client.query(
+      `UPDATE brands b
+          SET featured_rank = v.rank
+         FROM unnest($1::text[]) WITH ORDINALITY AS v(slug, rank)
+        WHERE b.slug = v.slug
+    RETURNING b.slug`,
+      [[...slugs]]
+    )
+    assertAllMatched(slugs, new Set(rows.map((row) => row.slug)), {
+      one: 'brand slug',
+      many: 'brand slugs',
+    })
+  })
+  return listFeaturedBrands(pool)
+}
+
+/** A collection's identity is the PAIR, so that is what is deduped and reported. */
+const collectionKey = (entry) => `${entry.brand_slug}/${entry.slug}`
+
+/**
+ * Replace the featured collection list with `entries`, ranked by position.
+ *
+ * Each entry is a `(brand_slug, slug)` PAIR and the UPDATE joins through
+ * `brands` accordingly: `collections_brand_id_slug_unique` is per brand and
+ * never global, so a slug-only match would feature another house's
+ * identically-slugged collection as well — or instead.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {ReadonlyArray<{ brand_slug: string, slug: string }>} entries
+ * @returns {Promise<object[]>}
+ */
+export const setFeaturedCollections = async (pool, entries) => {
+  const keys = entries.map(collectionKey)
+  assertNoDuplicates(keys, 'Collection')
+  await withTransaction(pool, async (client) => {
+    await client.query(
+      `UPDATE collections SET featured_rank = NULL WHERE featured_rank IS NOT NULL`
+    )
+    if (entries.length === 0) {
+      return
+    }
+    const { rows } = await client.query(
+      `UPDATE collections c
+          SET featured_rank = v.rank
+         FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS v(brand_slug, slug, rank)
+         JOIN brands b ON b.slug = v.brand_slug
+        WHERE c.brand_id = b.id AND c.slug = v.slug
+    RETURNING b.slug AS brand_slug, c.slug`,
+      [entries.map((entry) => entry.brand_slug), entries.map((entry) => entry.slug)]
+    )
+    assertAllMatched(keys, new Set(rows.map(collectionKey)), {
+      one: 'collection',
+      many: 'collections',
+    })
+  })
+  return listFeaturedCollections(pool)
 }

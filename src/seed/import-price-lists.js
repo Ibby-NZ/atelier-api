@@ -1,7 +1,7 @@
 /**
  * CLI entry for `npm run import:pricing`. Requires migrations applied and
  * DATABASE_URL set; reads the universal file written by
- * scripts/convert-price-lists.py.
+ * scripts/convert-price-lists.js.
  */
 import { readFile } from 'node:fs/promises'
 import { loadConfig } from '../config.js'

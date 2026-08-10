@@ -4,7 +4,13 @@ import {
   clearSessionCookie,
   readSessionUserId,
 } from '../auth/session.js'
-import { PUBLIC_USER_COLUMNS, SESSION_USER_CONDITION } from '../auth/user-columns.js'
+import {
+  PUBLIC_USER_COLUMNS,
+  SESSION_USER_COLUMNS,
+  SESSION_USER_CONDITION,
+  publicUser,
+} from '../auth/user-columns.js'
+import { reportAccess } from '../reports/access.js'
 import {
   validateTradeApplication,
   submitTradeApplication,
@@ -243,7 +249,7 @@ export const authRoutes = async (app, { pool }) => {
     }
 
     const { rows } = await pool.query(
-      `SELECT ${PUBLIC_USER_COLUMNS} FROM users
+      `SELECT ${SESSION_USER_COLUMNS} FROM users
         WHERE id = $1 AND ${SESSION_USER_CONDITION}`,
       [userId]
     )
@@ -254,6 +260,12 @@ export const authRoutes = async (app, { pool }) => {
       reply.code(401)
       return { error: 'Not logged in.' }
     }
-    return { user: rows[0] }
+    // report_access is DERIVED on every read and is never stored on the session.
+    // The cookie holds a user id and nothing else, so a finance grant revoked in
+    // the back office takes effect on the CRM's very next /auth/me rather than at
+    // the account's next sign-in — which is what makes it a revocation rather
+    // than a note for later. It is also why nothing here trusts the client: the
+    // statement is computed from the row, and the row is fetched by id.
+    return { user: { ...publicUser(rows[0]), report_access: reportAccess(rows[0]) } }
   })
 }

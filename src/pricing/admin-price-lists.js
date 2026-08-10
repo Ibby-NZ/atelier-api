@@ -7,7 +7,7 @@
 //
 // Three details shape the module:
 //   - `code_normalized` is DERIVED, never accepted from the client. It mirrors
-//     scripts/convert-price-lists.py (platform decision 6) so a hand-keyed item
+//     scripts/convert-price-lists.js (platform decision 6) so a hand-keyed item
 //     normalises exactly like an imported one, and it is recomputed whenever the
 //     raw `code` changes so the two never drift apart.
 //   - `repeat` is a Postgres non-reserved keyword and MUST be quoted as "repeat"
@@ -18,6 +18,7 @@
 //     back to a number before it reaches the client.
 
 import { buildUpdate } from '../catalogue/admin-brands.js'
+import { setArchived } from '../lifecycle/archive.js'
 
 export const DEFAULT_PAGE = 1
 export const DEFAULT_LIMIT = 50
@@ -41,7 +42,7 @@ const rethrowConflict = (error) => {
 
 // Uniform code format (platform decision 6): uppercase, every run of
 // non-alphanumerics collapsed to a single '-', with no leading/trailing '-'.
-// Mirrors the `code_normalized` regex in scripts/convert-price-lists.py.
+// Mirrors the `code_normalized` regex in scripts/convert-price-lists.js.
 const normalizeCode = (code) =>
   String(code)
     .toUpperCase()
@@ -323,13 +324,9 @@ export const updatePriceListItem = async (pool, id, input) => {
  * @returns {Promise<object|null>}
  */
 export const setPriceListItemArchived = async (pool, id, archived) => {
-  const { rows } = await pool.query(
-    `UPDATE price_list_items
-        SET archived_at = CASE WHEN $2::boolean THEN now() ELSE NULL END,
-            updated_at = now()
-      WHERE id = $1
-      RETURNING ${ROW_COLUMNS}`,
-    [id, archived]
-  )
-  return rows[0] ? toPriceListItem(rows[0]) : null
+  const row = await setArchived(pool, 'price_list_item', id, archived, {
+    extraSets: ['updated_at = now()'],
+    returning: ROW_COLUMNS,
+  })
+  return row ? toPriceListItem(row) : null
 }

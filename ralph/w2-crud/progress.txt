@@ -1,0 +1,1420 @@
+# Ralph progress log — Atelier — August 6th updates — W2 CRUD completion
+
+## Codebase Patterns
+
+General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
+Story-specific detail belongs in the per-story entries below, not here.
+
+- **W1 IS on this branch now** (api `2b75fae`/`560c13b`, crm `74fd824`), superseding the three
+  BLOCKED entries below — they were written before the merge and are kept as the audit trail, not
+  as current fact. `atelier-api/src/lifecycle/` (`registry.js`, `delete.js`, `archive.js`) and
+  `atelier-crm/src/admin/` (`list.js`, `useAdminList.js`, `Pagination.jsx`, `ConfirmDialog.jsx`,
+  `deleteFlow.js`, `useCrudScreen.js`) all exist, and `src/lib/api.js` has `apiDelete`. A human
+  cleared the `BLOCKED:` prefixes in prd.json in the same commit, so US-001..003 are live again.
+- **The registry already carries every W2 entity.** `LIFECYCLE_ENTITIES` in
+  `src/lifecycle/registry.js` ships entries for brand, collection, product, colourway, inventory,
+  price_list_item, user, shipping_rate, contact_enquiry and order — with the probes, guards and
+  `archivable` flags architecture.md § *Delete policy* specifies. So a W2 delete story is **routes
+  and tests only**: two `app.delete` handlers piping `deleteOrExplain` into `replyDelete`. Do not
+  add a registry entry (the file is W1's), and check what is already there before scoping the work
+  — epics.md's "Registry entries + DELETE routes" line overstates what is left to do.
+- Story pick order is by `priority`, so a blocked low-priority story does not stop the loop — it is
+  marked BLOCKED and the next iteration moves down the list.
+- **A story's file footprint is the ROUTE file plus the DOMAIN module it calls.** `src/routes/*` is
+  thin by house rule, so the logic always lands in `src/<domain>/`. Owning `admin-price-lists.js`
+  the route says nothing about `src/pricing/admin-price-lists.js` the module. Check both against the
+  MAY-touch list before starting, and check each entity separately when a story names two.
+- **Re-verify a shared blocker; do not inherit it from this log.** A previous entry recording
+  "dependency absent" is a statement about the branch at that moment, and another workstream can
+  land it in between. Two commands settle it in seconds — `ls atelier-api/src` for `lifecycle/`,
+  `ls atelier-crm/src/admin` for the CRUD kit — and they are cheaper than either blocking a story
+  that has become implementable or building on one that has not arrived. This is exactly what
+  happened: three stories were blocked on a dependency that landed the same day.
+- **The DELETE route shape, once, for every remaining delete story.** Handler is a one-liner:
+  `async (request, reply) => replyDelete(reply, await deleteOrExplain(pool, '<entity>',
+  request.params.id, { user: request.user }))`, with `{ preHandler: backoffice, schema: { params:
+  idParamsSchema } }`. Three fixed points: the entity name must be a **single-quoted literal**
+  (`test/lifecycle-registry.test.js` scans `src/` and fails on an expression — the registry is not
+  an authorisation boundary, so a `:entity` param would let a client pick the table); `ctx.user`
+  comes from `request.user`, which the role guard has already loaded; and the result is *returned*,
+  never thrown, because Fastify's error serializer drops `blockers` off a thrown error.
+- **CORS already lists DELETE** (`allowedMethods` in `src/app.js`, guarded by `test/cors.test.js`).
+  A new DELETE route needs no CORS change — but note the preflight is the only place this is
+  provable; `app.inject()` does not preflight.
+- **`sprint-status.yaml` can lag prd.json.** Story pick reads prd.json only, so a stale `blocked`
+  in the yaml does not stall the loop; fix your own story's line and leave the others.
+- **A test fixture that reaches commerce must be cleaned up before its brand.** `cleanupFixtures`
+  in `test/admin-catalogue.test.js` deletes brands by slug prefix and relies on CASCADE; the one
+  RESTRICT edge in the schema (`order_lines.colourway_id`) stops that cascade dead, so an order
+  fixture makes the *cleanup itself* raise 23503 in the NEXT test's `beforeEach`. Delete orders by
+  order-number prefix first (their lines cascade). Same rule for any future fixture that inserts
+  into `orders`.
+- **The mirror rule: a fixture that blocks a delete through a SET NULL FK must be cleaned by its OWN
+  tag, and before the rows it points at.** The CASCADE-side rule above is about cleanup order; this
+  is about cleanup existing at all. Deleting the parent does not take a SET NULL child with it — the
+  child survives carrying a null FK — so the next test's probes count rows an earlier test created,
+  and the failure appears in a *different* test from the one that leaked. Applies to every `users`
+  child (`orders`, `trade_applications`, `contact_enquiries`) and to `products.collection_id`. Check
+  the migration's `onDelete` before deciding a fixture needs no cleanup of its own.
+- **A cleared `BLOCKED:` prefix is the human answering EVERY blocker that entry listed, not just the
+  one the unblock commit's subject names.** US-003's BLOCKED.md carried two: the missing W1 module
+  *and* "no epic owns `src/contact/**`". The commit said only "W1 Foundations is now on this branch",
+  which reads as if blocker 2 were unaddressed — but the human deleted BLOCKED.md wholesale and
+  cleared the prefix, and clearing it is the one sanctioned mechanism for "go and do this story".
+  Re-blocking would re-litigate a decision already made. Read the blocked entry, not the subject
+  line, and if the second blocker still bites, say so in progress.txt rather than stalling the loop.
+- **The MAY-touch list is a collision guard, not a scope definition.** Its purpose is that two
+  concurrent workstreams never edit the same lines. A file no epic owns (here `src/routes/contact.js`
+  and `test/contact.test.js`) carries no collision risk, so the epic's own story table — which is
+  what assigns the work — wins over the list's silence. The MUST-NOT-touch list is the real fence and
+  it is explicit about who owns what; treat an omission there as permission and an entry there as a
+  wall. Epic 2's "Owns these files" line says "other Wave 2 epics must not touch them" — a protection
+  list, not an exhaustive statement of W2's surface.
+- **Check `git log --oneline` the moment the worktree behaves oddly — two iterations can be live in
+  it at once.** It happened on US-004: a second run committed the story while this one was writing
+  it. The tells are all cheap to spot and all mean the same thing — an `Edit` refused with "File has
+  been modified since read" on a file you had not touched, a path *disappearing* from `git status`
+  mid-task (it was committed underneath you), `prd.json` already reading `passes: true` with a
+  timestamp you did not write. When it happens: do NOT `git checkout -- <file>` anything you did not
+  personally write (it discards their in-flight work), stage by explicit pathspec rather than `-A`,
+  and gate the commit on the single test file you touched — a full-suite result is uninterpretable
+  while someone else has source files open.
+- **A row mapper that grows a second `extra` argument breaks every `rows.map(toX)` call site**, and
+  breaks it silently: `map` passes the index as the second argument and `{ ...1 }` is `{}`, so the
+  output is accidentally correct today and wrong the moment `extra` is used for anything a number
+  could satisfy. `toProduct(row, extra)` in `admin-products.js` was already the house pattern for a
+  detail read that adds children/counts to a list shape; when copying it, convert the sibling call
+  sites to `rows.map((row) => toX(row))` in the same edit. Only `src/catalogue/admin-brands.js` was
+  affected — `brands.js`/`collections.js` (W7's) have their own local mappers.
+- **A single-row admin read never filters on `archived_at`.** `getAdminProduct` does not, and the
+  restore screen is why: the row a caller asks for by id is one they already know exists, and a 404
+  there reads as "someone deleted it" rather than "it is archived". Filtering belongs on the LIST
+  (`include_archived`), never on the by-id read. The same applies to the children a detail read
+  embeds — `getAdminProduct` returns every colourway, archived included, each carrying its own
+  `archived_at` for the screen to style.
+- **A paginated admin list is a settled shape — copy it, do not redesign it.** Module exports
+  `DEFAULT_PAGE`/`DEFAULT_LIMIT`/`MAX_LIMIT` and a `list…` returning `{ items, total }`; the route
+  imports the three constants, spends them as schema `default`/`maximum`, and builds the envelope
+  `{ <plural>: items, meta: { total, page, limit } }`. `MAX_LIMIT` as the schema `maximum` is what
+  makes an over-large `limit` a 400 rather than a silent clamp. The CRM's `readList(body, key)`
+  takes the array's key as an argument precisely because this API has no single one, so `items` vs
+  `colourways` is a free choice — match the sibling routes in the same file.
+- **A LIST filters `archived_at`; a by-id read never does.** The two halves of the same rule: the
+  list hides archived rows behind `include_archived`, and the detail read returns them, because the
+  restore screen reads a row back after archiving it. What a list must NOT do is filter on a
+  *parent's* archive flag — archiving a product does not archive its colourways, so a list that
+  hid them would disagree with the product detail (which returns every child) about which rows
+  exist.
+- **A standalone list of a child entity has to carry its parents' names, or the screen is unusable.**
+  A colourway row is a SKU, a colour name and an id; nothing on it says which design or house it
+  belongs to, and the entire point of browsing it outside its parent is not knowing that already.
+  The pattern is a second `…_CONTEXT_COLUMNS` + `…_CONTEXT_FROM` pair beside the narrow select, fed
+  to the mapper's `extra` argument — so the rows embedded in a parent's detail read keep the narrow
+  shape (they already sit under their parent) and only the standalone reads pay for the joins.
+- **A PATCH with exactly ONE editable column takes `required`, not `minProperties: 1`.** The house
+  PATCH shape (whitelist + `minProperties: 1` + `buildUpdate`) exists to pick some-of-many; with one
+  column there is nothing to pick, and the two rules answer differently when Ajv's
+  `removeAdditional` strips the immutable keys a client sent. `{ zone, threshold_qty }` becomes `{}`,
+  which `minProperties` was evaluated BEFORE the strip and therefore lets through — the handler then
+  builds an empty SET clause, which is invalid SQL. `required: ['rate_cents']` makes that same body a
+  400. Write the UPDATE inline too: a one-column `buildUpdate` call is indirection over a literal.
+- **The identity key of a row is not always its id.** `shipping_rates` is addressed by `id` for PATCH
+  and DELETE but keyed on `(zone, threshold_qty)` — the quote resolves against the pair and the seed
+  upserts on it — so moving either column is a delete plus a create, never an edit. When a table has
+  both, the id belongs in the read projection (nothing else can address a row for a single-row
+  write) and the key columns belong out of every PATCH whitelist. Assert the strip explicitly: a
+  PATCH body carrying the key must come back with the key unchanged.
+- **A single-row POST beside a bulk PUT must 409 rather than upsert.** The bulk path is "make this
+  table so" and upserting is its whole point; a create is a statement that the row is new, so a
+  collision is a mistyped key, and silently overwriting a live row hides it. Same table, two write
+  paths, deliberately different conflict behaviour.
+- **A fixture is only namespaced by its SKU/slug/email, never by its human-readable name — so
+  search for it by the namespaced value.** The test database holds the seeded catalogue as well as
+  the fixtures, and a colour or design name is exactly the kind of word the real catalogue also
+  uses: `?q=Jade` returned the fixture plus two seeded rows, while `?q=Velvet` in the same file
+  happens to be unique today and will stop being so the moment the colour files land. Assert on
+  `q=<the prefixed SKU>`, or on `.toContain`, never on an exact array of everything a display name
+  matches. Same family as US-006's rule about an unfiltered `meta.total`.
+- **A value the API derives rather than accepts must be derived from ONE exported map.** `unit` is
+  computed by `unitFor` in `src/catalogue/admin-products.js` and now imported by the inventory
+  admin instead of being copied; two maps would eventually disagree about a colourway created
+  through one path and re-stocked through the other, and the disagreement would be a silently
+  redenominated quantity rather than an error. Export the helper (which carries the 422), not the
+  object.
+- **A mid-transaction race is reproducible deterministically by wrapping the pool, not by timing.**
+  `deleteOrExplain` only uses `connect()`/`query()`/`release()`, so `{ connect: async () => ({
+  query, release }) }` around a real client can run arbitrary work on another connection when a
+  chosen statement is about to execute. That is how the 23503 backstop gets exercised against the
+  real database instead of a stub that just throws the error code. Applies to any check-then-write
+  in this codebase.
+- **`useCrudScreen` replaces a CRM screen's list fetch, its `status`/`loadError` pair and its
+  `useToast` — but NOT its `useMutation` when the screen holds a SECOND list.** The kit binds
+  `mutation` to *its* list's reload, so a screen like AdminBrands (houses + collections) or
+  AdminProducts (list + an expanded detail read) builds a combined `reload` and calls `useMutation`
+  itself with `crud.toast.flash`, leaving `crud.mutation` unused. Everything else comes from the
+  kit: `crud.list.rows/status/error/total`, `crud.remove.ask(row)` on the button, and
+  `<ConfirmDialog {...crud.remove.dialog} />` at the foot of the screen. A screen must not import
+  `apiDelete`, `attemptDelete`, `describeBlockers` or `deleteDialog`.
+- **The dialog's "Archive instead" ALWAYS archives; it is not the row's Archive/Restore toggle.**
+  It appears only on a *refused* delete, so pointing it at the toggle would answer the refusal by
+  restoring an already-archived row — putting it back on the website in response to a request to
+  remove it. Keep them as two functions (`archiveTogglePath` / `archiveInsteadPath`), not one with
+  a flag. And `useCrudScreen` shows the button only when `archive !== null` AND the API said
+  `archivable`, so an archivable entity whose screen forgets the option renders a Cancel-only 409.
+- **An unpaged admin endpoint must be given a limit ABOVE its row count, never the kit's default
+  25.** `/admin/brands` and `/admin/products` return the whole list with no `meta` (`readList`
+  falls back to the row count) and declare no `page` param, which Fastify's Ajv silently strips
+  rather than rejecting — so a `totalPages` of 2 would advertise a page that can never be fetched.
+  Check whether the endpoint actually pages before wiring a screen: `meta` in the envelope is the
+  tell, and `MAX_LIMIT` in the module is the second.
+- **With no jsdom, an acceptance criterion about how a SCREEN is composed is provable only by
+  reading the file.** "Uses `useCrudScreen`", "adds no bespoke dialog or paginator" and "does not
+  re-implement the flow" are all `readFileSync(new URL('./Screen.jsx', import.meta.url))` plus
+  `toContain`/`not.toContain` — the idiom `src/admin/useCrudScreen.test.js` already uses on the kit.
+  It is the only test of a `.jsx` this repo can have, and it costs nothing.
+- **Only the permanent verb is drawn `tone="danger"`.** Archive was red while it was the most
+  destructive thing on a row; with a real Delete beside it, two red buttons claim the reversible
+  action is as grave as the irreversible one. Archive/Restore becomes neutral on every screen that
+  gains a Delete.
+- **A CRM screen holding a SECOND list is usually a screen that has not been written yet.** The
+  tell is exactly the workaround `useCrudScreen` forces: a combined `reload` and a hand-rolled
+  `useMutation`, because the kit binds `mutation` to *its* list. AdminBrands carried collections
+  that way; splitting them out gave them a filter, a create form, a Delete and a detail read, and
+  left AdminBrands taking `crud.mutation` straight from the kit. Read the "second list keeps its own
+  useMutation" rule as a description of a debt, not a pattern to copy.
+- **A child whose key is unique per PARENT must never be identified by that key once it is listed
+  across all parents.** A collection slug is unique per house (`collections_brand_id_slug_unique`),
+  and so is its display name in practice — the seed strips the house prefix off the vendored titles,
+  so a catalogue-wide list genuinely shows several "Cappuccino"s. React keys and every path stay on
+  `id`, the parent becomes a column, and anything naming a row to a person names the parent with it
+  (`describeCollection` → `Cappuccino (Pierre Frey)`), because the delete dialog's "Delete
+  “Cappuccino”?" is otherwise a question three houses can answer. Same rule for any future
+  cross-parent list of a per-parent-unique child.
+- **A filter another screen LINKS INTO belongs in the URL, not in `useState`.** `useSearchParams` is
+  the whole implementation (`const brandFilter = searchParams.get('brand_id') ?? ''`), and it fixes
+  two things state cannot: a link clicked while the target screen is already mounted does not
+  remount it, so state would silently ignore it; and the back button would not undo the filter. The
+  kit needs no change — `filters` is rebuilt each render and `useAdminList` keys on the serialised
+  query.
+- **A source-scan assertion must not match the file's own prose.** `expect(source).not.toContain(
+  'useMutation')` failed on a comment *explaining* when a screen calls `useMutation` — the scan sees
+  comments. Assert the positive (`toContain('crud.mutation')`) where the negative would be tripped by
+  a sentence, and keep negative scans to symbols a screen would never merely discuss. The general
+  form: scan for the **token a screen could only have by doing the thing** — a path fragment
+  (`'/archive'`), an import name, a call shape — never for the English word, which the file has to
+  be free to use while explaining itself.
+- **A screen whose entity is NOT archivable passes `useCrudScreen` no `archive` option, and that is
+  the entire handling.** `shipping_rates` and `inventory` have no `archived_at` column, so the API's
+  refusal carries `archivable: false`; the kit requires that AND a supplied action, so a Cancel-only
+  409 dialog is already the right rendering. There is nothing to branch on, and the only mistake
+  available is inventing a second button for an endpoint that does not exist. Read it as the mirror
+  of US-009's rule (an archivable entity whose screen forgets the option renders a Cancel-only 409
+  *wrongly*): the same dialog is correct here and a bug there, and which one it is comes from the
+  entity, not the screen.
+- **An advance warning derived from rows already on screen is not the forbidden pre-flight.** The kit
+  bans a second "can I delete this" GET because it races the delete and the 409 is authoritative — it
+  does not ban reading what the list already returned. Grouping the loaded tiers to mark a zone's
+  only tier, or reading a `product_count` off a detail the screen already holds, costs no request
+  and is the only warning staff get before a refusal.
+- **Check the read model's projection before trusting `useCrudScreen`'s default delete path.** It is
+  `` `${path}/${row.id}` ``, and `inventory` has no `id` in its public shape — one row per colourway,
+  every caller addresses it by colourway — so the default builds
+  `DELETE /admin/inventory/undefined`. That is what the `deletePath` option is for, and the same
+  question applies to any entity whose URL key is not its primary key.
+- **Deleting the row a list is keyed on removes the way back to it, so the create has to ship in the
+  same story.** A colourway whose stock row is deleted vanishes from `GET /admin/inventory`
+  altogether; a screen that only lists inventory can never show it again. The fix is a second
+  endpoint that still sees the row — `GET /admin/colourways` reports `inventory: null` for exactly
+  those — not a cleverer query against the list's own. Ask "what does this list stop showing after a
+  successful delete" before wiring one.
+- **A screen composing the kit may override a `remove.dialog` prop after spreading it; that is
+  composition, not re-implementation.** `useCrudScreen` discards a delete's response body, so an API
+  that qualifies its own success (`DELETE /admin/price-list-items/:id` returns a `warning` saying the
+  next import re-creates the row) cannot reach the toast — and a caveat that lands after the deletion
+  is not a caveat. Rewrite the **ask** step's body instead, keyed on `confirmLabel`: it is `'Delete'`
+  while the dialog is still asking and `null` once the API has refused, and a refusal's body is the
+  API's own sentence, which must never be overwritten. Re-implementing `deleteDialog` would be the
+  violation; passing a later prop is not.
+- **The dialog's name for a row must identify it across the WHOLE list it appears in.** The general
+  form of US-010's collection rule: a key unique within a parent, or within an identity tuple, names
+  several rows once the list spans all of them. A price-list `code` is unique only within
+  `(supplier, category)`, so `describeRate` leads with the supplier; an account is named by `email`
+  (unique by constraint) and never by `name` (nullable, freely duplicated). Ask what the row's real
+  uniqueness constraint is, not what looks like a name.
+- **A control bound to server truth needs no revert when its write fails.** `useMutation`
+  deliberately does not reload on error, and once a list belongs to `useAdminList` a `<select
+  value={row.role}>` re-renders from the unchanged row by itself — so the `load()`-to-undo that a
+  hand-rolled screen needed becomes dead weight. The rule only holds while the control reads the row
+  rather than a draft; an editor holding a draft still has to re-seed it.
+- **A negative source scan for "this screen does X nowhere" must name the one token that opens X.**
+  `not.toContain('Delete')` and `not.toContain('ConfirmDialog')` both fail against a header comment
+  explaining *why* a screen has neither. `remove.ask` is the only entry point into the kit's delete
+  flow, so its absence is the criterion; `'<ConfirmDialog'` (with the angle bracket) is the rendered
+  form the prose cannot accidentally contain. Third instance of the same trap — see US-010's
+  `useMutation` and US-011's `/archive`.
+
+---
+
+## Story log
+
+Appended by each iteration, newest last. Never rewrite an existing entry.
+
+## 2026-08-06T02:21:34Z - W2-US-001 - DELETE for brand and collection - BLOCKED
+
+- **Blocked on a missing cross-workstream dependency, not on a failing gate.** No code was written,
+  so nothing was reverted; the commit carries bookkeeping only.
+- **What the story needs.** epics.md names it "Registry entries + DELETE routes for brand and
+  collection", and architecture.md § *Shared lifecycle module* specifies the whole mechanism —
+  a frozen registry entry per entity (`table`, `idColumn`, `archivable`, `guard`, dependency probes
+  `{ relation, label, sql }`), `deleteOrExplain(pool, entityName, id, ctx)` returning
+  `{ deleted:false, status, blockers[] }` rather than throwing (Fastify's error serializer drops
+  custom properties, so a thrown error cannot carry `blockers`), and `replyDelete(reply, result)`.
+  All of it lives in `atelier-api/src/lifecycle/`.
+- **Why that cannot be done here.** `src/lifecycle/**` is on W2's MUST NOT TOUCH list — it is W1's
+  (W1 US-001 "Lifecycle registry and deleteOrExplain", still `pending` in sprint-status.yaml) — and
+  it is not present on this branch to consume either.
+- **Verification run** (no gate command failed; the blocker is structural):
+
+      $ ls /Users/verumoffice/atelier-worktrees/w2-crud/atelier-api/src/lifecycle
+      ls: /Users/verumoffice/atelier-worktrees/w2-crud/atelier-api/src/lifecycle: No such file or directory
+
+      $ grep -rn 'setArchived|deleteOrExplain|replyDelete' atelier-api/src
+      No matches found
+
+      $ grep -rn 'useCrudScreen|useAdminList|deleteFlow|ConfirmDialog|apiDelete' atelier-crm/src
+      No files found
+
+      $ git -C atelier-api log --oneline -4
+      38868e1 chore(api): make workstream setup a script, not a block to paste
+      6049be9 chore(api): ignore node_modules as a symlink too
+      ed14f9d chore(api): BMAD planning artefacts and the nine-workstream Ralph scaffold
+      536a0fd chore(api): install BMAD Method v6.10.0 (bmm module, claude-code)
+
+- **The alternative was rejected deliberately.** prd.json's four acceptance criteria could be met by
+  hand-rolling probe-then-delete inside `src/catalogue/admin-brands.js` (a file W2 does own). That
+  would pass the gates and be wrong: it duplicates the module W1 is building, conflicts with it at
+  merge, and breaks architecture.md's single-registry invariant tests. Ralph's Step 6 names exactly
+  this case — "a conflict with another workstream's file ownership … is BLOCKED. Do not decide it
+  yourself."
+- Repos and files changed: `atelier-api` bookkeeping only — `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `ralph/w2-crud/BLOCKED.md`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: not run — no source file was modified.
+- **Learnings:**
+  - Pattern: check for the dependency's *files* before starting a story whose epic line says
+    "Requires: W<n> merged". A merged-in prerequisite is visible as directories, not as a git note.
+  - Gotcha: W2's whole DELETE surface (US-001..004, and the delete halves of US-007/US-008) plus
+    every CRM story (US-009..012) share this one dependency. Unblocking W1 unblocks all of them at
+    once; blocking them one iteration at a time is correct but slow. US-005 and US-006 are the two
+    stories that need nothing from W1.
+  - Context: the spec for the missing module is architecture.md §§ *Shared lifecycle module*,
+    *Delete policy* (the per-entity blocker/guard table) and *CRM CRUD kit*.
+- **Needs human verification:** none — no behaviour changed. A human must decide how to satisfy the
+  W1 dependency; see `ralph/w2-crud/BLOCKED.md`.
+---
+
+## 2026-08-06T02:24:25Z - W2-US-002 - DELETE for product and colourway - BLOCKED
+
+- **Same structural blocker as US-001, re-verified on this branch rather than inherited from that
+  entry.** No code was written, so nothing was reverted; the commit carries bookkeeping only.
+- **What the story needs.** epics.md Epic 2 names it "Registry entries + DELETE routes for product
+  and colourway" — so the deliverable is literally two entries in W1's registry plus two thin
+  handlers. architecture.md § *Delete policy* gives the two rows: **product** blocks on order lines
+  via colourways, samples and non-zero inventory; **colourway** blocks on order lines (RESTRICT),
+  samples and non-zero inventory. § *Shared lifecycle module* gives the mechanism — the frozen
+  registry entry, `deleteOrExplain` returning `{ deleted:false, status, blockers[] }` instead of
+  throwing, `replyDelete`, and the BEGIN → `FOR UPDATE` → guard → probe → DELETE → COMMIT order with
+  the 23503 catch as a backstop. All of it lives in `atelier-api/src/lifecycle/`.
+- **Why that cannot be done here.** `src/lifecycle/**` is on W2's MUST NOT TOUCH list (W1 owns it;
+  W1 US-001 "Lifecycle registry and deleteOrExplain" is still `pending` in sprint-status.yaml) and
+  it is not present on this branch to consume either.
+- **Verification run this iteration** (no gate command failed; the blocker is structural):
+
+      $ ls atelier-api/src
+      account  admin  app.js  auth  catalogue  checkout  config.js  contact  db.js  email
+      inventory  legacy  orders  pricing  routes  seed  server.js  shipping  trade-accounts
+      users  webhooks
+      # no `lifecycle`
+
+      $ grep -rn "deleteOrExplain|replyDelete|setArchived|from '.*lifecycle" atelier-api/src
+      No matches found
+
+      $ grep -n "app.delete|.delete\(" atelier-api/src/routes/*.js
+      atelier-api/src/routes/admin-trade-accounts.js:156:  app.delete(
+      # the only DELETE route in the API; it predates the registry and is not a model for this story
+
+      $ ls atelier-crm/src/admin
+      drafts.js  drafts.test.js  orderFlow.js  orderFlow.test.js  parts.jsx  stock.js  stock.test.js
+
+- **US-002 is a strictly worse candidate for hand-rolling than US-001 was.** Its acceptance criteria
+  name the `order_lines` RESTRICT backstop explicitly ("a test that proves the 23503 backstop
+  produces the same 409 shape"), and "the same 409 shape" is by definition the shape
+  `deleteOrExplain` returns. Reproducing it inside `src/catalogue/admin-products.js` would fix that
+  shape in a second place, so W1's later version and this one would then have to be kept in step by
+  hand. Ralph Step 6 covers it: a conflict with another workstream's file ownership is BLOCKED.
+- Repos and files changed: `atelier-api` bookkeeping only — `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `ralph/w2-crud/BLOCKED.md`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: not run — no source file was modified.
+- **Learnings:**
+  - Pattern: re-check a shared dependency's files every iteration instead of trusting the previous
+    BLOCKED entry — added to `## Codebase Patterns` above.
+  - Gotcha: `src/routes/admin-trade-accounts.js:156` is the API's only existing `app.delete`. It is
+    a plain unlink of a `trade_account_users` grant with no probes, so copying its shape into a
+    catalogue delete would produce a route that silently destroys children. It is not the pattern
+    this epic is asking for.
+  - Context: the two rows this story implements are in architecture.md § *Delete policy*
+    (product, colourway); the machinery is § *Shared lifecycle module*.
+- **Needs human verification:** none — no behaviour changed. The decision is the same one US-001
+  raised; see `ralph/w2-crud/BLOCKED.md`.
+---
+
+## 2026-08-06T02:28:17Z - W2-US-003 - DELETE for price-list item and contact enquiry - BLOCKED
+
+- **Two independent ownership blockers, both re-verified on the branch this iteration.** No code was
+  written, so nothing was reverted; the commit carries bookkeeping only.
+- **Blocker 1 — the delete mechanism is W1's.** architecture.md § *Delete policy* lists both
+  entities as registry rows (`price-list item`: no blockers, no guard, "copy must warn a re-import
+  recreates it"; `contact enquiry`: no blockers, no guard), and § *Shared lifecycle module* makes
+  `deleteOrExplain` + `replyDelete` + the frozen registry entry the only sanctioned delete path.
+  All of it lives in `atelier-api/src/lifecycle/`, which is on W2's MUST NOT TOUCH list and is still
+  absent here (W1 US-001 `pending` in sprint-status.yaml).
+- **Blocker 2 — the contact-enquiry half is not W2's surface.** Contact enquiries live in
+  `src/contact/contact.js` + `src/routes/contact.js`. Neither appears on W2's MAY-touch list, and
+  neither appears in epics.md Epic 2's "Owns these files" (`src/routes/admin-catalogue.js`,
+  `admin-inventory.js`, `admin-orders.js`, `admin-price-lists.js` only). A grep of epics.md for
+  `contact|enquir` returns exactly one line — the US-003 row itself — so **no epic owns those
+  files**. That is a planning gap a human must close, not a call this loop can make.
+- **Verification run this iteration** (no gate command failed; both blockers are structural):
+
+      $ ls atelier-api/src
+      account admin app.js auth catalogue checkout config.js contact db.js email
+      inventory legacy orders pricing routes seed server.js shipping trade-accounts
+      users webhooks
+      # no `lifecycle`
+
+      $ grep -rn "deleteOrExplain\|replyDelete\|setArchived" atelier-api/src
+      # no matches
+
+      $ ls atelier-crm/src/admin
+      drafts.js  drafts.test.js  orderFlow.js  orderFlow.test.js  parts.jsx  stock.js  stock.test.js
+
+      $ grep -n "W1-US-001\|lifecycle" _bmad-output/implementation-artifacts/sprint-status.yaml
+      14:      US-001: pending   # Lifecycle registry and deleteOrExplain
+
+      $ grep -in "contact\|enquir" _bmad-output/planning-artifacts/epics.md
+      52:| US-003 | DELETE for price-list item and contact enquiry | api |
+
+- **US-003 is the WEAKEST of the four delete stories' cases for blocking, and it was still the right
+  call.** Unlike US-001/US-002 it has no probes, no guard and no 409 shape to duplicate — a
+  hand-rolled `DELETE … RETURNING id` producing architecture.md's `200 { deleted: { entity, id } }`
+  would be ~6 lines and would convert to `replyDelete(reply, await deleteOrExplain(...))` at merge
+  with an unchanged external contract. What still blocks it is blocker 2: half the story is in files
+  no workstream owns, and writing there is exactly the cross-workstream conflict Step 6 reserves for
+  a human. Recorded so the next reader does not re-derive it: if the human picks option (b) or (c)
+  in BLOCKED.md, US-003 is the cheapest of the four to unblock.
+- Repos and files changed: `atelier-api` bookkeeping only — `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `ralph/w2-crud/BLOCKED.md`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: not run — no source file was modified.
+- **Learnings:**
+  - Pattern: a story's file footprint is the union of the ROUTE file and the DOMAIN module it calls
+    (`src/routes/*` is thin by house rule, so logic cannot live there). Check both against the
+    MAY-touch list before starting — `admin-price-lists.js` being owned says nothing about
+    `src/pricing/admin-price-lists.js`, and a story naming two entities can straddle the boundary.
+    Added to `## Codebase Patterns`.
+  - Gotcha: both entities ALREADY have archive/restore (`POST /admin/price-list-items/:id/archive`
+    + `/restore`, `POST /admin/contact-enquiries/:id/archive` + `/restore`) via
+    `setPriceListItemArchived` / `setEnquiryArchived`. US-003 adds hard DELETE alongside them; it is
+    not a rename of the existing soft delete. W1 US-002 will also fold those two helpers into
+    `setArchived`, so touching them now collides twice over.
+  - Context: price-list admin is `src/routes/admin-price-lists.js` (182 lines) +
+    `src/pricing/admin-price-lists.js` (335); contact is `src/routes/contact.js` (121) +
+    `src/contact/contact.js` (110). `ENQUIRY_COLUMNS` is the single SELECT list for enquiry reads.
+- **Needs human verification:** none — no behaviour changed. The planning gap (who owns
+  `src/contact/**`) is new and needs an answer; see `ralph/w2-crud/BLOCKED.md`.
+---
+
+## 2026-08-06T03:09:33Z - W2-US-001 - DELETE for brand and collection
+
+- **Implemented.** `DELETE /admin/brands/:id` and `DELETE /admin/collections/:id`, both
+  backoffice-only, both piping `deleteOrExplain(pool, '<entity>', id, { user: request.user })`
+  straight into `replyDelete`. No registry work was needed — W1's `LIFECYCLE_ENTITIES` already
+  carries the `brand` and `collection` entries with the probes architecture.md § *Delete policy*
+  specifies, so this story was routes + tests only. The three earlier BLOCKED entries above were
+  written before W1 landed on this branch; a human merged it (`2b75fae`, `560c13b`) and cleared the
+  `BLOCKED:` prefixes, so US-001 was live again this iteration.
+- Repos and files changed: `atelier-api` only —
+  `src/routes/admin-catalogue.js` (+2 routes, +1 import, header note),
+  `test/admin-catalogue.test.js` (+11 tests in two describe blocks),
+  `CLAUDE.md` (new `## CRUD completion` section), `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 666 tests passed; 655 before).
+- **What the tests actually assert** (the acceptance criteria, one for one):
+  - A house holding one product AND one collection: 409 whose `blockers` carries BOTH rows with
+    `count: 1, capped: false`, whose `message` names both counts, and `archivable: true` — plus the
+    house and its product still exist afterwards, which is the point of probing before deleting.
+  - A collection holding a product: 409, and `products.collection_id` is **unchanged** afterwards.
+    That FK is SET NULL, so without the probe the delete returns success and silently uncollects
+    every product in it with nothing logged.
+  - An unreferenced house / an empty collection: 200 `{ deleted: { entity, id } }`, gone from the
+    admin list, and the collection's house survives its collection.
+  - 401 anonymous, 403 customer (row still present in both), 404 unknown id with `blockers: []`.
+  - An **archived** product still blocks its house. Not in the acceptance criteria, but it is the
+    first thing staff will hit ("I archived everything, why can't I delete the house?") and the
+    probes deliberately ignore `archived_at` — a delete must never destroy the archive.
+- **Learnings:**
+  - Pattern: the DELETE route shape and the single-quoted-literal rule — promoted to
+    `## Codebase Patterns` above, because US-002/003/004 and the delete halves of US-007/US-008 all
+    repeat it verbatim.
+  - Pattern: `epics.md` says "Registry entries + DELETE routes for X"; the registry entries already
+    exist for every W2 entity. Read `src/lifecycle/registry.js` before scoping a delete story —
+    what is left is roughly 12 lines of route and a test block.
+  - Gotcha: `POST /admin/<entity>/:id/archive` takes no body, and `app.inject` with an undefined
+    payload is the right way to call it from a test (`test/admin-archive.test.js` does the same).
+    Sending `{}` would be a different request.
+  - Gotcha: `test/admin-catalogue.test.js` registers its two users ONCE in `beforeAll` and cleans
+    only brands (by slug prefix) in `beforeEach`. New tests must create their own brand fixture
+    inside the test body; a fixture hoisted to `beforeAll` would be deleted before it is used.
+  - Gotcha: `sprint-status.yaml` still marks US-002 and US-003 `blocked` with a "waits on W1"
+    comment that is no longer true. prd.json is what the loop reads, so this does not stall
+    anything, but a human reading the status board will be misled until those lines are touched by
+    their own stories.
+  - Context: the delete machinery is `src/lifecycle/delete.js` (`deleteOrExplain`, `replyDelete`,
+    `lockSql`, `constraintBlockers`) and `src/lifecycle/registry.js` (`LIFECYCLE_ENTITIES`,
+    `requireDeletableEntity`). The refusal envelope is built by `refusal()`/`blocked()` in
+    delete.js — that is where the `message` wording and the `blockers` shape come from, so a CRM
+    story rendering them should read those two functions rather than guess.
+- **Needs human verification:** none for this story — the API has no screen yet. There is no e2e
+  harness and no `dev-browser` on this machine, so the browser-side half of this contract (the
+  delete dialog staying open on a 409 and offering "Archive instead") gets eyeballed when W2-US-009
+  wires `useCrudScreen` into AdminProducts/AdminBrands. Worth checking then: a real cross-origin
+  DELETE preflight from the CRM at :5273, which `app.inject()` cannot prove.
+---
+
+## 2026-08-06T03:16:02Z - W2-US-002 - DELETE for product and colourway
+
+- **Implemented.** `DELETE /admin/products/:id` and `DELETE /admin/colourways/:id`, both
+  backoffice-only, both the one-line `replyDelete(reply, await deleteOrExplain(pool, '<entity>',
+  request.params.id, { user: request.user }))` shape US-001 established. As with US-001 there was no
+  registry work to do — W1's `LIFECYCLE_ENTITIES` already carries `product` and `colourway` with
+  exactly the probes architecture.md § *Delete policy* specifies — so this was routes + tests only.
+- Repos and files changed: `atelier-api` only —
+  `src/routes/admin-catalogue.js` (+2 routes, header note widened to the whole catalogue),
+  `test/admin-catalogue.test.js` (+13 tests in two describe blocks, +2 fixtures, cleanup reordered),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 679 tests passed; 666 before).
+- **What the tests actually assert**, against the acceptance criteria:
+  - *Order lines block with a named count.* A product whose colourway carries an order line comes
+    back 409 with `{ relation: 'order_lines', label: 'order lines', count: 1, capped: false }`, and
+    both the product and the colourway still exist. The probe reaches the grandchild through the
+    colourway — nothing about the product row itself says it has been sold.
+  - *Non-zero inventory blocks*, on hand OR reserved (two separate tests). The product-level blocker
+    reads "colourways holding stock", the colourway-level one "units of stock on hand"; those labels
+    are W1's and the CRM will render them verbatim.
+  - *Colourways and zero-quantity inventory cascade as owned children.* Deleting a never-sold
+    product returns 200 and its colourway and stock row are gone; its house is untouched. Deleting a
+    colourway takes its stock row and leaves the product.
+  - *The 23503 backstop produces the same 409 shape.* See the note below — this one is the reason
+    the story is more than a copy of US-001.
+  - Plus 401 anonymous, 403 customer (row still present in both), 404 unknown id with `blockers: []`.
+- **The backstop test is a real race, not a stubbed error code.** The probes cover `order_lines` for
+  both entities, so no ordinary request can reach the 23503 path — the only way in is the grandchild
+  window delete.js documents: the transaction locks the PRODUCT, so an order line inserted against
+  one of its existing colourways after the probes have run is not stopped by anything. The test
+  reproduces that deterministically by passing `deleteOrExplain` a pool wrapper whose `query` runs
+  the insert on a second connection when the statement is about to be `DELETE FROM products`.
+  Postgres serialises the insert against the cascade's delete of the colourway, the RESTRICT edge
+  fires, and the catch re-answers it as a 409. The test then runs the ordinary probe path over the
+  same product and asserts `Object.keys` equality plus `probed.message === backstop.message` modulo
+  `1+` vs `1` — which is what "the same 409 shape" means, rather than two hand-written expectations
+  that could drift apart.
+- **Learnings:**
+  - Pattern: the pool-wrapper technique for reproducing a mid-transaction race, and the
+    delete-orders-before-brands cleanup rule — both promoted to `## Codebase Patterns` above.
+  - Gotcha: "samples" appears in this story's first acceptance criterion, and **there is no samples
+    table** — no migration creates one (E4 US-001 does, and is `pending`), and W1's registry
+    entries for product and colourway carry no samples probe. Nothing was stubbed for it: a probe
+    against a non-existent relation would fail the registry's `information_schema` safety test.
+    Whoever lands E4 must add that probe to the two registry entries and a test here; until then the
+    criterion is unmeetable, not unmet.
+  - Gotcha: `constraintBlockers` reports `count: 1, capped: true` — a "1+", because pg says a row
+    exists and nothing about how many. A CRM dialog that renders `count` without honouring `capped`
+    will tell staff there is exactly one order line when there may be a hundred.
+  - Gotcha: the delete of an order line's colourway is refused, but the delete of its ORDER is not
+    gated here at all — `orders` is `deletable: false` in the registry and cleanup relies on the
+    order cascade taking its lines. That is why the fixture cleanup works and why no test tries to
+    delete a colourway by deleting its order first.
+  - Context: the probe bodies for both entities are `src/lifecycle/registry.js` lines ~208-254; the
+    23503 mapping is `CONSTRAINT_BLOCKERS` in `src/lifecycle/delete.js`, keyed on
+    `order_lines_colourway_id_fkey` — the only RESTRICT edge in the schema
+    (`migrations/1784603440195_users-orders-shipping-schema.js`).
+- **Needs human verification:** none for this story on its own — no screen calls these yet. Carry
+  forward to W2-US-009 (AdminProducts wiring): a real cross-origin DELETE preflight from the CRM at
+  :5273, which `app.inject()` cannot prove, and the 409 dialog rendering both blocker labels
+  ("colourways holding stock" / "units of stock on hand") and the `capped` "+" suffix.
+---
+
+## 2026-08-06T03:24:11Z - W2-US-003 - DELETE for price-list item and contact enquiry
+
+- **Implemented.** `DELETE /admin/price-list-items/:id` and `DELETE /admin/contact-enquiries/:id`,
+  both backoffice-only, both through `deleteOrExplain`. Neither entity has probes or a guard — the
+  registry entries are `probes: []` and nothing in the schema references either table — so the only
+  refusal left on both is 404, and the interesting half of this story is the warning copy, not the
+  delete.
+- **Both blockers on the earlier US-003 BLOCKED entry are resolved, one by a human and one by
+  reading the plan properly.** W1's `src/lifecycle/` is on the branch. The second — "no epic owns
+  `src/contact/**`" — was the reason to stop last time and is not one now: a human deleted
+  BLOCKED.md and cleared the prefix, which is the sanctioned unblock, and epics.md Epic 2's story
+  table assigns "DELETE for price-list item **and contact enquiry**" to W2 in the api repo. The
+  MAY-touch list omits `src/routes/contact.js`, but that list exists so two concurrent workstreams
+  never edit the same lines, and no workstream owns contact — so there is nobody to collide with.
+  The change there is additive: one import and one `app.delete`, no existing line touched.
+  Both points promoted to `## Codebase Patterns`.
+- Repos and files changed: `atelier-api` only —
+  `src/routes/admin-price-lists.js` (+1 route, +1 import, +`REIMPORT_WARNING`, header note),
+  `src/routes/contact.js` (+1 route, +1 import),
+  `test/admin-price-lists.test.js` (+5 tests), `test/contact.test.js` (+5 tests),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 689 tests passed; 679 before).
+- **The price-list 200 carries a `warning`, and that is the whole point of the story.** Acceptance
+  criterion 2 asks the response or the docs to warn that `npm run import:pricing` re-creates the row.
+  A delete here is the only one in this API that is not durable: the import upserts on
+  `(supplier, category, code)` and *keeps* rows absent from later files, so a deleted rate comes
+  straight back on the next import while an archived one stays archived. Staff cannot infer that
+  from a 200, so the envelope is `{ deleted: { entity, id }, warning }` — `warning` is additive, so
+  any client reading `deleted` is unaffected, and the CRM's `useMutation` can render it in the toast.
+  Refusals still go through `replyDelete` untouched, because the 409/404 shape is the part every
+  screen shares. Both the response and `CLAUDE.md` say it; docs alone would only reach developers.
+- **What the tests assert:** the 200 body and the row actually gone from the table (not merely from
+  the list); the `warning` naming both `import:pricing` and archive; an already-archived row deleting
+  fine (archiving is not a precondition and not a protection); 404 with `blockers: []` and **no**
+  `warning` — the caveat is about a deletion that happened, and attaching it to a refusal would
+  describe an event that did not occur; 401 anonymous and 403 customer with the row still present
+  after each. Contact adds: the enquiry gone from `?include_archived=true` too, and an enquiry
+  carrying a `user_id` deleting without taking the account with it.
+- **Learnings:**
+  - Pattern: a story can widen a lifecycle *success* envelope without touching W1's module — branch
+    on `result.deleted`, hand refusals to `replyDelete`, and build the 200 in the handler.
+    `replyDelete` calls `reply.send()`, so post-processing its return value is not an option; the
+    branch is. Keep the refusal path going through it or the 409 shape drifts per route.
+  - Gotcha: **`POST /contact` shares the auth routes' 10-per-15-min-per-IP bucket**, and
+    `test/contact.test.js` had already spent ~6 of it before this block. Seeding five more enquiries
+    through the endpoint silently turned into 429s that surfaced as
+    `Cannot destructure property 'id' of 'created.json(...).enquiry'`. Fixtures for a rate-limited
+    public endpoint must be INSERTed directly — the same rule the suite already applies to
+    `/auth/register` in `beforeAll`.
+  - Gotcha: `contact_enquiries.user_id` is SET NULL, so an enquiry never blocks its author's account
+    — but W2-US-004 (DELETE for user) is the mirror case and enquiries **do** block there. The
+    registry's `user` entry probes `contact_enquiries`; check that before writing US-004's tests.
+  - Context: `price_list_item` and `contact_enquiry` are `src/lifecycle/registry.js` lines ~272 and
+    ~314, both `probes: []`, both `archivable: true`. The archive/restore pair each entity already
+    had is untouched — hard delete sits alongside soft archive, it does not replace it.
+- **Needs human verification:** no screen calls either route yet, so nothing to eyeball this
+  iteration. Carry forward to W2-US-012 (AdminPriceListItems delete wiring): the `warning` string
+  actually appearing in the CRM toast on a successful price-list delete — it is the only place staff
+  learn the removal is undone by the next import, and it is easy to drop by rendering only
+  `deleted`. Plus the standing cross-origin DELETE preflight check `app.inject()` cannot prove.
+---
+
+## 2026-08-06T03:28:42Z - W2-US-004 - DELETE for user with the self-delete guard
+
+- **Implemented.** `DELETE /admin/users/:id`, backoffice-only, the same one-line
+  `replyDelete(reply, await deleteOrExplain(pool, 'user', request.params.id, { user: request.user }))`
+  shape US-001..003 established. W1's registry already carries the `user` entry with all three
+  probes and the self-delete guard, so this was one route + one test block. The only thing this
+  story adds beyond the established pattern is fixtures: it is the first W2 delete whose blockers
+  are things a *person* accumulates, so the tests have to create an order, a trade application and
+  a contact enquiry.
+- Repos and files changed: `atelier-api` only —
+  `src/routes/admin-users.js` (+1 route, +1 import, header note widened),
+  `test/admin-users.test.js` (+10 tests in one describe block, +4 fixture helpers, +1 cleanup),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 699 tests passed; 689 before).
+- **This delete is the one whose damage is entirely invisible, which is what the tests are for.**
+  Every FK out of `users` is SET NULL or CASCADE — not one is RESTRICT — so `DELETE FROM users`
+  raises nothing and returns success while anonymising the account's whole order history into guest
+  orders carrying no `guest_email`. There is no error to catch and no 23503 backstop to fall back
+  on: the three probes ARE the defence. Each is asserted on its own (orders / trade applications /
+  contact enquiries, each 409 with its named count and `archivable: true`, row still present), plus
+  one test giving an account both an order and an enquiry and asserting the 409 names both — the
+  probes run as a single `UNION ALL`, so a regression that reported only the first relation would
+  still look like a working 409 and would send staff round the loop once per relation.
+- **`trade_account_users` proves the rule the other way round.** Acceptance criterion 3 asks that an
+  access grant not block, and the registry deliberately gives it no probe: `user_id` is CASCADE
+  because one login belongs to one company and a deleted login must not strand a dangling grant.
+  The test deletes a trade client whose only link is that grant, then asserts the grant row is gone
+  AND the `trade_accounts` row survives — the company is a business record, the grant is not.
+- **403 for a self-delete, where self-archive and self-role-change answer 422.** Not an
+  inconsistency: 422 is refusing a *body* the caller sent, and a delete has no body — the caller is
+  simply not permitted. It is also the only one of the three self-protection rules that cannot live
+  in the handler, because `deleteOrExplain` owns the transaction; it reads `ctx.user`, which is what
+  makes `{ user: request.user }` load-bearing on this route rather than the boilerplate it looks
+  like at the other call sites.
+- **Learnings:**
+  - Pattern: a fixture that blocks a delete through a **SET NULL** FK must be cleaned by its own
+    tag, and before the users. Deleting the user does not take it with them — it survives with a
+    null `user_id` — so the next test's probes count rows an earlier test created. This is the
+    mirror of the CASCADE-side rule US-002 recorded (delete orders before brands), and both are now
+    in `## Codebase Patterns`.
+  - Gotcha: `trade_applications` has 24 NOT NULL columns. Insert it as one frozen object with the
+    column list and placeholders generated from `Object.keys`, not a hand-written 24-column INSERT.
+    Going through `POST /auth/trade-application` instead is the tempting alternative and spends the
+    register rate-limit bucket the suite is already husbanding in `beforeAll`.
+  - Gotcha: an `orders` row needs no `order_lines` to block a user — the probe is
+    `SELECT 1 FROM orders WHERE user_id = $1`. Keeping the fixture line-free also keeps it clear of
+    the one RESTRICT edge, so cleanup is a plain delete by order-number prefix.
+  - Context: the `user` registry entry is `src/lifecycle/registry.js` ~line 283 (three probes) and
+    `userGuard` ~line 98. The two handler-side self-protection guards it mirrors are in
+    `src/routes/admin-users.js` (PATCH role, POST archive).
+- **Needs human verification:** no screen calls this route yet. Carry forward to W2-US-012 (delete
+  wired into the users screen): the 409 dialog must render the blocker labels and offer "Archive
+  instead" — for a user those labels ("orders", "trade applications", "contact enquiries") are the
+  only explanation staff get for why a client cannot be removed. Plus the standing cross-origin
+  DELETE preflight from the CRM at :5273, which `app.inject()` cannot prove.
+---
+
+
+## 2026-08-06T15:34:00Z - W2-US-004 - DELETE for user (follow-up: concurrent-iteration collision)
+
+- **This iteration started US-004 and found, mid-flight, that a SECOND iteration was running in the
+  same worktree and committed the story underneath it** (`009e62e`, complete and green). Nothing was
+  duplicated into the tree: the two DELETE describe blocks that briefly coexisted in
+  `test/admin-users.test.js` were reconciled down to the committed one, and the four `CLAUDE.md`
+  bullets written here were reverted after checking them line by line against the three the commit
+  had already landed. What remains is the genuinely additive residue, kept because it strengthens
+  the committed tests rather than restating them.
+- Repos and files changed: `atelier-api` only — `test/admin-users.test.js` (+1 test, 3 sharpened
+  assertions), `CLAUDE.md` (+1 bullet). No bookkeeping flip: `prd.json`, `sprint-status.yaml` and the
+  US-004 progress entry were all written by `009e62e` and are correct as they stand.
+- Gates: `npm run lint` -> 0, `npx vitest run test/admin-users.test.js` -> 0 (39 tests). The FULL
+  suite was green at 700 tests before this commit; it was NOT re-run afterwards because the other
+  iteration has `src/catalogue/admin-brands.js` open for US-005, so a full run would be measuring
+  its half-finished work, not this change.
+- **What the four additions assert**, none of which the committed block covered:
+  - The orders refusal now checks `orders.user_id` is *still* the deleted-would-be user. Every other
+    assertion in that test passes just as well against a delete that never ran; this is the only one
+    that fails if the probe is removed, because the FK is SET NULL and the damage is otherwise
+    invisible.
+  - `names every blocking relation at once` now exercises all THREE probes (it covered orders +
+    enquiries) and asserts the per-relation counts inside `message` — `2 orders, 1 trade
+    applications, 1 contact enquiries`. A UNION ALL that mis-joined its counts would still have
+    passed a relation-names-only assertion.
+  - A new test for `trade_accounts.linked_by_user_id`: a staff account that linked a trade client
+    still deletes, and the column goes null. That edge is SET NULL and carries no probe; nothing
+    else in the suite would notice if a future story added one, and the symptom would be that no
+    back-office login can ever be deleted again.
+  - The self-delete 403 now asserts `blockers: []` and `archivable: true`. The CRM dialog reads
+    those two fields on every refusal regardless of status, so a 403 that omitted them would render
+    an empty dialog with no "Archive instead".
+- **Learnings:**
+  - Pattern (process, and the important one): **two Ralph iterations were live in one worktree at
+    once.** The symptoms are diagnostic and worth recognising early — an `Edit` failing with "File
+    has been modified since read" on a file nothing in this iteration had touched; `git status`
+    showing a file *dropping out* of the modified list mid-task (it was committed underneath you);
+    `prd.json` already reading `passes: true` with a timestamp you did not write. `git log --oneline`
+    settles it in one command. Promoted to `## Codebase Patterns`.
+  - Gotcha: when this happens, `git checkout -- <file>` is NOT a safe revert — it discards whatever
+    the other iteration has in flight for that path. Scope every recovery to paths you personally
+    wrote, and stage by explicit pathspec (`git add <file>`), never `-A` or `-a`.
+  - Gotcha: do not re-run the full suite to gate a commit while another iteration has source files
+    open — a red result is ambiguous between your change and theirs, and a green one is luck. Gate
+    on the test file you touched and say so.
+  - Context: US-004's real entry is the one above this, written by `009e62e`. The registry entry it
+    consumes is `src/lifecycle/registry.js` (`user`, `userGuard` + three probes).
+- **Needs human verification:** **the worktree concurrency itself — this is the item that matters.**
+  Two agents sharing `/Users/verumoffice/atelier-worktrees/w2-crud` will eventually interleave a
+  half-written file into a commit; US-004 survived only because the collision was on a test file and
+  was noticed. Also still uncommitted and NOT authored by this iteration:
+  `ralph/w2-crud/CLAUDE.md`, whose MAY-touch list has been widened to add `admin-users.js`,
+  `src/routes/contact.js`, `src/users/admin-users.js` and `src/pricing/admin-price-lists.js`. It was
+  left unstaged deliberately — it is an edit to the operating instructions, which no story owns — but
+  it needs a human to either commit it or explain it, since US-003 and US-004 both relied on it.
+  Carried forward from US-002/003: a real cross-origin DELETE preflight from the CRM at :5273.
+---
+
+## 2026-08-06T03:37:07Z - W2-US-005 - Missing admin reads: brand, collection, price-list item by id
+
+- **Implemented.** Three by-id admin reads: `GET /admin/brands/:id` (the house with its collections
+  and both child counts), `GET /admin/collections/:id` (the collection with its house name and its
+  product count) and `GET /admin/price-list-items/:id` (wires the already-exported
+  `getPriceListItem`). All three are backoffice-only and answer 404 with
+  `{ error: 'Not Found', message }` — the shape `GET /admin/products/:id` already used.
+- Repos and files changed: `atelier-api` only —
+  `src/catalogue/admin-brands.js` (+`getAdminBrand`, +`getAdminCollection`, `toBrand`/`toCollection`
+  gain the `extra` argument, `COLLECTION_SELECT` split into columns + FROM, two `map` call sites
+  fixed), `src/routes/admin-catalogue.js` (+2 routes, +2 imports),
+  `src/routes/admin-price-lists.js` (+1 route, +1 import),
+  `test/admin-catalogue.test.js` (+11 tests in two describe blocks),
+  `test/admin-price-lists.test.js` (+5 tests), `CLAUDE.md` (`## CRUD completion`),
+  `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 716 tests passed; 705 before this story —
+  `test/admin-catalogue.test.js` 92 -> 103, `test/admin-price-lists.test.js` 25 -> 30).
+- **The counts are the point of the story, and they deliberately count archived rows.** Every one of
+  these reads exists because the CRM re-reads a row after a write instead of refetching the list, but
+  a brand detail carrying `product_count` / `collection_count` is also the only way a screen can know
+  in advance whether Delete will be accepted — and architecture.md's *CRM CRUD kit* forbids a
+  pre-flight "can I delete this" GET, so this read is where that information has to live. Making the
+  counts agree with the delete probes is therefore load-bearing: the probes count archived rows (an
+  archived product still blocks its house), so a count that skipped them would tell staff a house was
+  empty and then be contradicted by the 409. Two tests assert the agreement directly — archive the
+  only child, read the counts, then `DELETE` and assert the blocker counts are the same numbers — and
+  one asserts the other direction, that 0/0 really does delete with a 200.
+- **What else the tests assert:** the nested `collections` array is the same shape
+  `GET /admin/collections?brand_id=` returns (so one CRM renderer serves both) and includes archived
+  collections carrying `archived_at`; a product with a null `collection_id` is not counted by the
+  collection read (uncollected is the seed's normal state, not an error); an archived row is returned
+  by all three reads rather than 404'd; `wholesale_rate` comes back as a **number**, because the
+  detail read goes through the same `toPriceListItem` mapper as the list and pg would otherwise hand
+  the CRM's form a string; a PATCH is visible through the by-id read without a list refetch; 404 on
+  an unknown id and 401/403 on each of the three.
+- **Learnings:**
+  - Pattern: the `extra`-argument mapper trap and the "a by-id admin read never filters
+    `archived_at`" rule — both promoted to `## Codebase Patterns` above.
+  - Gotcha: `getPriceListItem` was already exported and already correct; the story was one route.
+    Before scoping a "wire the existing read model" story, grep the module's exports — the same thing
+    was true of the registry entries in US-001/US-002, and it is the difference between a 12-line
+    change and a day's work.
+  - Gotcha: a count subquery cannot be appended to `COLLECTION_SELECT`, because that constant already
+    ended in its `FROM … JOIN`. Splitting it into `COLLECTION_COLUMNS` + `COLLECTION_FROM` (the shape
+    `admin-products.js` already uses for `PRODUCT_COLUMNS`/`PRODUCT_FROM`) is what makes a detail read
+    composable; expect the same split to be needed for US-006's colourway detail.
+  - Gotcha: `BRAND_COLUMNS` is unqualified, so `getAdminBrand`'s query must stay alias-free —
+    `FROM brands`, and the correlated subquery says `WHERE brand_id = brands.id`. Adding an alias
+    later breaks the projection, which is the same trap `setCollectionArchived` documents.
+  - Context: both new read models are `src/catalogue/admin-brands.js` (`getAdminBrand` beside
+    `listAdminBrands`, `getAdminCollection` beside `listAdminCollections`). The probes the counts
+    mirror are `src/lifecycle/registry.js` `brand` (~line 182) and `collection` (~195).
+- **Needs human verification:** none for this story on its own — no screen calls these three routes
+  yet. Carry forward to W2-US-009/US-010: the houses screen showing a house's product/collection
+  counts and greying or explaining Delete from them, and the new AdminCollections screen rendering
+  `product_count`. Plus the standing cross-origin check `app.inject()` cannot prove — though these are
+  GETs, which the default CORS `methods` already allowed, so they are not at risk the way the DELETEs
+  were.
+---
+
+## 2026-08-06T03:45:18Z - W2-US-006 - Colourway list and detail endpoints
+
+- **Implemented.** `GET /admin/colourways` — paginated, filterable by `product_id`, `brand_id`, `q`
+  and `include_archived` — and `GET /admin/colourways/:id`, which wires the previously-private
+  `getAdminColourway`. Both are backoffice-only. The list is the SKU-level browse: colourways were
+  reachable only through their product, and a staff member holding a SKU off a sample tag does not
+  know which design it belongs to.
+- Repos and files changed: `atelier-api` only —
+  `src/catalogue/admin-products.js` (+`listAdminColourways`, `getAdminColourway` exported and
+  widened, +`DEFAULT_PAGE`/`DEFAULT_LIMIT`/`MAX_LIMIT`, `COLOURWAY_SELECT` split into
+  `COLOURWAY_COLUMNS` + a context select, `toColourway` gains `extra`, one `map` call site fixed),
+  `src/routes/admin-catalogue.js` (+2 routes, +1 query schema, +5 imports),
+  `test/admin-catalogue.test.js` (+14 tests in two describe blocks),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 730 tests passed; 716 before —
+  `test/admin-catalogue.test.js` 103 -> 117).
+- **The list row is not a colourway row, and that is the design decision of the story.** A bare
+  colourway carries `id`, `product_id`, `name`, `sku` and its stock snapshot — nothing that names
+  the design or the house — so a standalone screen would show a wall of SKUs and send staff back to
+  the product page to identify each one. The list and the by-id read therefore join products and
+  brands and add `product_name`, `product_slug`, `product_type`, `brand_id`, `brand_name` through
+  the mapper's `extra` argument. The colourways *embedded* in `GET /admin/products/:id` deliberately
+  keep the narrow shape: they already sit under their parent, so repeating its name on every child
+  would be noise. One test asserts the detail read and the list row are `toEqual` — one CRM renderer
+  serves both, which is the property that keeps them from drifting.
+- **What else the tests assert:** paging partitions rather than truncates (three colourways at
+  `limit=2` give `[a, b]` then `[c]`, `meta.total` 3 on both pages — the pager divides by it);
+  `limit=500` is a 400, because `MAX_LIMIT` is the schema `maximum` and a silent clamp would lie
+  about what was returned; each filter in isolation; `q` reaching the SKU, the colour name and the
+  design name; a literal `%` in a search term matching one row rather than the whole house; an
+  archived colourway hidden until `include_archived=true` and then carrying `archived_at`; the
+  colourways of an **archived product** still listed; 404 with `error: 'Not Found'` on an unknown
+  id; the archived row returned by the by-id read rather than 404'd; 401 anonymous and 403 customer
+  on both routes.
+- **Learnings:**
+  - Pattern: the settled paginated-admin-list shape, the LIST-filters/detail-does-not rule (and its
+    corollary about a *parent's* archive flag), and the context-columns pair for a standalone child
+    list — all three promoted to `## Codebase Patterns` above.
+  - Gotcha: every assertion in the list block scopes itself with `brand_id` or `product_id`. This
+    list spans the whole catalogue, so an unfiltered `meta.total` counts every seeded colourway in
+    `atelier_w2` as well as the fixtures — a test asserting `total` on an unfiltered read passes
+    today and breaks the first time someone runs `npm run seed` against the test database.
+  - Gotcha: `toColourway` growing its `extra` argument is the same trap `toBrand`/`toCollection` hit
+    in US-005 — `getAdminProduct` did `colourways.map(toColourway)`, which would have passed the
+    array index as `extra`. `{ ...0 }` is `{}`, so the bug is invisible until `extra` is used for
+    something a number satisfies. Converted to `map((child) => toColourway(child))` in the same
+    edit. Grep for `map(to` before adding a second parameter to any mapper here.
+  - Gotcha: the count query shares `COLOURWAY_CONTEXT_FROM` with the row query, which means it
+    carries the `LEFT JOIN inventory`. That is safe only because `inventory.colourway_id` is UNIQUE —
+    a join that could multiply rows would silently inflate `meta.total` while the rows looked right.
+  - Context: the read models are `src/catalogue/admin-products.js` (`listAdminColourways` and
+    `getAdminColourway`, beside `listAdminProducts`/`getAdminProduct`); the paginated sibling this
+    copies is `listPriceListItems` in `src/pricing/admin-price-lists.js` and its route in
+    `src/routes/admin-price-lists.js`. `escapeLike` is duplicated per module by house convention
+    (`products.js` and `admin-price-lists.js` each carry their own) rather than shared.
+- **Needs human verification:** no screen calls either route yet — there is no colourways screen in
+  the CRM and none is in Epic 2's story list, so these are consumed by W2-US-009's product screen and
+  by whatever browses SKUs later. Worth eyeballing when a screen does arrive: that the pager reads
+  sensibly at `DEFAULT_LIMIT` 50 against a real seeded catalogue, and that the `q` box searching the
+  design name (not just the SKU) is what staff expect. Carried forward from US-001..005: a real
+  cross-origin preflight from the CRM at :5273, which `app.inject()` cannot prove — these two are
+  GETs, which the default CORS `methods` already allowed, so they are not at the DELETEs' risk.
+---
+
+## 2026-08-06T03:52:12Z - W2-US-007 - Shipping-rate CRUD with the last-tier guard
+
+- **Implemented.** Four routes on `/admin/shipping-rates`, all backoffice-only: `GET` (every tier,
+  zone then threshold ascending, each carrying its `id`), `POST` (201, 409 on the
+  `(zone, threshold_qty)` unique constraint), `PATCH /:id` (`rate_cents` only) and `DELETE /:id`
+  (through `deleteOrExplain`, whose `shipping_rate` guard refuses the last tier for a zone). The
+  bulk `PUT` is untouched. As with US-001..004 the registry entry already existed — W1's
+  `shipping_rate` entry carries `shippingRateGuard` verbatim — so the delete half was one route.
+- Repos and files changed: `atelier-api` only —
+  `src/shipping/rates.js` (+`createShippingRate`, +`updateShippingRate`, +`RATE_COLUMNS`,
+  +`toShippingRate`, +local `httpError`; `listShippingRates` now selects `id` and goes through the
+  mapper), `src/routes/shipping.js` (+4 routes, +3 schemas, +2 imports, shared tier prop constants,
+  header note), `test/shipping.test.js` (+22 tests in one describe with four nested blocks),
+  `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 752 tests passed; 730 before —
+  `test/shipping.test.js` 11 -> 33).
+- **`id` had to be added to the read model before any of this could exist, and that is the story's
+  one externally visible change to an existing endpoint.** `listShippingRates` returned
+  `{ zone, threshold_qty, rate_cents }` and nothing else, so there was no way to address a single
+  tier: the pair that identifies it is also the pair a PATCH must never move. `PUT`'s response is
+  built from the same function, so its rows now carry `id` too — additive, no existing key changed,
+  and its five existing tests pass untouched. One new test asserts the PUT still upserts tier 0 in
+  place (rather than duplicating it) and that its rows carry ids.
+- **What the tests assert**, against the acceptance criteria:
+  - *List.* Both fixture tiers ascending with distinct numeric ids, and `threshold_qty` as a
+    **number** — the column is `numeric(12,2)`, so pg hands back `'30.00'` and only the mapper
+    coerces it; a string would land in the CRM's number input. Plus 401/403.
+  - *Create.* 201 with the id, the new tier immediately quotable, a brand-new zone coming into
+    existence from its first tier (the zone 400s before it and quotes after), 409 on a duplicate
+    `(zone, threshold_qty)` **with the existing rate proved unchanged**, 400 on a missing field,
+    401/403 each with the tier count unchanged.
+  - *Patch.* `rate_cents` written and the quote following it; a body carrying `zone` and
+    `threshold_qty` leaving both alone (and the named other zone not gaining a tier); that same body
+    without `rate_cents` being a 400; 404 unknown id; 403 with the rate unchanged.
+  - *Delete.* A non-last tier gone with `{ deleted: { entity: 'shipping_rate', id } }` and the zone
+    still quoting (the qty that reached the deleted tier falls back to the one below); the last tier
+    409 with the zone named, `blockers: []` and `archivable: false`; the *second* delete refused once
+    a two-tier zone is down to one, which is the same outage reached one tier at a time; 404 with
+    `blockers: []`; 401/403 with the row still present.
+- **`archivable: false` is the part a CRM story must not skip.** `shipping_rates` has no
+  `archived_at` column, so the 409 dialog's usual "Archive instead" escape does not exist here —
+  the only way out is to add a replacement tier first, which is what the guard's message says.
+- **Learnings:**
+  - Pattern: the one-editable-column PATCH rule (`required`, not `minProperties: 1`), the
+    identity-key-is-not-the-id rule, and "a single-row POST beside a bulk PUT must 409 rather than
+    upsert" — all three promoted to `## Codebase Patterns` above.
+  - Gotcha: `test/shipping.test.js` has no `beforeEach` and its bulk-PUT tests mutate the shared
+    fixture zone in order (the tier-50 test leaves it behind). New blocks must own their zones and
+    reset them per test, and every fixture zone name must end in `Test Zone` — the file's
+    `deleteTestData` cleans by `zone LIKE '%Test Zone'` and nothing else would ever be removed.
+  - Gotcha: the shipping routes carry no `config.rateLimit`, like the rest of the admin surface —
+    the limiter is `global: false`, so these four are unmetered by design, not by omission.
+  - Gotcha: `upsertShippingRates` returns `listShippingRates(pool)`, so any column added to the list
+    projection silently widens the PUT's response as well. That is fine while the addition is
+    additive; a *renamed* column there would break the PUT contract with nothing in the PUT's own
+    code changed.
+  - Context: the guard is `shippingRateGuard` in `src/lifecycle/registry.js` (~line 72) and the
+    entry is `shipping_rate` (~line 305), `archivable: false`, `probes: []`. The unique constraint
+    is `shipping_rates_zone_threshold_unique`
+    (`migrations/1784603440195_users-orders-shipping-schema.js`). `getShippingQuote` answering 400
+    for a zone with no rows is what makes the last-tier guard a guard rather than a nicety.
+- **Needs human verification:** none for this story on its own — no screen calls these four routes
+  yet. Carry forward to **W2-US-011 (AdminShipping)**, which is the story that consumes all of them:
+  the last-tier 409 must render as a readable refusal with **no** "Archive instead" button
+  (`archivable: false`), the duplicate-tier 409 must be distinguishable from it (it arrives as a
+  plain `{ statusCode, error, message }` from the module, with no `blockers`/`archivable` keys —
+  `describeBlockers` sees an empty list either way), and a rate typed in dollars must reach the API
+  as whole cents. Plus the standing cross-origin DELETE preflight from the CRM at :5273, which
+  `app.inject()` cannot prove.
+---
+
+## 2026-08-06T16:01:40Z - W2-US-008 - Inventory create and delete
+
+- **Implemented.** `POST /admin/inventory` (201, `unit` derived from the colourway's product type
+  and never accepted from the body) and `DELETE /admin/inventory/:colourwayId` (through
+  `deleteOrExplain`, whose `inventory` guard refuses a row with `qty_reserved > 0`). The two
+  together are the story's actual user need: deleting a stock row is how a colourway is taken out
+  of circulation, and without a create it could never sell again. As with US-001..004 and US-007
+  the registry entry already existed — W1's `inventory` entry carries `inventoryGuard`,
+  `idColumn: 'colourway_id'` and `archivable: false` — so the delete half was one route.
+- Repos and files changed: `atelier-api` only —
+  `src/catalogue/admin-products.js` (`unitFor` exported, +JSDoc),
+  `src/inventory/admin-inventory.js` (+`createInventory`, +1 import, header note),
+  `src/routes/admin-inventory.js` (+2 routes, +1 schema, +1 import, header note),
+  `test/admin-inventory.test.js` (+14 tests in two describe blocks, +2 stockless fixtures,
+  +`stockRowFor` helper), `CLAUDE.md` (`## CRUD completion`), `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm run lint` -> 0, `npm test` -> 0 (39 files, 766 tests passed; 752 before —
+  `test/admin-inventory.test.js` 11 -> 25).
+- **`unit` is the whole point of the create, and it is derived rather than validated.** It is what
+  every quantity on the row *means*, so a client-chosen unit does not produce a bad row that a
+  check could catch — it silently redenominates 40 metres as 40 units and nothing downstream can
+  tell. The column is therefore absent from the route schema (Ajv's `removeAdditional` strips a
+  `unit` a client sends) and the module reads it from the product row via `unitFor`, which is now
+  exported from `src/catalogue/admin-products.js` rather than copied. One test posts
+  `{ colourway_id: <a finished good>, unit: 'metres' }` and asserts the row comes back `units`,
+  which is the criterion "unit is never accepted from the client" stated as behaviour.
+- **The 409 on an existing row is a refusal to upsert, and the test asserts the quantities survive
+  it.** A stock row carries staff-corrected counts and a live `qty_reserved` the order state
+  machine depends on; a create that overwrote them with its defaults would zero live stock and drop
+  a reservation, with a 200 to say so. Same posture as US-007's `POST` beside the bulk `PUT`.
+- **What the tests assert**, against the acceptance criteria:
+  - *Create.* 201 with the joined display shape; `metres` for a fabric and `units` for a finished
+    good; opening quantities accepted and returned as **numbers** (`numeric(12,2)` gives `'40.00'`);
+    the new row immediately listable and patchable; 422 unknown colourway (message names the id);
+    409 on an existing row with `{ available: 60, reserved: 5 }` proved unchanged; 400 for a missing
+    `colourway_id` and for a negative quantity, with no row created; 401/403 with no row created.
+  - *Delete.* 200 `{ deleted: { entity: 'inventory', id: <colourwayId> } }` and the row gone from
+    the table and the list, **while the colourway survives** — the CASCADE runs colourway ->
+    inventory and never the reverse, so a delete that took the SKU with it would be catastrophic and
+    silent. The reserved-stock 409 with `blockers: []`, `archivable: false` and the reserved count
+    in the message. A refuse-then-release-then-delete sequence, because a row whose reservation has
+    been shipped or declined must become deletable or nothing could ever be removed after its first
+    sale. 404 for a colourway with no stock row. 401/403 with the row still present.
+  - *Round trip.* Delete then re-create: 201, and the unit is **re-derived** from the product rather
+    than remembered from the old row.
+- **Learnings:**
+  - Pattern: the fixture-name-vs-seeded-catalogue collision (search by the namespaced SKU, not by a
+    display name) and the one-exported-map rule for a derived column — both promoted to
+    `## Codebase Patterns` above.
+  - Gotcha: `?q=Jade` in this file returned the fixture **plus two seeded rows** (`MC-MAD-02`,
+    `MAN-1005`). `?q=Velvet` and `?q=Sky` in the pre-existing tests are unique only by luck and are
+    the same bug waiting for a bigger catalogue.
+  - Gotcha: `assertQuantities` already iterates `INVENTORY_UPDATE_COLUMNS` with `Object.hasOwn`, so
+    it covers the create's optional `qty_available`/`qty_reserved` unchanged — the create needed no
+    second validator. It is belt-and-braces either way: the route schema's `minimum: 0` makes a
+    negative body a 400 before the module sees it.
+  - Gotcha: the existence lookup before the INSERT is a nicety, not the rule — the FK is. A
+    colourway deleted in between raises 23503, which the catch answers with the same 422 as "never
+    existed", so the two paths cannot disagree.
+  - Gotcha: `inventoryFor` in this test file destructures `rows[0]` and throws on a missing row, so
+    every assertion about *absence* goes through the new `stockRowFor`, which returns null.
+  - Context: the guard is `inventoryGuard` in `src/lifecycle/registry.js` (~line 50) and the entry
+    is `inventory` (~line 260) — `idColumn: 'colourway_id'` (the table has both an `id` PK and a
+    unique `colourway_id`, and every caller addresses stock by colourway). `UNIT_BY_PRODUCT_TYPE` /
+    `unitFor` are `src/catalogue/admin-products.js` ~line 28; `createColourway` (~474) is the other
+    caller and the reason a colourway normally already has a stock row.
+- **Needs human verification:** no screen calls either route yet. Carry forward to **W2-US-012**
+  (delete wired into the stock screen): the reserved-stock 409 must render as a readable refusal
+  with **no** "Archive instead" button (`archivable: false`, same as the shipping tiers), and the
+  stock screen needs a create affordance for a colourway with no row — after a delete, that
+  colourway vanishes from `GET /admin/inventory` entirely, so the screen must reach it through the
+  colourway list (US-006's `GET /admin/colourways`) or the row is unrecoverable from the UI. Plus
+  the standing cross-origin DELETE preflight from the CRM at :5273, which `app.inject()` cannot
+  prove.
+---
+
+## 2026-08-06T04:13:11Z - W2-US-009 - Delete on the products and houses screens
+
+- **Implemented.** `AdminBrands` (houses) and `AdminProducts` (products) are the CRM's first two
+  consumers of W1's `useCrudScreen`. Each row gains a Delete button that opens the shared
+  `ConfirmDialog`; a 409 keeps that dialog open, renders the API's sentence plus one line per
+  blocker, drops the confirm button and offers **Archive instead**. Both screens' hand-rolled list
+  fetch, `status`/`loadError` pair and `useToast` are gone — the kit supplies all of it. No
+  paginator and no dialog of their own were added; a source scan asserts that, because with no
+  jsdom it is the only way to test a `.jsx` here.
+- Repos and files changed: `atelier-crm` only —
+  `src/screens/adminCatalogue.js` (new, the pure half: `CATALOGUE_LIST_LIMIT`,
+  `brandListFilters`, `productListFilters`, `archiveTogglePath`, `archiveInsteadPath`),
+  `src/screens/adminCatalogue.test.js` (new, 14 tests),
+  `src/screens/AdminBrands.jsx`, `src/screens/AdminProducts.jsx`,
+  `CLAUDE.md` (new `## CRUD completion` section, plus the one stale line under "Rules the forms
+  must honour" that said removal is *never* DELETE).
+- Gates: `npm test` -> 0 (33 files, 403 tests passed; 389 before), `npm run build` -> 0.
+- **The API half of this story was already finished and needed no change**, which is what made it a
+  screen story: `DELETE /admin/brands/:id` (US-001) and `DELETE /admin/products/:id` (US-002) both
+  exist, and W1's kit already had `attemptDelete`, `describeBlockers`, `deleteDialog`,
+  `ConfirmDialog` and `useCrudScreen`. What was missing was purely the wiring, and the wiring has
+  exactly three moving parts: `crud.remove.ask(row)` on the button, `<ConfirmDialog
+  {...crud.remove.dialog} />` at the foot of the screen, and an `archive` option — without which
+  `canArchive` is false and a refusal renders with Cancel as its only button.
+- **Two rules earned their own functions rather than an inline template string.**
+  `archiveInsteadPath` (always `/archive`) is deliberately not `archiveTogglePath` (which flips to
+  `/restore` for an archived row): the dialog's escape hatch is offered on a *refused* delete, so
+  reusing the toggle would answer "you cannot delete this archived house" by restoring it to the
+  public website. And `productListFilters` returns `null` — not `''` — for an unchosen house,
+  because `buildListQuery` drops null and would otherwise send `brand_id=`, which the endpoint's
+  integer schema answers with a 400 that kills the whole list rather than one filter.
+- **`CATALOGUE_LIST_LIMIT` is a limit that exists to avoid a pager, not to page.** Neither endpoint
+  pages: both return every row with no `meta`, and neither declares a `page` param — Fastify's Ajv
+  strips it rather than 400ing, so `useAdminList` sending `page`/`limit` is harmless but the kit's
+  default limit of 25 would compute `totalPages: 2` over the 41 seeded houses. A page that can
+  never be fetched is worse than no pager, so the limit sits above any plausible row count and
+  `totalPages` stays 1.
+- **The open editor now closes when its row leaves the list.** AdminBrands already did this;
+  AdminProducts did not, and after a delete its `openId` would have pointed at a row that no longer
+  exists — the next mutation's reload re-reads `/admin/products/:id` and reports a 404 the staff
+  member cannot act on. The same effect covers archiving with "Show archived" off.
+- **What the 14 new tests assert:** each filter helper through `buildListQuery` (empty when unset,
+  `brand_id=7&include_archived=true` when both are set, a numeric brand id as well as a string);
+  `pageCount(41, CATALOGUE_LIST_LIMIT) === 1` against `pageCount(41, 25) === 2`, which is the
+  reason the constant exists; the toggle path flipping and the "Archive instead" path refusing to;
+  and, for both screens, that the source contains `useCrudScreen`/`ConfirmDialog`/`remove.ask`/
+  `archiveInsteadPath` and contains none of `apiDelete`, `attemptDelete`, `describeBlockers`,
+  `deleteDialog`, `role="dialog"`, `Pagination` or `Previous`.
+- **Learnings:**
+  - Patterns: what `useCrudScreen` replaces and what it does NOT (a second list keeps its own
+    `useMutation`); "Archive instead" always archives; an unpaged endpoint needs a limit above its
+    row count; a source scan is the only test a `.jsx` can have here; only the permanent verb is
+    `tone="danger"`. All five promoted to `## Codebase Patterns` above.
+  - Gotcha: `useCrudScreen` computes `canArchive` from the **identity of the `archive` option**,
+    which is an input — so a screen cannot decide per-row whether to offer the button. An archived
+    house whose delete is refused therefore still shows "Archive instead", which re-stamps
+    `archived_at`. Harmless, and the alternative (mirroring the dialog's target into screen state
+    one render early) buys a copy fix for a state-sync bug; left as is deliberately.
+  - Gotcha: `useAdminList` keeps the previous rows while a refetch is in flight and only replaces
+    them on success, so the "close the editor when its row leaves the list" effect must also gate on
+    `status === 'ready'` — otherwise it would fire against the empty initial `rows` and close an
+    editor the user had just opened.
+  - Gotcha: the CRM's `npm test` is vitest over pure logic and `npm run build` is the **only**
+    compile check in the repo (there is no ESLint), so an unused import left behind by a refactor —
+    `useToast`, `messageOf` — surfaces nowhere at all. Grep the file for every symbol you stopped
+    using before committing.
+  - Gotcha: `DELETE /admin/colourways/:id` (US-002) still has **no UI**. Colourways are rendered
+    from the product detail read, not from a list, and `useCrudScreen` binds one entity per screen —
+    so a second delete flow on AdminProducts would mean composing `attemptDelete`/`deleteDialog`
+    by hand. Out of this story's criteria (the epic line is "products and houses screens"), and
+    `GET /admin/colourways` exists for whoever gives them a screen.
+  - Context: the kit is `src/admin/useCrudScreen.js` (four namespaces), `deleteFlow.js` (the copy
+    and `describeBlockers`), `ConfirmDialog.jsx`, `useAdminList.js` and `list.js`. The screens'
+    pure half is now `src/screens/adminCatalogue.js`, beside `clientAccounts.js`/`clientView.js`.
+    Collection delete belongs to US-010, which moves the collections panel out of AdminBrands
+    entirely.
+- **Needs human verification:** **both screens, in a browser — this is the story whose whole
+  contract is visual, and there is no e2e harness or `dev-browser` on this machine.** Specifically:
+  (1) Houses → Delete on a house holding products: the dialog must stay open showing "3 products,
+  1 collection" style lines with **no** Delete button and an **Archive instead** button;
+  (2) Houses → Delete on an empty house: gone from the list, toast reads "<name> deleted.";
+  (3) Products → Delete on a product with an order line: the 409 must render the blocker labels
+  W1 writes ("colourways holding stock", "units of stock on hand") and honour `capped` — a "1+"
+  must not read as "1"; (4) Escape and a backdrop click both cancel, and focus lands on Cancel so a
+  stray Enter cannot delete; (5) the standing item carried from US-001..008 — a **real
+  cross-origin DELETE preflight from the CRM at :5273**, which `app.inject()` cannot prove and
+  which is the one thing that would make every delete here fail while curl passes.
+---
+
+## 2026-08-06T04:25:04Z - W2-US-010 - Standalone AdminCollections screen
+
+- **Implemented.** `/admin/collections` is a screen of its own: a house filter, a create form, an
+  expandable editor over `GET /admin/collections/:id`, Archive/Restore and Delete through
+  `useCrudScreen`. AdminBrands loses the collections panel entirely and each house row links through
+  to it with the filter pre-applied. The API half needed no change — `GET|POST /admin/collections`,
+  `GET /admin/collections/:id` (US-005), `PATCH`, archive/restore and `DELETE` (US-001) all already
+  existed; this story is the screen that finally calls the by-id read, which until now had no
+  consumer.
+- Repos and files changed: `atelier-crm` only —
+  `src/screens/AdminCollections.jsx` (new, 487 lines),
+  `src/screens/adminCatalogue.js` (+`collectionListFilters`, +`collectionsPath`,
+  +`describeCollection`, `productListFilters` re-expressed over a shared `brandScopedFilters`),
+  `src/screens/adminCatalogue.test.js` (+16 tests),
+  `src/screens/AdminBrands.jsx` (683 -> 515: collections panel, second list, `COLLECTION_FIELDS`,
+  four collection handlers and its own `useMutation` all removed; row link added),
+  `src/App.jsx` (+1 route, +1 import), `src/components/sectionTabs.jsx` (+1 catalogue tab),
+  `src/components/layout.jsx` (Catalogue nav `match` gains `/admin/collections`),
+  `CLAUDE.md` (`## CRUD completion`, plus two stale lines that named AdminBrands as the collection
+  editor). `atelier-api` carries the bookkeeping only — `ralph/w2-crud/prd.json`,
+  `ralph/w2-crud/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm test` -> 0 (33 files, 419 tests passed; 403 before), `npm run build` -> 0.
+- **The move is the story, so what the tests hold is where the panel now is — and where it is not.**
+  With no jsdom a source scan is the only test a `.jsx` can have here, so `COLLECTION_FIELDS` is
+  asserted present in AdminCollections and **absent** from AdminBrands; AdminBrands is asserted to
+  contain no `/admin/collections` path and no `collectionDrafts`, and to use `crud.mutation`; and
+  AdminCollections joins the existing three-screens loop that proves the delete flow is the kit's
+  (`useCrudScreen`, `ConfirmDialog`, `remove.ask`, `archiveInsteadPath` present; `apiDelete`,
+  `attemptDelete`, `describeBlockers`, `deleteDialog`, `role="dialog"`, `Pagination` absent).
+- **Criterion 4 — "a collection slug is unique per brand, never globally" — is a real hazard here,
+  not a formality.** It was harmless while collections were nested under their house; a
+  catalogue-wide list is exactly where it bites, and the seed makes it certain rather than
+  theoretical: `collectionDisplayName` strips the house prefix off the vendored titles, so several
+  houses ship a plain "Cappuccino". Three answers, each tested: rows are keyed by `id`
+  (`key={collection.id}`, and the scan asserts `key={collection.slug}` appears nowhere), the house is
+  the first column and a read-only field in the editor, and `describeCollection` renders
+  `Cappuccino (Pierre Frey)` for the delete dialog's title and every toast. Without the last one the
+  dialog asks "Delete “Cappuccino”?" and a staff member with the list filtered to "All houses" cannot
+  tell which row is about to go.
+- **The house filter lives in the URL.** `collectionsPath(brand)` is
+  `/admin/collections?brand_id=<id>` and the screen reads it with `useSearchParams` rather than
+  seeding `useState` from it — a link clicked while this screen is already mounted does not remount
+  it, so state would ignore the second click, and the back button would not undo a filter change.
+- **AdminBrands got smaller in the way that matters.** Removing the second list removed the reason it
+  had to build a combined `reload` and call `useMutation` itself, so it now destructures
+  `crud.mutation`; the "a screen with a second list keeps its own `useMutation`" rule US-009 recorded
+  is a description of a debt, and this story paid it. What replaced the panel is two links: one on
+  the row's sub-line (beside the country) and one beside Save house in the editor. The row's name is
+  a `<button>` that expands the editor, so the `<Link>` is its sibling rather than nested — a control
+  inside a control.
+- **Learnings:**
+  - Patterns: a second list is an unwritten screen; a per-parent-unique key must not identify a row
+    in a cross-parent list; a linked-into filter belongs in the URL; a negative source scan must not
+    match the file's own prose. All four promoted to `## Codebase Patterns` above.
+  - Gotcha: the first version of the "houses only" test asserted `not.toContain('useMutation')` and
+    failed against a **comment** explaining when a screen calls it. A source scan reads comments;
+    prefer the positive assertion wherever prose could trip the negative.
+  - Gotcha: `GET /admin/collections` returns no `product_count` — only the by-id read does — so the
+    count that tells staff a Delete will be refused is available on the expanded row and nowhere
+    else. Do not add a per-row count by fetching the detail for every row; that is the pre-flight the
+    kit forbids, once per row.
+  - Gotcha: `PATCH /admin/collections/:id` accepts name/description/image_url only. `brand_id` is
+    create-only, so the editor shows the house as `readOnlyInput` and the create form keeps its own
+    `CREATE_ONLY_FIELDS` — the same split AdminProducts makes for `brand_id`/`product_type`.
+  - Gotcha: the CRM already has a **demo** `/collections` screen in the brand world (`Collections.jsx`,
+    localStorage-backed). The live one is `/admin/collections`; the two are different screens in
+    different layouts and neither should be edited in mistake for the other.
+  - Gotcha: `AdminProducts` also fetches `/admin/collections` — for its collection `<select>`, not as
+    a list — and is untouched by this story. It reads the same endpoint, so the two must not diverge
+    on filters: the select deliberately fetches unfiltered and narrows per house in memory.
+  - Context: the screen is `src/screens/AdminCollections.jsx`, its pure half is
+    `src/screens/adminCatalogue.js` (now serving all three catalogue screens), and the read models
+    behind it are `listAdminCollections` / `getAdminCollection` in the API's
+    `src/catalogue/admin-brands.js`.
+- **Needs human verification:** **the new screen, in a browser — the whole contract is visual and
+  there is no e2e harness or `dev-browser` on this machine.** Specifically: (1) Houses → a house
+  row's "Collections" link lands on `/admin/collections` with that house selected in the filter, and
+  the back button returns to Houses; (2) clicking a second house's link while already on Collections
+  changes the filter (this is the bug `useState` would have had); (3) Delete on a collection holding
+  products keeps the dialog open, names the count, and offers **Archive instead** — and the dialog
+  title reads "Cappuccino (Pierre Frey)" rather than a bare name; (4) with the filter on "All
+  houses", two same-named collections from different houses are distinguishable in the list, in the
+  dialog and in the toast; (5) create a collection whose name matches one that already exists under
+  a DIFFERENT house — it must succeed (the slug is per-house), while the same name under the same
+  house is a 409; (6) the Catalogue tab strip shows four tabs and the SideNav stays lit on
+  Collections. Carried forward from US-001..009: a real cross-origin DELETE preflight from the CRM at
+  :5273, which `app.inject()` cannot prove.
+---
+
+## 2026-08-06T04:35:00Z - W2-US-011 - AdminShipping screen
+
+- **Implemented.** `/admin/shipping` (Orders → Freight rates) is a new live screen over the four
+  routes US-007 added: the tier list, a create form, a per-row rate box with Save, and Delete
+  through `useCrudScreen`. Nothing in the CRM edited `shipping_rates` before this — the tiers were
+  seeded once and could only be changed by the bulk `PUT`, i.e. by hand with curl, which is what the
+  story means by "nothing edits them today". The API half needed no change.
+- Repos and files changed: `atelier-crm` only —
+  `src/screens/adminShipping.js` (new, the pure half: `SHIPPING_LIST_LIMIT`, `formatQty`,
+  `describeShippingRate`, `annotateTiers`, `zonesOf`, `ratePatch`, `tierProblem`),
+  `src/screens/adminShipping.test.js` (new, 28 tests),
+  `src/screens/AdminShipping.jsx` (new, 279 lines),
+  `src/App.jsx` (+1 route, +1 import), `src/components/sectionTabs.jsx` (+1 Orders tab),
+  `src/components/layout.jsx` (Orders nav `match` gains `/admin/shipping`),
+  `CLAUDE.md` (`## CRUD completion`). `atelier-api` carries the bookkeeping only —
+  `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm test` -> 0 (34 files, 447 tests passed; 419 before), `npm run build` -> 0. The API
+  gates were not run: no API source file was touched, and the story's own criteria name the CRM pair
+  — the same posture US-009 and US-010 took.
+- **The screen is where it is because a zone is an order-level charge, not a catalogue property.**
+  Freight rates went into the Orders tab strip beside Web orders (`ordersTabs` gains a fourth tab,
+  and the SideNav's Orders `match` gains the route) rather than becoming a thirteenth top-level nav
+  item: the tiers price the shipping line on a storefront checkout, which is precisely what the tab
+  next to it lists. That also follows the repo's existing grouping rule — a live writable tab sits
+  beside the screens it complements, as Supplier rates does under Price Lists.
+- **Only the rate is an input, and that is the API's identity-key rule made visible.**
+  `(zone, threshold_qty)` is what `getShippingQuote` resolves against and what the seed upserts on,
+  so moving either is a delete plus a create; `PATCH` accepts `rate_cents` alone. The row therefore
+  renders the zone and the floor as text and offers one box. `ratePatch(rate, text)` is the whole
+  rule: an unparseable amount is an error, an **empty box is an error rather than a clear** (the
+  column is NOT NULL and the PATCH names `rate_cents` `required`, so a blank would be a 400 that
+  says nothing useful), an unchanged figure sends no PATCH at all, and 0 is a legitimate rate.
+- **`annotateTiers` exists because a tier's floor is not the band it covers.** `getShippingQuote`
+  takes the highest floor `<= qty` and **falls back to the lowest tier** when the quantity is under
+  every floor, so a zone whose lowest floor is 5 still quotes that tier for a single item. The lowest
+  tier is therefore labelled by its ceiling alone ("under 20 items"), the top one is open-ended
+  ("20 items or more"), a middle one is bounded at both ends, and a zone with one tier reads "any
+  quantity". Getting this wrong would print a band with a gap beneath it that cannot occur.
+- **The last-tier 409 is surfaced twice: before the attempt and after it.** After — the dialog stays
+  open and renders the API's own sentence ("\"Rural\" would be left with no shipping tiers, which
+  stops checkout for that zone. Add a replacement tier first, or edit this one."), with `blockers: []`
+  so there are no count lines and no "Archive instead", because the entity is not archivable. Before
+  — `annotateTiers` marks a zone's only tier `sole` and the row prints "the zone's only tier" in
+  clay. That is derived from the list already fetched, so it is not the pre-flight GET the kit
+  forbids; it is the same job `product_count` does on AdminCollections, done for free.
+- **What the 28 tests assert:** every band case (lowest / middle / top / sole) and that each zone is
+  banded against its own ladder rather than the flat list the API returns; that `annotateTiers`
+  leaves its input untouched; that two zones' tiers at the same floor get different names, which is
+  why `describeShippingRate` carries the zone; `formatQty` dropping pg's `'20.00'` tail while keeping
+  a real fraction and never printing NaN; `ratePatch` for each of change / no-change / blank /
+  non-money / zero / pg's string form; `tierProblem` catching a negative floor before the API's
+  schema phrases it as `body/threshold_qty must be >= 0`; `pageCount(30, SHIPPING_LIST_LIMIT) === 1`;
+  and the source scan — kit delete flow present, none of the flow's internals present, no paginator,
+  no archive path, and the create/patch call shapes actually in the file.
+- **Learnings:**
+  - Patterns: a non-archivable entity's screen supplies no `archive` option (and the resulting
+    Cancel-only dialog is correct, not the bug US-009 warned about); a warning derived from
+    already-loaded rows is not the forbidden pre-flight; a negative source scan must target the
+    token a screen could only have by doing the thing, never the English word. All three promoted to
+    `## Codebase Patterns` above.
+  - Gotcha: `GET /admin/shipping-rates` declares **no querystring schema at all**, so
+    `useAdminList`'s `page`/`limit` are neither honoured nor rejected — they are simply ignored by
+    Fastify. That is why `SHIPPING_LIST_LIMIT` (500) exists: the same unpaged-endpoint rule
+    `CATALOGUE_LIST_LIMIT` carries, for the same reason (`totalPages` must stay 1 over a list whose
+    second page could never be fetched).
+  - Gotcha: the per-row rate boxes are re-seeded from `crud.list.rows` in an effect, which means a
+    reload discards a half-typed edit in any *other* row. Deliberate and the same choice AdminStock
+    makes — the alternative is showing a stale figure over a saved one — but it is why the effect
+    must key on the rows array (`useAdminList` holds it in state, so its identity is stable between
+    renders and the effect does not loop).
+  - Gotcha: a duplicate `(zone, threshold_qty)` is **not** pre-checked here even though the whole
+    list is in memory and the check would be trivial. The API's 409 already names the tier to edit
+    instead, and a check in the screen would race the insert — the same rule the API applies to its
+    own 23505 handling.
+  - Gotcha: `bodyFrom`'s `required` test is `value == null || value === ''`, so `0` passes. That is
+    load-bearing twice over here: a zone's first tier must be at floor 0, and free freight is a real
+    rate. A `required` implemented as falsiness would have rejected both.
+  - Context: the screen is `src/screens/AdminShipping.jsx`, its pure half
+    `src/screens/adminShipping.js` (beside `adminCatalogue.js`/`clientAccounts.js`), and the routes
+    behind it are `src/routes/shipping.js` + `src/shipping/rates.js` in the API. The 409's wording is
+    `shippingRateGuard` in `src/lifecycle/registry.js` (~line 72).
+- **Needs human verification:** **the new screen, in a browser — the contract is visual and there is
+  no e2e harness or `dev-browser` on this machine.** Specifically: (1) Orders → Freight rates shows
+  four tabs, the SideNav stays lit on Orders, and the tiers render grouped-looking (zone, band, floor,
+  rate) with the seeded three zones; (2) edit a rate to a new figure and confirm
+  `GET /shipping/quote?zone=&qty=` follows it — the rate typed in **dollars** must reach the API as
+  whole cents, which is the one arithmetic error this screen could make silently; (3) Delete a
+  non-last tier: gone, toast names the zone; (4) Delete a zone's **last** tier: the dialog stays open,
+  reads the guard's sentence, and shows **Cancel only** — no "Archive instead", because a freight
+  tier cannot be archived; (5) create a tier at a floor that already exists in that zone — a 409
+  naming the existing tier, inline, with the form still filled; (6) create a tier with a brand-new
+  zone name and confirm the zone starts quoting (and that the datalist then offers it). Carried
+  forward from US-001..010: a real cross-origin DELETE preflight from the CRM at :5273, which
+  `app.inject()` cannot prove — this screen is the first one to issue a DELETE against a route whose
+  refusal staff will actually see.
+---
+
+## 2026-08-06T17:05:00Z - W2-US-012 - Delete on stock, supplier rates, orders and users screens
+
+- **Implemented.** The last five live list screens move onto W1's kit: `AdminStock`,
+  `AdminPriceListItems`, `AdminOrders`, `ClientAccounts` and `UserManagement` now compose
+  `useCrudScreen` and render the shared `<Pagination />`. Four of them gain a Delete button and the
+  shared `ConfirmDialog`; **Web orders deliberately gains neither**. The four Dynamics mirror screens
+  that carried a copy-pasted paginator (`ClientsList`, `PriceLists`, `Reserves`, `SalesOrdersList`)
+  take `pageCount` + `<Pagination />` and keep their read-only fetch. With this story every live list
+  screen in the CRM composes the kit, and no screen anywhere carries its own pager.
+- **The story title says "users screens", plural, and there are two of them.** `ClientAccounts`
+  (`segment=clients`) and `UserManagement` (the superset, `/users`) both list `users` and both now
+  delete. Wiring only the first would have left the self-delete 403 unreachable from the UI:
+  `segment=clients` never returns the signed-in staff account, so `UserManagement` is the only screen
+  where that refusal can occur. Criterion 1's "all four screens" reads as four datasets — stock,
+  supplier rates, orders, users — which is five files.
+- Repos and files changed: `atelier-crm` only —
+  `src/screens/adminLists.js` (new, the pure half: `UNPAGED_LIST_LIMIT`, `RATE_LIST_LIMIT`,
+  `RATE_DELETE_CAVEAT`, four filter builders, `stockDeletePath`, three `describe*`, `needsStockRow`,
+  `withDeleteCaveat`), `src/screens/adminLists.test.js` (new, 42 tests),
+  `src/screens/AdminStock.jsx` (kit + Delete + a restock create panel),
+  `src/screens/AdminPriceListItems.jsx`, `src/screens/AdminOrders.jsx`,
+  `src/screens/ClientAccounts.jsx`, `src/screens/UserManagement.jsx`,
+  `src/screens/clientAccounts.js` + `.test.js` (`clientAccountsQuery` -> `clientAccountsFilters`),
+  `src/screens/ClientsList.jsx`, `PriceLists.jsx`, `Reserves.jsx`, `SalesOrdersList.jsx`
+  (paginator only), `CLAUDE.md` (`## CRUD completion`, plus the one stale line saying hard DELETE
+  exists on the catalogue screens). `atelier-api` carries the bookkeeping only —
+  `ralph/w2-crud/prd.json`, `ralph/w2-crud/progress.txt`, `ralph/w2-crud/PR-BODY.md`,
+  `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+- Gates: `npm test` -> 0 (35 files, 490 tests passed; 447 before), `npm run build` -> 0. The API
+  gates were not run: no API source file was touched and the story's own criteria name the CRM pair
+  — the same posture US-009, US-010 and US-011 took.
+- **The five copy-pasted paginators were not the five screens this story names.** `list.js`'s header
+  said "five screens had grown their own copy"; the five that actually matched
+  `Math.max(1, Math.ceil(total / LIMIT))` were `AdminPriceListItems` plus **four Dynamics mirror
+  screens**, and the mirrors are absent from the MAY-touch list. They are also absent from the
+  MUST-NOT-touch list and from every epic — a grep of epics.md for ClientsList / Reserves /
+  SalesOrders / PriceLists returns nothing — so there is nobody to collide with, and criterion 2
+  ("the five copy-pasted paginators are gone — grep proves it") is what assigns the work. Same
+  judgement US-003 made about `src/routes/contact.js`. The change there is genuinely small: the
+  mirrors keep their hand-rolled fetch (they have no live list to hand to `useAdminList`), and only
+  the arithmetic and the Previous/Next pair were ever duplicated.
+- **`<Pagination />` is rendered on all five kit screens even though four endpoints do not page, and
+  the rendering is identical to the US-009 screens that render none.** It returns null at
+  `totalPages <= 1`, and `UNPAGED_LIST_LIMIT` (1000) keeps `totalPages` at 1 over
+  `/admin/inventory`, `/admin/orders` and `/admin/users` — all three of which answer with the whole
+  list and declare `additionalProperties: false`, so Ajv strips the `page` the hook sends. So there
+  is no user-visible inconsistency with AdminBrands/AdminProducts; the difference is that criterion 1
+  asks for the component and that the day one of those endpoints gains `page`, the screen already
+  has the pager. `/admin/price-list-items` is the CRM's one genuinely paged list and therefore the
+  kit's first real consumer of the component.
+- **Manage stock gained a create, and that is not scope creep — it is what makes the delete
+  reversible.** US-008's own entry flagged it: a colourway whose stock row is deleted vanishes from
+  `GET /admin/inventory` entirely, so shipping Delete alone would make the removal permanent from
+  the CRM's point of view. The "Put a colourway back into stock" panel searches
+  `GET /admin/colourways` (US-006's endpoint, which reports `inventory: null` for exactly those
+  rows) and POSTs `{ colourway_id }`; `unit` is never sent, because the API derives it from the
+  product type and a client-chosen one would silently redenominate the stock.
+- **The price-list `warning` reaches staff, but in the confirmation rather than the toast.**
+  US-003's carried-forward item asked for the API's `warning` in the CRM toast; `useCrudScreen`
+  discards a delete's response body, and the kit is W1's. Rather than re-implement the flow, the
+  screen rewrites the **ask** step's body via `withDeleteCaveat` — so the caveat arrives *before* the
+  deletion, which is the only time it can change a decision. A refusal keeps the API's own sentence.
+- **Web orders composes the kit and never touches `remove`.** The registry has `order` as
+  `deletable: false` (a CASCADE would take the lines, the delete would not release `qty_reserved`,
+  and the row holds the Xero reference and the Stripe session id), so there is no endpoint to wire.
+  The screen takes `list`, `toast` and `mutation` and renders no `<ConfirmDialog>` and no Delete
+  button. Its Archive stays `tone="danger"` — alone among the live screens, and by the same rule
+  rather than as an exception: only the most permanent verb on a row is red, and on an order archive
+  is it.
+- **What the 42 new tests assert:** `pageCount(866, UNPAGED_LIST_LIMIT) === 1` against
+  `pageCount(866, 25) === 35`, and `RATE_LIST_LIMIT` inside the endpoint's `MAX_LIMIT` of 200; each
+  filter builder through `buildListQuery` (an unset filter never becoming `status=` / `role=`, which
+  the enums answer with a list-killing 400); `stockDeletePath` addressing by colourway **with an
+  explicit assertion that the row has no `id`**; `describeRate` telling two suppliers' rows with the
+  same code apart, and `describeAccount` preferring email over name; `needsStockRow` separating "no
+  row" from "a row at zero"; `withDeleteCaveat` rewriting the ask, leaving a refusal untouched and
+  mutating nothing. Then the source scans: all five screens contain `useCrudScreen` and
+  `<Pagination`; the four delete screens contain `remove.ask` and `<ConfirmDialog` and none of
+  `apiDelete`/`attemptDelete`/`describeBlockers`/`deleteDialog`/`role="dialog"`; none of the five
+  keeps `useToast`, `loadError` or `useState('loading')`; AdminOrders has no `remove.ask`, no
+  `<ConfirmDialog` and no rendered `Delete` label, and still has `/archive`; AdminStock has no
+  `/archive` (not archivable) and does have `stockDeletePath`; and all five former paginator screens
+  contain `<Pagination` and neither `Math.ceil(` nor `Previous`.
+- **Learnings:**
+  - Patterns: check the read model's projection before trusting the kit's default delete path; a
+    delete removes the way back to its own row, so the create ships with it; overriding a
+    `remove.dialog` prop after spreading is composition; a dialog name must be unique across the
+    whole list; a control bound to server truth needs no revert; a negative source scan must name
+    the one token that opens the behaviour. All six promoted to `## Codebase Patterns` above.
+  - Gotcha: `clientAccountsQuery` returned a **querystring** and `useAdminList` wants a **filters
+    object**, so it became `clientAccountsFilters` and its seven tests now assert through
+    `buildListQuery`. Any screen-local query builder written before W1 landed has the same shape
+    mismatch; converting it is the conversion.
+  - Gotcha: `useMutation` does not reload on failure, which is correct and was previously papered
+    over. `UserManagement` called `load()` to revert a refused PATCH; with the row owned by the hook
+    the `<select>` reverts by itself, and the extra reload was hiding the fact that the control was
+    already bound to server truth.
+  - Gotcha: the drafts effect on AdminStock must key on `crud.list.rows`, which `useAdminList` holds
+    in state — a stable identity between renders. Keyed on anything rebuilt per render it would
+    loop, and with no jsdom nothing in this repo would catch it.
+  - Gotcha: `readList` falls back to the row count when there is no `meta`, so `crud.list.total` is
+    the right source for every "N shown" counter — including on the three unpaged endpoints, where
+    it equals `rows.length` by construction.
+  - Context: the new pure half is `src/screens/adminLists.js` (beside `adminCatalogue.js`,
+    `adminShipping.js` and `clientAccounts.js`); the kit it composes is `src/admin/useCrudScreen.js`,
+    `useAdminList.js`, `list.js`, `Pagination.jsx`, `ConfirmDialog.jsx` and `deleteFlow.js`. The
+    API routes behind the deletes are `DELETE /admin/inventory/:colourwayId` (US-008),
+    `/admin/price-list-items/:id` (US-003) and `/admin/users/:id` (US-004); `POST /admin/inventory`
+    and `GET /admin/colourways` (US-006) are what the restock panel calls.
+- **Needs human verification:** **all nine touched screens, in a browser — the contract is visual
+  and there is no e2e harness or `dev-browser` on this machine.** Specifically:
+  (1) **Manage stock** — Delete a stock row with `qty_reserved > 0`: the dialog stays open, reads the
+  guard's sentence, and shows **Cancel only** (no "Archive instead" — inventory has no archive).
+  Then Delete an unreserved row, confirm the SKU is still in the catalogue, and use "Add a stock
+  row" to bring it back at 0 in the right unit (metres for a fabric, units for a finished good).
+  (2) **Supplier rates** — the pager is the first real one in the CRM: page through it, check a
+  search resets to page 1, and check that deleting the last row on the last page steps back a page
+  rather than showing an empty table. Delete a rate and read the confirmation: it must say the next
+  import re-creates it, **before** the Delete button is pressed.
+  (3) **Web orders** — there must be no Delete button on any row and no delete in any state; Archive
+  and Restore still work, and Archive is still the red verb there.
+  (4) **Trade accounts / Users & permissions** — Delete a client with an order: the 409 names
+  "orders", "trade applications", "contact enquiries" with their counts and offers Archive instead.
+  On Users & permissions, try to delete **your own** signed-in account: 403, no count lines, Archive
+  instead offered. Also confirm a role change still saves and that a refused one snaps the select
+  back to the saved role.
+  (5) **The four Dynamics mirrors** (Clients, Price lists, Stock/Reserves, Sales orders) — the pager
+  looks and behaves as it did, and disappears when a search narrows to one page.
+  (6) The standing item carried from US-001..011: a **real cross-origin DELETE preflight from the
+  CRM at :5273**, which `app.inject()` cannot prove and which would make every delete in this epic
+  fail while curl passes.
+---

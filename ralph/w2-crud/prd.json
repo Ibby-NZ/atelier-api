@@ -1,0 +1,213 @@
+{
+  "project": "Atelier — August 6th updates — W2 CRUD completion",
+  "branchName": "aug6/w2-crud",
+  "description": "Every dataset the CRM shows gains full create, read, update and delete — including the DELETE endpoints the API has never had, and a standalone Collections screen.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 2)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: W1 merged into august-6th-updates in both repos\nBlocks: W5 (reporting reads these models)",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "DELETE for brand and collection",
+      "description": "As back-office staff, I want to remove a house or collection created in error, so that test rows do not accumulate forever.",
+      "acceptanceCriteria": [
+        "Deleting a brand with products or collections returns 409 naming both counts",
+        "Deleting a collection with products returns 409 — the FK is SET NULL, so without the probe it would silently uncollect them",
+        "An unreferenced row is genuinely deleted and returns 200",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "done 2026-08-06T03:09:33Z"
+    },
+    {
+      "id": "US-002",
+      "title": "DELETE for product and colourway",
+      "description": "As back-office staff, I want to remove a product that was never sold, so that the catalogue reflects reality.",
+      "acceptanceCriteria": [
+        "Order lines, samples and non-zero inventory each block with a named count",
+        "Colourways and zero-quantity inventory cascade as owned children",
+        "The order_lines RESTRICT edge is exercised by a test that proves the 23503 backstop produces the same 409 shape",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": " | done 2026-08-06T03:16:02Z"
+    },
+    {
+      "id": "US-003",
+      "title": "DELETE for price-list item and contact enquiry",
+      "description": "As back-office staff, I want to remove a bad rate row or a spam enquiry.",
+      "acceptanceCriteria": [
+        "Neither has blockers",
+        "The price-list response or docs warn that npm run import:pricing recreates the row, so archive is the durable removal",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": " | done 2026-08-06T03:24:11Z"
+    },
+    {
+      "id": "US-004",
+      "title": "DELETE for user with the self-delete guard",
+      "description": "As an administrator, I want to remove an account that never transacted, so that a mistyped signup is not permanent.",
+      "acceptanceCriteria": [
+        "Orders, trade applications and contact enquiries each block",
+        "Deleting yourself returns 403",
+        "trade_account_users is an access grant and cascades; it does not block",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": " | done 2026-08-06T03:28:42Z"
+    },
+    {
+      "id": "US-005",
+      "title": "Missing admin reads: brand, collection, price-list item by id",
+      "description": "As the CRM, I want to re-read a single row after a write, so that server-generated fields appear without a full list refresh.",
+      "acceptanceCriteria": [
+        "GET /admin/brands/:id returns the brand with its collections and counts",
+        "GET /admin/collections/:id returns the collection with brand name and product count",
+        "GET /admin/price-list-items/:id wires the already-exported getPriceListItem",
+        "Unknown id returns 404",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": " | done 2026-08-06T03:37:07Z"
+    },
+    {
+      "id": "US-006",
+      "title": "Colourway list and detail endpoints",
+      "description": "As back-office staff, I want to browse colourways directly, so that I can find a SKU without opening its product.",
+      "acceptanceCriteria": [
+        "GET /admin/colourways is paginated — this is the largest catalogue table",
+        "Filters: product_id, brand_id, q, include_archived",
+        "GET /admin/colourways/:id exports the currently-private getAdminColourway",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": " | done 2026-08-06T03:45:18Z"
+    },
+    {
+      "id": "US-007",
+      "title": "Shipping-rate CRUD with the last-tier guard",
+      "description": "As back-office staff, I want to manage freight tiers without a redeploy.",
+      "acceptanceCriteria": [
+        "GET /admin/shipping-rates wires the already-exported listShippingRates, with id added",
+        "POST returns 201; 409 on the (zone, threshold_qty) unique constraint",
+        "PATCH accepts rate_cents ONLY — zone and threshold_qty are the identity key",
+        "DELETE of the last tier for a zone returns 409, because an empty zone fails every checkout in it",
+        "The existing bulk PUT is unchanged and its tests still pass",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": " | done 2026-08-06T03:52:12Z"
+    },
+    {
+      "id": "US-008",
+      "title": "Inventory create and delete",
+      "description": "As back-office staff, I want to restore an inventory row that was removed, so that a colourway can sell again.",
+      "acceptanceCriteria": [
+        "POST /admin/inventory derives unit from the colourway product_type via UNIT_BY_PRODUCT_TYPE",
+        "unit is never accepted from the client",
+        "422 unknown colourway; 409 when a row already exists",
+        "DELETE is refused with 409 when qty_reserved > 0, because the release join would then match nothing forever",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": " | done 2026-08-06T16:01:40Z"
+    },
+    {
+      "id": "US-009",
+      "title": "Delete on the products and houses screens",
+      "description": "As back-office staff, I want a Delete action that explains itself when refused.",
+      "acceptanceCriteria": [
+        "Both screens use useCrudScreen from W1; no bespoke dialog or pagination is added",
+        "A 409 keeps the dialog open and offers Archive instead",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": " | done 2026-08-06T04:13:11Z"
+    },
+    {
+      "id": "US-010",
+      "title": "Standalone AdminCollections screen",
+      "description": "As back-office staff, I want collections managed on their own screen, so that they stop being buried inside houses.",
+      "acceptanceCriteria": [
+        "Route /admin/collections, filterable by brand_id",
+        "COLLECTION_FIELDS moves out of AdminBrands with the panel",
+        "AdminBrands keeps houses only and links each row through to its collections",
+        "A collection slug is unique per brand, never globally — the screen must never assume otherwise",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": " | done 2026-08-06T04:25:04Z"
+    },
+    {
+      "id": "US-011",
+      "title": "AdminShipping screen",
+      "description": "As back-office staff, I want to edit freight tiers in the CRM, because nothing edits them today.",
+      "acceptanceCriteria": [
+        "Create, edit rate, delete a tier",
+        "The last-tier 409 is surfaced as a readable refusal",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": " | done 2026-08-06T04:35:00Z"
+    },
+    {
+      "id": "US-012",
+      "title": "Delete on stock, supplier rates, orders and users screens",
+      "description": "As back-office staff, I want the same delete affordance everywhere.",
+      "acceptanceCriteria": [
+        "All four screens use useCrudScreen and the shared Pagination",
+        "The five copy-pasted paginators are gone — grep proves it",
+        "Orders offer archive only; there is no delete affordance for an order anywhere",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": " | done 2026-08-06T17:05:00Z"
+    }
+  ]
+}

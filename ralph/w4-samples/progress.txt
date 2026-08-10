@@ -1,0 +1,1055 @@
+# Ralph progress log — Atelier — August 6th updates — W4 Samples
+
+## Codebase Patterns
+
+General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
+Story-specific detail belongs in the per-story entries below, not here.
+
+- **The allowed migration glob is `migrations/*samples*`, so every migration this workstream
+  writes must contain the literal string "samples"** — `..._sample-loans.js` does NOT match and
+  would be an out-of-bounds file. Name them `..._samples-loans.js`, `..._samples-orders.js`.
+- **`atelier_w4` was migrated BEFORE it was seeded**, so any migration that seeds by UPDATE matched
+  nothing and its effect is missing from this database while the code is correct. That is how
+  `test/featured-rank.test.js` was already failing on a clean checkout (all `featured_rank` NULL).
+  Repair is to re-run the migration's OWN exported statements against the database
+  (`1786593600000_featured-rank.js` exports `FEATURED_BRANDS`/`brandFeatureSql` for exactly this),
+  never to edit another workstream's test. If a suite fails before you have written a line, prove
+  it is pre-existing by moving your new files aside and re-running — do not assume either way.
+- **`npx vitest run <one file>` is denied at the tool level; `npm test` is the only way to run
+  tests.** Budget for the whole suite (~30 s, 52 files) on every check.
+- **A source scan that bans a token must not ban it in prose too.** Ban the literal column names
+  (`qty_available`, `qty_reserved`) plus the table in a SQL position
+  (`/(?:INTO|FROM|JOIN|UPDATE)\s+inventory\b/i`), so a comment may still explain WHY samples are
+  not inventory. And assert the scanned file list is non-empty — a scan that matches nothing
+  passes every per-file check vacuously.
+- **A concurrency invariant held by a partial unique index is testable without stubbing pg**, and
+  the shape is reusable for any check-then-write here: take TWO clients off the pool, `BEGIN` both,
+  INSERT on the first, start the second INSERT as a PENDING promise (do not await it), sleep ~50 ms
+  so it actually reaches the lock wait, `COMMIT` the first, then await the rejection. Without the
+  sleep the two statements may simply run in sequence — the assertion still passes, but it has
+  stopped testing contention. `client.release()` in a `finally`, and `ROLLBACK` the aborted
+  transaction.
+- **`rethrowConflict` is EXPORTED from `src/catalogue/admin-brands.js` and is the house 23505 -> 409
+  mapper for the whole API.** An unrecognised `error.constraint` degrades the MESSAGE and never the
+  status, so a domain that has no message table yet can already prove its duplicate answers 409.
+- **A prefix cleanup must match every name the suite WRITES, not just the ones it inserts.** A test
+  that renames a fixture (`${PREFIX} Name` → `${PREFIX} Name Ltd`) leaks the row past a
+  hyphen-anchored `${PREFIX}-%` pattern, and a fixture carrying a LITERAL unique value (a uuid, a
+  guid) then 23505s on the next run — so the suite passes exactly once per database and fails for
+  every later iteration on a checkout nobody touched. Anchor the pattern on `${PREFIX}%` (no
+  separator) or make every written name carry the separator. This is why the DATABASE is state a
+  Ralph iteration inherits: a green suite on a fresh database says nothing about the fifth run.
+- **A test suite failing before you have written a line is proved pre-existing by finding its
+  CAUSE, not by re-running it.** Query the fixture rows the failing assertion collides with — a
+  leaked row whose name predates your change settles it in one query, where a bisect by moving
+  files aside costs a 30 s suite run and, for a migration, leaves `pgmigrations` naming a file that
+  is no longer on disk. `psql` is denied at the tool level; `node -e` with `require('dotenv')` +
+  `require('pg')` against `process.env.DATABASE_URL` is the way to look at `atelier_w4`.
+- **A SQL comparison against a NULLABLE column yields NULL, not false, and pg hands that back as
+  JS `null`** — so a derived boolean in a projection must be `COALESCE(<comparison>, false)` or a
+  caller that wrote `x.overdue === false` silently never matches. The same NULL then makes
+  `WHERE NOT <expr>` drop the row instead of keeping it, so the filter and the projection must use
+  the ONE expression constant, not two spellings of it.
+- **A list whose filter refers to a JOINED table forces the count query to share the FROM clause,
+  and that is only safe while no join can multiply a row.** A UNIQUE column is the usual licence
+  (`inventory.colourway_id`); a PARTIAL unique index is an equally good one where the join carries
+  its predicate (`sample_loans_open_unique` + `ON ... AND returned_at IS NULL` is at most one row
+  per sample). State which index licenses it in a comment — a later join added without one inflates
+  `meta.total` while every row still looks correct.
+- **"Derived at read time, never stored" is only proved by a test that changes the INPUT and
+  re-reads.** Reading once and asserting the value passes against a stored column too. Move the
+  dependency (the due date, the clock), read again, assert the derived value flipped AND that the
+  parent row's `updated_at` did not — that pair is what a stored flag cannot satisfy.
+- **A ROUTE story here ships nothing until `src/app.js` registers it.** There is no plugin
+  auto-loader: every route module is an explicit `api.register(<module>, { pool })` inside
+  `buildApp`. Standing up a bare Fastify instance in the test instead does not rescue an
+  unregistered module — the route needs `app.guards.requireRole('backoffice')` and `guards` is
+  decorated onto the instance by `buildApp` (`src/app.js:60`), so a hand-rolled app proves the
+  handlers work and proves nothing about the authorisation every other `/admin/*` route carries.
+  *(Both `src/app.js` and `src/lifecycle/registry.js` are now on this workstream's allowed list,
+  additive only. `adminSampleRoutes` is registered as of W4-US-005 — a further samples route
+  belongs in that existing plugin, so no second registration is needed.)* The first assertion in
+  `test/samples-routes.test.js` is a plain 200 on `GET /admin/samples`: it asserts the
+  REGISTRATION, ahead of anything about behaviour, which is the cheap guard against this failure.
+- **`deleteOrExplain` 500s on a registry name that does not exist** — `requireEntity` throws a
+  plain Error rather than answering 404, deliberately, so an `:entity` wired from a URL fails
+  loudly. `sample` is registered as of W4-US-005 (probe `sample_loans`, `archivable: true`);
+  `sample order` and `sample loan` are NOT, and US-007 owes the first of those. Two probes the
+  delete policy calls for are still missing and belong to no story in this PRD: a `samples` probe
+  on the existing `product` and `colourway` entries, so deleting a design sees the samples cut
+  from it. Do not add those silently — they change another workstream's delete route.
+- **`src/seed/legacy-import.js`'s `LEGACY_TABLES` is the canonical declaration of what every
+  `legacy_*` table holds**, so "no legacy table gained a column" is a real assertion: compare
+  `information_schema.columns` against the map plus `imported_at`. One pre-existing exception —
+  `legacy_sales_orders.owning_business_unit` is staged by the migration and never imported.
+- **A block must name WHICH out-of-bounds file it needs, not just that it is blocked.** The two
+  walls here are independent: `src/app.js` (a route is unreachable without a registration) and
+  `src/lifecycle/registry.js` (a DELETE has nothing to hang its probe on). US-006 needs only the
+  first, US-005 and US-007 need both — so one of the three is materially cheaper to unblock, and a
+  human reading "blocked, same as the others" cannot see that. State the file, and state which
+  acceptance criteria survive without it: naming the ONE criterion of US-006 that is in bounds
+  (`withSampleTxn` itself) is what stops the next iteration re-deriving the whole analysis.
+- **git may be denied at the tool level for a WHOLE iteration — `status`, `log`, `add` and `commit`
+  alike — and that is not the same as the loop's push/rebase ban.** When it happens, working-tree
+  state cannot be queried and the iteration's own bookkeeping cannot be committed: the files land
+  on disk UNCOMMITTED and the next iteration inherits a dirty tree it did not create. Check the
+  bottom of this log before assuming a dirty tree is your own half-done work. Two consequences
+  worth planning for: find a block BEFORE writing any source, so Step 6's "revert partial code" has
+  nothing to revert and needs no `git checkout --` you may not be able to run; and if git IS
+  available, commit the bookkeeping for any uncommitted entry you find here alongside your own.
+  To look at `atelier_w4`, `node -e` with `require('dotenv')` + `require('pg')` against
+  `process.env.DATABASE_URL` remains the way in (`psql` is denied too).
+- **"Never a pre-check" is a claim about the SQL, not about the answer, so a status-code test
+  cannot prove it.** A read-then-write implementation returns the same 409 as the correct one on
+  every uncontended request, and the concurrency test passes too if the pre-check happens to sit
+  inside a transaction holding the row locked. Drive the module against the four-line recording
+  stub pool (`{ connect, query }` returning `{ rows: [{ id: 1 }], rowCount: 1 }`) and assert that
+  **no statement before the deciding write names the table at all** — `statements.slice(0,
+  writeIndex).filter((sql) => /sample_loans/i.test(sql))` is empty. The same stub proves the
+  transaction shape (BEGIN / `FOR UPDATE` / … / COMMIT, and `not.toMatch(/FOR NO KEY UPDATE/)`) and
+  is the ONLY way to reach a failure AFTER the first write, which is the window a two-statement
+  handler outside a transaction leaves open: make the stub throw on the second write and assert
+  `ROLLBACK` was issued and `COMMIT` was not.
+- **A 409 whose evidence is a row COUNT needs no pre-check either.** "Nothing was out to check in"
+  is `UPDATE … WHERE <predicate> RETURNING`/`rowCount === 0`, not `SELECT` then `UPDATE`: the write
+  answers the question it is asked. It is only safe while the transaction already holds the parent
+  locked `FOR UPDATE` — that is what stops a concurrent movement landing between the two
+  statements — so the lock and the rowCount are one design, not two.
+- **`FOR UPDATE` and not `FOR NO KEY UPDATE` whenever the transaction's own child INSERT
+  references the locked row.** Inserting a row that points at the parent takes `FOR KEY SHARE` on
+  it, and `FOR KEY SHARE` conflicts with `FOR UPDATE` and with nothing weaker — so the weaker mode
+  leaves two movements on one parent running side by side. Same rule `src/lifecycle/delete.js`
+  already states for check-then-delete; it applies identically to check-then-insert.
+- **A POST whose body is genuinely optional must type it `['object', 'null']`.** Fastify hands a
+  bodyless POST to the validator as null, so a plain `type: 'object'` body schema 400s the most
+  ordinary call such a route receives — and the handler then needs `request.body ?? {}`. Routes
+  with no body schema at all (archive/restore) never hit this, which is why it does not show up
+  until the first optional-body verb.
+- **Fastify's bundled Ajv has no `format` keywords, timestamps included.** `date_effective` uses an
+  explicit `YYYY-MM-DD` pattern for this reason (`src/routes/admin-price-lists.js:66`) and a
+  timestamptz needs the same treatment. A pattern can only police the SHAPE — only Postgres knows
+  the calendar — so `2026-02-31` passes it and arrives as a 22007/22008, which the domain module
+  must map to a 422 or it surfaces as a 500.
+- **The allowed-file list is data, not a constant — re-read `ralph/w4-samples/CLAUDE.md` every
+  iteration before concluding a story is blocked on ownership.** A human unblocks by editing BOTH
+  `prd.json` (clearing the `BLOCKED:` prefix) and the file list itself, and those two edits can land
+  mid-iteration. `src/app.js` and `src/lifecycle/registry.js` are now MAY-touch for this workstream,
+  **additive only and only for this workstream's own entries** — register your own route plugin
+  without reordering another's, add your own registry entities and leave the rest alone. Three
+  stories' worth of blocks were cleared by that one edit.
+
+- **A state machine that another repo must mirror has to be a LEAF module — and the lifecycle
+  registry forces the same shape for a different reason.** `src/lifecycle/registry.js` is imported
+  by `src/lifecycle/archive.js`, so any domain module calling `setArchived` cannot also be imported
+  BY the registry: registry → domain → archive → registry is a cycle, and the registry validates
+  its entries at import time, so it would run against a half-initialised module. Putting the
+  vocabulary, the transitions and the guard predicate in a pure module that imports nothing
+  (`src/samples/sample-order-states.js`) lets the registry's guard and the SQL module share one
+  copy — and is the same property the CRM needs to import it into a browser bundle. Test the pure
+  module in a `describe` with no `beforeAll` pool at all; that block IS the proof it is portable.
+- **A guard answers "is this row still a record of something"; a probe answers "does anything point
+  at this".** Where no FK points at the table, there is nothing to probe and the delete rule is a
+  guard on the row's own state — which the registry reports with `blockers: []` and the entity's
+  `archivable`, so the CRM's dialog needs no second shape. `refuse(409, …)` is the whole of it.
+- **A concurrency test only discriminates when the two racers make the SAME move.** Racing
+  `requested → ordered` against `requested → cancelled` through a correct lock yields TWO 200s (the
+  loser wakes up in `ordered`, and `ordered → cancelled` is legal), so the test fails against
+  working code and would pass against a broken lock only by accident. Race one move against itself:
+  the loser's second read sees the state it was asked to move to, the self-move is refused, and the
+  assertion `[200, 409]` then means the lock actually serialised. Assert the winner's stamp still
+  stands afterwards — that is what a lost update would have overwritten.
+- **"Nothing changed" is a stronger assertion than the status code, and costs one line.** An
+  illegal transition test that only checks 409 passes against a handler that writes first and
+  refuses afterwards. Read the row before, read it after, `toEqual` the two — every stamp, every
+  column, including `updated_at`.
+- **A story whose deliverable needs a surface NO story names is not automatically blocked — check
+  the allowed-file list against what the surface actually costs.** Three iterations recorded "there
+  is no showroom CRUD anywhere in this PRD" as a wall for US-008. It was not one: `src/samples/**`,
+  `src/routes/admin-samples.js`, `src/lifecycle/registry.js` and `test/samples*.test.js` were
+  already this workstream's, and the whole surface fitted inside them with no `src/app.js` edit at
+  all (a further samples route belongs in the plugin US-005 registered). A block is for a FORBIDDEN
+  path or a product decision; "no story names it" is neither on its own. Name the files the missing
+  work would touch before concluding either way.
+- **"This value comes from the server, never the browser" needs a SOURCE scan as well as a
+  behavioural test, and the behavioural test needs BOTH directions.** One assertion that a
+  long-past due date still reads "not overdue" is passed by today's correct function and by a
+  helper added next month that recomputes; one scan for `Date.now(`/`new Date(`/`Date.parse(`/
+  `getTime(` over the module AND the `.jsx` is what forbids the helper. Assert the scanned sources
+  are non-empty — a scan that read nothing passes every per-file check vacuously — and give the
+  behavioural test its mirror case (a FUTURE due date the API calls overdue), because only a reader
+  of the server's boolean gets both right.
+- **A negative source assertion that is a SUBSTRING of a positive one proves nothing.**
+  `expect(src).toContain('SAMPLE_STATUSES.map')` passes on the strength of
+  `WRITABLE_SAMPLE_STATUSES.map` alone, so a test asserting "the form offers the writable set and
+  the filter the full one" can pass with the filter deleted. Anchor on the surrounding character
+  (`{SAMPLE_STATUSES.map`). The same trap as the prose-ban one, inverted.
+- **The endpoint-quote scan matches router Link targets too, and a navigation literal is not an
+  endpoint call.** `<Link to="/admin/samples">` carries exactly the token the scan hunts for, so a
+  screen that links to a sibling screen fails a scan expecting the empty set. Expect the Link's
+  path IN the set and pin the actual traffic separately: assert every `apiFetch`/`apiSend` in the
+  file takes an IMPORTED path builder (`apiFetch(byBarcodePath(`), which is the stronger claim
+  anyway — the quoted-literal scan then only polices strays.
+- **A CRM source scan for endpoints must anchor on the opening QUOTE.** `/\/admin\/[a-z-]+/`
+  matches every relative kit import (`'../admin/drafts.js'`, `'../admin/parts.jsx'`) and reports
+  `/admin/drafts` as an endpoint the screen calls. `/['"`]\/admin\/[a-z-]+/` then `.slice(1)` is
+  the shape. And it still matches a path written inside BACKTICKS in a comment — the "do not ban a
+  token in prose" rule in a new place: keep example paths out of backticks in a file a scan reads.
+
+---
+
+## Story log
+
+Appended by each iteration, newest last. Never rewrite an existing entry.
+
+## 2026-08-06T06:19:01Z - W4-US-001 - Migration: showrooms and samples
+
+- Created the `showrooms` and `samples` tables, the first two of the samples domain. `samples`
+  carries `barcode` (NOT NULL, unique — the scanner's key, so `by-barcode` can give one
+  deterministic answer), `label`, `colourway_id` (RESTRICT, nullable), `supplier_id` (SET NULL),
+  `showroom_id` (SET NULL), `sample_type`, `location`, `status` (CHECK
+  `in_library|out|missing|retired`, default `in_library`), `notes`, timestamps and `archived_at`.
+  `showrooms` is a plain address-book row (name unique, address, city, three contact fields,
+  notes) plus timestamps and `archived_at`.
+- Repos and files changed: atelier-api only —
+  `migrations/1786680000000_samples-register.js` (new), `test/samples-schema.test.js` (new, 15
+  tests), plus the bookkeeping (`prd.json`, `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `npm run migrate` twice -> second run "No migrations to run!";
+  `( cd atelier-api && npm run lint && npm test )` -> 0 (52 files, 1179 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the four entries added to
+    `## Codebase Patterns` above — the `*samples*` glob trap, the unseeded-`atelier_w4` cause of
+    the pre-existing `featured-rank` failure, the prose-safe source-scan shape, and `LEGACY_TABLES`
+    as the baseline for "no legacy table gained a column".
+  - Gotchas:
+    - Fixture cleanup order is `samples` -> `brands` -> `suppliers` -> `showrooms`.
+      `samples.colourway_id` is RESTRICT, so it stops a brand cascade dead and the *cleanup itself*
+      raises 23503 in the next test's `beforeEach` — the same trap `order_lines.colourway_id`
+      already sets in `test/admin-catalogue.test.js`.
+    - `status` and `archived_at` both exist and are NOT redundant: `retired` is a statement about
+      the physical object, archiving is the reversible removal of the ROW that every live CRM list
+      offers. US-004's `include_archived` filter needs the column.
+    - An inline `check:` in `createTable` is emitted unnamed and Postgres auto-names it
+      `samples_status_check` — that is the name a `rejects.toThrow(...)` anchors on, and the name
+      US-005's `rethrowConflict` will key `samples_barcode_key` on.
+    - `sample_type` is deliberately free text: nobody has ratified a vocabulary (hanger, cutting,
+      book, memo) and a guessed CHECK would refuse the office's own word for it.
+  - Context:
+    - The domain spec is `_bmad-output/planning-artifacts/architecture.md` § *Samples domain*, and
+      the delete policy table above it already lists `sample` / `sample order` / `sample loan`.
+    - **`src/lifecycle/registry.js` is NOT in this workstream's allowed files**, yet the delete
+      policy wants a `samples` probe on the `product` and `colourway` entries, and US-005's "DELETE
+      is blocked by sample_loans" needs a `sample` registry entry. Whoever reaches US-005 must
+      decide: either the allowed-file list is widened for `src/lifecycle/registry.js`, or the
+      story is BLOCKED on that ownership conflict (atelier-api's CLAUDE.md says E4 adds the probe;
+      the loop's file list says E2 owns lifecycle). Do not silently edit the registry.
+- **Needs human verification:** none — schema only, no screen and no route. A human should confirm
+  the `showrooms` column set is what the office actually records for a stockist (address, city,
+  contact name/email/phone, notes) before US-008 draws the form on it.
+---
+
+## 2026-08-06T18:26:00Z - W4-US-002 - Migration: sample_loans with the one-open-loan index
+
+- Created `sample_loans`: `sample_id` (NOT NULL, RESTRICT), `trade_account_id` (nullable, SET
+  NULL), `holder_name` (NOT NULL, the snapshot), `out_at` (NOT NULL, default now()),
+  `due_back_at`, `returned_at`, `notes`, `created_at`, `updated_at`. Four indexes:
+  `sample_loans_open_unique` (UNIQUE on `sample_id` WHERE `returned_at IS NULL` — the invariant),
+  a plain `sample_id` index for history reads and the per-sample loan count,
+  a `trade_account_id` index, and `sample_loans_overdue_idx` (`due_back_at` WHERE
+  `returned_at IS NULL`) so US-004 can derive overdue cheaply.
+- Repos and files changed: atelier-api only —
+  `migrations/1786766400000_samples-loans.js` (new), `test/samples-loans.test.js` (new, 16 tests),
+  plus the bookkeeping (`prd.json`, `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `npm run migrate` twice -> second run "No migrations to run!";
+  `( cd atelier-api && npm run lint && npm test )` -> 0 (53 files, 1195 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the two entries added to
+    `## Codebase Patterns` above — the two-client recipe for testing a partial unique index under
+    real contention, and `rethrowConflict` being exported from `src/catalogue/admin-brands.js` as
+    the API-wide 23505 -> 409 mapper whose unknown-constraint path degrades the message only.
+  - Gotchas:
+    - **`trade_account_id` is NOT in architecture.md's column list and was still the right call.**
+      AC #2 says "holder_name is a snapshot, so history survives a trade account being unlinked or
+      renamed" — a sentence with no meaning unless a loan can reference a trade account, and an
+      AC that cannot be tested without one. It is nullable + SET NULL: most borrowers (architects,
+      stylists, Atelier's own staff) are not trade clients at all, and the link is CURRENT state
+      while the loan is history. `holder_name` is never joined for.
+    - **`sample_loans` has NO `archived_at`, unlike every other live table here.** A loan is
+      append-only history and no CRM list may offer to remove one. Do not add it in US-004 "for
+      consistency" — `returned_at IS NULL` is the whole of "still out". A test asserts no column
+      matches `/overdue|is_out|archived_at/`, which also nails down "overdue is derived, never
+      stored".
+    - **The unique index MUST stay partial.** A plain unique on `sample_id` would allow one loan
+      per sample for all time; the `WHERE returned_at IS NULL` predicate is what lets a returned
+      sample go out again. Two tests cover the two halves separately.
+    - Fixture cleanup order gained a step ahead of US-001's: `sample_loans` -> `samples` ->
+      `brands` -> `suppliers` -> `showrooms`, plus `trade_accounts` (by
+      `legacy_customer_name LIKE`). `sample_loans.sample_id` is RESTRICT, so a `samples` delete
+      23503s inside cleanup while a loan points at it.
+    - `trade_accounts` needs `legacy_account_guid` (uuid, NOT NULL, unique) and
+      `legacy_customer_name` (NOT NULL) — a fixture must supply a literal uuid.
+    - The source scan in `test/samples-schema.test.js` globs `migrations/*samples*`, so this
+      migration is scanned too: its header may say "samples are not stock" but must not put the
+      inventory table in a SQL position or name the two quantity columns.
+  - Context:
+    - The spec is `_bmad-output/planning-artifacts/architecture.md` § *Samples domain* (the loan
+      register bullet plus the four invariants) and the delete-policy table above it, which lists
+      `sample` -> blocked by sample loans and `sample loan` -> 409 while still open.
+    - US-006 owns `withSampleTxn` and the check-out/check-in verb routes; its "already out" 409 is
+      the caught 23505 on `sample_loans_open_unique` this migration creates, and its message
+      belongs in a `CONFLICT_MESSAGES`-style table keyed on that constraint name.
+    - **`src/lifecycle/registry.js` is still NOT in this workstream's allowed files** and now has
+      two probes owing to it, not one: `sample` -> `sample_loans` and the open-loan guard on
+      `sample loan`. Same ownership question US-001 flagged (E2 owns lifecycle); do not edit the
+      registry silently.
+- **Needs human verification:** none — schema only, no screen and no route. A human should confirm
+  that recording a borrower as a free-text `holder_name` plus an optional trade-account link is
+  what the counter actually does, before US-006 draws the check-out form on it.
+---
+
+## 2026-08-06T18:34:00Z - W4-US-003 - Migration: sample_orders
+
+- Created `sample_orders`, the samples domain's SECOND and independent lifecycle: `showroom_id`
+  (NOT NULL, RESTRICT), `colourway_id` (nullable, RESTRICT), `supplier_id` (nullable, SET NULL),
+  `label`, `status` (CHECK `requested|ordered|in_transit|received|displayed|cancelled`, default
+  `requested`), one timestamp column per transition (`requested_at` NOT NULL default now(), plus
+  `ordered_at`/`in_transit_at`/`received_at`/`displayed_at`/`cancelled_at`, all nullable), `notes`,
+  timestamps and `archived_at`. Five indexes: the three FKs, `status`, and a partial
+  `sample_orders_archived_at_live_idx` on the live rows.
+- Also fixed a latent fixture leak in `test/samples-loans.test.js` (its `trade_accounts` cleanup
+  pattern could not match the row its own rename test creates), which is why the suite failed on a
+  checkout nobody had touched. See the two new `## Codebase Patterns` entries.
+- Repos and files changed: atelier-api only —
+  `migrations/1786852800000_samples-orders.js` (new), `test/samples-orders.test.js` (new, 15
+  tests), `test/samples-loans.test.js` (one-line cleanup pattern fix), plus the bookkeeping
+  (`prd.json`, `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `npm run migrate` twice -> second run "No migrations to run!";
+  `( cd atelier-api && npm run lint && npm test )` -> 0 (54 files, 1212 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the two entries added to
+    `## Codebase Patterns` above — a prefix cleanup must match every name a suite WRITES (a rename
+    that drops the separator leaks a row carrying a literal uuid, so the suite passes once per
+    database), and a pre-existing failure is proved by finding its cause with a `node -e` query
+    rather than by moving files aside (`psql` is denied; moving an APPLIED migration aside also
+    leaves `pgmigrations` naming a file that is gone).
+  - Gotchas:
+    - **`showroom_id` is NOT NULL + RESTRICT here while `samples.showroom_id` is SET NULL, and the
+      asymmetry is deliberate.** A sample with no home is still a sample on a shelf; an ORDER with
+      no destination is a request nobody can fulfil. Consequence for the fixtures: every sample
+      order hangs off a showroom, so a suite can clean the whole table with
+      `WHERE showroom_id IN (SELECT id FROM showrooms WHERE name LIKE $1)` and needs no prefix
+      column of its own.
+    - **Cleanup order gains a THIRD shape**: `sample_orders` must go before `showrooms` (RESTRICT)
+      AND before `brands` (its `colourway_id` is RESTRICT, so it stops a brand cascade dead exactly
+      as `samples.colourway_id` does). A suite touching both lifecycles deletes
+      `sample_orders` + `sample_loans` -> `samples` -> `brands` -> `suppliers` -> `showrooms`.
+    - **The six transition stamps are the table's reason to exist and must not be collapsed.** One
+      `status_changed_at` is overwritten by the next move; `status` answers "where is it now" and
+      the stamps answer "when did it move", which is what a showroom chasing a house asks. A NULL
+      stamp is readable as "has not been there" without consulting `status`, so US-004/US-007 need
+      no CASE over the status to date a transition.
+    - **The state MACHINE is not in the schema and must not be added there.** A CHECK sees one row
+      at a time and cannot see which state a row is moving FROM, so it can hold the vocabulary and
+      never the transitions — `ALLOWED_TRANSITIONS` is US-007's, in a module the CRM mirrors. There
+      is deliberately also no CHECK tying `status = 'cancelled'` to `cancelled_at IS NOT NULL`: a
+      back-dated correction must stay possible.
+    - **There is no quantity column, deliberately.** The row is one requested item; nothing derives
+      a figure from it, and the first number on a samples table is what a later reader mistakes for
+      stock. If the office needs "three hangers" that is three rows or a note, until somebody
+      ratifies a line grain.
+    - `archived_at` IS here (unlike `sample_loans`, which is append-only history): US-007 refuses a
+      hard delete of anything past `requested`/`cancelled`, so archiving is the only way a finished
+      order leaves the CRM list.
+  - Context:
+    - The spec is `_bmad-output/planning-artifacts/architecture.md` § *Samples domain* ("Showroom
+      stocking — `showrooms` + `sample_orders` advancing requested -> ordered -> in_transit ->
+      received -> displayed | cancelled") and the delete-policy table above it, whose `sample order`
+      row is "409 unless requested/cancelled".
+    - The inline `check:` is emitted unnamed and Postgres auto-names it `sample_orders_status_check`
+      — the name the `rejects.toThrow(...)` anchors on and the name US-007's `rethrowConflict`-style
+      mapping would key on.
+    - **`src/lifecycle/registry.js` is STILL not in this workstream's allowed files** and now has
+      three probes owing to it, not two: `sample` -> `sample_loans`, the open-loan guard on
+      `sample loan`, and `sample order` -> the requested/cancelled guard (plus a `samples` probe on
+      `product`/`colourway`). Same ownership question US-001 and US-002 flagged (E2 owns lifecycle);
+      do not edit the registry silently.
+- **Needs human verification:** none — schema only, no screen and no route. A human should confirm
+  that a sample order is one requested item with no quantity, and that `displayed` is the office's
+  own word for "it is on the shelf in the showroom", before US-007 draws the lifecycle on it.
+---
+
+## 2026-08-06T18:44:00Z - W4-US-004 - Sample read models, filters and overdue derivation
+
+- Added `src/samples/admin-samples.js`, the back-office read layer for the register: `listSamples`
+  (filters `q`, `status`, `showroom_id`, `supplier_id`, `overdue`, `include_archived`; paginated
+  `{ samples, total }`, the route builds the meta envelope), `getSample`, `getSampleByBarcode`
+  (exact match on the unique column, so the scanner's answer is one row or none) and
+  `listSampleLoans`. Every row carries its parents by NAME (colourway, design, house, supplier,
+  showroom), its open loan, a lifetime `loan_count` and a freshly derived `overdue`. Also exports
+  `SAMPLE_STATUSES` so US-005's route can spend the vocabulary as a schema enum instead of keeping
+  its own copy.
+- Overdue is one expression constant, `COALESCE(ol.due_back_at < now(), false)`, used by both the
+  projection and the filter; the `returned_at IS NULL` half rides on the open-loan join predicate.
+  Nothing is stored and no column exists to store it in.
+- Repos and files changed: atelier-api only — `src/samples/admin-samples.js` (new),
+  `test/samples-read-models.test.js` (new, 25 tests), plus the bookkeeping (`prd.json`,
+  `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (55 files, 1237 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the three entries added to
+    `## Codebase Patterns` above — a nullable comparison derives NULL rather than false (so one
+    COALESCE'd expression constant must serve the projection AND the filter), a count query sharing
+    a FROM needs every join to be non-multiplying (a PARTIAL unique index licenses one), and
+    "derived at read time" is only proved by moving the input and re-reading.
+  - Gotchas:
+    - **The open loan is a plain `LEFT JOIN`, not a lateral, and that is deliberate.**
+      `sample_loans_open_unique` guarantees at most one open loan per sample, which is exactly what
+      lets the count query reuse `SAMPLE_FROM` — and it must reuse it, because the `overdue` filter
+      names `ol`. A lateral with `LIMIT 1` would work and would hide the fact that the invariant is
+      what makes it correct.
+    - **`loan_count` is a correlated scalar subquery in the projection, never an aggregate join.**
+      An aggregate join would need a GROUP BY over every selected column and would put the count
+      into the count query, where it is dead weight.
+    - **`overdue` is tri-state as a filter**: absent leaves the list alone, `true` is the chase
+      list, `false` is "not late back" (out on time OR on the shelf). `false` is not the same as
+      "on the shelf" and a screen must not treat it as such.
+    - **`q` deliberately does NOT search `holder_name`.** "What has Kedgley got out" is a question
+      about loans, and a loan list is its own read model; folding it in here would make a register
+      search return samples whose own fields match nothing the user typed.
+    - The by-id and by-barcode reads do NOT filter `archived_at` — house rule for every by-id admin
+      read, and for the scanner it is load-bearing: a scanned object exists whatever the CRM list is
+      currently showing.
+    - `status` and `include_archived` answer different questions and both are needed. A `retired`
+      sample is a LIVE row (`archived_at IS NULL`) and appears in the default list; a test asserts
+      exactly that, because collapsing the two is the obvious wrong simplification.
+    - Test fixture cleanup is anchored on `${PREFIX}%` (no separator) per the pattern above, and the
+      order is `sample_loans` -> `samples` -> `brands` -> `suppliers` -> `showrooms`.
+  - Context:
+    - The AC "no sample code path reads or writes inventory" is covered twice now: the static source
+      scan in `test/samples-schema.test.js` already globs `src/samples/**`, and
+      `test/samples-read-models.test.js` adds the runtime counterpart — a recording stub pool
+      (`{ query }` only, four lines) asserting no statement these read models issue names
+      `qty_available`/`qty_reserved` or puts `inventory` in a SQL position.
+    - US-005 owns `src/routes/admin-samples.js`. It should spend `MAX_LIMIT` as the query schema's
+      `maximum` (an over-large limit is a 400 there; the module still clamps because it is also
+      called directly), `SAMPLE_STATUSES` as the `status` enum, and build
+      `{ samples, meta: { total, page, limit } }` from `{ samples, total }` — the shape
+      `src/routes/admin-suppliers.js` already uses.
+    - `getSampleByBarcode` is written and tested here rather than in US-005 because it is a read
+      model; US-005 only has to wire the route and turn null into a 404.
+    - **`src/lifecycle/registry.js` is STILL not in this workstream's allowed files** and still owes
+      three probes (`sample` -> `sample_loans`, the open-loan guard on `sample loan`, the
+      requested/cancelled guard on `sample order`, plus a `samples` probe on `product`/`colourway`).
+      US-005's "DELETE is blocked by sample_loans" is the story that finally collides with it: E2
+      owns `src/lifecycle/`, so that is an ownership question for a human, not a tidy-up. The
+      alternative a reviewer may prefer is that US-005 relies on the RESTRICT FK's 23503 rather than
+      a probe — but the house rule is that the probe is the primary defence and the catch is the
+      backstop, so this needs deciding rather than assuming.
+- **Needs human verification:** none — no route and no screen yet, so nothing is reachable from a
+  browser. A human should confirm the register list's search fields are the ones staff actually
+  type (tag, label, type, shelf location, design name, SKU — deliberately not the borrower) before
+  US-008 draws the filter bar on them.
+---
+
+## 2026-08-06T19:02:00Z - W4-US-005 - BLOCKED - Sample CRUD routes and by-barcode lookup
+
+- Nothing was implemented. The block was found before a line was written and the working tree is
+  clean at `9d06df4 feat(api): [W4-US-004]`. Full detail and the options a human chooses between
+  are in `ralph/w4-samples/BLOCKED.md`.
+- The story needs TWO files this workstream may not touch:
+  1. **`src/app.js`** — nothing registers a sample route, so `src/routes/admin-samples.js` would be
+     unreachable and all three status-code criteria (by-barcode 200/404, POST 409, DELETE 409)
+     would be unassertable.
+  2. **`src/lifecycle/registry.js`** — no `sample` entry, so `deleteOrExplain(pool, 'sample', …)`
+     answers 500 via `requireEntity` and the "DELETE is blocked by sample_loans" criterion has
+     nothing to hang the probe on.
+- No gate was run: there was no code to gate. The evidence is four read-only commands.
+
+  ```
+  $ ls src/routes/ | grep -i sample
+  (no output)
+
+  $ grep -n "routes/" src/app.js
+  7:import { authRoutes } from './routes/auth.js'
+  … 18 route modules, none of them samples …
+  24:import { webhookRoutes } from './routes/webhooks.js'
+  108:    api.register(authRoutes, { pool })
+  … 18 registrations, none of them samples …
+  164:  app.register(webhookRoutes, { pool, stripe, stripeWebhookSecret, mailer })
+
+  $ grep -n "sample" src/lifecycle/registry.js
+  27:// Entities whose tables do not exist yet (samples, sample orders and sample
+
+  $ grep -n "^  [a-z_]*: {" src/lifecycle/registry.js
+  182:  brand: {        195:  collection: {   208:  product: {     235:  colourway: {
+  260:  inventory: {    272:  price_list_item: {              289:  supplier: {
+  307:  user: {         329:  shipping_rate: {                338:  contact_enquiry: {
+  354:  order: {
+  (11 entries, no sample)
+  ```
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the two entries added to
+    `## Codebase Patterns` above — a route story here cannot ship without `src/app.js` because
+    there is no auto-loader AND `guards` is decorated by `buildApp`, and `deleteOrExplain` 500s
+    rather than 404s on an entity the registry has never heard of.
+  - Gotchas:
+    - **US-006 and US-007 are route stories too and hit the `src/app.js` wall identically.** They
+      are NOT marked BLOCKED — the loop's rule is one story per iteration and a human may clear
+      all three with one decision — but an iteration picking US-006 next should check
+      `grep -n "routes/" src/app.js` before writing anything, and block on the same ground if the
+      file list has not been widened. Do not write `src/routes/admin-samples.js` and leave it
+      unregistered to make a story look finished; it ships nothing.
+    - **The 23503 workaround was considered and deliberately refused.**
+      `sample_loans.sample_id` is RESTRICT, so a bare `DELETE FROM samples` really does raise
+      23503 while a loan points at it, and catching that inside `src/samples/` would satisfy the
+      criterion's literal words in-bounds. It is wrong twice over: `atelier-api/CLAUDE.md` states
+      the probe is the primary defence and the catch only the backstop, and the 409 envelope
+      (`{ message, blockers: [{ relation, label, count, capped }], archivable }`) is a shared
+      contract the CRM's `describeBlockers`/`ConfirmDialog` kit consumes — a second, divergent
+      implementation of it in a domain folder is a decision for a human, which is what US-004's
+      entry already said ("this needs deciding rather than assuming").
+    - **`sprint-status.yaml` has a `blocked` value** — line 6 declares
+      `# Values: pending | in_progress | done | blocked`. It does not need a new state inventing.
+  - Context:
+    - The delete policy is `_bmad-output/planning-artifacts/architecture.md` § *Delete policy*:
+      `sample` → blocked by sample loans; `sample order` → 409 unless requested/cancelled;
+      `sample loan` → 409 while still open. All three, plus a `samples` probe on the existing
+      `product` and `colourway` entries, are owed to `src/lifecycle/registry.js`.
+    - The read models US-005 would have wired are already written and tested
+      (`src/samples/admin-samples.js`, W4-US-004): `listSamples`, `getSample`,
+      `getSampleByBarcode` (exact match on the unique column — the route only has to turn null
+      into a 404) and `listSampleLoans`, plus `DEFAULT_PAGE`/`DEFAULT_LIMIT`/`MAX_LIMIT` and
+      `SAMPLE_STATUSES` for the query schema. The route work itself is small; only the two
+      out-of-bounds files stand in the way.
+    - `src/routes/admin-suppliers.js` is the shape to copy when this is unblocked — same
+      `{ suppliers, meta: { total, page, limit } }` envelope built in the route, `MAX_LIMIT` as
+      the schema `maximum`, `rethrowConflict` for the 23505, and `deleteOrExplain`/`replyDelete`
+      with the entity name as a single-quoted literal.
+- **Needs human verification:** none — no code was written and no screen exists. What a human owes
+  is the decision in `BLOCKED.md`, not a browser check.
+---
+
+## 2026-08-06T19:26:00Z - W4-US-006 - BLOCKED - Check-out and check-in verb routes
+
+- Nothing was implemented. The wall was re-checked before a line was written, exactly as the
+  US-005 entry below instructed the next iteration to do, and the file list has NOT been widened.
+  Full detail and the one decision a human owes are in `ralph/w4-samples/BLOCKED.md`.
+- The story needs ONE file this workstream may not touch: **`src/app.js`**. It does NOT need
+  `src/lifecycle/registry.js` — the check-out/check-in pair has no DELETE — so this is the
+  cheapest of the three route stories to unblock, and decision 1 alone clears it.
+- Three of the four acceptance criteria are statements about a ROUTE (both verbs are routes; two
+  distinct 409s), and `architecture.md:191-193` says so normatively: "Check-out and check-in are
+  verb routes, not a status PATCH". Only `withSampleTxn` itself is reachable inside
+  `src/samples/**`, and shipping that alone would leave both 409 criteria unassertable.
+- No gate was run: there was no code to gate. The evidence is two read-only commands.
+
+  ```
+  $ grep -n "routes/" src/app.js
+  7:import { authRoutes } from './routes/auth.js'
+  … 18 route modules, none of them samples …
+  164:  app.register(webhookRoutes, { pool, stripe, stripeWebhookSecret, mailer })
+
+  $ ls src/routes/ | grep -i sample
+  (no output)
+  ```
+
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the entry added to `## Codebase Patterns`
+    above — a blocked route story states WHICH of the two out-of-bounds files it needs, because
+    they are not needed together and a story blocked on one is cheaper to unblock than a story
+    blocked on both.
+  - Gotchas:
+    - **git was denied at the tool level for this ENTIRE iteration** — `status`, `log`, `add` and
+      `commit` all returned "This command requires approval", so **the four bookkeeping files below
+      are written to disk but NOT COMMITTED**. They are `ralph/w4-samples/prd.json`,
+      `ralph/w4-samples/progress.txt`, `ralph/w4-samples/BLOCKED.md` and
+      `_bmad-output/implementation-artifacts/sprint-status.yaml`, and they are the only paths this
+      iteration touched — no source file was written, so a dirty tree here is bookkeeping and
+      nothing else. The next iteration that HAS git should commit them as
+      `chore(api): [W4-US-006] - blocked, needs human input`, either on its own or folded into its
+      own commit, and must not treat them as half-done code to revert.
+    - Corollary: a block found BEFORE implementation is what made that survivable. Had source been
+      written, Step 6's `git checkout -- <files>` would have been unavailable too.
+    - **`sprint-status.yaml` already declares `blocked` (line 6)** — `US-005: blocked` is the
+      precedent to copy, with the `# … — see ralph/w4-samples/BLOCKED.md` trailing comment.
+    - **US-007 is the third route story and needs BOTH files** (`src/app.js` for the routes,
+      `src/lifecycle/registry.js` for its "DELETE is refused unless requested or cancelled"
+      criterion). It is deliberately left unblocked: the loop runs one story per iteration, and an
+      iteration reaching it must re-run the same two-command check first.
+    - **US-008 and US-009 are CRM stories and are NOT blocked by this.**
+      `atelier-crm/src/screens/AdminSamples.jsx`, `AdminShowrooms.jsx`, `AdminSampleOrders.jsx`,
+      `sampleFlow.js`, `SampleScanner.jsx`, `src/App.jsx` (sample routes only) and
+      `sectionTabs.jsx` (samplesTabs only) are all inside this workstream's allowed files. Their
+      gates are `( cd atelier-crm && npm test && npm run build )`, which do not need a running API.
+      An iteration reaching them builds against the endpoint CONTRACT (the shapes recorded under
+      `## Samples` in `atelier-api/CLAUDE.md`), not against a live server — so the loop still has
+      two stories it can finish while the three route stories wait on a human.
+  - Context:
+    - The read models US-006's routes would sit on are already written and tested
+      (`src/samples/admin-samples.js`, W4-US-004). What US-006 itself owes is `withSampleTxn` —
+      mirroring `withOrderTxn` at `src/orders/admin-orders.js:207` (BEGIN, `SELECT … FOR UPDATE`
+      the parent, run `fn(client, row)`, COMMIT, re-read through the read model) — plus the two
+      handlers. `sample_loans_open_unique` is the constraint the "already out" 23505 lands on
+      (`rethrowConflict`, exported from `src/catalogue/admin-brands.js`); "not out" has no
+      constraint behind it and is an ordinary `requireStatus`-style 409 on the row the transaction
+      already holds locked.
+    - `_bmad-output/planning-artifacts/architecture.md` § *Samples domain* lines 191-193 is the
+      normative sentence; `epics.md:102` is the epic row ("Check-out / check-in verb routes through
+      `withSampleTxn`", api).
+- **Needs human verification:** none — no code was written and no screen exists. What a human owes
+  is decision 1 in `BLOCKED.md` (widen the file list to `src/app.js`, or nominate an owner for the
+  registration), which clears US-005, US-006 and US-007 in one move.
+---
+
+
+## 2026-08-06T19:05:00Z - W4-US-005 - Sample CRUD routes and by-barcode lookup
+
+- **The block was cleared by a human mid-iteration and the story shipped.** This iteration opened
+  by re-running the two-command wall check for US-007, found both walls still standing, and started
+  the BLOCKED bookkeeping — at which point `ralph/w4-samples/CLAUDE.md` and `prd.json` were both
+  edited: the allowed-file list gained `src/app.js` and `src/lifecycle/registry.js` (additive only,
+  own entries only), and the `BLOCKED:` prefix was cleared from US-005, US-006 and US-007.
+  `BLOCKED.md` was deleted in the same move. That made US-005 the lowest unblocked story, so the
+  block bookkeeping was reverted and US-005 was implemented.
+- Shipped the register's write layer and its whole route surface:
+  `GET /admin/samples` (the meta envelope over `listSamples`),
+  `GET /admin/samples/by-barcode/:barcode`, `GET|PATCH|DELETE /admin/samples/:id`,
+  `POST /admin/samples`, `POST /admin/samples/:id/archive|restore`. Backoffice-only throughout.
+  Module gained `createSample`, `updateSample`, `setSampleArchived`, `SAMPLE_UPDATE_COLUMNS` and
+  `WRITABLE_SAMPLE_STATUSES`; the registry gained the `sample` entry (probe `sample_loans`,
+  `archivable: true`); `src/app.js` gained one import and one `api.register`.
+- Repos and files changed: atelier-api only — `src/routes/admin-samples.js` (new),
+  `src/samples/admin-samples.js` (writes appended), `src/lifecycle/registry.js` (one entry, added),
+  `src/app.js` (one import + one registration, added), `test/samples-routes.test.js` (new, 55
+  tests), plus the bookkeeping (`prd.json`, `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (56 files, 1292 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the entry added to `## Codebase Patterns`
+    above — the allowed-file list is DATA and must be re-read every iteration, because a human
+    unblocks by editing it and `prd.json` together and both edits can land mid-iteration.
+  - Gotchas:
+    - **`out` is refused by both the create and the PATCH, and that is what keeps US-006
+      meaningful.** It is the one status that ASSERTS an open loan exists, and only check-out can
+      write both tables in the transaction that makes it true; a status PATCH that could say `out`
+      would let a screen mark a sample out with no loan behind it. `WRITABLE_SAMPLE_STATUSES` is
+      DERIVED from `SAMPLE_STATUSES` (filter, not a second literal), so widening the CHECK widens
+      it too and the two cannot drift. The route spends it as a schema enum (400) and the module
+      re-checks it (422), because the module is also called directly. **US-006 must write `status`
+      itself inside `withSampleTxn`** — it cannot go through `updateSample`.
+    - **Fastify validates BEFORE it runs a preHandler**, so a guard test that posts a malformed
+      body asserts 400 and passes without the guard existing. Every payload in the parameterised
+      401/403 sweep is deliberately valid.
+    - `barcode` is editable by PATCH on purpose (a printed tag can be mistyped and nothing
+      references it — `sample_loans.sample_id` points at the row id), and a collision is the same
+      409 the create answers with.
+    - Every write returns through `getSample`, so create/patch/archive/read all hand the CRM ONE
+      shape (parents by name, open loan, loan count, derived overdue, loan history). Costs a round
+      trip, saves the screens a second renderer.
+    - A 23503 on any of the three FKs is a **422**, not a 404: the id arrived in a BODY as a fact
+      about the sample, exactly like an unknown `brand_id` on a product create. Constraint names
+      are `samples_{colourway,supplier,showroom}_id_fkey`.
+  - Context:
+    - `test/samples-schema.test.js`'s source scan already globs `src/routes/admin-samples.js`, so
+      the new route file was in its blast radius from the moment it existed — the "samples are not
+      stock" ban applies to it without any test edit. The runtime counterpart for the WRITES and
+      the delete probe is in `test/samples-routes.test.js`.
+    - **Two things the delete story did NOT do, both deliberate and both still owed.**
+      (1) `src/lifecycle/delete.js`'s `CONSTRAINT_BLOCKERS` has no
+      `sample_loans_sample_id_fkey` entry — that file is not on the widened list, and the probe
+      covers the case; only a lost race would fall through to the generic "related records".
+      (2) The `product` and `colourway` registry entries still carry NO `samples` probe, so
+      deleting a product does not yet see the samples cut from it. `atelier-api/CLAUDE.md`
+      (§ CRUD completion) records that as owed to E4, but **no story in this PRD names it** — it is
+      not in any US-005..US-009 acceptance criterion, and adding it changes another workstream's
+      delete route. A human should decide whether it becomes a story.
+    - **There is no showroom CRUD anywhere in this PRD.** US-008 draws `AdminShowrooms.jsx`, but
+      no API story creates `GET|POST|PATCH|DELETE /admin/showrooms` — `showrooms` has a table, an
+      `archived_at` and no routes and no registry entry. The iteration that reaches US-008 will
+      find the screen has nothing to call. Flagging it here rather than widening US-005's scope.
+    - US-006 is next and is now unblocked. What it owes: `withSampleTxn` mirroring `withOrderTxn`
+      (`src/orders/admin-orders.js:207`), the two verb routes registered in the plugin this story
+      created, "already out" as a caught 23505 on `sample_loans_open_unique` through
+      `rethrowConflict`, and "not out" as an ordinary 409 on the row the transaction holds locked.
+- **Needs human verification:** none in a browser — no screen exists yet. Two judgement calls a
+  human should confirm before US-008 draws on them: that `out` being unwritable by PATCH matches
+  how the counter actually works (a sample can be marked `missing` or `retired` directly, but goes
+  out and comes back only through the verb routes), and that a sample with any loan history is
+  never hard-deletable, archiving being the only way one leaves the list.
+---
+
+## 2026-08-06T19:14:00Z - W4-US-006 - Check-out and check-in verb routes
+
+- Shipped the register's two MOVEMENTS as verb routes:
+  `POST /admin/samples/:id/check-out` (body `{ holder_name (required), trade_account_id?,
+  due_back_at?, out_at?, notes? }`) and `POST /admin/samples/:id/check-in` (body optional,
+  `{ returned_at? }`). Both backoffice-only, both inside the plugin US-005 already registered, so
+  `src/app.js` needed no edit at all this iteration.
+- New module `src/samples/sample-loans.js` holds `withSampleTxn`, `checkOutSample` and
+  `checkInSample`. `withSampleTxn` mirrors `withOrderTxn` (`src/orders/admin-orders.js:207`):
+  BEGIN, `SELECT id, status FROM samples WHERE id = $1 FOR UPDATE` (404 if missing), run `fn`,
+  COMMIT, then re-read through `getSample` on the POOL — so every movement hands the CRM the same
+  shape a plain read does.
+- Check-out writes TWO tables in the one transaction: `INSERT INTO sample_loans` then
+  `UPDATE samples SET status = 'out'`. "Already out" is the caught 23505 on
+  `sample_loans_open_unique` mapped to 409; there is no pre-check anywhere. Check-in is the mirror:
+  `UPDATE sample_loans SET returned_at = COALESCE($2, now()) WHERE sample_id = $1 AND returned_at
+  IS NULL` then `UPDATE samples SET status = 'in_library'`, with "not out" derived from that
+  UPDATE's own `rowCount === 0`.
+- Repos and files changed: atelier-api only — `src/samples/sample-loans.js` (new),
+  `src/routes/admin-samples.js` (two routes, two schemas, one import — additive),
+  `test/samples-checkout.test.js` (new, 30 tests), `test/samples-routes.test.js` (two rows added to
+  the parameterised 401/403 guard sweep), plus the bookkeeping (`prd.json`, `sprint-status.yaml`,
+  `progress.txt`, `CLAUDE.md`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (57 files, 1322 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the five entries added to
+    `## Codebase Patterns` above — "never a pre-check" is a claim about the SQL and needs a
+    statement-order assertion rather than a status code, a rowCount is evidence enough for a 409
+    when the parent is already locked, `FOR UPDATE` is required whenever the same transaction
+    INSERTs a row referencing the locked parent, an optional POST body must be typed
+    `['object', 'null']`, and a timestamp needs an explicit pattern plus a 22007/22008 mapping.
+  - Gotchas:
+    - **The two 409s have different mechanisms and both had to be proved, not assumed.**
+      "Already out" is the database's (23505 on the partial index); "not out" is the closing
+      UPDATE's rowCount. A test that only asserted the codes would pass against a pre-check
+      implementation of either, which is why `test/samples-checkout.test.js` carries two
+      statement-order tests and a `Promise.all` contention test (two concurrent check-outs of one
+      barcode -> `[200, 409]` and exactly ONE loan row).
+    - **The verb routes write `status` with their own SQL and must keep doing so.**
+      `updateSample` refuses `out` (`WRITABLE_SAMPLE_STATUSES`), so routing the status write
+      through it would 422 the whole movement. That refusal is the point: this transaction is the
+      only place the assertion "it is out" can be made true.
+    - **No guard refuses a `missing`, `retired` or ARCHIVED sample a check-out**, deliberately, and
+      that is a judgement a human should confirm rather than a gap. A missing sample somebody has
+      just scanned out has by definition been found; refusing would make the register argue with
+      the person holding the object. Adding such a guard is a product decision, so it was not
+      taken here. Check-in likewise sets `in_library` unconditionally — a sample that came back
+      damaged is a follow-up PATCH to `retired`, which is freely writable.
+    - **Check-in does not rewrite the loan's `notes`.** A loan is append-only history and the note
+      is what was typed when the sample went out. There is no loan PATCH route anywhere in this
+      PRD, so a mistyped loan note currently cannot be corrected through the API — flagging rather
+      than inventing a route US-006 does not name.
+    - `checkInSample`'s rollback is real: a 409 leaves `samples.status` untouched, asserted against
+      the database, because the status write sits after the failing statement inside the same
+      transaction.
+    - Fixture cleanup order here is `sample_loans` -> `samples` -> `brands` -> `showrooms` ->
+      `trade_accounts`, and the `trade_accounts` fixture uses `randomUUID()` rather than a literal
+      guid — the pattern entry two stories back explains why a literal one makes a suite pass
+      exactly once per database.
+  - Context:
+    - The normative sentence is `_bmad-output/planning-artifacts/architecture.md` § *Samples
+      domain* lines 191-193 ("Check-out and check-in are verb routes, not a status PATCH... 'Already
+      out' is a caught 23505 on the partial index, never a pre-check"); the epic row is
+      `epics.md:102`.
+    - **US-007 is next and needs nothing out of bounds.** `src/app.js` already registers
+      `adminSampleRoutes` and its sample-order routes belong in that same plugin (or a sibling
+      module registered the same way — either is additive). It DOES need
+      `src/lifecycle/registry.js` for its "DELETE is refused unless requested or cancelled"
+      criterion, and that file is now on this workstream's allowed list (additive, own entries
+      only), exactly as the `sample` entry US-005 added. `ALLOWED_TRANSITIONS` + `requireStatus`
+      go in a module the CRM mirrors; `requireStatus` at `src/orders/admin-orders.js:46` is the
+      shape, and `withSampleTxn` here is the shape for a `withSampleOrderTxn` if one is wanted.
+    - **Still owed and named by no story** (unchanged from US-005): `CONSTRAINT_BLOCKERS` in
+      `src/lifecycle/delete.js` has no `sample_loans_sample_id_fkey` entry, the `product` and
+      `colourway` registry entries carry no `samples` probe, and there is **no showroom CRUD
+      anywhere in this PRD** — `showrooms` has a table, an `archived_at`, no routes and no registry
+      entry, so US-008's `AdminShowrooms.jsx` will have nothing to call.
+- **Needs human verification:** none in a browser — no screen exists yet, and there is no e2e
+  harness on this machine. Two judgement calls a person should confirm before US-009 wires the
+  scanner to these endpoints: (1) that a `missing`, `retired` or archived sample may be checked out
+  without an argument from the system, and (2) that check-in always returns the sample to
+  `in_library`, a damaged return being a separate PATCH to `retired`.
+---
+
+## 2026-08-06T07:25:43Z - W4-US-007 - Sample-order lifecycle module and routes
+
+- Shipped the showroom-stocking lifecycle: the state machine, the read/write module and the whole
+  route surface. Three files, one registry entry, no `src/app.js` change (the routes live in the
+  `adminSampleRoutes` plugin US-005 registered).
+- `src/samples/sample-order-states.js` is the machine and imports NOTHING: `SAMPLE_ORDER_STATUSES`,
+  `ALLOWED_TRANSITIONS` (requested -> ordered -> in_transit -> received -> displayed, `cancelled`
+  from anywhere short of terminal, both terminals empty), `SOURCE_STATUSES` (derived inverse, never
+  a second copy), `STATUS_STAMPS`, `DELETABLE_SAMPLE_ORDER_STATUSES`, `requireStatus`,
+  `requireTransition`, `isDeletableStatus`, plus an `assertMachine()` that runs at module load.
+  This is the module `atelier-crm/src/screens/sampleFlow.js` (US-009) mirrors.
+- `src/samples/sample-orders.js` is the SQL: `listSampleOrders` (filters `q`, `status`,
+  `showroom_id`, `supplier_id`, `include_archived`; paginated `{ sample_orders, total }`),
+  `getSampleOrder`, `createSampleOrder`, `updateSampleOrder`, `withSampleOrderTxn`,
+  `transitionSampleOrder`, `setSampleOrderArchived`. Every row carries its showroom, design, house
+  and supplier by NAME; every write returns through `getSampleOrder`, so one CRM renderer serves
+  create, patch, move, archive and read alike.
+- Routes appended to `src/routes/admin-samples.js`, all backoffice-only:
+  `GET|POST /admin/sample-orders`, `GET|PATCH|DELETE /admin/sample-orders/:id`,
+  `POST /admin/sample-orders/:id/transition`, `POST /admin/sample-orders/:id/archive|restore`.
+- `src/lifecycle/registry.js` gained the `sample_order` entity (table `sample_orders`,
+  `archivable: true`, NO probes, `guard: sampleOrderGuard`) and one import of
+  `DELETABLE_SAMPLE_ORDER_STATUSES`. Additive; nothing else in that file moved.
+- Repos and files changed: atelier-api only — `src/samples/sample-order-states.js` (new),
+  `src/samples/sample-orders.js` (new), `src/routes/admin-samples.js` (imports, four schemas, eight
+  routes — additive), `src/lifecycle/registry.js` (one import, one guard, one entity),
+  `test/samples-order-lifecycle.test.js` (new, 64 tests), plus the bookkeeping (`prd.json`,
+  `sprint-status.yaml`, `progress.txt`, `CLAUDE.md`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (58 files, 1386 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (37 files, 567 tests) — no CRM file was
+  touched, run only to prove the branch is clean.
+- **NOT COMMITTED — git was denied at the tool level for this entire iteration** (`status`, `add`
+  and `commit` all returned "This command requires approval"), exactly as it was for the US-006
+  BLOCKED iteration. **The story is finished and both gates are green**; only the commit is
+  missing, so the next iteration inherits a dirty tree it did not create. It is NOT half-done code
+  and must not be reverted. The nine paths are:
+  `src/samples/sample-order-states.js`, `src/samples/sample-orders.js`,
+  `src/routes/admin-samples.js`, `src/lifecycle/registry.js`,
+  `test/samples-order-lifecycle.test.js`, `CLAUDE.md`, `ralph/w4-samples/prd.json`,
+  `ralph/w4-samples/progress.txt`, `_bmad-output/implementation-artifacts/sprint-status.yaml`.
+  No `.env`, no secret and nothing under `incoming/` was touched. An iteration that HAS git should
+  commit them as `feat(api): [W4-US-007] - Sample-order lifecycle module and routes`, either on its
+  own or ahead of its own commit.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the four entries added to
+    `## Codebase Patterns` above — a mirrored state machine must be a LEAF module (the registry's
+    import-time validation makes the cycle fatal, and the CRM needs it importable anyway), a guard
+    is the delete rule where no FK points at the table, a concurrency test must race the SAME move
+    or a correct lock produces two successes, and an illegal-transition test must assert the row is
+    byte-for-byte unchanged rather than just the 409.
+  - Gotchas:
+    - **The first concurrency test written here FAILED against correct code.** `ordered` raced
+      against `cancelled` returned `[200, 200]`, which is right: serialised, the loser reads
+      `ordered` and `ordered -> cancelled` is a legal move. Racing `ordered` against `ordered` is
+      the version that discriminates. Worth knowing before assuming a lock is broken.
+    - **`status` is not patchable and a create cannot choose one.** Both are the same rule the
+      register applies to `out`: a move writes the state AND the stamp that dates it, and either
+      alone is a row that contradicts itself (a `displayed` order with `displayed_at` NULL, when a
+      NULL stamp is defined to read as "has not been there"). Recording an order raised weeks ago is
+      a create with a back-dated `requested_at` plus moves each carrying their own `at`.
+    - **`showroom_id` is the one editable ref here that is NOT nullable.** A request can be
+      redirected to another showroom but never un-homed, so the route types it `integer` rather than
+      `['integer','null']` — an explicit null is a 400 there, and the module maps the 23502 to 422
+      for a direct caller.
+    - **`transitionSampleOrder` looks its stamp column up in `STATUS_STAMPS` and refuses an unknown
+      key with a 422 before interpolating anything.** The route spends the vocabulary as a schema
+      enum (400), but the module is also called directly and `undefined` interpolated into an UPDATE
+      is a 500 nobody can read.
+    - **Terminal means terminal: nothing moves out of `displayed` or `cancelled`.** An abandoned
+      order is re-raised as a new request, not resurrected — resurrecting one would leave
+      `cancelled_at` stamped on a live row and make all six stamps unreadable.
+    - Fixture cleanup is `sample_orders` (by `showroom_id IN (SELECT id FROM showrooms WHERE name
+      LIKE $1)`) -> `brands` -> `suppliers` -> `showrooms`. Because `showroom_id` is NOT NULL, every
+      fixture order hangs off a fixture showroom and the table needs no prefix column of its own.
+    - The ISO stamp on this entry is real UTC from `date -u`; several earlier entries in this log
+      carry what looks like NZ local time labelled `Z`, so the log is not monotonic. Append order is
+      the reliable ordering, not the timestamps.
+  - Context:
+    - The spec is `_bmad-output/planning-artifacts/architecture.md` § *Samples domain* ("Showroom
+      stocking — `showrooms` + `sample_orders` advancing requested -> ordered -> in_transit ->
+      received -> displayed | cancelled") and the § *Delete policy* row `sample order` -> "409
+      unless requested/cancelled". The migration header (`1786852800000_samples-orders.js`) already
+      stated the machine belongs in US-007's module and not in a CHECK; this implements exactly that
+      split, and a test parses the live `sample_orders_status_check` to prove the two agree on the
+      vocabulary.
+    - **US-009 mirrors `sample-order-states.js`.** `sampleFlow.js` needs `ALLOWED_TRANSITIONS`
+      (so the UI never offers a move that 409s) and `isDeletableStatus` (so Delete is greyed rather
+      than discovered). The endpoint is `POST /admin/sample-orders/:id/transition` with body
+      `{ status, at? }`, answering `{ sample_order }` — the same envelope every other write here
+      returns.
+    - **Still owed and named by no story** (unchanged from US-005/US-006): `CONSTRAINT_BLOCKERS` in
+      `src/lifecycle/delete.js` has no `sample_loans_sample_id_fkey` entry; the `product` and
+      `colourway` registry entries carry no `samples` probe; and there is **no showroom CRUD
+      anywhere in this PRD** — `showrooms` has a table, an `archived_at`, no routes and no registry
+      entry, so US-008's `AdminShowrooms.jsx` has nothing to call. That is now the next iteration's
+      problem: US-008 is a CRM story whose screen needs an API that no story creates.
+- **Needs human verification:** none in a browser — no screen exists yet and there is no e2e harness
+  on this machine. Three judgement calls a person should confirm before US-009 draws the lifecycle:
+  (1) that `displayed` and `cancelled` are terminal, so a cancelled request is re-raised rather than
+  reopened; (2) that a sample order may be deleted outright only while `requested` or `cancelled`,
+  everything else archiving instead; and (3) that an order is created `requested` and advanced,
+  rather than being creatable directly in a later state.
+---
+
+## 2026-08-06T07:45:45Z - W4-US-008 - AdminSamples and AdminShowrooms screens
+
+- Shipped both CRM screens AND the showroom API surface they needed. Three iterations had recorded
+  "no showroom CRUD anywhere in this PRD" as a wall for this story; it was not one — every file the
+  surface needed was already on this workstream's allowed list, and `src/app.js` needed no edit
+  because the routes went into the `adminSampleRoutes` plugin US-005 registered. See the new
+  `## Codebase Patterns` entry: "no story names it" is not a block on its own.
+- **atelier-api (the enabling half).** `src/samples/showrooms.js` (new): `listShowrooms` (filters
+  `q`, `include_archived`; paginated `{ showrooms, total }`), `getShowroom` (carrying
+  `sample_count` + `sample_order_count`), `createShowroom`, `updateShowroom`,
+  `setShowroomArchived`, plus `SHOWROOM_UPDATE_COLUMNS`. Routes appended to
+  `src/routes/admin-samples.js`: `GET|POST /admin/showrooms`,
+  `GET|PATCH|DELETE /admin/showrooms/:id`, `POST /admin/showrooms/:id/archive|restore`, all
+  backoffice-only. `src/lifecycle/registry.js` gained the `showroom` entity (table `showrooms`,
+  `archivable: true`, probes on `samples` and `sample_orders`) — additive, nothing else moved.
+- **atelier-crm (the story).** `AdminSamples.jsx` + `adminSamples.js` + `adminSamples.test.js`, and
+  `AdminShowrooms.jsx` + `adminShowrooms.js` + `adminShowrooms.test.js`. Both compose
+  `useCrudScreen` and touch no step of the delete flow themselves. `src/App.jsx` gained the two
+  routes and two imports; `src/components/sectionTabs.jsx` gained two `samplesTabs` entries
+  (`register`, `showrooms`) beside the existing demo tabs.
+- Repos and files changed: atelier-api — `src/samples/showrooms.js` (new),
+  `src/routes/admin-samples.js` (one import block, five schemas, seven routes — additive),
+  `src/lifecycle/registry.js` (one entity, added), `test/samples-showrooms.test.js` (new, 52
+  tests), `CLAUDE.md`; atelier-crm — `src/screens/AdminSamples.jsx`, `adminSamples.js`,
+  `adminSamples.test.js`, `AdminShowrooms.jsx`, `adminShowrooms.js`, `adminShowrooms.test.js` (all
+  new), `src/App.jsx`, `src/components/sectionTabs.jsx`, `CLAUDE.md`; plus the bookkeeping
+  (`prd.json`, `sprint-status.yaml`, `progress.txt`).
+- Gates: `( cd atelier-api && npm run lint && npm test )` -> 0 (59 files, 1438 tests);
+  `( cd atelier-crm && npm test && npm run build )` -> 0 (39 files, 617 tests; build 144 modules).
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the four entries added to
+    `## Codebase Patterns` above — "no story names it" is not a block, a
+    server-derived-value claim needs a source scan plus a two-directional behavioural test, a
+    negative assertion that is a substring of a positive one is vacuous, and a CRM endpoint scan
+    must anchor on the opening quote (and stay out of backticks in prose).
+  - Gotchas:
+    - **`safeFetch` returns `{ data, error }`, not the body.** `apiFetch` returns the body and
+      throws; `safeFetch` wraps it and never throws. The two pickers on AdminSamples use
+      `safeFetch` deliberately — a showroom list that failed to load must leave an empty `<select>`
+      rather than take the whole register down — and the destructure is `({ data })`.
+    - **The scan that bans a token has now bitten twice in one iteration.** Writing
+      "Not `due_back_at < Date.now()`" in a comment tripped the date-arithmetic ban, and writing
+      an example endpoint inside backticks tripped the endpoint scan. Both were caught by the gate,
+      but the rule is cheaper to remember than to rediscover: a file a scan reads must not spell
+      the banned token, even to explain it.
+    - **Check-out/check-in is on the register screen, and that is a judgement a human should
+      confirm.** US-009 gives the scanner the same two endpoints. It is here because `out` is
+      unwritable by PATCH, so without a movement verb no CRM user could ever produce an `out`
+      sample — which would make this story's own `status` filter and `overdue` column display data
+      nothing in the CRM can create. Narrowing it to the scanner alone would ship a register that
+      cannot record a loan taken at the counter.
+    - **The colourway link is an id box, not a picker.** Showroom and supplier are `<select>`s read
+      whole from their endpoints; `colourways` is ~19k rows and needs the search UI Manage stock
+      has. The row shows the resolved design and house names, so a wrong id is visible rather than
+      silent. A picker is owed and is not in any story.
+    - **`layout.jsx` is NOT on this workstream's allowed list**, so the SideNav's Samples item
+      still carries `match: ['/samples', '/sample-scanner']` and the nav goes dark on the two new
+      tabs. One line for whoever owns that file; deliberately not touched.
+    - Fixture cleanup here is `sample_orders` (by `showroom_id IN (SELECT id FROM showrooms WHERE
+      name LIKE $1)`) -> `sample_loans` -> `samples` -> `brands` -> `showrooms`, anchored on
+      `${PREFIX}%` with no separator. The suite renames nothing, but the showroom NAME is unique,
+      so a leaked row 23505s the next run exactly as US-003's `trade_accounts` guid did.
+  - Context:
+    - The story's four acceptance criteria map to: the kit (a source scan on both screens for
+      `useCrudScreen` + the absence of `apiDelete`/`attemptDelete`/`describeBlockers`/
+      `deleteDialog`/`Math.ceil(`), overdue-from-the-API (the two-directional test plus the
+      date-arithmetic source ban), the cutting-comments ban (a source scan on the path, the table
+      name and the field access), and the CRM gates.
+    - **US-009 is next and needs nothing out of bounds.** `sampleFlow.js` mirrors
+      `src/samples/sample-order-states.js` (`ALLOWED_TRANSITIONS` so the UI never offers a move
+      that 409s, `isDeletableStatus` so Delete is greyed rather than discovered); the endpoint is
+      `POST /admin/sample-orders/:id/transition` with body `{ status, at? }` answering
+      `{ sample_order }`. `SampleScanner.jsx` can import `byBarcodePath`, `checkOutPath`,
+      `checkInPath`, `checkOutBody`, `loanState` and `movementVerb` from
+      `src/screens/adminSamples.js` rather than re-deriving them — `movementVerb` is what decides
+      which verb a scan offers. `AdminSampleOrders.jsx` should take the `samplesTabs` key
+      `orders`; the strip already carries `tracking`, `register`, `showrooms`, `scanner`.
+      The redirects US-009 owes are `/samples` and `/showroom-samples`, and note that `/samples` is
+      currently the DEMO Tracking screen and is still a live tab in the strip — retiring it is part
+      of that story, not this one.
+    - **Still owed and named by no story** (two of the three from US-005/US-006/US-007 remain):
+      `CONSTRAINT_BLOCKERS` in `src/lifecycle/delete.js` has no `sample_loans_sample_id_fkey` or
+      `sample_orders_showroom_id_fkey` entry (the probes cover both; only a lost race falls through
+      to the generic "related records"), and the `product`/`colourway` registry entries still carry
+      no `samples` probe, so deleting a design does not yet see the samples cut from it. The
+      showroom-CRUD gap is closed by this story.
+- **Needs human verification:** BOTH new screens, in a browser — this is the first W4 story with a
+  UI, there is no jsdom and no e2e harness on this machine, so nothing here has been rendered.
+  Specifically: (1) `/admin/samples` — the filter bar (search, status, showroom, the tri-state
+  overdue select), that an overdue row prints in clay, and that the expanded row's check-out form,
+  movement history and Save all behave; (2) `/admin/showrooms` — the create form, the rename, and
+  that a showroom with samples in it refuses Delete with a dialog offering "Archive instead";
+  (3) the samples tab strip now has four tabs and the SideNav item does not light on the two new
+  ones (see the `layout.jsx` gotcha). Two judgement calls a person should confirm: that recording a
+  check-out from the register screen (not only from the scanner) is what the counter wants, and
+  that a colourway is acceptable as a typed id until a picker exists.
+---
+
+## 2026-08-09T20:34:50Z - W4-US-009 - AdminSampleOrders, live scanner, retired-route redirects
+
+- The last story: the showroom-stocking screen, the scanner rewired to the real endpoints, and the
+  two demo routes retired into redirects. atelier-crm only — the API surface it consumes was all
+  built by US-005..US-008.
+- `src/screens/sampleFlow.js` (new) mirrors the API's `src/samples/sample-order-states.js`:
+  `SAMPLE_ORDER_STATUSES`, `ALLOWED_TRANSITIONS`, `STATUS_STAMPS`,
+  `DELETABLE_SAMPLE_ORDER_STATUSES`/`isDeletableStatus`, plus the screen's own rules — paths,
+  `availableMoves` (buttons; archived and terminal rows offer none), `stampEntries`/`stampDate`
+  (the history line, machine-ordered, dates sliced from the API's strings — no Date is ever
+  constructed), `SAMPLE_ORDER_FIELDS` (the PATCH whitelist mirror; `status` deliberately absent),
+  `sampleOrderFilters`, `orderTitle`/`orderMeta`/`describeSampleOrder`. `sampleFlow.test.js`
+  carries a literal second copy of the transition map, so a hand-edit cannot half-change it.
+- `AdminSampleOrders.jsx` (new) composes `useCrudScreen` (key `sample_orders`, archive action
+  supplied); create always lands `requested`; moves go through
+  `POST /admin/sample-orders/:id/transition` from `availableMoves`, so the UI never offers a move
+  the API would 409; Delete is greyed outside requested/cancelled (`isDeletableStatus`) rather
+  than discovered as a refusal — the 409 stays authoritative if a row moves underneath.
+- `SampleScanner.jsx` rewritten live: one autofocused input (a wedge scanner is a keyboard — it
+  types the code and its Enter submits the form), `GET /admin/samples/by-barcode/:barcode` via
+  `byBarcodePath`, then whichever of check-out/check-in `movementVerb` says the open loan allows.
+  The 404 is rendered as an outcome (a real tag the register has never heard of, offering the
+  register screen), not an error — `isNotFound` added to `adminSamples.js`. The check-out body
+  goes through the same `checkOutBody` the register uses.
+- `App.jsx`: `/samples` → `/admin/samples` and `/showroom-samples` → `/admin/sample-orders` as
+  `<Navigate replace>` (a bookmark must not fall into the catch-all and read as a deleted
+  screen); `/admin/sample-orders` routed; `SampleTracking`/`ShowroomSamples` imports removed
+  (files left on disk untouched). `sectionTabs.jsx`: `samplesTabs` loses `tracking` (its route now
+  redirects — a tab pointing at it would bounce) and gains `orders`; strip is register /
+  showrooms / orders / scanner.
+- Repos and files changed: atelier-crm — `src/screens/sampleFlow.js`, `sampleFlow.test.js`,
+  `AdminSampleOrders.jsx` (all new), `SampleScanner.jsx` (rewritten), `adminSamples.js` (one
+  helper appended), `adminSamples.test.js` (scanner scans + isNotFound), `src/App.jsx` (sample
+  routes/redirects only), `src/components/sectionTabs.jsx` (samplesTabs only), `CLAUDE.md`;
+  atelier-api — bookkeeping only (`prd.json`, `sprint-status.yaml`, `progress.txt`, `PR-BODY.md`).
+- Gates: `( cd atelier-crm && npm test && npm run build )` -> 0 (40 files, 661 tests; build 146
+  modules); `( cd atelier-api && npm run lint && npm test )` -> 0 (59 files, 1438 tests) — no API
+  source touched, run to prove the branch is clean.
+- **Learnings:**
+  - Patterns discovered (general and reusable only): see the entry added to `## Codebase
+    Patterns` above — the endpoint-quote scan matches router Link targets, and the stronger claim
+    is pinning every apiFetch/apiSend to an imported path builder.
+  - Gotchas:
+    - **A tab strip and a redirect must retire together.** Leaving the Tracking tab while its
+      `/samples` route redirects to the register would make the tab a button that bounces to a
+      different tab — the strip edit is part of the redirect story, not polish.
+    - **The scanner cannot reuse `useMutation` for its lookup.** The by-barcode 404 is an OUTCOME
+      to render (offer the register), and useMutation's catch would flatten it into the red error
+      line. The movements could use it but then the file would mix two mutation idioms; it
+      hand-rolls one small busy/error pair instead, with the reason commented.
+    - **`stampEntries` is machine-ordered, not chronological, and `.at(-1)` is therefore "the
+      furthest the order has been"** — which is what the list's Moved column wants even when
+      stamps were back-dated out of order. `cancelled` sorts last in the vocabulary, so a
+      cancelled order's latest entry is always the cancellation.
+    - `availableMoves` returns `[]` for an unknown status rather than throwing — a CHECK widened
+      on the API side must degrade the CRM to "no buttons", not a crash.
+  - Context:
+    - The machine's authority is `atelier-api/src/samples/sample-order-states.js`; the endpoint
+      contract is recorded under `## Samples` in both repos' CLAUDE.md. The transition endpoint
+      answers `{ sample_order }`, the same envelope every other write returns.
+    - `SampleTracking.jsx` and `ShowroomSamples.jsx` still exist on disk, unrouted and unlinked —
+      they are outside this workstream's allowed files, so deleting them is a decision for
+      whoever owns the demo screens.
+    - `layout.jsx` is still outside this workstream's list: its SideNav `match` array carries
+      `/samples` and `/sample-scanner` only, so the nav item lights on the scanner and on the two
+      redirects mid-flight but not on `/admin/samples`, `/admin/showrooms` or
+      `/admin/sample-orders`. Same one-line fix flagged by US-008, now three routes wide.
+- **Needs human verification:** all three US-009 surfaces, in a browser — there is no jsdom and no
+  e2e harness on this machine. Specifically: (1) `/#/sample-scanner` — scan or type a barcode,
+  check a sample out and back in, and confirm a wedge scanner's Enter submits the lookup; the 404
+  card for an unknown tag; (2) `/#/admin/sample-orders` — raise a request, advance it
+  requested → ordered → … and confirm each move stamps its date in the History line; that Delete
+  is greyed once past `requested`; a cancelled order offers nothing; (3) the old bookmarks
+  `/#/samples` and `/#/showroom-samples` land on the register and sample orders respectively, and
+  the samples strip shows register / showrooms / orders / scanner. One judgement call to confirm:
+  the demo Tracking screen is now unreachable by design — if the office still wants its mock
+  reporting view, that is a product decision to reverse the tab, not a bug.
+---

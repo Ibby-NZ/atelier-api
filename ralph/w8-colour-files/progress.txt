@@ -1,0 +1,621 @@
+# Ralph progress log — Atelier — August 6th updates — W8 Colour files
+
+## Codebase Patterns
+
+General, reusable findings only. A Ralph iteration reads this block FIRST, before anything else.
+Story-specific detail belongs in the per-story entries below, not here.
+
+- **A worksheet is addressed by NAME, never by `sheet<N>.xml`.** The number in the filename is the
+  order the sheets were CREATED in, not the order they appear in, and one file in this corpus
+  (C&C Milano) has a single sheet called `sheet.xml` with no number at all. Resolve
+  `xl/workbook.xml` -> `xl/_rels/workbook.xml.rels` by relationship id. A rels `Target` may be
+  relative to `xl/` (`worksheets/sheet1.xml`) or absolute from the package root
+  (`/xl/worksheets/sheet.xml`) — handle both.
+- **The `x:` namespace prefix is not a D365 quirk.** CLAUDE.md records it for D365's `<x:row>`;
+  C&C Milano's supplier-written workbook root is `<x:workbook>` too. Anything scanning
+  SpreadsheetML by tag name must resolve the prefix via `namespacePrefix()` first. Matching a bare
+  tag name silently finds nothing, which reads as "empty workbook", not as a parser bug. The same
+  applies to the ATTRIBUTE prefix: `r:id` comes from `xmlns:r="…/relationships"`, so resolve it
+  from the declaration rather than assuming the letter.
+- **`scripts/lib/` is dependency-free by design and stays that way.** `zip.js` + `xml.js` +
+  `xlsx.js` are enough to read any of these workbooks; `node_modules` is a symlink to the main
+  checkout, so adding a package corrupts every other worktree on this machine.
+- **`incoming/` is gitignored, so no test may read it.** Build a real xlsx in memory instead: a
+  genuine deflated zip (`deflateRawSync`) of genuine SpreadsheetML. `test/converters.test.js`
+  already had the `buildZip` helper; `test/colour-files.test.js` carries its own copy because the
+  converters test is another workstream's file.
+- **A supplier's own spelling of a house is not the catalogue's, and the file must never invent
+  one.** "Mariaflora" is `Maria Flora`, "Liberty" is `Liberty London`, and the same trap is already
+  recorded for the price lists ("Colefax & Fowler" vs "Colefax and Fowler"). Map the ones you can
+  evidence in a declared alias table, pass an unknown spelling through raw, and let the import
+  report it — a house created silently is the one outcome nobody can undo.
+- **The price list is the corpus that identifies an unlabelled code prefix.** `src/seed/data/
+  price-lists.json` holds 19.5k rows across 40 suppliers with their `code` and `product_range`, so
+  a mystery token can be looked up rather than guessed: `NH-AFTERALLTOO` in there under supplier
+  "Nicky Haslam" is what identified the `NH` sheet of the Jean Monro workbook. When nothing in it
+  matches, that is an answer too — emit the token and let a human name the house.
+- **The price list also verifies a DERIVED code, not just an unlabelled one.** Nine of these files
+  print a colourway SKU that is the design's code plus a colour suffix (`F4613-01`, `6978401`,
+  `JT013998001`), and the design part is exactly what `price-lists.json` keys on. Splitting the SKU
+  and looking the prefix up in that supplier's own rows turns the split rule into a measurement:
+  Colefax 9,015 of 9,065, Jim Thompson 2,839 of 3,320 (the other 481 are Fox Linton, which has its
+  own supplier rows), the five Fabricut houses 97%+ each. A rule that cannot be measured this way
+  is a guess, and the corpus usually offers a way to measure.
+- **A row that is not stock is not the same as a row that failed to map.** Every large file carries
+  non-stock rows mixed into its stock sheets — sample books and colour cards (JV, 239 rows, told
+  apart only by the sales unit), sample cuttings (C&C Milano's 587 `Camp.` rows, told apart by a
+  type code), a translation dictionary (C&C Milano rows 2-4), a substrate price table (CO.DE, 45
+  rows with no item code). A mapper DECLINES those by a stated, measured property and THROWS on
+  anything else it cannot map. Importing them puts a sample book in the catalogue as a colourway;
+  throwing on them fails a file that is perfectly well formed.
+- **A DECLINED row must state WHY, and the reason names a KIND of row, not that row.** A summary
+  reading "1,604 rows skipped" is a number nobody can account for; "587 sample cutting, 262 sample
+  sold by the unit, 45 substrate price, 684 blank" is a file someone can check. `skip(reason)` in
+  `colour-adapters/records.js` is the mechanism, and a decline with no reason still lands in its own
+  counted bucket rather than vanishing — rows in ALWAYS equals colourways out plus skips plus errors,
+  which is what makes the summary auditable at all.
+- **Collect every bad row, do not stop at the first.** A supplier who renamed one column usually
+  renamed three, and a converter that dies on the first one is fixed one release per row. The reader
+  yields a bad row as data (`{ rowNumber, error }`) and the caller decides; the strict view over it
+  still throws, so a caller that only wants records cannot walk past one. Same for a sheet that will
+  not open: record it and read the remaining eight.
+- **Loud failure means the WHOLE run writes nothing, not just the bad file.** A half-written
+  catalogue is worse than none — the missing houses look exactly like houses the supplier stopped
+  carrying. Both existing converters have this posture; keep it.
+- **An exact repeat is dropped; a CLASH is reported and both rows kept.** 1,159 of the 47,082
+  colourways are exact repeats (Liberty's overlapping sheets, Jim Thompson's spring subset, Maria
+  Flora's 73 reprints) and dropping them is safe because nothing is chosen. Seven rows share a
+  (house, design, colour code) with a DIFFERENT name — the supplier's own two spellings ("Blue
+  Grass"/"Bluegrass", "Lino"/"Linen") — and dropping one of those is choosing, on an identity key
+  nothing has ratified. Report and keep.
+- **A converter whose output lands in its own input directory must filter directories out of the
+  walk.** `readdirSync(dir, { withFileTypes: true })` + `isFile()`: otherwise the second run meets
+  the `normalized/` directory it wrote and reports it as a drop nobody has mapped.
+- **A second output belongs in a shape the office already ratified, not in one of its own.** The
+  colour files are price lists too, and `scripts/lib/price-template.js` already defines what a
+  supplier rate looks like — so the rate output IS the v2 template (a CSV with its header row),
+  which puts it through `convert-price-lists.js`'s vocabularies, code normalisation, dedupe and
+  importer instead of a second private path. The header is asserted against `matchTemplate` at
+  module load, and every emitted row is run through the template's own mapper before the file is
+  written, so "it is in the template's shape" is a measurement rather than a claim.
+- **A SECTIONED sheet reprints its header with some columns RENAMED, and often SHIFTED.** Liberty's
+  wallpaper section writes `WALLPAPER NAME`/`PAPER TYPE` and inserts `ROLL DIMENSIONS` after the
+  width, so every later cell moves by one; Madeaux relabels its price column per section
+  (`Export/m`, `Export/ Roll`, `Export`). Two consequences: the shared "row repeats the header" rule
+  does not recognise such a row (declare it by the one label that does not change), and no column
+  past the first divergence may be declared at all — a composition read at the wrong index is a
+  repeat measurement filed as a fibre content, which nothing downstream can detect.
+- **The committed price list is the corpus that verifies a whole extraction, not just a code.**
+  Every emitted rate can be looked up by `(supplier, category, code)` in `src/seed/data/
+  price-lists.json`: 14,914 of 15,611 land on a row the office already holds and 10,634 of those
+  are identical to the cent. That turns supplier naming, code grain, category and unit into
+  measurements — and it is how the JV dealer-price factor and Liberty's two price columns were
+  settled. A rule nobody can measure this way is a guess.
+- **`(supplier, category, code)` is a ratified key, so two rates under it are not a clash to report
+  — they are a rate nobody may write.** Unlike a colourway clash (both rows kept, because the SKU's
+  shape is still the import's decision), the ledger holds exactly one row per key. Keeping the
+  first decides silently and keeping both makes the pricing converter refuse the whole file, so the
+  code gets NO rate and every coordinate is printed. 230 of 15,841 codes end up there.
+- **An identity key that SLUGIFIES its parts finds the repeats a raw-string comparison cannot.**
+  The converter's exact-repeat rule compares whole records, so Liberty's two sheets writing one
+  colourway "Deco Scallop"/"Pewter" and "DECO SCALLOP"/"PEWTER" survived it as two rows; the
+  importer's slugified key collapses them into one. 28 of the 35 repeated SKUs in the corpus are
+  exactly that. The converse matters as much: after casing is normalised away, a name that STILL
+  differs ("Blue Grass"/"Bluegrass", "Lino"/"Linen") is the supplier genuinely disagreeing with
+  itself, and separating the two counts is what turns 35 rows of noise into 7 a person can settle.
+- **The catalogue's identity key is the SLUG, so match houses on it and never on the name.** It
+  absorbs the differences that are not differences — an accent, a full point, a case ("Braquenié"
+  and "S. Harris" resolve; the supplier's ALL CAPS resolves) — while still refusing a genuinely
+  different name, so "Colefax & Fowler" and "Colefax and Fowler" cannot merge into one house by
+  accident. 22 of the corpus's 37 brand spellings resolve this way against the seeded 41.
+- **An importer DECLINES what a human must decide and REJECTS what nobody can act on.** A house
+  with no catalogue row, or a row carrying no design, is declined with a stated reason and counted
+  — the rows stay in the normalised file and land on the next run once the decision is made. A
+  non-string field or a missing coordinate is malformed: it throws before a connection is taken,
+  because a row nobody can locate cannot be reported afterwards. Conflating the two either fails a
+  38,000-row import over one supplier placeholder, or swallows a genuinely broken file.
+- **`INSERT … ON CONFLICT DO NOTHING` plus a select-back is the honest upsert for a partial
+  writer.** A pipeline that knows three columns of a twenty-column table must not write EXCLUDED
+  over the other seventeen: it would replace a catalogue entry with a thinner one, re-capitalise a
+  house-styled name into the supplier's ALL CAPS, and undo a publish somebody made in the CRM. The
+  cost is one extra SELECT (DO NOTHING returns no row for a key that already existed); what it buys
+  is an import that provably changes nothing on a second run. Read back what you need from the
+  existing row — the product's own `product_type`, here — rather than assuming your own default.
+- **Verify a derivation against the file's own redundancy before shipping it.** Several of these
+  sheets decompose a value into extra columns they then leave blank further down (Jean Monro splits
+  its item codes across three unlabelled cells for the first 102 rows of one sheet and none of the
+  last 50). Deriving the value and diffing it against those cells over the whole file turns "this
+  regex looks right" into a measurement — and the rows where the file stopped filling them in are
+  exactly the rows the derivation exists for.
+
+---
+
+## Story log
+
+Appended by each iteration, newest last. Never rewrite an existing entry.
+
+## 2026-08-06T16:05:00Z - W8-US-001 - Adapter registry and the row-extraction harness
+
+- **What was implemented**
+  - `scripts/lib/colour-sheet.js` — the shared row-extraction harness. Resolves sheet name -> zip
+    path, yields dense rows, and LOCATES THE HEADER ROW BY MATCHING LABELS within a bounded scan
+    window (`HEADER_SCAN_LIMIT = 250`). The adapter's column map IS the label set the header is
+    recognised by, so the map and the recognition rule cannot disagree. `select(cells)` returns the
+    declared fields of a row, trimmed.
+  - `scripts/lib/colour-adapters/index.js` — the registry keyed by filename prefix, with
+    `assertAdapter`/`assertRegistry` running at import over every entry, `selectAdapter` (pure,
+    longest-prefix-wins) and `matchAdapter`. An entry may declare itself `unsupported` with a
+    reason — deliberately distinct from an unknown filename.
+  - `scripts/convert-colour-files.js` + `npm run convert:colour` — the harness driver. Walks the
+    drop directory, resolves an adapter per file, opens every declared sheet and reports
+    `file:sheet: header row N, M data row(s)`. A DECLARED refusal is reported and is not fatal; an
+    UNKNOWN file is listed on stderr and exits 1. It writes no output file — the normalised write
+    is US-004's, and the header comment says so.
+  - `test/colour-files.test.js` — 22 tests, no database, no fixtures on disk.
+- **Repos and files changed** — atelier-api only:
+  `scripts/lib/colour-sheet.js` (new), `scripts/lib/colour-adapters/index.js` (new),
+  `scripts/convert-colour-files.js` (new), `test/colour-files.test.js` (new),
+  `package.json` (scripts only), `CLAUDE.md` (new `## Colour files` section).
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 771 tests, 22 new).
+- **Learnings:**
+  - Patterns (general ones are also in `## Codebase Patterns` above):
+    - The registry deliberately separates DECLARED-unsupported from UNKNOWN. A declared refusal is
+      a decision someone recorded (the de Le Cuona PDF, US-003); an unknown filename is a drop
+      nobody has looked at and must fail the run, because a skipped file looks exactly like a file
+      that imported cleanly.
+    - `selectAdapter(adapters, filename)` takes the registry as an argument and `matchAdapter`
+      binds it to `ADAPTERS`. That is what let the longest-prefix rule be tested while the registry
+      is still empty — the alternative (re-implementing the rule in the test) asserts nothing.
+    - A duplicated label is only an error on a row that OTHERWISE matches. Checking earlier would
+      make any preamble row carrying two blank-ish repeats abort the file.
+  - Gotchas for the next iteration:
+    - **Measured header rows, so no adapter has to rediscover them:** C&C Milano/Listino 1,
+      Colefax/Export Prices 1, JV/(all ten sheets) 1, Jean Monro/JM 1, Jim Thompson 2026/CODE LIST
+      1, Maria Flora/Foglio1 1, Pierre Frey 1; Jim Thompson SS'26/FABRIC 2, Liberty/Sheet1 2,
+      Madeaux/UK Export 2; Perennials WC/ALL SKUS 3; Perennials Fabrics/Fabrics 4;
+      Vervain/All Colors 77, Clarence House/All Colors 98, S Harris 104, Trend 105, Stroheim 106.
+      Clarence House's *Pattern Only* sheet is 102. Row numbers count `<row>` elements from 1 — a
+      position in the file, not the spreadsheet's row label.
+    - **`sheetRows` skips no rows but omits empty cells**, so a data row can be SHORTER than the
+      header. `select` reads an absent cell as `''`, never `undefined` — do not `.trim()` a raw
+      `cells[i]` yourself.
+    - The five US houses (Clarence House, S Harris, Stroheim, Trend, Vervain) are the same layout
+      with the same terms preamble and a `Pattern Only` + `All Colors` sheet pair. `All Colors` is
+      the colourway sheet; `Pattern Only` has no colour column at all. That is one adapter shape
+      reused five times in US-003, not five adapters.
+    - Jean Monro's `JM` sheet has THREE sheets (JM/NH/RSC) and the header labels differ between
+      them (`PRICE 2026` vs `Price 2026`, and the `name`/`DESCRIPTION` columns swap position).
+      Label matching is case- and whitespace-insensitive, so `PRICE 2026` covers both; the column
+      ORDER difference is why the map must be by label and never by index.
+    - Jim Thompson's FABRIC sheet repeats `H`, `V`, `CM.` and `IN.` in its header. Declaring one of
+      those as a column will throw "header carries … more than once" — by design. Use the
+      unambiguous labels (`ARTICLE CODE`, `ARTICLE NAME`, `BRAND`, the priced column).
+    - `.DS_Store` is present in `incoming/colour-files/`; the converter filters dot-prefixed names.
+    - `incoming/` IS populated in this worktree (unlike `incoming/pricing-templates/`, which
+      CLAUDE.md notes exists only in the main checkout), so `node scripts/convert-colour-files.js`
+      runs here. It still must never be written to.
+  - Context: harness `scripts/lib/colour-sheet.js`; registry `scripts/lib/colour-adapters/index.js`;
+    driver `scripts/convert-colour-files.js`; tests `test/colour-files.test.js`. The architecture
+    section is `_bmad-output/planning-artifacts/architecture.md` "## Colour files".
+- **Needs human verification:** none — no screen, no route and no database table is touched by this
+  story. The one thing worth a human eye is the console output of
+  `npm run convert:colour`, which today lists all 18 drops as unsupported (no adapter is registered
+  yet) and exits 1. That is the intended state until US-002/US-003 land.
+---
+
+## 2026-08-06T04:20:44Z - W8-US-002 - Adapters for the single-sheet, single-brand files
+
+- **What was implemented**
+  - `scripts/lib/colour-adapters/records.js` — the colourway record and the reader over it.
+    A record is `{ brand, design, designCode, colourCode, colourName }`; a sheet declares its
+    columns and, where the layout needs it, a `row` mapper returning one record, several, or none.
+    `sheetColourways` skips a blank row and a row that repeats the header (a general rule: every
+    declared cell equalling its own label), and rethrows a mapper's error carrying
+    `file:sheet:row`.
+  - Six adapters over five files, all six named in the story: `jean-monro.js` (3 sheets, 3
+    houses), `madeaux.js`, `liberty.js` (2 overlapping sheets), `maria-flora.js` (2 houses in one
+    sheet), `perennials.js` (the fabrics and wallcoverings drops).
+  - `colour-adapters/index.js` — registers them; `assertSheet` now also requires a `brand`, checks
+    `row` is a function, and — for a sheet with NO mapper — that every declared column is a record
+    field and that `design`/`colourCode`/`colourName` are all present.
+  - `scripts/lib/colour-sheet.js` — one-word fix: `openSheet` read `spec.sheet` while the registry
+    declared `spec.name`, so a registry spec could never open its sheet. US-001's own tests passed
+    because they hand-wrote `{ sheet }`; the driver would have thrown on the first real adapter.
+  - `scripts/convert-colour-files.js` — reports `N row(s) -> M colourway(s)` per sheet and a total.
+- **Repos and files changed** — atelier-api only:
+  `scripts/lib/colour-adapters/{records,jean-monro,madeaux,liberty,maria-flora,perennials}.js`
+  (new), `scripts/lib/colour-adapters/index.js`, `scripts/lib/colour-sheet.js`,
+  `scripts/convert-colour-files.js`, `test/colour-files.test.js` (22 -> 39 tests), `CLAUDE.md`.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 788 tests).
+- **Corpus result** (`node scripts/convert-colour-files.js`, 4,918 colourways, exits 1 because
+  US-003's twelve files are still unknown, which is the intended state):
+  JM 321, NH 152, RSC 87, Liberty "Sheet1 (2)" 557 + "Sheet1" 720, Madeaux 150 rows -> 452,
+  Maria Flora 1441, Perennials Fabrics 867 + Trims 101, Perennials Wallcoverings 220.
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - The four fields the story asks for are not enough on their own: a fifth, `designCode`, is
+      what the supplier's PRICE list keys on (Maria Flora's pattern number, Perennials' quality,
+      `NH-AFTERALLTOO`), so US-005 would have had to re-read every file without it. It is NOT the
+      colour code and neither may be joined to `price_list_items.code`.
+    - One row is not one colourway. Madeaux prints one row per design and names that design's
+      colours inside a cell, so a mapper returns an ARRAY — which is why the reader normalises one
+      result or many rather than assuming a 1:1 row mapping.
+  - Gotchas for the next iteration:
+    - **Jean Monro is not one house.** JM is Jean Monro, NH is Nicky Haslam (identified from the
+      price list's own `NH-…` codes) and **RSC is unidentified** — no price list carries an `RSC-`
+      code and nothing in the repo names it. The adapter emits the token `RSC` so US-006 reports it
+      as an unknown house. A human must name it before those 87 colourways can be imported.
+    - **Perennials has no brand row in the catalogue at all** (41 brands, none of them Perennials),
+      and neither has Nicky Haslam. Expect US-006 to report both.
+    - The three Jean Monro sheets disagree about what their columns MEAN — `name` is the design on
+      JM and the colour on NH and RSC — which is the sharpest case yet for the column map being by
+      label per sheet and never shared.
+    - **`Trims ` has a trailing space in its real sheet name.** A sheet is addressed by name, so
+      the adapter declares the space. Do not "tidy" it.
+    - Perennials Wallcoverings reprints all four of its type sheets in `ALL SKUS` (41+23+75+81=220,
+      exactly), so only `ALL SKUS` is declared. The fabrics file is the opposite: `Fabrics` and
+      `Trims ` are disjoint and both are read.
+    - **Liberty's two sheets overlap without either containing the other** — 54 codes only in
+      "Sheet1 (2)", 217 only in "Sheet1". Reading one drops between 50 and 200 colourways; reading
+      both means US-004 must dedupe, and the two sheets price differently ("PRICE £ EX VAT" vs
+      "DISTRIBUTOR PRICE"), which US-005 has to decide between.
+    - **Maria Flora repeats 73 of its 1,441 rows** — the same (brand, product, colour code) appears
+      twice, e.g. BoujeeVelvet at rows 149-152 and again at 1320-1323. US-004/US-006 need a dedupe
+      rule; it is not a parsing fault.
+    - Both Liberty sheets and Madeaux repeat their header mid-sheet. `openSheet` matches the FIRST
+      header, so every later copy arrives as a data row — handled once in the reader, not per
+      adapter.
+  - Context: the reader is `scripts/lib/colour-adapters/records.js`, one module per layout family
+    beside it, the registry `index.js`, the harness `scripts/lib/colour-sheet.js`, tests
+    `test/colour-files.test.js`.
+- **Needs human verification:** no screen, route or table is touched. Three data questions a person
+  must settle before US-006 writes anything:
+  1. **What house is Jean Monro's `RSC` sheet?** 87 colourways (BERNARDO PAISLEY, OTTOLINE, KANPUR,
+     THE HARE) are filed under the token until someone names it.
+  2. **Nicky Haslam's design names are derived from the item code** ("AFTERALLTOO", "WINTER-WHEAT",
+     "ODBALCONY-STRIPE") because that sheet has no design column — the price list spells the same
+     design "AFTER ALL TOO". Eyeball a dozen against the supplier's own list.
+  3. **Maria Flora's colour code is the colour's alone** ("11"), with the pattern number kept
+     separately as `designCode` ("60656"); nothing joins them, because the supplier never wrote a
+     separator. Confirm that is the SKU shape the office wants.
+---
+
+## 2026-08-06T04:41:00Z - W8-US-003 - Adapters for the multi-sheet and multi-brand files
+
+- **What was implemented** — the twelve remaining drops, so the registry now claims all eighteen:
+  - `colour-adapters/colefax.js` — one sheet, four houses keyed by a single letter
+    (C/J/L/M). The letter->house map was MEASURED, not read off the filename: each letter's design
+    names were looked up in `price-lists.json` and C matches "Colefax & Fowler" on 678 of its 691
+    designs, J "Jane Churchill" 332/338, L "Larsen" 347/361, M "Manuel Canovas" 278/288 (no other
+    supplier scores above 42). An unknown letter THROWS — a letter is a code, not a spelling, so it
+    cannot pass through raw the way an unmapped house name does.
+  - `colour-adapters/jannelli-volpi.js` — nine declared sheets of ten, eight houses.
+  - `colour-adapters/pierre-frey.js` — one sheet, five houses, colour name cut out of the SKU name.
+  - `colour-adapters/jim-thompson.js` — two drops, each reading its own CODE LIST sheet.
+  - `colour-adapters/us-houses.js` — Clarence House, S. Harris, Stroheim, Trend and Vervain: five
+    files, one Fabricut layout, five different header rows (98/104/106/105/77).
+  - `colour-adapters/cc-milano.js` — the `x:`-prefixed workbook, its three dictionary rows and its
+    587 sample cuttings.
+  - `colour-adapters/de-le-cuona.js` — the PDF's declared refusal, with the reason and what to ask
+    the supplier for.
+  - `colour-adapters/index.js` — registers all twelve. No change to the harness or the reader was
+    needed: US-001 and US-002 already carried every mechanism these files need.
+- **Repos and files changed** — atelier-api only: `scripts/lib/colour-adapters/{colefax,
+  jannelli-volpi,pierre-frey,jim-thompson,us-houses,cc-milano,de-le-cuona}.js` (new),
+  `scripts/lib/colour-adapters/index.js`, `test/colour-files.test.js` (39 -> 59 tests), `CLAUDE.md`.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 808 tests).
+- **Corpus result** (`node scripts/convert-colour-files.js`, now exits 0): 18 files, **47,082
+  colourways**. New this story: Colefax 9,065, Pierre Frey 5,998, Trend 6,039, Stroheim 3,883,
+  S Harris 3,870, Jim Thompson 3,320 + 221, Clarence House 2,540, C&C Milano 1,686, Vervain 625,
+  and JV 4,917 across nine sheets (JANNELLI&VOLPI 2,663, ARMANI CASA 585, ALTAGAMMA 447, DESIGN
+  LICENCE 361, MISSONI 344, CO.DE 221, JWALL 215, JV FABRICS 81, JV Contract 0).
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - The one file that could have failed SILENTLY (C&C Milano's `x:` prefix and absolute
+      unnumbered sheet target) is now read end to end through a fixture in its own shape — the test
+      helpers take a `flavour` argument for exactly that. A parser bug that reads as "empty
+      workbook" needs a test in the real shape, not in the shape everything else uses.
+    - Five files, one layout, five header rows is the corpus's best argument for label matching;
+      the adapter for them is ONE module exporting five entries, not five modules.
+  - Gotchas for the next iteration:
+    - **Jannelli & Volpi names no colours at all.** `ITEM` is the colourway's code and `DESIGN` the
+      design's name; 6570 and 6571 are both "RIBBON GRASS" and nothing in the file says how they
+      differ. The price list agrees (it repeats the design as its description), so these 4,917
+      records carry an EMPTY `colourName` by design. US-004's summary and US-006's SKU shape both
+      have to cope with that; inventing "Colour 1" would be worse.
+    - **Six of JV's eight houses have no catalogue row** (Jannelli&Volpi itself, Altagamma, Design
+      Licence, JWall, CO.DE, JV Fabrics), and two of them are spelt two ways inside this one file
+      (`DESIGN LICENSE`/`DESIGN LICENCE`, `ALTAGAMMA`/`ALTAGAMMA MODERN LIVING`). Both spellings are
+      emitted as found — choosing between them is naming a house. Expect US-006 to report ~8 unknown
+      houses from this file alone, plus Le Manach (Pierre Frey), Fox Linton and BILL BENSLEY X JIM
+      THOMPSON (Jim Thompson), on top of RSC, Nicky Haslam and Perennials from US-002.
+    - **Jim Thompson's colour names are on a sheet of their own.** `FABRIC`/`WALLPAPER`/`THROWS` are
+      the priced sheets and name no colour; `CODE LIST` carries `OFFICIAL COLOUR NAME` and every one
+      of the 2,922 fabric and 392 wallpaper codes. US-005 has to JOIN the two, in this file at
+      least. Two throw codes (`FLTR0001003`, `FLTR0002003`) are in no code list at all.
+    - **The SS'26 drop is a strict subset of the annual one** — all 221 codes are in the annual with
+      identical colour names — so US-004 will see 221 exact duplicates that are not a bug. The two
+      drops also ORDER the same labels differently (code before name in one, after in the other).
+    - **Pierre Frey's colour name is a subtraction, and 318 rows resist it.** 5,680 of 5,998 SKU
+      names start with their own design name; 299 of those ARE the design (no colour named, so the
+      record carries none). The other 318 abbreviate the design instead of repeating it ("GR CORAIL
+      RAY 2CH BLEU BL 4" for "LE GRAND CORAIL - Rayure 2 chemins") and keep the SKU name whole. A
+      human should eyeball a dozen of those before they reach the catalogue.
+    - **C&C Milano's rows 2-4 are a dictionary, not data** — they translate the Italian header into
+      English, French and German, and are told apart only by the type cell spelling the type out
+      ("1 - Tessuti / Fabrics") where a data row numbers it ("1"). Type 0 is the 587 `Camp.` sample
+      cuttings, the only rows in that file with no colour.
+    - Colefax's stock number splits on a hyphen on most rows and a SLASH on 1,750 of them.
+    - `firstRecords` opens EVERY sheet an adapter declares, so a nine-sheet adapter cannot be tested
+      through it with a one-sheet fixture — use `sheetRecords`, which takes one spec.
+  - Context: one module per layout family in `scripts/lib/colour-adapters/`, registry `index.js`,
+    harness `scripts/lib/colour-sheet.js`, reader `records.js`, tests `test/colour-files.test.js`.
+- **Needs human verification:** no screen, route or table is touched. Four data questions for a
+  person, on top of US-002's three:
+  1. **Jannelli & Volpi's 4,917 colourways have no colour names.** Confirm the office is content to
+     hold them by item code alone, or ask JV for the colour list.
+  2. **Pierre Frey's 318 abbreviated SKU names** keep the whole name as the colour ("GR CORAIL RAY
+     2CH BLEU BL 4"). Eyeball a dozen against the supplier's own list.
+  3. **The six JV houses and Le Manach, Fox Linton and BILL BENSLEY X JIM THOMPSON** need catalogue
+     names (or a decision not to carry them) before US-006 can import them.
+  4. **The de Le Cuona PDF** is refused by declaration. Somebody has to ask the supplier for the
+     spreadsheet it was printed from; 139 of its rows are already in the price list.
+---
+
+## 2026-08-06T16:55:00Z - W8-US-004 - Normalised output, loud failure, per-file summary
+
+- **What was implemented**
+  - `scripts/lib/colour-adapters/records.js` — `skip(reason)`, `skipReason`, the three reader-owned
+    reasons (`BLANK_ROW`, `REPEATED_HEADER`, `UNSTATED`) and a new `sheetReadings` generator that
+    classifies EVERY data row as exactly one of `record` / `skip` / `error` and never throws.
+    `sheetColourways` is now the strict view over it (throws on the first error), so US-001–003's
+    contract and their tests are untouched.
+  - `scripts/lib/colour-adapters/reading.js` (new) — `readSheet` / `readColourFile`: one workbook
+    read end to end, returning per sheet `{ headerRow, rows, records, skips, entries, errors }`. A
+    sheet that will not OPEN is recorded like a bad row and the remaining sheets are still read.
+  - `scripts/lib/colour-adapters/output.js` (new) — the normalised row (`snake_case`, plus
+    `source_file`/`source_sheet`/`source_row`), `collectColourways` (exact-repeat dedupe keep-first,
+    clash detection) and `serialiseColourways` (one record per line, plain `JSON.stringify` — there
+    is no Python byte-history to reproduce here, unlike price-lists.json).
+  - `scripts/convert-colour-files.js` — now WRITES. Per-sheet summary lines, per-file abort with the
+    full `file:sheet:row` list (capped at 50 reported, the count always in full), the run-level
+    totals and skip breakdown, the clash report, then the write. Any aborted or unknown file means
+    the run writes nothing and exits 1. Output defaults to
+    `incoming/colour-files/normalized/colourways.json` — gitignored, never `src/seed/data/`, the
+    same rule the D365 exports follow.
+  - Four adapters now state their decline reasons: `cc-milano.js` (header translation / sample
+    cutting), `jannelli-volpi.js` (sample, sold by the unit / substrate price, no item code),
+    `madeaux.js` (section banner or note).
+  - `test/colour-files.test.js` — 59 -> 72 tests.
+- **Repos and files changed** — atelier-api only: `scripts/convert-colour-files.js`,
+  `scripts/lib/colour-adapters/{reading,output}.js` (new), `scripts/lib/colour-adapters/records.js`,
+  `scripts/lib/colour-adapters/{cc-milano,jannelli-volpi,madeaux}.js`, `test/colour-files.test.js`,
+  `CLAUDE.md`. `package.json` needed no change — `convert:colour` already existed.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 821 tests, 72 in colour-files).
+- **Corpus result** (`node scripts/convert-colour-files.js incoming/colour-files <scratch>.json`,
+  exit 0): 18 files, 17 read + 1 declared refusal, **48,384 rows in, 47,082 colourways out, 1,604
+  rows skipped, 1,159 exact duplicates dropped, 45,923 written** (12 MB, 15 suppliers, 37 brand
+  spellings). Skips by reason: 684 blank row, 587 sample cutting, 262 sample sold by the unit, 45
+  substrate price no item code, 16 section banner or note, 7 repeats the header, 3 header
+  translation. **Zero reasonless declines** — every decline in the registry states its kind.
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - One classification path, two views. `sheetReadings` decides what a row IS; `sheetColourways`
+      throws on an error and the converter collects it. Writing the lenient reader as a second
+      implementation of the same rules is how the two drift apart.
+    - The counts are only trustworthy because they are exhaustive: rows in = colourways out + skips
+      + errors, per sheet. That is why a reasonless decline gets its own bucket instead of being
+      absorbed, and why blank rows and repeated headers are counted as skips rather than ignored.
+  - Gotchas for the next iteration:
+    - **US-005 and US-006 both read the normalised file, not the workbooks.** It carries `supplier`,
+      `brand`, `design`, `design_code`, `colour_code`, `colour_name` and the three `source_*` fields.
+      `design_code` is empty for Jannelli & Volpi (FAM is the collection's code), C&C Milano, Liberty
+      and Madeaux; `colour_name` is empty for all 4,917 JV records and 299 Pierre Frey ones.
+    - **The output is NOT deduped on any identity key** — only on the whole record. US-006 must
+      decide the SKU shape and will meet the seven clashes listed by the run (six Madeaux, one Maria
+      Flora); if its upsert batches must be key-unique, that is where the choice gets made.
+    - The default output path is inside the read-only drop directory (`normalized/` beside the
+      files). This iteration never ran the default form — every corpus run went to an explicit
+      scratch path — so `incoming/` is still exactly as the client left it. A human running
+      `npm run convert:colour` is what creates that directory.
+    - The converter walk now filters to FILES, because its own `normalized/` output directory would
+      otherwise be reported as an unmapped drop on the second run.
+    - `MAX_REPORTED = 50` caps the printed error and clash lists, never the counts.
+- Context: reader `scripts/lib/colour-adapters/records.js`, per-file reading `reading.js`, the
+    written file `output.js`, driver `scripts/convert-colour-files.js`, tests
+    `test/colour-files.test.js`.
+- **Needs human verification:** no screen, route or table is touched — this story writes a file and
+  prints a report. Three things a person must look at, on top of US-002's three and US-003's four:
+  1. **The seven colour codes carrying two names.** Six are Madeaux reprinting a design in a second
+     section ("Blue Grass"/"Bluegrass", "Duck Egg On Ecru"/"Duck Egg", "Red Earth"/"Clay", "Jewel
+     Tones"/"Moonstone", "Taupe & Teal"/"Taupe and Teal") and one is Maria Flora's Filigrana 102
+     ("Lino"/"Linen"). Both rows are kept; somebody has to say which name the catalogue carries.
+  2. **1,159 exact duplicates dropped.** Expected (Liberty's overlap, Jim Thompson's spring subset,
+     Maria Flora's 73 reprints), but worth one eyeball against the printed totals before import.
+  3. **Run `npm run convert:colour` once by hand** to create `incoming/colour-files/normalized/` and
+     confirm the file lands where the office expects it — this loop deliberately never wrote into
+     `incoming/`.
+---
+
+## 2026-08-06T18:10:00Z - W8-US-005 - Rates as a secondary output
+
+- **What was implemented** — the 2026 rates these files carry, written in the office's UNIVERSAL
+  PRICING TEMPLATE rather than in a shape of this pipeline's own:
+  - `scripts/lib/colour-adapters/rate-template.js` (new) — `RATE_HEADER` (the v2 template's
+    eighteen columns as a supplier's own drop spells them), `assertTemplateHeader` running at
+    module load against `matchTemplate`, `rateCells`, `rateKey`, `collectRates`, `verifyRates` and
+    `serialiseRates` (RFC 4180, CRLF).
+  - `scripts/lib/colour-adapters/rates.js` (new) — the rate record, `assertRateSheet` (validating
+    a sheet's declared currency/item type/pack against the SHARED vocabularies in
+    `price-template.js`, so an adapter cannot declare a value the pricing converter would refuse)
+    and `sheetRates`, the reader that classifies every row as a rate, a stated decline or an error.
+  - `reading.js` — one counting loop now serves both passes (`readSheet`, `readRateSheet`,
+    `readColourFile`, `readRateFile`); rows in = entries out + skips + errors, as before.
+  - `index.js` — `rateSheets` is validated at import beside `sheets`, and is exclusive with a
+    declared refusal.
+  - Rate declarations in all twelve adapters: `jean-monro`, `liberty`, `madeaux`, `maria-flora`,
+    `perennials` (×2), `colefax`, `us-houses` (×5), `cc-milano`, `jannelli-volpi` (×9 sheets),
+    `pierre-frey`, `jim-thompson` (three RATE-ONLY sheets — the one file whose colour names and
+    prices never meet).
+  - `scripts/convert-colour-files.js` — reads the rate sheets in a second pass, reports rates in /
+    out / skipped by reason / collapsed / conflicted, verifies every row through the template's own
+    mapper (refusal = write nothing, exit 1), and writes
+    `incoming/colour-files/normalized/rates.csv` beside the colourways. Third CLI argument.
+  - `test/colour-files.test.js` — 72 -> 98 tests.
+- **Repos and files changed** — atelier-api only:
+  `scripts/lib/colour-adapters/{rate-template,rates}.js` (new), `scripts/lib/colour-adapters/
+  {index,reading,cc-milano,colefax,jannelli-volpi,jean-monro,jim-thompson,liberty,madeaux,
+  maria-flora,perennials,pierre-frey,us-houses}.js`, `scripts/convert-colour-files.js`,
+  `test/colour-files.test.js`, `CLAUDE.md`. `package.json` needed no change.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 847 tests, 98 in colour-files).
+- **Corpus result** (`node scripts/convert-colour-files.js incoming/colour-files <scratch>.json
+  <scratch>.csv`, exit 0). Colourways unchanged from US-004 (47,082 out, 45,923 written). Rates:
+  **47,608 priced rows in, 15,611 rates out**, 1,822 skipped, 29,397 exact duplicates and 313
+  same-rate repeats collapsed, **230 codes priced more than one way and therefore not written**.
+  Skips by reason are dominated by the units the template has no pack for (JV's books, hangers and
+  shop displays; S Harris's 84 SQFT rows; Maria Flora's 30 sqm) plus 587 C&C Milano sample cuttings.
+- **The whole output was checked against the office's own ledger** (`src/seed/data/
+  price-lists.json`, read as evidence — never written): **14,914 of the 15,611 rates land on a row
+  it already holds under the same supplier, category and code, and 10,634 of those carry the
+  identical rate.** End to end, `node scripts/convert-price-lists.js <dir with rates.csv>
+  <scratch>.json` reads all 15,611 rows with zero errors (30 suppliers) and
+  `validatePriceListItems` accepts every one.
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - The rate pass is separate from the colourway pass and re-opens the sheet. The two want
+      different cells, are grained differently (a rate is usually the design's, a colourway always
+      the colour's), and one file keeps them on different sheets — bending either to the other's
+      shape costs more than the second read does.
+    - Where a file states no unit, the office's own rows for that supplier are the evidence: C&C
+      Milano is unanimous (fabric and trimming by the metre, wallpaper by the roll) and Colefax's
+      four houses are 180/196 roll for wallpaper. Where a file DOES state one, it wins.
+  - Gotchas for the next iteration:
+    - **The JV drop's DEALER PRICE is exactly TWICE what the office's ledger holds** for five of its
+      six houses — 3,939 rows at a ratio of exactly 2.000 (Jannelli Volpi 2,444, Armani Casa 479,
+      Altagamma 446, JV Design 361, JWall 209) — while Missoni's 323 rows match to the cent. The
+      ledger is discount-inclusive (CLAUDE.md), so importing JV's rates as they stand would replace
+      a net cost with a list price. **Do not import them without asking the supplier.** No discount
+      is applied here: inventing one is exactly the placeholder this story forbids.
+    - **Liberty's two sheets price differently and the ledger settles it**: of the 119 designs in
+      both, all 119 agree with `DISTRIBUTOR PRICE` and only the 29 coincidences agree with `PRICE £
+      EX VAT`. Only `Sheet1` is a rate sheet; the 19 designs that appear solely in "Sheet1 (2)"
+      carry no distributor price and get no rate.
+    - **43 rows would change a unit the office already recorded** (Colefax 12, Liberty 11, Manuel
+      Canovas 6, Pierre Frey 5, Larsen 4, Vervain 4, S Harris 1): the ledger's minority cases —
+      a wallpaper by the metre, a trimming by the piece — which these files give no way to tell
+      apart because they state no unit at all. The upsert would overwrite them.
+    - `rates.csv` is written beside `colourways.json` and is NOT dropped into
+      `incoming/pricing-templates/` by anything here. Copying it there and running
+      `npm run convert:pricing` regenerates the committed `src/seed/data/price-lists.json` — an
+      8 MB diff and a deliberate decision, not a step this converter takes.
+    - A sheet with a `row` mapper must still declare a `wholesale` column; where a file prices two
+      ways (Perennials' yard/roll, Jim Thompson's metre/selling-unit), `wholesale` is the common
+      case and the mapper reaches for the other column by name.
+  - Context: the emitted shape `scripts/lib/colour-adapters/rate-template.js`, the reader
+    `rates.js`, the per-file pass `reading.js`, the declarations in each adapter module, the driver
+    `scripts/convert-colour-files.js`, tests `test/colour-files.test.js`.
+- **Needs human verification:** no screen, route or table is touched — this story writes a second
+  file and prints a report. Four things a person must settle, on top of US-002's three, US-003's
+  four and US-004's three:
+  1. **Jannelli & Volpi's rates must not be imported as they stand.** The file's DEALER PRICE is
+     exactly double the office's own figure for five of its six houses. Ask JV (or the office)
+     whether a 50% distributor discount applies before those 4,285 rows go anywhere.
+  2. **CO.DE and JV Fabrics quote a PUBLIC price** — those two sheets carry no dealer column at all
+     — so 285 of those rows are a list price sitting in a wholesale column. Confirm with the
+     supplier.
+  3. **The 43 rows whose unit disagrees with the ledger** (listed above). Somebody has to say
+     whether a Larsen wallcovering is sold by the roll or by the metre; the file does not.
+  4. **Madeaux's 13 grasscloth wallpapers state two rates in one cell** ("£35/m" and "£350/roll"),
+     so none is written. Which one does the office buy at?
+---
+
+## 2026-08-06T18:55:00Z - W8-US-006 - Import colourways into products and colourways
+
+- **What was implemented** — the normalised file lands in the live catalogue, one product per
+  (house, design) and one colourway per row:
+  - `src/seed/colourways-import.js` (new) — the pure planning layer and the write.
+    `validateColourwayRows` throws on the first malformed row (with `file:sheet:row`) BEFORE a
+    connection is taken; `prepareColourwayImport(rows, brands)` takes the catalogue's brands as
+    data and returns the products, the colourways, the declines by reason, the unknown houses, the
+    repeats collapsed and the name conflicts, so the whole plan is testable and printable without a
+    database; `importColourways(pool, rows)` writes it in one transaction in chunked `unnest`
+    batches.
+  - `src/seed/import-colourways.js` (new) + `npm run import:colour` — the CLI. Defaults to
+    `incoming/colour-files/normalized/colourways.json` (gitignored, client data — same rule the
+    legacy import follows), takes a path argument, and prints the summary plus three reports:
+    houses with no catalogue row, rows declined by reason, colour codes carrying two names.
+    `MAX_REPORTED = 50` caps what is printed, never what is counted.
+  - `test/colour-files.test.js` — 98 -> 114 tests.
+- **Repos and files changed** — atelier-api only: `src/seed/colourways-import.js` (new),
+  `src/seed/import-colourways.js` (new), `test/colour-files.test.js`, `package.json` (scripts
+  only), `CLAUDE.md`. No migration, no route, no converter change.
+- **Gates:** `npm run lint` -> 0, `npm test` -> 0 (41 files, 863 tests, 114 in colour-files).
+- **The decisions this story had to make, each measured rather than chosen**
+  - **The colourway SKU is `<brand slug>-<design>-<supplier colour code>`, uppercased, every part
+    slugified.** Nothing shorter is unique (Madeaux and Maria Flora number colours per design, so
+    "01" repeats across designs) and the office's own Brand-Product-Colour generator lives in the
+    CRM demo app and was deliberately never ported. Measured over the corpus: 38,064 rows produce
+    38,064 distinct SKUs, and NONE of them collides with the 34 demo SKUs the seed already holds.
+  - **A house is resolved by SLUG against `brands`, never created.** 22 of the 37 spellings
+    resolve, carrying 38,064 of the 45,923 rows; 15 spellings covering 7,823 rows have no
+    catalogue row and are reported with a count and a first coordinate.
+  - **`colourways.name` is NOT NULL and 917 rows name no colour**, so those carry the supplier's
+    own colour code — what the colour is identified by on the supplier's own document. Inventing
+    "Colour 1" would read as a name somebody chose.
+  - **Products are DO NOTHING, colourways upsert on the SKU, inventory is DO NOTHING at zero.**
+    See the CLAUDE.md entry for why each; the short version is that this file knows a design's name
+    and nothing else.
+- **Whole-corpus plan** (`prepareColourwayImport` over the 45,923 normalised rows against the
+  seeded 41 brands; the numbers balance exactly):
+  **45,923 rows in = 38,064 colourways out + 7,824 skipped + 28 repeats collapsed + 7 conflicts**,
+  across **8,438 products and 22 houses**. Declines: 7,823 "house not in the catalogue", 1 "no
+  design name". The 7 conflicts are precisely the seven US-004's clash report named (six Madeaux
+  section reprints, Maria Flora's Filigrana 102).
+- **Learnings:**
+  - Patterns (the general ones are also in `## Codebase Patterns` above):
+    - The plan is a pure function over `(rows, brands)`, so every corpus measurement in this entry
+      was taken without a database and the CLI can print the whole report before writing. Taking
+      the brands as an ARGUMENT rather than querying inside is what made that possible.
+    - Idempotency is proved by comparing every catalogue row before and after a second run, not by
+      re-reading the summary — a summary can be identical while the rows were rewritten. The
+      second signal is `inventoryCreated: 0`, which only a genuine no-op produces.
+  - Gotchas for the next iteration:
+    - **The real corpus has NOT been written to a database by this loop.** Creating a scratch
+      database is denied in this sandbox and `atelier_w8` is the suite's own database — 38,064
+      colourways in it would falsify other suites' counts. The database path is covered by the
+      integration tests with prefixed fixtures; the whole-corpus run is the pure plan. A human
+      running `npm run import:colour` against a seeded database is what closes that gap.
+    - **A `DO UPDATE` multi-row upsert cannot hit one conflict key twice**, which is why the plan
+      dedupes colourways into a Map by SKU before any SQL. That is a guarantee by construction, not
+      a validator — do not "simplify" the Map into an array.
+    - **`incoming/colour-files/normalized/` still does not exist.** Neither US-004, US-005 nor this
+      story ever ran the converter's default output path, so `npm run import:colour` with no
+      argument will report a missing file until somebody runs `npm run convert:colour` once.
+    - **Liberty's `Sheet1 (2)` row 403 is a placeholder** — design, colour code and name are all
+      "-". The importer declines it with `no design name`. It would be cleaner still for
+      `liberty.js` to decline it at source with a stated reason (the corpus total would move from
+      45,923 to 45,922), but that changes numbers already recorded in CLAUDE.md and three progress
+      entries, so it is left as a note rather than taken unilaterally.
+    - `design_code` is read, validated and then DROPPED: no column holds it. It is what the
+      supplier's price list keys on, so if the office ever wants the join, that is a migration and
+      belongs to whichever workstream owns the schema — not to this importer.
+  - Context: the plan and the write are `src/seed/colourways-import.js`, the CLI
+    `src/seed/import-colourways.js`, tests at the end of `test/colour-files.test.js` (three
+    describe blocks: planning, statements, database).
+- **Needs human verification:** no screen and no route is touched, but this is the first story in
+  the workstream that writes to catalogue TABLES, so three things need a person, on top of US-002's
+  three, US-003's four, US-004's three and US-005's four:
+  1. **Run `npm run convert:colour` then `npm run import:colour` once against a real database and
+     eyeball the CRM's Products screen.** 8,438 products and 38,064 colourways appear, all with
+     `show_on_website = false`, so nothing reaches the public storefront until somebody publishes
+     it — that is the intended posture and it is worth confirming on the screen rather than in a
+     count.
+  2. **The 15 houses with no catalogue row (7,823 colourways) import nothing until they exist.**
+     The list is printed by the run and is in CLAUDE.md. Somebody has to name them — or decide
+     Atelier does not carry them — and a house must be created in the CRM, never by this importer.
+  3. **The SKU shape is this story's decision and is now the catalogue's.** `COLEFAX-FOWLER-
+     BOWOOD-01020-01` is what an order line will quote. If the office wants the D365 shape
+     (`{colour code} {YY}{SUPPLIER_TOKEN}`) or the CRM generator's (`CF-SWT-01`) instead, changing
+     it later means re-keying every imported colourway, so it is worth confirming before the first
+     production import.
+---

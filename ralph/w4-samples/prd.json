@@ -1,0 +1,164 @@
+{
+  "project": "Atelier — August 6th updates — W4 Samples",
+  "branchName": "aug6/w4-samples",
+  "description": "A real samples register and showroom stocking domain, replacing three demo screens that persist nothing.\n\nEpic: _bmad-output/planning-artifacts/epics.md (Epic 4)\nArchitecture: _bmad-output/planning-artifacts/architecture.md\nRequires: W1 merged; W3 merged (supplier FK)\nBlocks: nothing",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Migration: showrooms and samples",
+      "description": "As the office, I want a physical sample register, so that we know where every sample is.",
+      "acceptanceCriteria": [
+        "samples.barcode is unique; colourway_id is RESTRICT and nullable; supplier_id and showroom_id are SET NULL",
+        "status is CHECK-constrained to in_library, out, missing, retired",
+        "A test asserts no legacy_* table gained a column",
+        "A test asserts samples are not inventory: no code path reads or writes qty_available or qty_reserved",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": " | done 2026-08-06T06:19:01Z"
+    },
+    {
+      "id": "US-002",
+      "title": "Migration: sample_loans with the one-open-loan index",
+      "description": "As the office, I want loan history to be append-only and unambiguous.",
+      "acceptanceCriteria": [
+        "A partial unique index on sample_id WHERE returned_at IS NULL enforces at most one open loan",
+        "holder_name is a snapshot, so history survives a trade account being unlinked or renamed",
+        "sample_loans.sample_id is RESTRICT — history is a record, not an owned child",
+        "A test proves two concurrent check-outs yield one loan and one 409",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": " | done 2026-08-06T18:26:00Z"
+    },
+    {
+      "id": "US-003",
+      "title": "Migration: sample_orders",
+      "description": "As a showroom, I want to order sample material and track it.",
+      "acceptanceCriteria": [
+        "status is CHECK-constrained through requested, ordered, in_transit, received, displayed, cancelled",
+        "Each transition has its own timestamp column",
+        "showroom_id is RESTRICT; colourway_id is RESTRICT; supplier_id is SET NULL",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": " | done 2026-08-06T18:34:00Z"
+    },
+    {
+      "id": "US-004",
+      "title": "Sample read models, filters and overdue derivation",
+      "description": "As the office, I want to see which samples are out and which are overdue.",
+      "acceptanceCriteria": [
+        "Overdue is DERIVED at read time, never stored",
+        "Filters: q, status, showroom_id, supplier_id, overdue, include_archived; paginated",
+        "Each row embeds its open loan and a loan count",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": " | done 2026-08-06T18:44:00Z"
+    },
+    {
+      "id": "US-005",
+      "title": "Sample CRUD routes and by-barcode lookup",
+      "description": "As a scanner, I want one deterministic answer for a barcode.",
+      "acceptanceCriteria": [
+        "GET /admin/samples/by-barcode/:barcode returns 200 or 404, never a filtered list",
+        "POST returns 409 on a duplicate barcode, detected by the database",
+        "DELETE is blocked by sample_loans",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": " | done 2026-08-06T19:05:00Z"
+    },
+    {
+      "id": "US-006",
+      "title": "Check-out and check-in verb routes",
+      "description": "As showroom staff, I want to send a sample out and take it back in.",
+      "acceptanceCriteria": [
+        "Both are verb routes, not a status PATCH — each writes two tables in one transaction",
+        "withSampleTxn mirrors withOrderTxn: BEGIN, SELECT FOR UPDATE, run, COMMIT, re-read",
+        "Already out returns 409 from a caught 23505 on the partial index, never a pre-check",
+        "Check-in of a sample that is not out returns 409",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": " | done 2026-08-06T19:14:00Z"
+    },
+    {
+      "id": "US-007",
+      "title": "Sample-order lifecycle module and routes",
+      "description": "As a showroom, I want to advance an order through its states.",
+      "acceptanceCriteria": [
+        "ALLOWED_TRANSITIONS and requireStatus live in a module the CRM mirrors",
+        "An invalid transition returns 409",
+        "DELETE is refused unless the order is requested or cancelled",
+        "Gates green: `( cd atelier-api && npm run lint && npm test )`"
+      ],
+      "repos": [
+        "atelier-api"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": " | done 2026-08-06T07:25:43Z"
+    },
+    {
+      "id": "US-008",
+      "title": "AdminSamples and AdminShowrooms screens",
+      "description": "As the office, I want to manage the register in the CRM.",
+      "acceptanceCriteria": [
+        "Both use the W1 kit",
+        "Overdue is shown from the API value, not recomputed in the browser",
+        "legacy_cuttings.comments is never displayed — it holds third parties personal data",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-api",
+        "atelier-crm"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Needed the showroom API no story creates (routes, module, registry entry) — all in-bounds files | done 2026-08-06T07:45:45Z"
+    },
+    {
+      "id": "US-009",
+      "title": "AdminSampleOrders, live scanner, retired-route redirects",
+      "description": "As showroom staff, I want the scanner to actually record a movement.",
+      "acceptanceCriteria": [
+        "SampleScanner calls by-barcode then check-out or check-in",
+        "sampleFlow.js mirrors the API transitions so the UI never offers one that 409s",
+        "/samples and /showroom-samples redirect to the live screens rather than falling into the catch-all",
+        "Gates green: `( cd atelier-crm && npm test && npm run build )`"
+      ],
+      "repos": [
+        "atelier-crm"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": " | done 2026-08-09T20:34:50Z"
+    }
+  ]
+}

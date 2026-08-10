@@ -14,6 +14,8 @@
 // orders (kind='checkout') arrive already paid with inventory decremented and
 // hold no reservation, so their inventory is never touched here.
 
+import { setArchived } from '../lifecycle/archive.js'
+
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
 
@@ -346,8 +348,8 @@ export const setOrderArchived = (pool, id, archived) =>
     if (archived && reserves(order.kind)) {
       requireStatus(order, ['shipped', 'declined'], 'archive')
     }
-    await client.query(
-      `UPDATE orders SET archived_at = ${archived ? 'now()' : 'NULL'} WHERE id = $1`,
-      [id]
-    )
+    // The transaction's client, not the pool: the guard above and this write
+    // must be the same transaction, or a concurrent transition could slip in
+    // between them.
+    await setArchived(client, 'order', id, archived)
   })

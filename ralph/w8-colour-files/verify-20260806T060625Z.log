@@ -1,0 +1,194 @@
+verify.sh — workstream w8-colour-files
+root: /Users/verumoffice/atelier-worktrees/w8-colour-files
+utc:  2026-08-06T06:06:25Z
+
+===================================================
+ atelier-api  @ aug6/w8-colour-files a65f5b1
+===================================================
+
+--- atelier-api: npm run lint
+
+> atelier-api@0.1.0 lint
+> eslint .
+
+    exit 0
+
+--- atelier-api: npm test
+
+> atelier-api@0.1.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api
+
+(node:72095) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/colour-files.test.js (114 tests) 116ms
+(node:72101) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-catalogue.test.js (69 tests) 616ms
+(node:72123) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/account-portal.test.js (22 tests) 695ms
+(node:72136) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/lifecycle-delete.test.js (23 tests) 107ms
+ ✓ test/price-template.test.js (62 tests) 10ms
+(node:72142) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/trade-catalogue.test.js (22 tests) 543ms
+(node:72153) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/catalogue-listing.test.js (28 tests) 482ms
+(node:72164) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-users.test.js (28 tests) 420ms
+(node:72283) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-panel.test.js (22 tests) 1816ms
+(node:72311) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/price-lists.test.js (44 tests) 195ms
+(node:72333) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-price-lists.test.js (20 tests) 327ms
+(node:72345) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/trade-accounts.test.js (18 tests) 400ms
+(node:72349) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/seed.test.js (18 tests) 172ms
+(node:72360) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/guards.test.js (18 tests) 520ms
+(node:72371) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/email.test.js (18 tests) 191ms
+(node:72380) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-orders.test.js (14 tests) 389ms
+(node:72392) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/checkout.test.js (15 tests) 326ms
+(node:72403) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/legacy-import-api.test.js (22 tests) 364ms
+(node:72408) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/webhooks.test.js (9 tests) 307ms
+(node:72420) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/trade-applications.test.js (18 tests) 477ms
+(node:72433) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-inventory.test.js (11 tests) 370ms
+(node:72465) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/auth.test.js (17 tests) 973ms
+   ✓ login rate limiting > returns 429 on the 11th login attempt from one IP 342ms
+(node:72549) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/catalogue-collections.test.js (15 tests) 206ms
+(node:72560) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/catalogue-detail.test.js (12 tests) 513ms
+(node:72599) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-archive.test.js (4 tests) 280ms
+(node:72603) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/lifecycle-registry.test.js (79 tests) 46ms
+(node:72614) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/contact.test.js (9 tests) 268ms
+(node:72618) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/price-list-exposure.test.js (15 tests) 297ms
+ ✓ test/converters.test.js (16 tests) 6ms
+(node:72633) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/legacy-import.test.js (10 tests) 77ms
+(node:72637) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/orders.test.js (9 tests) 304ms
+(node:72648) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/orders-history.test.js (8 tests) 347ms
+(node:72659) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/catalogue.test.js (9 tests) 206ms
+(node:72663) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/shipping.test.js (11 tests) 262ms
+(node:72674) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/admin-legacy.test.js (7 tests) 257ms
+ ✓ test/cors.test.js (8 tests) 159ms
+(node:72688) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/lifecycle-archive.test.js (7 tests) 48ms
+(node:72692) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/seed-staff.test.js (3 tests) 290ms
+(node:72703) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/schema.test.js (3 tests) 65ms
+(node:72709) ExperimentalWarning: CommonJS module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/_ is loading ES Module /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/migrations/1784603304194_catalogue-schema.js using require().
+Support for loading ES Module in require() is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ ✓ test/commerce-schema.test.js (4 tests) 56ms
+ ✓ test/health.test.js (2 tests) 142ms
+
+ Test Files  41 passed (41)
+      Tests  863 passed (863)
+   Start at  18:06:27
+   Duration  22.56s (transform 322ms, setup 0ms, collect 3.66s, tests 13.64s, environment 4ms, prepare 1.15s)
+
+    exit 0
+
+--- atelier-api: converter byte-identity
+
+> atelier-api@0.1.0 convert:pricing
+> node scripts/convert-price-lists.js
+
+ENOENT: no such file or directory, scandir '/Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/incoming/pricing-templates'
+    price-lists.json unchanged — exit 0
+
+ALL GATES GREEN
+log: /Users/verumoffice/atelier-worktrees/w8-colour-files/atelier-api/ralph/w8-colour-files/verify-20260806T060625Z.log

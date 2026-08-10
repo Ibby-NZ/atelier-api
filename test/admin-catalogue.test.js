@@ -3,6 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { deleteOrExplain } from '../src/lifecycle/delete.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'admin-cat-test'
@@ -23,8 +24,13 @@ const sessionCookieFrom = (response) => {
 // Brand fixtures only — the staff/customer users are registered once in beforeAll
 // and kept, because register shares a rate-limit bucket (10 / 15 min / IP) that
 // re-registering every test would exhaust.
-const cleanupFixtures = (pool) =>
-  pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
+// Orders go first: `order_lines.colourway_id` is the schema's one RESTRICT edge,
+// so a brand cascade cannot get past an order line and the cleanup itself would
+// raise 23503. Deleting the order cascades its lines.
+const cleanupFixtures = async (pool) => {
+  await pool.query('DELETE FROM orders WHERE order_number LIKE $1', [`${PREFIX}-%`])
+  await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
+}
 
 const deleteUsers = (pool) =>
   pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${DOMAIN}`])
@@ -99,6 +105,35 @@ describe('back-office catalogue admin', () => {
     )
     return rows[0].count
   }
+
+  // Commerce fixtures for the delete tests. There is no admin route that creates
+  // an order line, and the request flow would reserve stock as a side effect, so
+  // these go in directly — an order line is the thing a catalogue delete must
+  // never destroy, and its presence is the whole assertion.
+  let orderSeq = 0
+  const createOrderLineFixture = async (colourwayId) => {
+    orderSeq += 1
+    const { rows } = await pool.query(
+      `INSERT INTO orders (order_number, kind, status)
+            VALUES ($1, 'order_request', 'requested')
+         RETURNING id`,
+      [`${PREFIX}-order-${orderSeq}`]
+    )
+    await pool.query(
+      `INSERT INTO order_lines (order_id, colourway_id, qty, unit_price_cents)
+            VALUES ($1, $2, 3, 0)`,
+      [rows[0].id, colourwayId]
+    )
+    return rows[0].id
+  }
+
+  // The colourway create route always makes the stock row at 0/0; a delete is
+  // only blocked once there is something on hand or spoken for.
+  const setStock = (colourwayId, { available = 0, reserved = 0 }) =>
+    pool.query(
+      `UPDATE inventory SET qty_available = $2, qty_reserved = $3 WHERE colourway_id = $1`,
+      [colourwayId, available, reserved]
+    )
 
   const publicProductSlugs = async (brandSlug) => {
     const response = await inject('GET', `/catalogue/products?brand=${brandSlug}`, null)
@@ -350,6 +385,99 @@ describe('back-office catalogue admin', () => {
     })
   })
 
+  // The re-read the CRM does after a write. Its counts are the interesting part:
+  // they answer the same question DELETE /admin/brands/:id answers, so a screen
+  // can grey the button out instead of discovering the refusal.
+  describe('GET /admin/brands/:id', () => {
+    it('returns the house with its collections and both child counts', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      await createProductFixture(brand.id)
+      await createProductFixture(brand.id, { name: 'Velvet Two' })
+
+      const response = await inject('GET', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      const detail = response.json().brand
+      expect(detail.id).toBe(brand.id)
+      expect(detail.slug).toBe(`${PREFIX}-house`)
+      expect(detail.product_count).toBe(2)
+      expect(detail.collection_count).toBe(1)
+      // Same shape the collections list returns, so one renderer serves both.
+      expect(detail.collections).toHaveLength(1)
+      expect(detail.collections[0]).toMatchObject({
+        id: collection.id,
+        brand_id: brand.id,
+        brand_name: brandName('House'),
+        name: 'Spring Two Six',
+        slug: 'spring-two-six',
+      })
+    })
+
+    it('counts archived children, because the delete probes do', async () => {
+      const brand = await createBrandFixture('House')
+      const product = await createProductFixture(brand.id)
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      await inject('POST', `/admin/products/${product.id}/archive`, backofficeCookie)
+      await inject('POST', `/admin/collections/${collection.id}/archive`, backofficeCookie)
+
+      const detail = (
+        await inject('GET', `/admin/brands/${brand.id}`, backofficeCookie)
+      ).json().brand
+      expect(detail.product_count).toBe(1)
+      expect(detail.collection_count).toBe(1)
+      // Listed too, carrying archived_at — hiding the row would hide the reason
+      // the delete below is refused.
+      expect(detail.collections[0].archived_at).not.toBeNull()
+
+      // The invariant the counts exist for: non-zero counts mean the delete is
+      // refused with those same numbers. A count that skipped archived rows
+      // would say "empty house" and then be contradicted by the 409.
+      const refusal = await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(refusal.statusCode).toBe(409)
+      expect(refusal.json().blockers.map((blocker) => blocker.count)).toEqual([1, 1])
+    })
+
+    it('reads zero counts for a house a delete would accept', async () => {
+      const brand = await createBrandFixture('House')
+      const detail = (
+        await inject('GET', `/admin/brands/${brand.id}`, backofficeCookie)
+      ).json().brand
+      expect(detail.product_count).toBe(0)
+      expect(detail.collection_count).toBe(0)
+      expect(detail.collections).toEqual([])
+
+      expect(
+        (await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)).statusCode
+      ).toBe(200)
+    })
+
+    it('returns an archived house rather than 404', async () => {
+      const brand = await createBrandFixture('House')
+      await inject('POST', `/admin/brands/${brand.id}/archive`, backofficeCookie)
+
+      // Archiving is reversible, so the row must stay readable — the restore
+      // screen reads it back.
+      const response = await inject('GET', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().brand.archived_at).not.toBeNull()
+    })
+
+    it('returns 404 for an unknown brand id', async () => {
+      const response = await inject('GET', '/admin/brands/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      const brand = await createBrandFixture('House')
+      expect(
+        (await inject('GET', `/admin/brands/${brand.id}`, null)).statusCode
+      ).toBe(401)
+      expect(
+        (await inject('GET', `/admin/brands/${brand.id}`, customerCookie)).statusCode
+      ).toBe(403)
+    })
+  })
+
   describe('PATCH /admin/brands/:id', () => {
     it('updates a subset of fields and leaves the slug untouched', async () => {
       const created = await createBrandFixture('House', { story: 'Old story.' })
@@ -561,6 +689,89 @@ describe('back-office catalogue admin', () => {
         { name: 'Ghost' }
       )
       expect(response.statusCode).toBe(404)
+    })
+  })
+
+  describe('GET /admin/collections/:id', () => {
+    it('returns the collection with its house name and product count', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      await createProductFixture(brand.id, { collection_id: collection.id })
+      // Same house, no collection: a product with a null collection_id is normal
+      // (the seed never assigns one), and it must not be counted here.
+      await createProductFixture(brand.id, { name: 'Velvet Two' })
+
+      const response = await inject(
+        'GET',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      const detail = response.json().collection
+      expect(detail).toMatchObject({
+        id: collection.id,
+        brand_id: brand.id,
+        brand_name: brandName('House'),
+        name: 'Spring Two Six',
+        slug: 'spring-two-six',
+        product_count: 1,
+      })
+    })
+
+    it('counts an archived product, because the delete probe does', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      const product = await createProductFixture(brand.id, {
+        collection_id: collection.id,
+      })
+      await inject('POST', `/admin/products/${product.id}/archive`, backofficeCookie)
+
+      const detail = (
+        await inject('GET', `/admin/collections/${collection.id}`, backofficeCookie)
+      ).json().collection
+      expect(detail.product_count).toBe(1)
+
+      // collection_id is SET NULL, so a delete that trusted a count which
+      // skipped archived rows would report success and quietly uncollect this
+      // product. The refusal agrees with the count.
+      const refusal = await inject(
+        'DELETE',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(refusal.statusCode).toBe(409)
+      expect(refusal.json().blockers[0].count).toBe(1)
+    })
+
+    it('returns an archived collection rather than 404', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      await inject('POST', `/admin/collections/${collection.id}/archive`, backofficeCookie)
+
+      const response = await inject(
+        'GET',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().collection.archived_at).not.toBeNull()
+    })
+
+    it('returns 404 for an unknown collection id', async () => {
+      const response = await inject('GET', '/admin/collections/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Spring Two Six')
+      expect(
+        (await inject('GET', `/admin/collections/${collection.id}`, null)).statusCode
+      ).toBe(401)
+      expect(
+        (await inject('GET', `/admin/collections/${collection.id}`, customerCookie))
+          .statusCode
+      ).toBe(403)
     })
   })
 
@@ -1008,6 +1219,719 @@ describe('back-office catalogue admin', () => {
         backofficeCookie,
         { name: 'Ghost' }
       )
+      expect(response.statusCode).toBe(404)
+    })
+  })
+
+  // The SKU-level browse. Every assertion here scopes itself with brand_id or
+  // product_id: this list spans the whole catalogue, so an unfiltered
+  // `meta.total` counts every seeded colourway in the database too.
+  describe('GET /admin/colourways', () => {
+    const skusFrom = (response) =>
+      response.json().colourways.map((colourway) => colourway.sku)
+
+    const listColourways = (query) =>
+      inject('GET', `/admin/colourways?${query}`, backofficeCookie)
+
+    it('carries the design and house on every row, with the stock snapshot', async () => {
+      const brand = await createBrandFixture('Swatch House')
+      const product = await createProductFixture(brand.id, { name: 'Atlas' })
+      const colourway = await createColourwayFixture(product.id, {
+        name: 'Ivory',
+        sku: `${PREFIX}-ivory`,
+        hex_tones: ['#AABBCC'],
+      })
+
+      const response = await listColourways(`brand_id=${brand.id}`)
+      expect(response.statusCode).toBe(200)
+
+      const body = response.json()
+      expect(body.meta).toEqual({ total: 1, page: 1, limit: 50 })
+      // Without the parent context the screen shows a bare SKU and a colour
+      // name, which is precisely what sending staff back to the product page to
+      // identify it looks like.
+      expect(body.colourways[0]).toMatchObject({
+        id: colourway.id,
+        product_id: product.id,
+        name: 'Ivory',
+        sku: `${PREFIX}-ivory`,
+        hex_tones: ['#AABBCC'],
+        product_name: 'Atlas',
+        product_slug: product.slug,
+        product_type: 'fabric',
+        brand_id: brand.id,
+        brand_name: brandName('Swatch House'),
+      })
+      expect(body.colourways[0].inventory.unit).toBe('metres')
+    })
+
+    // Paging is the story: this is the largest table in the catalogue, so the
+    // pages must partition the result set rather than merely truncate it.
+    it('pages in a stable order, with no row on two pages', async () => {
+      const brand = await createBrandFixture('Paged House')
+      const product = await createProductFixture(brand.id)
+      await createColourwayFixture(product.id, { name: 'Alpha', sku: `${PREFIX}-a` })
+      await createColourwayFixture(product.id, { name: 'Bravo', sku: `${PREFIX}-b` })
+      await createColourwayFixture(product.id, { name: 'Charlie', sku: `${PREFIX}-c` })
+
+      const first = await listColourways(`brand_id=${brand.id}&limit=2`)
+      expect(first.json().meta).toEqual({ total: 3, page: 1, limit: 2 })
+      expect(skusFrom(first)).toEqual([`${PREFIX}-a`, `${PREFIX}-b`])
+
+      const second = await listColourways(`brand_id=${brand.id}&limit=2&page=2`)
+      // total is the filtered total, not the page size — the CRM divides by it
+      // to draw the pager.
+      expect(second.json().meta).toEqual({ total: 3, page: 2, limit: 2 })
+      expect(skusFrom(second)).toEqual([`${PREFIX}-c`])
+    })
+
+    it('rejects a limit above the maximum with 400', async () => {
+      const response = await listColourways('limit=500')
+      expect(response.statusCode).toBe(400)
+    })
+
+    it('filters by product_id', async () => {
+      const brand = await createBrandFixture('Two Designs')
+      const atlas = await createProductFixture(brand.id, { name: 'Atlas' })
+      const orion = await createProductFixture(brand.id, { name: 'Orion' })
+      await createColourwayFixture(atlas.id, { sku: `${PREFIX}-atlas-1` })
+      await createColourwayFixture(orion.id, { sku: `${PREFIX}-orion-1` })
+
+      const response = await listColourways(`product_id=${atlas.id}`)
+      expect(skusFrom(response)).toEqual([`${PREFIX}-atlas-1`])
+    })
+
+    it('filters by brand_id', async () => {
+      const mine = await createBrandFixture('Mine')
+      const theirs = await createBrandFixture('Theirs')
+      const ours = await createProductFixture(mine.id)
+      const others = await createProductFixture(theirs.id)
+      await createColourwayFixture(ours.id, { sku: `${PREFIX}-mine-1` })
+      await createColourwayFixture(others.id, { sku: `${PREFIX}-theirs-1` })
+
+      const response = await listColourways(`brand_id=${mine.id}`)
+      expect(skusFrom(response)).toEqual([`${PREFIX}-mine-1`])
+    })
+
+    // Three ways staff arrive at a colourway: the code off a sample tag, the
+    // colour name off an invoice, and the design name they were told over the
+    // phone.
+    it('searches the sku, the colour name and the design name', async () => {
+      const brand = await createBrandFixture('Search House')
+      const atlas = await createProductFixture(brand.id, { name: 'Atlas' })
+      const orion = await createProductFixture(brand.id, { name: 'Orion' })
+      await createColourwayFixture(atlas.id, { name: 'Ivory', sku: `${PREFIX}-ivory` })
+      await createColourwayFixture(orion.id, { name: 'Slate', sku: `${PREFIX}-slate` })
+
+      const bySku = await listColourways(`brand_id=${brand.id}&q=${PREFIX}-slate`)
+      expect(skusFrom(bySku)).toEqual([`${PREFIX}-slate`])
+
+      const byColour = await listColourways(`brand_id=${brand.id}&q=ivory`)
+      expect(skusFrom(byColour)).toEqual([`${PREFIX}-ivory`])
+
+      const byDesign = await listColourways(`brand_id=${brand.id}&q=Orion`)
+      expect(skusFrom(byDesign)).toEqual([`${PREFIX}-slate`])
+    })
+
+    // A supplier code carrying a percent is not a wildcard. Without the escape
+    // this term matches every colourway in the house.
+    it('treats a percent in the search term as a literal', async () => {
+      const brand = await createBrandFixture('Percent House')
+      const product = await createProductFixture(brand.id)
+      await createColourwayFixture(product.id, { sku: `${PREFIX}-100%-linen` })
+      await createColourwayFixture(product.id, { sku: `${PREFIX}-plain` })
+
+      const response = await listColourways(
+        `brand_id=${brand.id}&q=${encodeURIComponent('100%')}`
+      )
+      expect(skusFrom(response)).toEqual([`${PREFIX}-100%-linen`])
+    })
+
+    it('hides archived colourways until include_archived is set', async () => {
+      const brand = await createBrandFixture('Archive House')
+      const product = await createProductFixture(brand.id)
+      const live = await createColourwayFixture(product.id, { sku: `${PREFIX}-live` })
+      const gone = await createColourwayFixture(product.id, {
+        name: 'Zed',
+        sku: `${PREFIX}-gone`,
+      })
+      await inject('POST', `/admin/colourways/${gone.id}/archive`, backofficeCookie)
+
+      const working = await listColourways(`brand_id=${brand.id}`)
+      expect(skusFrom(working)).toEqual([live.sku])
+      expect(working.json().meta.total).toBe(1)
+
+      const all = await listColourways(`brand_id=${brand.id}&include_archived=true`)
+      expect(skusFrom(all)).toEqual([live.sku, gone.sku])
+      const archived = all
+        .json()
+        .colourways.find((colourway) => colourway.id === gone.id)
+      expect(archived.archived_at).not.toBeNull()
+    })
+
+    // Archiving a product does not archive its colourways, so they stay in the
+    // working list — the same rows the product detail still returns. A filter on
+    // the parent here would make the two screens disagree about what exists.
+    it('keeps the colourways of an archived product', async () => {
+      const brand = await createBrandFixture('Retired Design')
+      const product = await createProductFixture(brand.id)
+      await createColourwayFixture(product.id, { sku: `${PREFIX}-orphan` })
+      await inject('POST', `/admin/products/${product.id}/archive`, backofficeCookie)
+
+      const response = await listColourways(`brand_id=${brand.id}`)
+      expect(skusFrom(response)).toEqual([`${PREFIX}-orphan`])
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      expect((await inject('GET', '/admin/colourways', null)).statusCode).toBe(401)
+      expect((await inject('GET', '/admin/colourways', customerCookie)).statusCode).toBe(
+        403
+      )
+    })
+  })
+
+  describe('GET /admin/colourways/:id', () => {
+    it('returns the same row the list does, so one renderer serves both', async () => {
+      const brand = await createBrandFixture('Detail House')
+      const product = await createProductFixture(brand.id, { name: 'Atlas' })
+      const created = await createColourwayFixture(product.id, {
+        name: 'Ivory',
+        sku: `${PREFIX}-ivory`,
+        hex_tones: ['#AABBCC'],
+      })
+
+      const response = await inject(
+        'GET',
+        `/admin/colourways/${created.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      const detail = response.json().colourway
+      expect(detail).toMatchObject({
+        id: created.id,
+        product_id: product.id,
+        sku: `${PREFIX}-ivory`,
+        product_name: 'Atlas',
+        brand_name: brandName('Detail House'),
+      })
+      // pg hands numeric back as a string — coerce, as every caller must.
+      expect(Number(detail.inventory.qty_available)).toBe(0)
+      expect(detail.inventory.unit).toBe('metres')
+
+      const listed = (
+        await inject('GET', `/admin/colourways?brand_id=${brand.id}`, backofficeCookie)
+      ).json().colourways[0]
+      expect(detail).toEqual(listed)
+    })
+
+    // A by-id admin read never filters on archived_at: the caller already knows
+    // the row exists, and a 404 here reads as "someone deleted it".
+    it('returns an archived colourway rather than 404', async () => {
+      const brand = await createBrandFixture('Detail House')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      await inject('POST', `/admin/colourways/${colourway.id}/archive`, backofficeCookie)
+
+      const response = await inject(
+        'GET',
+        `/admin/colourways/${colourway.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().colourway.archived_at).not.toBeNull()
+    })
+
+    it('returns 404 for an unknown colourway id', async () => {
+      const response = await inject('GET', '/admin/colourways/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+      expect(response.json().error).toBe('Not Found')
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      const brand = await createBrandFixture('Detail House')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      expect(
+        (await inject('GET', `/admin/colourways/${colourway.id}`, null)).statusCode
+      ).toBe(401)
+      expect(
+        (await inject('GET', `/admin/colourways/${colourway.id}`, customerCookie))
+          .statusCode
+      ).toBe(403)
+    })
+  })
+
+  // Hard delete, wired to the lifecycle registry. The point of these tests is
+  // the refusal: every child edge out of brands and collections is CASCADE or
+  // SET NULL, so a bare `DELETE FROM brands` returns success while destroying
+  // the catalogue under it. Probe semantics themselves are W1's
+  // test/lifecycle-delete.test.js; what is asserted here is the HTTP contract
+  // the CRM's delete dialog reads.
+  describe('DELETE /admin/brands/:id', () => {
+    const blockerFor = (body, relation) =>
+      body.blockers.find((blocker) => blocker.relation === relation)
+
+    const brandExists = async (id) => {
+      const { rows } = await pool.query('SELECT 1 FROM brands WHERE id = $1', [id])
+      return rows.length === 1
+    }
+
+    it('rejects an anonymous delete with 401', async () => {
+      const brand = await createBrandFixture('Anon Delete')
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, null)
+      expect(response.statusCode).toBe(401)
+      expect(await brandExists(brand.id)).toBe(true)
+    })
+
+    it('rejects a customer delete with 403', async () => {
+      const brand = await createBrandFixture('Shopper Delete')
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, customerCookie)
+      expect(response.statusCode).toBe(403)
+      expect(await brandExists(brand.id)).toBe(true)
+    })
+
+    it('deletes an unreferenced house and returns 200', async () => {
+      const brand = await createBrandFixture('Empty House')
+
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({ deleted: { entity: 'brand', id: brand.id } })
+      expect(await brandExists(brand.id)).toBe(false)
+    })
+
+    // Both counts, in one refusal: staff need to know everything in the way, not
+    // the first thing the server tripped over.
+    it('refuses a house with products AND collections, naming both counts', async () => {
+      const brand = await createBrandFixture('Stocked House')
+      await createCollectionFixture(brand.id, 'Spring')
+      await createProductFixture(brand.id)
+
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(409)
+
+      const body = response.json()
+      expect(blockerFor(body, 'products')).toMatchObject({
+        label: 'products',
+        count: 1,
+        capped: false,
+      })
+      expect(blockerFor(body, 'collections')).toMatchObject({
+        label: 'collections',
+        count: 1,
+        capped: false,
+      })
+      expect(body.message).toContain('1 products')
+      expect(body.message).toContain('1 collections')
+      // The dialog offers "Archive instead" on the strength of this flag.
+      expect(body.archivable).toBe(true)
+      // Nothing was destroyed: the whole point of probing before deleting.
+      expect(await brandExists(brand.id)).toBe(true)
+      const listed = await inject('GET', `/admin/products?brand_id=${brand.id}`, backofficeCookie)
+      expect(listed.json().products).toHaveLength(1)
+    })
+
+    // The trap staff hit first: archiving the catalogue does not unblock the
+    // house, because archiving is not deletion and a delete must never destroy
+    // the archive.
+    it('still refuses when the only product is archived', async () => {
+      const brand = await createBrandFixture('Archived Stock')
+      const product = await createProductFixture(brand.id)
+      const archived = await inject(
+        'POST',
+        `/admin/products/${product.id}/archive`,
+        backofficeCookie
+      )
+      expect(archived.statusCode).toBe(200)
+
+      const response = await inject('DELETE', `/admin/brands/${brand.id}`, backofficeCookie)
+      expect(response.statusCode).toBe(409)
+      expect(blockerFor(response.json(), 'products').count).toBe(1)
+    })
+
+    it('returns 404 for an unknown house id', async () => {
+      const response = await inject('DELETE', '/admin/brands/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+      expect(response.json().blockers).toEqual([])
+    })
+  })
+
+  describe('DELETE /admin/collections/:id', () => {
+    const collectionIdFor = async (productId) => {
+      const { rows } = await pool.query('SELECT collection_id FROM products WHERE id = $1', [
+        productId,
+      ])
+      return rows[0]?.collection_id ?? null
+    }
+
+    it('rejects a customer delete with 403', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Autumn')
+      const response = await inject(
+        'DELETE',
+        `/admin/collections/${collection.id}`,
+        customerCookie
+      )
+      expect(response.statusCode).toBe(403)
+    })
+
+    it('deletes an empty collection and leaves its house alone', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Autumn')
+
+      const response = await inject(
+        'DELETE',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({
+        deleted: { entity: 'collection', id: collection.id },
+      })
+
+      const remaining = await inject(
+        'GET',
+        `/admin/collections?brand_id=${brand.id}`,
+        backofficeCookie
+      )
+      expect(remaining.json().collections).toEqual([])
+      const houses = await inject('GET', '/admin/brands', backofficeCookie)
+      expect(houses.json().brands.map((row) => row.id)).toContain(brand.id)
+    })
+
+    // products.collection_id is SET NULL, so the database raises nothing here:
+    // without the probe this delete would succeed and silently uncollect every
+    // product in the collection, with nothing logged.
+    it('refuses a collection holding products, and uncollects nothing', async () => {
+      const brand = await createBrandFixture('House')
+      const collection = await createCollectionFixture(brand.id, 'Autumn')
+      const product = await createProductFixture(brand.id, { collection_id: collection.id })
+      expect(await collectionIdFor(product.id)).toBe(collection.id)
+
+      const response = await inject(
+        'DELETE',
+        `/admin/collections/${collection.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(409)
+
+      const body = response.json()
+      expect(body.blockers).toEqual([
+        { relation: 'products', label: 'products', count: 1, capped: false },
+      ])
+      expect(body.message).toContain('1 products')
+      expect(body.archivable).toBe(true)
+      // The SET NULL that did not happen.
+      expect(await collectionIdFor(product.id)).toBe(collection.id)
+    })
+
+    it('returns 404 for an unknown collection id', async () => {
+      const response = await inject('DELETE', '/admin/collections/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+    })
+  })
+
+  // Product and colourway are where the catalogue meets commerce. A product
+  // owns its colourways and their stock rows and takes them with it; an order
+  // line is record and must survive, and stock that is on hand or reserved is
+  // an operational fact the office has to resolve first.
+  describe('DELETE /admin/products/:id', () => {
+    const blockerFor = (body, relation) =>
+      body.blockers.find((blocker) => blocker.relation === relation)
+
+    const productExists = async (id) => {
+      const { rows } = await pool.query('SELECT 1 FROM products WHERE id = $1', [id])
+      return rows.length === 1
+    }
+
+    const colourwayExists = async (id) => {
+      const { rows } = await pool.query('SELECT 1 FROM colourways WHERE id = $1', [id])
+      return rows.length === 1
+    }
+
+    it('rejects an anonymous delete with 401', async () => {
+      const brand = await createBrandFixture('Anon Product Delete')
+      const product = await createProductFixture(brand.id)
+
+      const response = await inject('DELETE', `/admin/products/${product.id}`, null)
+      expect(response.statusCode).toBe(401)
+      expect(await productExists(product.id)).toBe(true)
+    })
+
+    it('rejects a customer delete with 403', async () => {
+      const brand = await createBrandFixture('Shopper Product Delete')
+      const product = await createProductFixture(brand.id)
+
+      const response = await inject(
+        'DELETE',
+        `/admin/products/${product.id}`,
+        customerCookie
+      )
+      expect(response.statusCode).toBe(403)
+      expect(await productExists(product.id)).toBe(true)
+    })
+
+    // The colourway and its zero-quantity stock row are owned children: they are
+    // the product's own record, not somebody else's, so they go with it.
+    it('deletes a never-sold product and cascades its colourway and stock row', async () => {
+      const brand = await createBrandFixture('Unsold')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      expect(await inventoryForSku(`${PREFIX}-001`)).not.toBeNull()
+
+      const response = await inject(
+        'DELETE',
+        `/admin/products/${product.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({ deleted: { entity: 'product', id: product.id } })
+
+      expect(await productExists(product.id)).toBe(false)
+      expect(await colourwayExists(colourway.id)).toBe(false)
+      expect(await inventoryForSku(`${PREFIX}-001`)).toBeNull()
+      // The house it hung off is untouched.
+      const houses = await inject('GET', '/admin/brands', backofficeCookie)
+      expect(houses.json().brands.map((row) => row.id)).toContain(brand.id)
+    })
+
+    // The probe reaches the grandchild through the colourway: the order line
+    // points at the colourway, not at the product, so nothing about the product
+    // row itself says it has been sold.
+    it('refuses a product whose colourway carries an order line', async () => {
+      const brand = await createBrandFixture('Sold')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      await createOrderLineFixture(colourway.id)
+
+      const response = await inject(
+        'DELETE',
+        `/admin/products/${product.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(409)
+
+      const body = response.json()
+      expect(blockerFor(body, 'order_lines')).toEqual({
+        relation: 'order_lines',
+        label: 'order lines',
+        count: 1,
+        capped: false,
+      })
+      expect(body.message).toContain('1 order lines')
+      expect(body.archivable).toBe(true)
+      expect(await productExists(product.id)).toBe(true)
+      expect(await colourwayExists(colourway.id)).toBe(true)
+    })
+
+    it('refuses a product holding stock, and names the stock separately', async () => {
+      const brand = await createBrandFixture('Stocked Product')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      await setStock(colourway.id, { available: 12 })
+
+      const response = await inject(
+        'DELETE',
+        `/admin/products/${product.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(409)
+
+      const body = response.json()
+      expect(body.blockers).toEqual([
+        {
+          relation: 'inventory',
+          label: 'colourways holding stock',
+          count: 1,
+          capped: false,
+        },
+      ])
+      expect(Number((await inventoryForSku(`${PREFIX}-001`)).qty_available)).toBe(12)
+    })
+
+    // Reserved but not on hand still counts: the reservation is open demand the
+    // order state machine has to release.
+    it('refuses a product whose stock is reserved rather than on hand', async () => {
+      const brand = await createBrandFixture('Reserved Product')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      await setStock(colourway.id, { available: 0, reserved: 4 })
+
+      const response = await inject(
+        'DELETE',
+        `/admin/products/${product.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(409)
+      expect(blockerFor(response.json(), 'inventory').count).toBe(1)
+    })
+
+    it('returns 404 for an unknown product id', async () => {
+      const response = await inject('DELETE', '/admin/products/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+      expect(response.json().blockers).toEqual([])
+    })
+
+    // The one window the parent lock does not cover: the transaction locks the
+    // product, so an order line inserted against one of its existing colourways
+    // after the probes have run is not stopped by anything the probes did.
+    // Postgres serialises that insert against the cascade's delete of the
+    // colourway instead, and `order_lines.colourway_id` being the schema's one
+    // RESTRICT edge turns the lost race into a 23503 — which delete.js catches
+    // and re-answers as the same 409. Reproduced deterministically here by
+    // wrapping the pool and committing the insert on its own connection at
+    // exactly that moment; going through the route instead would leave the
+    // window to chance.
+    describe('the 23503 backstop', () => {
+      const poolRacingTheDeleteWith = (race) => ({
+        connect: async () => {
+          const client = await pool.connect()
+          return {
+            query: async (sql, params) => {
+              if (typeof sql === 'string' && sql.startsWith('DELETE FROM products')) {
+                await race()
+              }
+              return client.query(sql, params)
+            },
+            release: () => client.release(),
+          }
+        },
+      })
+
+      it('answers a lost race with the 409 the probe would have produced', async () => {
+        const brand = await createBrandFixture('Race')
+        const product = await createProductFixture(brand.id)
+        const colourway = await createColourwayFixture(product.id)
+
+        const racingPool = poolRacingTheDeleteWith(() =>
+          createOrderLineFixture(colourway.id)
+        )
+        const backstop = await deleteOrExplain(racingPool, 'product', product.id, {})
+
+        expect(backstop).toMatchObject({
+          deleted: false,
+          status: 409,
+          error: 'Conflict',
+          archivable: true,
+        })
+        // "1, capped" because the database says at least one row exists and
+        // nothing about how many.
+        expect(backstop.blockers).toEqual([
+          { relation: 'order_lines', label: 'order lines', count: 1, capped: true },
+        ])
+        // Rolled back: the DELETE is the only statement that writes.
+        expect(await productExists(product.id)).toBe(true)
+        expect(await colourwayExists(colourway.id)).toBe(true)
+
+        // Same envelope as the probe path, field for field — the order line the
+        // race committed is now visible to the probes, so the only difference is
+        // the count the database could not give us.
+        const probed = await deleteOrExplain(pool, 'product', product.id, {})
+        expect(Object.keys(probed)).toEqual(Object.keys(backstop))
+        expect(probed.message).toBe(backstop.message.replace('1+ order', '1 order'))
+        expect(probed.blockers[0]).toMatchObject({
+          relation: 'order_lines',
+          label: 'order lines',
+        })
+      })
+    })
+  })
+
+  describe('DELETE /admin/colourways/:id', () => {
+    const colourwayExists = async (id) => {
+      const { rows } = await pool.query('SELECT 1 FROM colourways WHERE id = $1', [id])
+      return rows.length === 1
+    }
+
+    it('rejects a customer delete with 403', async () => {
+      const brand = await createBrandFixture('Shopper Colourway Delete')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+
+      const response = await inject(
+        'DELETE',
+        `/admin/colourways/${colourway.id}`,
+        customerCookie
+      )
+      expect(response.statusCode).toBe(403)
+      expect(await colourwayExists(colourway.id)).toBe(true)
+    })
+
+    it('deletes an unsold colourway with its stock row, keeping the product', async () => {
+      const brand = await createBrandFixture('Colour Cleanup')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+
+      const response = await inject(
+        'DELETE',
+        `/admin/colourways/${colourway.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({
+        deleted: { entity: 'colourway', id: colourway.id },
+      })
+      expect(await colourwayExists(colourway.id)).toBe(false)
+      expect(await inventoryForSku(`${PREFIX}-001`)).toBeNull()
+      expect(await colourwayCountFor(product.id)).toBe(0)
+
+      const remaining = await inject(
+        'GET',
+        `/admin/products/${product.id}`,
+        backofficeCookie
+      )
+      expect(remaining.statusCode).toBe(200)
+    })
+
+    // Here the RESTRICT edge is direct, so the database would have raised
+    // anyway. The probe still wins: it runs before anything is destroyed and it
+    // can say how many.
+    it('refuses a colourway with an order line against it', async () => {
+      const brand = await createBrandFixture('Sold Colour')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      await createOrderLineFixture(colourway.id)
+
+      const response = await inject(
+        'DELETE',
+        `/admin/colourways/${colourway.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(409)
+
+      const body = response.json()
+      expect(body.blockers).toEqual([
+        { relation: 'order_lines', label: 'order lines', count: 1, capped: false },
+      ])
+      expect(body.message).toContain('1 order lines')
+      expect(body.archivable).toBe(true)
+      expect(await colourwayExists(colourway.id)).toBe(true)
+    })
+
+    it('refuses a colourway holding stock', async () => {
+      const brand = await createBrandFixture('Stocked Colour')
+      const product = await createProductFixture(brand.id)
+      const colourway = await createColourwayFixture(product.id)
+      await setStock(colourway.id, { available: 7 })
+
+      const response = await inject(
+        'DELETE',
+        `/admin/colourways/${colourway.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(409)
+      expect(response.json().blockers).toEqual([
+        {
+          relation: 'inventory',
+          label: 'units of stock on hand',
+          count: 1,
+          capped: false,
+        },
+      ])
+      expect(await colourwayExists(colourway.id)).toBe(true)
+    })
+
+    it('returns 404 for an unknown colourway id', async () => {
+      const response = await inject('DELETE', '/admin/colourways/99999999', backofficeCookie)
       expect(response.statusCode).toBe(404)
     })
   })

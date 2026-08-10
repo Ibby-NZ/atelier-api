@@ -254,6 +254,70 @@ describe('back-office price-list management', () => {
     })
   })
 
+  describe('GET /admin/price-list-items/:id', () => {
+    it('returns one row in the same shape the list returns', async () => {
+      const response = await inject(
+        'GET',
+        `/admin/price-list-items/${fixtures.alphaFabric}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      const { item } = response.json()
+      expect(item.id).toBe(fixtures.alphaFabric)
+      expect(item.supplier).toBe(`${PREFIX}Alpha`)
+      expect(item.code).toBe('PLT-001')
+      expect(item.description).toBe('Linen Weave')
+      // pg returns numeric as a string; the mapper is what coerces it, and the
+      // detail read must go through the same one or the CRM's form gets a string.
+      expect(item.wholesale_rate).toBe(65)
+    })
+
+    it('reflects a PATCH without a list refetch', async () => {
+      await inject(
+        'PATCH',
+        `/admin/price-list-items/${fixtures.alphaFabric}`,
+        backofficeCookie,
+        { wholesale_rate: 71.5 }
+      )
+      const response = await inject(
+        'GET',
+        `/admin/price-list-items/${fixtures.alphaFabric}`,
+        backofficeCookie
+      )
+      expect(response.json().item.wholesale_rate).toBe(71.5)
+    })
+
+    it('returns an archived row rather than 404', async () => {
+      await inject(
+        'POST',
+        `/admin/price-list-items/${fixtures.alphaFabric}/archive`,
+        backofficeCookie
+      )
+      // Archive is the durable removal here (a re-import undoes a delete), so
+      // the archived row is the one staff go back to most — a 404 would read as
+      // "someone deleted it".
+      const response = await inject(
+        'GET',
+        `/admin/price-list-items/${fixtures.alphaFabric}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().item.archived_at).not.toBeNull()
+    })
+
+    it('returns 404 for an unknown id', async () => {
+      const response = await inject('GET', '/admin/price-list-items/99999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+      expect(response.json().message).toMatch(/not found/i)
+    })
+
+    it('rejects an anonymous caller with 401 and a customer with 403', async () => {
+      const path = `/admin/price-list-items/${fixtures.alphaFabric}`
+      expect((await inject('GET', path, null)).statusCode).toBe(401)
+      expect((await inject('GET', path, customerCookie)).statusCode).toBe(403)
+    })
+  })
+
   describe('POST /admin/price-list-items', () => {
     it('creates an item, deriving code_normalized and defaulting source_file', async () => {
       const response = await inject('POST', '/admin/price-list-items', backofficeCookie, {
@@ -412,6 +476,91 @@ describe('back-office price-list management', () => {
         null
       )
       expect(response.statusCode).toBe(401)
+    })
+  })
+
+  describe('DELETE /admin/price-list-items/:id', () => {
+    const rowCount = async (id) => {
+      const { rows } = await pool.query(
+        'SELECT 1 FROM price_list_items WHERE id = $1',
+        [id]
+      )
+      return rows.length
+    }
+
+    it('deletes the row and warns that a re-import re-creates it', async () => {
+      const response = await inject(
+        'DELETE',
+        `/admin/price-list-items/${fixtures.alphaFabric}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      const body = response.json()
+      expect(body.deleted).toEqual({
+        entity: 'price_list_item',
+        id: fixtures.alphaFabric,
+      })
+      // The one thing staff cannot infer from a 200: the supplier file still
+      // holds this rate, so `npm run import:pricing` brings it straight back.
+      expect(body.warning).toMatch(/import:pricing/)
+      expect(body.warning).toMatch(/[Aa]rchive/)
+
+      expect(await rowCount(fixtures.alphaFabric)).toBe(0)
+      const list = await inject(
+        'GET',
+        `/admin/price-list-items?supplier=${PREFIX}Alpha&include_archived=true`,
+        backofficeCookie
+      )
+      expect(list.json().items.some((i) => i.id === fixtures.alphaFabric)).toBe(false)
+    })
+
+    it('deletes an already-archived row too', async () => {
+      await inject(
+        'POST',
+        `/admin/price-list-items/${fixtures.alphaWall}/archive`,
+        backofficeCookie
+      )
+      const response = await inject(
+        'DELETE',
+        `/admin/price-list-items/${fixtures.alphaWall}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(await rowCount(fixtures.alphaWall)).toBe(0)
+    })
+
+    it('returns 404 with an empty blockers list for an unknown id', async () => {
+      const response = await inject(
+        'DELETE',
+        '/admin/price-list-items/99999999',
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(404)
+      const body = response.json()
+      expect(body.blockers).toEqual([])
+      // No `warning`: the row was never deleted, so the re-import caveat would
+      // be a statement about something that did not happen.
+      expect(body.warning).toBeUndefined()
+    })
+
+    it('rejects an anonymous delete with 401 and leaves the row', async () => {
+      const response = await inject(
+        'DELETE',
+        `/admin/price-list-items/${fixtures.betaFabric}`,
+        null
+      )
+      expect(response.statusCode).toBe(401)
+      expect(await rowCount(fixtures.betaFabric)).toBe(1)
+    })
+
+    it('rejects a customer delete with 403 and leaves the row', async () => {
+      const response = await inject(
+        'DELETE',
+        `/admin/price-list-items/${fixtures.betaFabric}`,
+        customerCookie
+      )
+      expect(response.statusCode).toBe(403)
+      expect(await rowCount(fixtures.betaFabric)).toBe(1)
     })
   })
 })

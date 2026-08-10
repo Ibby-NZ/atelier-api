@@ -11,11 +11,18 @@ const DOMAIN = 'inv-test.example.com'
 const testEmail = (local) => `${local}@${DOMAIN}`
 const PASSWORD = 'correct horse battery staple'
 
-// Two colourways under one house so `q` search and per-row edits can be told
-// apart. Velvet starts with a live reservation; Linen is untouched stock.
+// Two stocked colourways under one house so `q` search and per-row edits can be
+// told apart. Velvet starts with a live reservation; Linen is untouched stock.
+//
+// Jade and Cushion carry NO inventory row — they are what a create targets. A
+// colourway created through the catalogue always gets one, so the only way to
+// reach this state is a delete, which is exactly the round trip this story adds.
+// Neither is visible to the list or `q` tests: those read FROM inventory.
 const SKU = {
   velvet: `${PREFIX}-VELVET-RUBY`,
   linen: `${PREFIX}-LINEN-SKY`,
+  jade: `${PREFIX}-VELVET-JADE`,
+  cushion: `${PREFIX}-CUSHION-OCHRE`,
 }
 
 const sessionCookieFrom = (response) => {
@@ -52,6 +59,12 @@ const seedFixtures = async (pool) => {
     [velvetCw[0].id]
   )
 
+  // A second colourway of the same fabric, deliberately stockless.
+  await pool.query(
+    `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Jade', $2)`,
+    [velvet[0].id, SKU.jade]
+  )
+
   const { rows: linen } = await pool.query(
     `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website)
      VALUES ($1, 'Inv Linen', $2, 'fabric', 'NZD', true)
@@ -67,6 +80,19 @@ const seedFixtures = async (pool) => {
     `INSERT INTO inventory (colourway_id, qty_available, qty_reserved, unit)
      VALUES ($1, 20, 0, 'metres')`,
     [linenCw[0].id]
+  )
+
+  // A finished good — the only fixture whose derived unit is 'units' rather than
+  // 'metres'. Stockless, like Jade.
+  const { rows: cushion } = await pool.query(
+    `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website)
+     VALUES ($1, 'Inv Cushion', $2, 'finished_good', 'NZD', true)
+     RETURNING id`,
+    [brandId, `${PREFIX}-cushion`]
+  )
+  await pool.query(
+    `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Ochre', $2)`,
+    [cushion[0].id, SKU.cushion]
   )
 }
 
@@ -105,6 +131,18 @@ const inventoryFor = async (pool, sku) => {
     available: Number(rows[0].qty_available),
     reserved: Number(rows[0].qty_reserved),
   }
+}
+
+// Tolerant of a missing row, unlike inventoryFor — the create and delete blocks
+// assert on absence as often as on presence.
+const stockRowFor = async (pool, sku) => {
+  const { rows } = await pool.query(
+    `SELECT i.qty_available, i.qty_reserved, i.unit
+       FROM inventory i JOIN colourways c ON c.id = i.colourway_id
+      WHERE c.sku = $1`,
+    [sku]
+  )
+  return rows[0] ?? null
 }
 
 describe('back-office stock management', () => {
@@ -301,6 +339,206 @@ describe('back-office stock management', () => {
         { delta: 5 }
       )
       expect(response.statusCode).toBe(404)
+    })
+  })
+
+  describe('POST /admin/inventory', () => {
+    it('creates a stock row, deriving metres from a fabric product', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.jade)
+      const response = await inject('POST', '/admin/inventory', backofficeCookie, {
+        colourway_id: cwId,
+      })
+      expect(response.statusCode).toBe(201)
+      expect(response.json().inventory).toMatchObject({
+        colourway_id: cwId,
+        sku: SKU.jade,
+        colourway_name: 'Jade',
+        product_name: 'Inv Velvet',
+        brand_name: 'Inv Test House',
+        unit: 'metres',
+        qty_available: 0,
+        qty_reserved: 0,
+      })
+      expect(await stockRowFor(pool, SKU.jade)).toMatchObject({ unit: 'metres' })
+    })
+
+    it('derives units from a finished good and never takes unit from the body', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.cushion)
+      const response = await inject('POST', '/admin/inventory', backofficeCookie, {
+        colourway_id: cwId,
+        // Ajv strips this rather than rejecting it; the derived unit must win.
+        unit: 'metres',
+      })
+      expect(response.statusCode).toBe(201)
+      expect(response.json().inventory.unit).toBe('units')
+      expect((await stockRowFor(pool, SKU.cushion)).unit).toBe('units')
+    })
+
+    it('accepts opening quantities and returns them as numbers', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.jade)
+      const response = await inject('POST', '/admin/inventory', backofficeCookie, {
+        colourway_id: cwId,
+        qty_available: 40,
+        qty_reserved: 2,
+      })
+      expect(response.statusCode).toBe(201)
+      const { inventory } = response.json()
+      // numeric(12,2) comes back from pg as '40.00'; the mapper coerces it.
+      expect(inventory).toMatchObject({ qty_available: 40, qty_reserved: 2 })
+      expect(typeof inventory.qty_available).toBe('number')
+    })
+
+    it('the new row is immediately listable and editable', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.jade)
+      await inject('POST', '/admin/inventory', backofficeCookie, { colourway_id: cwId })
+
+      // Search by SKU, not by colour name: the fixtures share this database with
+      // a seeded catalogue that has its own Jade colourways.
+      const list = await inject(
+        'GET',
+        `/admin/inventory?q=${SKU.jade}`,
+        backofficeCookie
+      )
+      expect(list.json().inventory.map((row) => row.sku)).toEqual([SKU.jade])
+
+      const patched = await inject('PATCH', `/admin/inventory/${cwId}`, backofficeCookie, {
+        qty_available: 12,
+      })
+      expect(patched.statusCode).toBe(200)
+      expect(patched.json().inventory.qty_available).toBe(12)
+    })
+
+    it('rejects an unknown colourway with 422', async () => {
+      const response = await inject('POST', '/admin/inventory', backofficeCookie, {
+        colourway_id: 99999999,
+      })
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toContain('99999999')
+    })
+
+    it('rejects a colourway that already has a stock row with 409, leaving it intact', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.velvet)
+      const response = await inject('POST', '/admin/inventory', backofficeCookie, {
+        colourway_id: cwId,
+        qty_available: 0,
+      })
+      expect(response.statusCode).toBe(409)
+      // The point of the 409: an upsert here would have zeroed live stock and
+      // dropped a reservation the order state machine still needs.
+      expect(await inventoryFor(pool, SKU.velvet)).toEqual({ available: 60, reserved: 5 })
+    })
+
+    it('rejects a body with no colourway_id, or a negative quantity, with 400', async () => {
+      const missing = await inject('POST', '/admin/inventory', backofficeCookie, {
+        qty_available: 5,
+      })
+      expect(missing.statusCode).toBe(400)
+
+      const cwId = await colourwayIdFor(pool, SKU.jade)
+      const negative = await inject('POST', '/admin/inventory', backofficeCookie, {
+        colourway_id: cwId,
+        qty_available: -1,
+      })
+      expect(negative.statusCode).toBe(400)
+      expect(await stockRowFor(pool, SKU.jade)).toBeNull()
+    })
+
+    it('rejects anonymous with 401 and a customer with 403, creating nothing', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.jade)
+      const anonymous = await inject('POST', '/admin/inventory', null, {
+        colourway_id: cwId,
+      })
+      expect(anonymous.statusCode).toBe(401)
+
+      const customer = await inject('POST', '/admin/inventory', customerCookie, {
+        colourway_id: cwId,
+      })
+      expect(customer.statusCode).toBe(403)
+      expect(await stockRowFor(pool, SKU.jade)).toBeNull()
+    })
+  })
+
+  describe('DELETE /admin/inventory/:colourwayId', () => {
+    it('deletes a stock row with nothing reserved, leaving the colourway alone', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.linen)
+      const response = await inject('DELETE', `/admin/inventory/${cwId}`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({
+        deleted: { entity: 'inventory', id: cwId },
+      })
+      expect(await stockRowFor(pool, SKU.linen)).toBeNull()
+      // The CASCADE runs colourway -> inventory, never the reverse: removing the
+      // stock row must not take the SKU out of the catalogue with it.
+      expect(await colourwayIdFor(pool, SKU.linen)).toBe(cwId)
+
+      const list = await inject(
+        'GET',
+        `/admin/inventory?q=${SKU.linen}`,
+        backofficeCookie
+      )
+      expect(list.json().inventory).toHaveLength(0)
+    })
+
+    it('refuses a row with stock reserved: 409, blockers empty, archivable false', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.velvet)
+      const response = await inject('DELETE', `/admin/inventory/${cwId}`, backofficeCookie)
+      expect(response.statusCode).toBe(409)
+      const body = response.json()
+      // A guard refusal, not a probe one — nothing references an inventory row.
+      // `archivable: false` matters to the CRM: the table has no archived_at, so
+      // the dialog must not offer "Archive instead" here.
+      expect(body).toMatchObject({ blockers: [], archivable: false })
+      expect(body.message).toContain('5')
+      expect(await inventoryFor(pool, SKU.velvet)).toEqual({ available: 60, reserved: 5 })
+    })
+
+    it('refuses while a reservation is open and allows it once released', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.velvet)
+      expect((await inject('DELETE', `/admin/inventory/${cwId}`, backofficeCookie)).statusCode)
+        .toBe(409)
+
+      // Releasing the reservation is what ship/decline does through the order
+      // state machine; the delete has to become possible once it has run, or a
+      // row could never be removed after its first sale.
+      await inject('PATCH', `/admin/inventory/${cwId}`, backofficeCookie, {
+        qty_reserved: 0,
+      })
+      const second = await inject('DELETE', `/admin/inventory/${cwId}`, backofficeCookie)
+      expect(second.statusCode).toBe(200)
+      expect(await stockRowFor(pool, SKU.velvet)).toBeNull()
+    })
+
+    it('a deleted row can be re-created, and the colourway sells again', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.linen)
+      await inject('DELETE', `/admin/inventory/${cwId}`, backofficeCookie)
+
+      const recreated = await inject('POST', '/admin/inventory', backofficeCookie, {
+        colourway_id: cwId,
+        qty_available: 25,
+      })
+      expect(recreated.statusCode).toBe(201)
+      // The unit is re-derived from the product, not remembered from the old row.
+      expect(recreated.json().inventory).toMatchObject({
+        unit: 'metres',
+        qty_available: 25,
+        qty_reserved: 0,
+      })
+    })
+
+    it('returns 404 with an empty blocker list for a colourway with no stock row', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.jade)
+      const response = await inject('DELETE', `/admin/inventory/${cwId}`, backofficeCookie)
+      expect(response.statusCode).toBe(404)
+      expect(response.json()).toMatchObject({ blockers: [], archivable: false })
+    })
+
+    it('rejects anonymous with 401 and a customer with 403, deleting nothing', async () => {
+      const cwId = await colourwayIdFor(pool, SKU.linen)
+      expect((await inject('DELETE', `/admin/inventory/${cwId}`, null)).statusCode).toBe(401)
+      expect(
+        (await inject('DELETE', `/admin/inventory/${cwId}`, customerCookie)).statusCode
+      ).toBe(403)
+      expect(await stockRowFor(pool, SKU.linen)).not.toBeNull()
     })
   })
 })

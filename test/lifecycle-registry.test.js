@@ -95,6 +95,11 @@ describe('assertEntity rejects what it must', () => {
     ['a non-boolean deletable flag', { ...valid, deletable: 'no' }, /deletable must be/],
     ['an empty label', { ...valid, label: '' }, /label must be/],
     ['a non-function guard', { ...valid, guard: 'nope' }, /guard must be/],
+    [
+      'a non-function beforeDelete',
+      { ...valid, beforeDelete: 'nope' },
+      /beforeDelete must be/,
+    ],
     ['probes that are not an array', { ...valid, probes: {} }, /probes must be/],
     [
       'a probe that is not a bare existence select',

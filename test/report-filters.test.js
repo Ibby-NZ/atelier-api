@@ -1103,7 +1103,13 @@ describe('W5-US-007 — stock and not-invoiced, declared', () => {
     // paid at Stripe and is never invoiced through this platform, so counting one
     // would report every web sale as an unbilled receivable.
     it('covers the invoiceable kinds only, and says so in the note', () => {
-      expect([...INVOICEABLE_KINDS]).toEqual(['order_request', 'backorder_request'])
+      // What defines the report is the EXCLUSION, not a fixed list: the set
+      // grows as the platform gains kinds (a staff-keyed 'manual' sales order is
+      // invoiced exactly like a request), and every member must be a kind the
+      // schema allows — which is what the loop below asserts.
+      expect(INVOICEABLE_KINDS).toContain('order_request')
+      expect(INVOICEABLE_KINDS).toContain('backorder_request')
+      expect(INVOICEABLE_KINDS).toContain('manual')
       expect(INVOICEABLE_KINDS).not.toContain('checkout')
       for (const kind of INVOICEABLE_KINDS) {
         expect(ORDER_KINDS).toContain(kind)

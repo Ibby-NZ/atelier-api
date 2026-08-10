@@ -14,14 +14,19 @@
 // orders (kind='checkout') arrive already paid with inventory decremented and
 // hold no reservation, so their inventory is never touched here.
 
+import { randomUUID } from 'node:crypto'
+
 import { setArchived } from '../lifecycle/archive.js'
+// Which kinds hold a reservation lives in a leaf module: src/lifecycle/registry.js
+// needs the same predicate for the delete guard and cannot import this file
+// (archive.js -> registry.js -> here would be a cycle).
+import { reserves } from './order-states.js'
+// The same packing the storefront's request flow writes, so `orders.notes` reads
+// identically however the order was raised.
+import { buildNotes } from './order-request.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
-
-// Only these order kinds reserve stock; checkout orders decrement at payment.
-const RESERVING_KINDS = new Set(['order_request', 'backorder_request'])
-const reserves = (kind) => RESERVING_KINDS.has(kind)
 
 export const ORDER_STATUSES = Object.freeze([
   'requested',
@@ -227,18 +232,105 @@ const withOrderTxn = async (pool, id, fn) => {
   return getAdminOrder(pool, id)
 }
 
+// Move a colourway's held reservation by `delta` (signed). Reserving kinds only;
+// a colourway with no inventory row (a short backorder, or a design that has
+// never been stocked) reserved nothing, so the UPDATE simply matches no rows.
+const moveReservation = async (client, kind, colourwayId, delta) => {
+  if (!reserves(kind) || delta === 0) return
+  await client.query(
+    `UPDATE inventory SET qty_reserved = qty_reserved + $1 WHERE colourway_id = $2`,
+    [delta, colourwayId]
+  )
+}
+
+// Lock a colourway by id inside the transaction so concurrent edits to the same
+// SKU serialise their read-then-reserve. `FOR UPDATE OF c` because the inventory
+// row is the nullable side of the LEFT JOIN and cannot be locked directly — the
+// same rule (and the same reason) as resolveLine in order-request.js.
+//
+// No visibility gate here, unlike the storefront's resolveLine: staff key orders
+// against unlisted designs and trade-only houses as a matter of course, and the
+// backoffice guard is what stands in for the catalogue gate.
+const lockColourway = async (client, colourwayId) => {
+  const { rows } = await client.query(
+    `SELECT c.id, i.colourway_id AS stocked
+       FROM colourways c
+       LEFT JOIN inventory i ON i.colourway_id = c.id
+      WHERE c.id = $1
+      FOR UPDATE OF c`,
+    [colourwayId]
+  )
+  const row = rows[0]
+  if (!row) {
+    throw httpError(422, `Colourway ${colourwayId} does not exist.`)
+  }
+  return { colourwayId: row.id, hasInventory: row.stocked !== null }
+}
+
+// Recompute the money from the lines. `qty` is numeric(12,2), so the product is
+// numeric too — ROUND then cast, once, over the whole order rather than per line
+// (rounding each line would multiply the error by the line count). `shipping_cents`
+// is left exactly as it was; nothing here prices freight.
+const recomputeOrderMoney = (client, id) =>
+  client.query(
+    `UPDATE orders o
+        SET subtotal_cents = t.sum,
+            total_cents = t.sum + o.shipping_cents
+       FROM (SELECT COALESCE(ROUND(SUM(qty * unit_price_cents)), 0)::int AS sum
+               FROM order_lines
+              WHERE order_id = $1) t
+      WHERE o.id = $1`,
+    [id]
+  )
+
+// The header fields staff may correct while an order is still being priced.
+// Frozen code literals fed to a dynamic SET clause — column names are never user
+// input, values are always placeholders (the buildUpdate posture).
+const ORDER_HEADER_COLUMNS = Object.freeze(['notes', 'guest_email', 'contact_phone'])
+
+const applyOrderHeader = async (client, id, patch) => {
+  const sets = []
+  const params = [id]
+  for (const column of ORDER_HEADER_COLUMNS) {
+    // hasOwn, not a truthiness test: an explicit null clears the column and an
+    // absent key must leave it alone.
+    if (!Object.hasOwn(patch, column)) continue
+    params.push(patch[column])
+    sets.push(`${column} = $${params.length}`)
+  }
+  if (sets.length === 0) return
+  await client.query(`UPDATE orders SET ${sets.join(', ')} WHERE id = $1`, params)
+}
+
 /**
- * Edit line quantities and adjust the held reservation to match. Only allowed
- * while the order is still in the reservation phase (requested/confirmed);
- * later states have already converted or released the reservation.
+ * Edit an order: line quantities and prices, added lines, removed lines, and the
+ * contact/notes header — keeping the held reservation and the money in step.
+ *
+ * Only allowed while the order is still in the reservation phase
+ * (requested/confirmed); later states have already converted or released the
+ * reservation, and their money has been invoiced.
+ *
+ * This is what turns a storefront request (every line priced at 0 by
+ * `createOrderRequest`) into a sales order the office can invoice.
  *
  * @param {import('pg').Pool} pool
  * @param {number} id
- * @param {Array<{ id: number, qty: number }>} edits
+ * @param {{
+ *   lines?: Array<{ id: number, qty?: number, unit_price_cents?: number, cut_requirements?: string|null }>,
+ *   add_lines?: Array<{ colourway_id: number, qty: number, unit_price_cents: number, cut_requirements?: string|null }>,
+ *   remove_line_ids?: number[],
+ *   notes?: string|null,
+ *   guest_email?: string|null,
+ *   contact_phone?: string|null,
+ * }} patch
  */
-export const editOrderLines = (pool, id, edits) =>
+export const editOrderLines = (pool, id, patch) =>
   withOrderTxn(pool, id, async (client, order) => {
-    requireStatus(order, ['requested', 'confirmed'], 'edit lines on')
+    requireStatus(order, ['requested', 'confirmed'], 'edit')
+
+    const edits = patch.lines ?? []
+    const adds = patch.add_lines ?? []
+    const removeIds = patch.remove_line_ids ?? []
 
     const { rows: lines } = await client.query(
       `SELECT id, colourway_id, qty FROM order_lines WHERE order_id = $1`,
@@ -246,29 +338,185 @@ export const editOrderLines = (pool, id, edits) =>
     )
     const byId = new Map(lines.map((line) => [line.id, line]))
 
+    // An order with no lines is not an order. Declining it is what the office
+    // means by "cancel this" — that releases the reservation and leaves a record,
+    // where an empty order would keep its number and say nothing.
+    if (lines.length - removeIds.length + adds.length <= 0) {
+      throw httpError(
+        422,
+        'An order cannot be left with no lines. Decline it instead.'
+      )
+    }
+
+    // Removals first: they free reservation that a re-add in the same request
+    // may want back.
+    for (const lineId of removeIds) {
+      const line = byId.get(lineId)
+      if (!line) {
+        throw httpError(422, `Order line ${lineId} is not on order ${id}.`)
+      }
+      await moveReservation(client, order.kind, line.colourway_id, -Number(line.qty))
+      byId.delete(lineId)
+    }
+    if (removeIds.length > 0) {
+      await client.query(`DELETE FROM order_lines WHERE id = ANY($1::int[])`, [
+        removeIds,
+      ])
+    }
+
     for (const edit of edits) {
       const line = byId.get(edit.id)
       if (!line) {
         throw httpError(422, `Order line ${edit.id} is not on order ${id}.`)
       }
-      const delta = edit.qty - Number(line.qty)
-      await client.query(`UPDATE order_lines SET qty = $1 WHERE id = $2`, [
-        edit.qty,
-        edit.id,
-      ])
-      // Keep the reservation in step with the new quantity. Reserving kinds only;
-      // a colourway with no inventory row (short backorder) reserved nothing, so
-      // the UPDATE simply matches no rows.
-      if (reserves(order.kind) && delta !== 0) {
+      const sets = []
+      const params = [edit.id]
+      if (edit.qty !== undefined) {
+        params.push(edit.qty)
+        sets.push(`qty = $${params.length}`)
+      }
+      if (edit.unit_price_cents !== undefined) {
+        params.push(edit.unit_price_cents)
+        sets.push(`unit_price_cents = $${params.length}`)
+      }
+      if (Object.hasOwn(edit, 'cut_requirements')) {
+        params.push(edit.cut_requirements)
+        sets.push(`cut_requirements = $${params.length}`)
+      }
+      if (sets.length > 0) {
         await client.query(
-          `UPDATE inventory
-              SET qty_reserved = qty_reserved + $1
-            WHERE colourway_id = $2`,
-          [delta, line.colourway_id]
+          `UPDATE order_lines SET ${sets.join(', ')} WHERE id = $1`,
+          params
+        )
+      }
+      if (edit.qty !== undefined) {
+        await moveReservation(
+          client,
+          order.kind,
+          line.colourway_id,
+          edit.qty - Number(line.qty)
         )
       }
     }
+
+    for (const add of adds) {
+      const { colourwayId, hasInventory } = await lockColourway(client, add.colourway_id)
+      await client.query(
+        `INSERT INTO order_lines (order_id, colourway_id, qty, unit_price_cents, cut_requirements)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [id, colourwayId, add.qty, add.unit_price_cents, add.cut_requirements ?? null]
+      )
+      if (hasInventory) {
+        await moveReservation(client, order.kind, colourwayId, add.qty)
+      }
+    }
+
+    await applyOrderHeader(client, id, patch)
+    await recomputeOrderMoney(client, id)
   })
+
+/**
+ * Create a sales order the back office keyed itself (a phone call, a walk-in, a
+ * bespoke enquiry, or a storefront request that turned into a bigger job).
+ *
+ * `createOrderRequest` cannot serve this: it is keyed on SKU rather than
+ * colourway id, prices every line at 0, and applies the storefront's trade
+ * visibility gate. This one takes prices, addresses colourways directly (the CRM
+ * picks them out of the catalogue search) and trusts the backoffice guard.
+ *
+ * Attribution is either an account (`user_id`) or a walk-in's contact details;
+ * the contact is packed into `notes` in the same shape `createOrderRequest`
+ * writes, so one CRM renderer reads both.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{
+ *   user_id?: number|null,
+ *   contact?: { name?: string, email?: string, phone?: string },
+ *   lines: Array<{ colourway_id: number, qty: number, unit_price_cents: number, cut_requirements?: string|null }>,
+ *   notes?: string|null,
+ * }} input
+ * @returns {Promise<object>} the created order
+ */
+export const createManualOrder = async (pool, input) => {
+  const contact = input.contact ?? {}
+  const userId = input.user_id ?? null
+  // An order nobody can be billed for is not a sales order. One of the two forms
+  // of attribution has to be present; which one is the office's choice.
+  if (userId === null && !contact.name && !contact.email) {
+    throw httpError(
+      422,
+      'A sales order needs a client: either an account (user_id) or contact details.'
+    )
+  }
+
+  const client = await pool.connect()
+  let orderId
+  try {
+    await client.query('BEGIN')
+
+    if (userId !== null) {
+      const { rows } = await client.query(`SELECT id FROM users WHERE id = $1`, [
+        userId,
+      ])
+      if (!rows[0]) {
+        throw httpError(422, `User ${userId} does not exist.`)
+      }
+    }
+
+    // Resolve every line before writing anything, so an unknown colourway
+    // refuses the whole order rather than leaving half of one behind.
+    const resolved = []
+    for (const line of input.lines) {
+      const { colourwayId, hasInventory } = await lockColourway(client, line.colourway_id)
+      resolved.push({
+        colourwayId,
+        hasInventory,
+        qty: line.qty,
+        unitPriceCents: line.unit_price_cents,
+        cutRequirements: line.cut_requirements ?? null,
+      })
+    }
+
+    const notes = [buildNotes(contact), input.notes ?? null]
+      .filter(Boolean)
+      .join('\n')
+
+    const { rows } = await client.query(
+      `INSERT INTO orders (user_id, guest_email, order_number, kind, status, notes)
+       VALUES ($1, $2, $3, 'manual', 'requested', $4)
+       RETURNING id`,
+      [
+        userId,
+        // A guest email only when there is no account: the account's own address
+        // is the one to write to, and duplicating it here would go stale.
+        userId === null ? (contact.email ?? null) : null,
+        `SO-${randomUUID().slice(0, 8).toUpperCase()}`,
+        notes === '' ? null : notes,
+      ]
+    )
+    orderId = rows[0].id
+
+    for (const line of resolved) {
+      await client.query(
+        `INSERT INTO order_lines (order_id, colourway_id, qty, unit_price_cents, cut_requirements)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [orderId, line.colourwayId, line.qty, line.unitPriceCents, line.cutRequirements]
+      )
+      if (line.hasInventory) {
+        await moveReservation(client, 'manual', line.colourwayId, line.qty)
+      }
+    }
+
+    await recomputeOrderMoney(client, orderId)
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+  return getAdminOrder(pool, orderId)
+}
 
 /**
  * Confirm a requested order and store the manually-created Xero invoice ref.

@@ -63,7 +63,18 @@ export const validateOrderRequestInput = (body, { hasUser }) => {
   return errors
 }
 
-const buildNotes = (contact, fallbackEmail) => {
+/**
+ * Pack a guest's contact details into the one line `orders.notes` carries.
+ *
+ * Exported so the back office's manual create writes the SAME shape — the CRM
+ * renders `notes` verbatim, and a second spelling of "who this is for" would be
+ * two things for a person to read instead of one.
+ *
+ * @param {{ name?: string, email?: string, phone?: string }} [contact]
+ * @param {string} [fallbackEmail]  the signed-in user's address, when there is one
+ * @returns {string|null}
+ */
+export const buildNotes = (contact, fallbackEmail) => {
   const parts = []
   if (contact?.name) parts.push(`Name: ${contact.name}`)
   const email = contact?.email ?? fallbackEmail

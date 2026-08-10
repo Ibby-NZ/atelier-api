@@ -10,7 +10,15 @@ const DOMAIN = 'admin-ord-test.example.com'
 const testEmail = (local) => `${local}@${DOMAIN}`
 const PASSWORD = 'correct horse battery staple'
 
-const SKU = { inStock: `${PREFIX}-INSTOCK` }
+const SKU = {
+  inStock: `${PREFIX}-INSTOCK`,
+  // A second stocked colourway, so an added line can be told apart from the one
+  // the storefront request already placed.
+  second: `${PREFIX}-SECOND`,
+  // No inventory row at all: a design that has never been stocked. Every
+  // reservation write must simply match nothing for it, rather than fail.
+  unstocked: `${PREFIX}-UNSTOCKED`,
+}
 
 const sessionCookieFrom = (response) => {
   const setCookie = response.headers['set-cookie']
@@ -35,14 +43,17 @@ const seedFixtures = async (pool) => {
   )
   const { rows: cw } = await pool.query(
     `INSERT INTO colourways (product_id, name, sku)
-     VALUES ($1, 'Default', $2) RETURNING id`,
-    [products[0].id, SKU.inStock]
+     VALUES ($1, 'Default', $2), ($1, 'Second', $3), ($1, 'Unstocked', $4)
+     RETURNING id, sku`,
+    [products[0].id, SKU.inStock, SKU.second, SKU.unstocked]
   )
+  const idBySku = new Map(cw.map((row) => [row.sku, row.id]))
   await pool.query(
     `INSERT INTO inventory (colourway_id, qty_available, qty_reserved, unit)
-     VALUES ($1, 100, 0, 'metres')`,
-    [cw[0].id]
+     VALUES ($1, 100, 0, 'metres'), ($2, 50, 0, 'metres')`,
+    [idBySku.get(SKU.inStock), idBySku.get(SKU.second)]
   )
+  return idBySku
 }
 
 // Orders + brand fixtures only — the staff/customer users are registered once in
@@ -82,6 +93,8 @@ describe('back-office order management', () => {
   let app
   let backofficeCookie
   let customerCookie
+  // Refreshed by beforeEach, since the fixtures are rebuilt for every test.
+  let colourwayId
 
   const inject = (method, url, cookie, payload) =>
     app.inject({ method, url, headers: cookie ? { cookie } : {}, payload })
@@ -135,7 +148,7 @@ describe('back-office order management', () => {
 
   beforeEach(async () => {
     await cleanupFixtures(pool)
-    await seedFixtures(pool)
+    colourwayId = await seedFixtures(pool)
   })
 
   afterAll(async () => {
@@ -317,6 +330,375 @@ describe('back-office order management', () => {
         backofficeCookie
       )
       expect(response.statusCode).toBe(409)
+    })
+  })
+
+  // A sales order the office keys itself. It lands in the same queue as a
+  // storefront request and drives the same lifecycle from there — what differs
+  // is that it carries prices from the first minute and names its own client.
+  describe('POST /admin/orders', () => {
+    const lineFor = (sku, extra = {}) => ({
+      colourway_id: colourwayId.get(sku),
+      qty: 4,
+      unit_price_cents: 12550,
+      ...extra,
+    })
+
+    const create = (payload) =>
+      inject('POST', '/admin/orders', backofficeCookie, payload)
+
+    it('creates a priced manual order against a client account and holds stock', async () => {
+      const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [
+        testEmail('shopper'),
+      ])
+      const response = await create({
+        user_id: rows[0].id,
+        lines: [lineFor(SKU.inStock, { qty: 4, cut_requirements: 'Cut one length' })],
+        notes: 'Phoned in.',
+      })
+
+      expect(response.statusCode).toBe(201)
+      const order = response.json().order
+      expect(order.kind).toBe('manual')
+      expect(order.status).toBe('requested')
+      expect(order.order_number).toMatch(/^SO-[0-9A-F]{8}$/)
+      expect(order.user_id).toBe(rows[0].id)
+      // An account's address lives on the account; duplicating it here goes stale.
+      expect(order.guest_email).toBeNull()
+      expect(order.reservation_state).toBe('held')
+      // 4 x 125.50 — the whole point of a manual order over a request.
+      expect(order.subtotal_cents).toBe(50200)
+      expect(order.total_cents).toBe(50200)
+      expect(order.lines[0].unit_price_cents).toBe(12550)
+      expect(order.lines[0].cut_requirements).toBe('Cut one length')
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(4)
+    })
+
+    it('records a walk-in from contact details alone', async () => {
+      const response = await create({
+        contact: { name: 'Ada Lovelace', email: 'ada@example.com', phone: '021 555' },
+        lines: [lineFor(SKU.inStock)],
+      })
+
+      expect(response.statusCode).toBe(201)
+      const order = response.json().order
+      expect(order.user_id).toBeNull()
+      expect(order.guest_email).toBe('ada@example.com')
+      // The same packing a storefront request writes, so one CRM renderer reads both.
+      expect(order.notes).toContain('Name: Ada Lovelace')
+      expect(order.notes).toContain('Phone: 021 555')
+    })
+
+    it('reserves nothing for a colourway that has never been stocked', async () => {
+      const response = await create({
+        contact: { name: 'Walk-in' },
+        lines: [lineFor(SKU.unstocked)],
+      })
+
+      expect(response.statusCode).toBe(201)
+      expect(response.json().order.lines[0].inventory).toBeNull()
+    })
+
+    it('refuses an order nobody can be billed for with 422', async () => {
+      const response = await create({ lines: [lineFor(SKU.inStock)] })
+      expect(response.statusCode).toBe(422)
+    })
+
+    it('refuses an unknown colourway with 422 and writes nothing', async () => {
+      const before = await pool.query('SELECT count(*)::int AS n FROM orders')
+      const response = await create({
+        contact: { name: 'Walk-in' },
+        lines: [lineFor(SKU.inStock), { colourway_id: 99999999, qty: 1, unit_price_cents: 1 }],
+      })
+
+      expect(response.statusCode).toBe(422)
+      // The whole order rolls back — a half-written sales order is worse than none.
+      const after = await pool.query('SELECT count(*)::int AS n FROM orders')
+      expect(after.rows[0].n).toBe(before.rows[0].n)
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(0)
+    })
+
+    it('refuses an unknown client account with 422', async () => {
+      const response = await create({
+        user_id: 99999999,
+        lines: [lineFor(SKU.inStock)],
+      })
+      expect(response.statusCode).toBe(422)
+    })
+
+    it('rejects an empty line list with 400', async () => {
+      const response = await create({ contact: { name: 'Walk-in' }, lines: [] })
+      expect(response.statusCode).toBe(400)
+    })
+
+    it('rejects a non-backoffice caller with 403', async () => {
+      const response = await inject('POST', '/admin/orders', customerCookie, {
+        contact: { name: 'Walk-in' },
+        lines: [lineFor(SKU.inStock)],
+      })
+      expect(response.statusCode).toBe(403)
+    })
+  })
+
+  // Pricing a storefront request in place: this is what turns the quote a
+  // shopper submitted (every line at 0) into an invoiceable sales order.
+  describe('PATCH /admin/orders/:id — pricing and line edits', () => {
+    const orderFor = async (id) =>
+      (await inject('GET', `/admin/orders/${id}`, backofficeCookie)).json().order
+
+    const patch = (id, body) =>
+      inject('PATCH', `/admin/orders/${id}`, backofficeCookie, body)
+
+    it('prices a request line and recomputes the money, touching no stock', async () => {
+      const placed = await placeRequest(10)
+      const order = await orderFor(placed.id)
+      expect(order.subtotal_cents).toBe(0)
+
+      const response = await patch(placed.id, {
+        lines: [{ id: order.lines[0].id, unit_price_cents: 9900 }],
+      })
+
+      expect(response.statusCode).toBe(200)
+      const priced = response.json().order
+      expect(priced.lines[0].unit_price_cents).toBe(9900)
+      expect(priced.subtotal_cents).toBe(99000)
+      expect(priced.total_cents).toBe(99000)
+      // Repricing is not a change of demand.
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+    })
+
+    it('adds a line, reserving its stock and re-totalling', async () => {
+      const placed = await placeRequest(10)
+
+      const response = await patch(placed.id, {
+        add_lines: [
+          { colourway_id: colourwayId.get(SKU.second), qty: 3, unit_price_cents: 20000 },
+        ],
+      })
+
+      expect(response.statusCode).toBe(200)
+      const order = response.json().order
+      expect(order.lines).toHaveLength(2)
+      expect(order.subtotal_cents).toBe(60000)
+      expect((await inventoryFor(pool, SKU.second)).reserved).toBe(3)
+      // The original line's reservation is untouched.
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+    })
+
+    it('removes a line, releasing its stock', async () => {
+      const placed = await placeRequest(10)
+      const order = await orderFor(placed.id)
+      await patch(placed.id, {
+        add_lines: [
+          { colourway_id: colourwayId.get(SKU.second), qty: 3, unit_price_cents: 20000 },
+        ],
+      })
+
+      const response = await patch(placed.id, { remove_line_ids: [order.lines[0].id] })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.lines).toHaveLength(1)
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(0)
+      expect((await inventoryFor(pool, SKU.second)).reserved).toBe(3)
+    })
+
+    it('refuses to leave an order with no lines', async () => {
+      const placed = await placeRequest(10)
+      const order = await orderFor(placed.id)
+
+      const response = await patch(placed.id, { remove_line_ids: [order.lines[0].id] })
+
+      expect(response.statusCode).toBe(422)
+      // Nothing was released — the refusal rolled the whole edit back.
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+      expect((await orderFor(placed.id)).lines).toHaveLength(1)
+    })
+
+    it('still accepts the qty-only body the CRM sent before', async () => {
+      const placed = await placeRequest(10)
+      const order = await orderFor(placed.id)
+
+      const response = await patch(placed.id, {
+        lines: [{ id: order.lines[0].id, qty: 25 }],
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(25)
+    })
+
+    it('edits the contact header without touching the lines', async () => {
+      const placed = await placeRequest(10)
+
+      const response = await patch(placed.id, {
+        notes: 'Deliver to the site office.',
+        contact_phone: '021 999',
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.notes).toBe('Deliver to the site office.')
+      expect(response.json().order.contact_phone).toBe('021 999')
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+    })
+
+    it('rejects a line id belonging to another order with 422', async () => {
+      const mine = await placeRequest(10)
+      const theirs = await placeRequest(5)
+      const theirLine = (await orderFor(theirs.id)).lines[0]
+
+      const response = await patch(mine.id, {
+        lines: [{ id: theirLine.id, unit_price_cents: 1 }],
+      })
+      expect(response.statusCode).toBe(422)
+    })
+
+    it('rejects an empty body with 400', async () => {
+      const placed = await placeRequest(10)
+      const response = await patch(placed.id, {})
+      expect(response.statusCode).toBe(400)
+    })
+
+    it('rejects a line edit that says nothing but its id with 400', async () => {
+      const placed = await placeRequest(10)
+      const order = await orderFor(placed.id)
+      const response = await patch(placed.id, { lines: [{ id: order.lines[0].id }] })
+      expect(response.statusCode).toBe(400)
+    })
+  })
+
+  // Hard delete, for an order that is not yet a financial record. The rule and
+  // the reservation release live in the lifecycle registry.
+  describe('DELETE /admin/orders/:id', () => {
+    const del = (id) => inject('DELETE', `/admin/orders/${id}`, backofficeCookie)
+
+    const advance = async (id, ...verbs) => {
+      for (const verb of verbs) {
+        await inject('POST', `/admin/orders/${id}/${verb}`, backofficeCookie, {
+          xero_invoice_ref: 'INV-DEL',
+        })
+      }
+    }
+
+    it('deletes a requested order and hands its reservation back', async () => {
+      const placed = await placeRequest(10)
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+
+      const response = await del(placed.id)
+
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({ deleted: { entity: 'order', id: placed.id } })
+      expect((await inventoryFor(pool, SKU.inStock))).toEqual({
+        available: 100,
+        reserved: 0,
+      })
+      const after = await inject('GET', `/admin/orders/${placed.id}`, backofficeCookie)
+      expect(after.statusCode).toBe(404)
+    })
+
+    it('deletes a confirmed order and releases its reservation', async () => {
+      const placed = await placeRequest(6)
+      await advance(placed.id, 'confirm')
+
+      expect((await del(placed.id)).statusCode).toBe(200)
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(0)
+    })
+
+    it('deletes a declined order without releasing its reservation twice', async () => {
+      const placed = await placeRequest(10)
+      await advance(placed.id, 'decline')
+      // Decline already handed the stock back.
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({
+        available: 100,
+        reserved: 0,
+      })
+
+      expect((await del(placed.id)).statusCode).toBe(200)
+      // A second release would read as -10 and inflate availability for ever.
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({
+        available: 100,
+        reserved: 0,
+      })
+    })
+
+    it('deletes the lines with the order', async () => {
+      const placed = await placeRequest(10)
+      await del(placed.id)
+      const { rows } = await pool.query(
+        'SELECT count(*)::int AS n FROM order_lines WHERE order_id = $1',
+        [placed.id]
+      )
+      expect(rows[0].n).toBe(0)
+    })
+
+    it('refuses a paid order with 409 and offers archiving instead', async () => {
+      const placed = await placeRequest(10)
+      await advance(placed.id, 'confirm', 'mark-paid')
+
+      const response = await del(placed.id)
+
+      expect(response.statusCode).toBe(409)
+      expect(response.json()).toMatchObject({
+        statusCode: 409,
+        error: 'Conflict',
+        blockers: [],
+        archivable: true,
+      })
+      // The refusal rolled back: the reservation is exactly as it was.
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+      expect(
+        (await inject('GET', `/admin/orders/${placed.id}`, backofficeCookie)).statusCode
+      ).toBe(200)
+    })
+
+    it('refuses a shipped order with 409', async () => {
+      const placed = await placeRequest(10)
+      await advance(placed.id, 'confirm', 'mark-paid', 'ship')
+      expect((await del(placed.id)).statusCode).toBe(409)
+    })
+
+    it('refuses a card checkout with 409 whatever its status', async () => {
+      const { rows } = await pool.query(
+        `INSERT INTO orders (order_number, kind, status, guest_email)
+         VALUES ($1, 'checkout', 'requested', 'buyer@example.com')
+         RETURNING id`,
+        [`${PREFIX}-CHK`]
+      )
+      await pool.query(
+        `INSERT INTO order_lines (order_id, colourway_id, qty, unit_price_cents)
+         VALUES ($1, $2, 1, 5000)`,
+        [rows[0].id, colourwayId.get(SKU.inStock)]
+      )
+
+      const response = await del(rows[0].id)
+
+      expect(response.statusCode).toBe(409)
+      expect(response.json().message).toMatch(/Stripe/)
+      expect(response.json().archivable).toBe(true)
+    })
+
+    it('deletes a manual order the office keyed by mistake', async () => {
+      const created = await inject('POST', '/admin/orders', backofficeCookie, {
+        contact: { name: 'Walk-in' },
+        lines: [{ colourway_id: colourwayId.get(SKU.second), qty: 2, unit_price_cents: 100 }],
+      })
+      const order = created.json().order
+      expect((await inventoryFor(pool, SKU.second)).reserved).toBe(2)
+
+      expect((await del(order.id)).statusCode).toBe(200)
+      expect((await inventoryFor(pool, SKU.second)).reserved).toBe(0)
+    })
+
+    it('returns 404 for an unknown order id', async () => {
+      expect((await del(99999999)).statusCode).toBe(404)
+    })
+
+    it('rejects a non-backoffice caller with 403', async () => {
+      const placed = await placeRequest(10)
+      const response = await inject(
+        'DELETE',
+        `/admin/orders/${placed.id}`,
+        customerCookie
+      )
+      expect(response.statusCode).toBe(403)
     })
   })
 

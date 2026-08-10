@@ -702,6 +702,85 @@ describe('back-office order management', () => {
     })
   })
 
+  // Two lines may name ONE colourway — two cuts of the same cloth with different
+  // cut requirements is an ordinary order — and every whole-order inventory move
+  // must therefore sum the demand per colourway. `UPDATE … FROM order_lines`
+  // updates a target row once however many lines match it, so the reservation
+  // would be taken twice and handed back once, stranding stock permanently and
+  // silently. All three moves (ship, decline, delete) are asserted, because they
+  // are three copies of the same statement.
+  describe('an order with two lines on one colourway', () => {
+    const twoLinesOn = async (sku, first, second) => {
+      const response = await inject('POST', '/admin/orders', backofficeCookie, {
+        contact: { name: 'Double liner' },
+        lines: [
+          { colourway_id: colourwayId.get(sku), qty: first, unit_price_cents: 1000 },
+          { colourway_id: colourwayId.get(sku), qty: second, unit_price_cents: 1000 },
+        ],
+      })
+      expect(response.statusCode).toBe(201)
+      return response.json().order
+    }
+
+    it('reserves the SUM of both lines', async () => {
+      await twoLinesOn(SKU.inStock, 4, 6)
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+    })
+
+    it('releases everything it reserved when declined', async () => {
+      const order = await twoLinesOn(SKU.inStock, 4, 6)
+
+      await inject('POST', `/admin/orders/${order.id}/decline`, backofficeCookie)
+
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({
+        available: 100,
+        reserved: 0,
+      })
+    })
+
+    it('draws down the SUM of both lines when shipped', async () => {
+      const order = await twoLinesOn(SKU.inStock, 4, 6)
+      await inject('POST', `/admin/orders/${order.id}/confirm`, backofficeCookie, {
+        xero_invoice_ref: 'INV-DOUBLE',
+      })
+      await inject('POST', `/admin/orders/${order.id}/mark-paid`, backofficeCookie)
+
+      await inject('POST', `/admin/orders/${order.id}/ship`, backofficeCookie)
+
+      // 10 metres left the shelf, not 4 or 6.
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({
+        available: 90,
+        reserved: 0,
+      })
+    })
+
+    it('releases everything it reserved when deleted', async () => {
+      const order = await twoLinesOn(SKU.inStock, 4, 6)
+
+      expect((await inject('DELETE', `/admin/orders/${order.id}`, backofficeCookie)).statusCode).toBe(200)
+
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({
+        available: 100,
+        reserved: 0,
+      })
+    })
+
+    it('holds the sum when a second line is ADDED for a colourway already on the order', async () => {
+      const placed = await placeRequest(10)
+      const order = (await inject('GET', `/admin/orders/${placed.id}`, backofficeCookie)).json().order
+
+      await inject('PATCH', `/admin/orders/${placed.id}`, backofficeCookie, {
+        add_lines: [
+          { colourway_id: order.lines[0].colourway_id, qty: 5, unit_price_cents: 100 },
+        ],
+      })
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(15)
+
+      await inject('POST', `/admin/orders/${placed.id}/decline`, backofficeCookie)
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(0)
+    })
+  })
+
   describe('not found', () => {
     it('returns 404 for an unknown order id', async () => {
       const response = await inject('GET', '/admin/orders/99999999', backofficeCookie)

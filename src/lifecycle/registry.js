@@ -174,7 +174,14 @@ const orderGuard = async (client, id) => {
  * back, so releasing again would inflate availability. (Shipped is unreachable
  * here anyway — the guard refuses it — but the predicate is the rule, not the
  * guard's side effect.) A colourway with no inventory row reserved nothing, so
- * the join simply matches nothing; same UPDATE shape as `declineOrder`.
+ * the join simply matches nothing.
+ *
+ * The quantity is SUMMED PER COLOURWAY first, for the reason `ORDER_DEMAND` in
+ * src/orders/admin-orders.js states: two lines may name one colourway, and
+ * `UPDATE … FROM order_lines` would then release only one of them, stranding
+ * the rest of the reservation for good. Same shape as `shipOrder` and
+ * `declineOrder`, deliberately — this is the third of the three whole-order
+ * inventory moves and they must agree.
  */
 const releaseOrderReservation = async (client, id) => {
   const { rows } = await client.query(
@@ -184,10 +191,12 @@ const releaseOrderReservation = async (client, id) => {
   if (!rows[0] || !holdsReservation(rows[0])) return
   await client.query(
     `UPDATE inventory i
-        SET qty_reserved = i.qty_reserved - ol.qty
-       FROM order_lines ol
-      WHERE ol.order_id = $1
-        AND i.colourway_id = ol.colourway_id`,
+        SET qty_reserved = i.qty_reserved - demand.qty
+       FROM (SELECT colourway_id, SUM(qty) AS qty
+               FROM order_lines
+              WHERE order_id = $1
+              GROUP BY colourway_id) AS demand
+      WHERE i.colourway_id = demand.colourway_id`,
     [id]
   )
 }

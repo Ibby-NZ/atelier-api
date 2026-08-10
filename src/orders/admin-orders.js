@@ -232,6 +232,22 @@ const withOrderTxn = async (pool, id, fn) => {
   return getAdminOrder(pool, id)
 }
 
+// An order's demand PER COLOURWAY, not per line.
+//
+// **Two lines may name the same colourway** — two cuts of one cloth with
+// different cut requirements is an ordinary order — and `UPDATE … FROM
+// order_lines` would then be wrong in a way that is silent and permanent:
+// Postgres updates a target row ONCE however many rows of the FROM relation
+// match it, choosing one arbitrarily. So two 5-metre lines on one colourway
+// reserve 10 and release 5, stranding 5 metres for good.
+//
+// Aggregating first is what makes the release the exact inverse of the
+// reservation. Every whole-order inventory move goes through this.
+const ORDER_DEMAND = `SELECT colourway_id, SUM(qty) AS qty
+                        FROM order_lines
+                       WHERE order_id = $1
+                       GROUP BY colourway_id`
+
 // Move a colourway's held reservation by `delta` (signed). Reserving kinds only;
 // a colourway with no inventory row (a short backorder, or a design that has
 // never been stocked) reserved nothing, so the UPDATE simply matches no rows.
@@ -548,11 +564,10 @@ export const shipOrder = (pool, id) =>
     if (reserves(order.kind)) {
       await client.query(
         `UPDATE inventory i
-            SET qty_reserved = i.qty_reserved - ol.qty,
-                qty_available = i.qty_available - ol.qty
-           FROM order_lines ol
-          WHERE ol.order_id = $1
-            AND i.colourway_id = ol.colourway_id`,
+            SET qty_reserved = i.qty_reserved - demand.qty,
+                qty_available = i.qty_available - demand.qty
+           FROM (${ORDER_DEMAND}) AS demand
+          WHERE i.colourway_id = demand.colourway_id`,
         [id]
       )
     }
@@ -569,10 +584,9 @@ export const declineOrder = (pool, id) =>
     if (reserves(order.kind)) {
       await client.query(
         `UPDATE inventory i
-            SET qty_reserved = i.qty_reserved - ol.qty
-           FROM order_lines ol
-          WHERE ol.order_id = $1
-            AND i.colourway_id = ol.colourway_id`,
+            SET qty_reserved = i.qty_reserved - demand.qty
+           FROM (${ORDER_DEMAND}) AS demand
+          WHERE i.colourway_id = demand.colourway_id`,
         [id]
       )
     }

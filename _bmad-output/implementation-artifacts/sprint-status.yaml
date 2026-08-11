@@ -28,6 +28,12 @@ epics:
       US-004: done      # Importer accepts the v2 fields
       US-005: done      # Shared vocabulary module
       US-006: done      # Byte-pin unit test and regeneration tripwire
+  w11-d365-corrections:
+    name: "W11 D365 mirror corrections"
+    branch: d365-custom-fields
+    status: done
+    stories:
+      US-001: done      # Custom (non-D365) fields on the override layer
   w2-crud:
     name: "W2 CRUD completion"
     branch: aug6/w2-crud

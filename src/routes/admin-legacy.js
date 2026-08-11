@@ -128,11 +128,21 @@ const filtersFromQuery = (query) => {
 // The house rule stands: do not rely on schema strictness to reject a field.
 const valuesSchema = { type: 'object', minProperties: 1 }
 
+// `custom` carries the fields D365 has no column for. Same untyped-values
+// reasoning as above, and for the same two reasons — but note the keys here are
+// free-form by design, so src/legacy/override-schema.js is the ONLY thing that
+// bounds them (key pattern, scalar-only values, length and count caps).
+const revertListSchema = {
+  type: 'array',
+  minItems: 1,
+  items: { type: 'string', maxLength: 100 },
+}
+
 const createBodySchema = {
   type: 'object',
   required: ['values'],
   additionalProperties: false,
-  properties: { values: valuesSchema },
+  properties: { values: valuesSchema, custom: valuesSchema },
 }
 
 const patchBodySchema = {
@@ -141,11 +151,9 @@ const patchBodySchema = {
   additionalProperties: false,
   properties: {
     set: valuesSchema,
-    revert: {
-      type: 'array',
-      minItems: 1,
-      items: { type: 'string', maxLength: 100 },
-    },
+    revert: revertListSchema,
+    custom: valuesSchema,
+    revert_custom: revertListSchema,
   },
 }
 
@@ -210,6 +218,7 @@ export const adminLegacyRoutes = async (app, { pool }) => {
     async (request, reply) => {
       const record = await createLocalLegacyRecord(pool, request.params.entity, {
         values: request.body.values,
+        custom: request.body.custom,
         userId: request.user.id,
       })
       reply.code(201)
@@ -219,17 +228,27 @@ export const adminLegacyRoutes = async (app, { pool }) => {
 
   // Correct a record. `revert` drops a correction and returns the column to
   // whatever the staging row currently says — which is the only way back, since
-  // an explicit null in `set` is a deliberate override TO empty.
+  // an explicit null in `set` is a deliberate override TO empty. `custom` /
+  // `revert_custom` are the same two verbs over the fields D365 has no column
+  // for; they ride in the same statement, so a correction and a custom field
+  // written together are one atomic write.
   app.patch(
     '/admin/legacy/:entity/:guid',
     { preHandler: backoffice, schema: { params: guidParamsSchema, body: patchBodySchema } },
     async (request) => {
       const { entity, guid } = request.params
-      const { set = {}, revert = [] } = request.body
+      const { set = {}, revert = [], custom = {}, revert_custom: revertCustom = [] } = request.body
+      // DECLARED column names only. `touchesCommercial` classifies by column
+      // name and cannot classify a free-form key, so passing custom keys through
+      // it would read as a gate while gating nothing. A custom field is clerical
+      // work: it carries only what a staff member typed, and no D365 cost figure
+      // reaches it, so it opens no read path `can_view_finance` protects.
       await requireFinanceFor(request, entity, [...Object.keys(set), ...revert])
       const record = await setLegacyOverrides(pool, entity, guid, {
         set,
         revert,
+        custom,
+        revertCustom,
         userId: request.user.id,
       })
       return { record }

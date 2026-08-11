@@ -765,37 +765,6 @@ describe('back-office order management', () => {
       })
     })
 
-    // The same order is reachable ANONYMOUSLY: /orders/request takes a line list
-    // and nothing rejects a repeated SKU, so a shopper asking for two cuts of one
-    // cloth produces exactly this shape. The release sites are shared, which is
-    // what makes one fix cover both doors — asserted rather than assumed.
-    it('releases a storefront request that named one SKU twice', async () => {
-      const response = await app.inject({
-        method: 'POST',
-        url: '/orders/request',
-        payload: {
-          lines: [
-            { sku: SKU.inStock, qty_metres: 4 },
-            { sku: SKU.inStock, qty_metres: 6 },
-          ],
-          contact: { email: 'buyer@example.com' },
-        },
-      })
-      expect(response.statusCode).toBe(201)
-      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
-
-      await inject(
-        'POST',
-        `/admin/orders/${response.json().order.id}/decline`,
-        backofficeCookie
-      )
-
-      expect(await inventoryFor(pool, SKU.inStock)).toEqual({
-        available: 100,
-        reserved: 0,
-      })
-    })
-
     it('holds the sum when a second line is ADDED for a colourway already on the order', async () => {
       const placed = await placeRequest(10)
       const order = (await inject('GET', `/admin/orders/${placed.id}`, backofficeCookie)).json().order

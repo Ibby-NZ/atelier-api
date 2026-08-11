@@ -245,8 +245,13 @@ describe('trade applications', () => {
         signatory_name: 'Alex Designer',
         signatory_position: 'Director',
       })
+      // `role` is load-bearing, not decoration: the CRM's review queue decides
+      // "still pending" with a predicate that reads it, and a partial account
+      // object fails that test silently — which is what once hid every submitted
+      // application from the queue while the Clients tab counted it as pending.
       expect(application.user).toMatchObject({
         email: testEmail('applicant'),
+        role: 'trade',
         trade_approved: false,
       })
     })

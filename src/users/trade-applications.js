@@ -219,6 +219,17 @@ export const submitTradeApplication = async (pool, { email, passwordHash, name, 
 
 // The applicant's live account state rides along so the CRM can show pending vs
 // approved (and spot an archived account) without a second request.
+//
+// **`role` is part of that state and its absence was a live bug.** The CRM's
+// review queue decides "still pending" with one predicate applied to whichever
+// account object it has to hand — the row from `/admin/users`, or this embedded
+// one — and that predicate reads `role === 'trade'`, because `trade_approved`
+// means nothing on a customer. A user object missing the column does not fail
+// loudly: `undefined === 'trade'` is false, so every SUBMITTED application was
+// quietly filed as "not awaiting review" and vanished from the queue, while the
+// Clients tab went on counting the same account as pending. An embedded record
+// that is a partial of a shape somebody else's rules are written against has to
+// carry the columns those rules read.
 const toTradeApplication = (row) => {
   const { user_id: userId } = row
   const application = { id: row.id, user_id: userId }
@@ -233,6 +244,7 @@ const toTradeApplication = (row) => {
           id: userId,
           email: row.user_email,
           name: row.user_name,
+          role: row.user_role,
           trade_approved: row.user_trade_approved,
           archived_at: row.user_archived_at,
         })
@@ -243,6 +255,7 @@ const APPLICATION_SELECT = `
   SELECT ${APPLICATION_READ_COLUMNS},
          u.email AS user_email,
          u.name AS user_name,
+         u.role AS user_role,
          u.trade_approved AS user_trade_approved,
          u.archived_at AS user_archived_at
     FROM trade_applications ta

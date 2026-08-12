@@ -32,6 +32,8 @@ migrations.
   deterministic answer, 200 or 404, never a filtered list; a nullable barcode would let the unique
   index tolerate any number of unlabelled samples and turn that lookup into a guess. A duplicate is
   detected by the database (23505 on `samples_barcode_key` → 409), never by a pre-check that races.
+  Still NOT NULL after W20-US-002 — the server supplies one when the caller does not, it never
+  stores a blank.
 - **The three FKs differ on purpose.** `colourway_id` is **RESTRICT and nullable** — restricted
   because a sample is physical evidence the design exists and deleting the catalogue row underneath
   it leaves a labelled object nobody can identify; nullable because plenty of samples predate the
@@ -237,6 +239,20 @@ migrations.
 - **`barcode` IS editable by PATCH.** It is a printed tag that can be mistyped and nothing
   references it — `sample_loans.sample_id` points at the row's id — so a correction is safe, and a
   collision is the same 409 the create answers with. Same reasoning as `colourways.sku`.
+- **`barcode` is OPTIONAL on create, and omitting it IS the generate action** (W20-US-002,
+  `migrations/1787371200000_sample-barcode-sequence.js`). `ATL-S-` + six zero-padded digits off
+  `samples_barcode_seq`, which **starts at 1000**: the hand-typed corpus is `ATL-0049-217` (three
+  digits, highest 217), `samples` was empty and `legacy_cuttings` has no barcode column, so a minted
+  tag cannot collide with a typed one *by construction* — the middle segment is the literal `S`,
+  never digits. A **SEQUENCE, never `max(barcode) + 1`**, which serialises every insert and races
+  anyway. It is a `COALESCE` arm inside the existing INSERT, not a preceding SELECT: Postgres skips
+  a COALESCE argument it does not need, so **a supplied barcode wins AND spends no number**, and the
+  mint cannot outlive a failed insert. There is deliberately **no mint endpoint and no retry loop** —
+  a number handed out before the row exists is a number the office has to remember again, which is
+  the whole complaint, and a generated barcode that collides (sequence moved behind the corpus) is
+  the same 23505 → 409 a typed one gets. `''` and `null` are 400s at the route, so only an ABSENT
+  key generates. A suite creating generated samples must clean up **by `label`** — the barcode is
+  the server's, and `ATL-S-%` is nobody's namespace to delete from.
 - **A 23503 on any of the three FKs is a 422, not a 404.** The id arrived in a BODY as a business
   fact about the sample, exactly like an unknown `brand_id` on a product create, so it is the body
   that is wrong and not the URL. Keyed on the constraint name

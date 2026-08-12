@@ -45,14 +45,21 @@ const sessionCookieFrom = (response) => {
   return header.split(';')[0]
 }
 
+// A typed fixture carries the prefix in its BARCODE; a server-minted one carries
+// it in its LABEL, because the barcode is `ATL-S-…` and that namespace is not
+// this suite's to delete from. Both halves are needed: a prefix cleanup must
+// match every row the suite writes, or the survivor 23505s the next run.
+const FIXTURE_SAMPLE = 'barcode LIKE $1 OR label LIKE $1'
+
 // Loans first (sample_id is RESTRICT), then samples ahead of brands — a brand
 // cascade cannot get past samples.colourway_id, also RESTRICT.
 const cleanupFixtures = async (pool) => {
   await pool.query(
-    `DELETE FROM sample_loans WHERE sample_id IN (SELECT id FROM samples WHERE barcode LIKE $1)`,
+    `DELETE FROM sample_loans
+      WHERE sample_id IN (SELECT id FROM samples WHERE ${FIXTURE_SAMPLE})`,
     [`${PREFIX}%`]
   )
-  await pool.query('DELETE FROM samples WHERE barcode LIKE $1', [`${PREFIX}%`])
+  await pool.query(`DELETE FROM samples WHERE ${FIXTURE_SAMPLE}`, [`${PREFIX}%`])
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}%`])
   await pool.query('DELETE FROM suppliers WHERE slug LIKE $1', [`${PREFIX}%`])
   await pool.query('DELETE FROM showrooms WHERE name LIKE $1', [`${PREFIX}%`])
@@ -342,11 +349,16 @@ describe('back-office sample routes', () => {
       expect(codes).toEqual([201, 409])
     })
 
-    it('requires a barcode', async () => {
+    it('mints a barcode when the body omits one, rather than requiring it', async () => {
+      // W20-US-002: "we have to manually keep track of our own barcode number".
+      // An omitted barcode is the generate action — there is no separate mint
+      // endpoint, because a number handed out before the row exists is a number
+      // the office has to remember again.
       const response = await inject('POST', '/admin/samples', backofficeCookie, {
-        label: 'No tag on it',
+        label: `${PREFIX} no tag on it`,
       })
-      expect(response.statusCode).toBe(400)
+      expect(response.statusCode).toBe(201)
+      expect(response.json().sample.barcode).toMatch(/^ATL-S-\d{6}$/)
     })
 
     it('answers 422 for a parent that does not exist', async () => {
@@ -368,6 +380,132 @@ describe('back-office sample routes', () => {
         const response = await createSample(`${PREFIX}-015${index}`, { status })
         expect(response.statusCode).toBe(201)
         expect(response.json().sample.status).toBe(status)
+      }
+    })
+  })
+
+  describe('server-generated barcodes (W20-US-002)', () => {
+    // The shape is spelled out here rather than imported from the module: a test
+    // that derives its expectation from the code under test asserts nothing.
+    // Six fixed digits behind `ATL-S-` — argued in
+    // migrations/1787371200000_sample-barcode-sequence.js.
+    const GENERATED = /^ATL-S-\d{6}$/
+
+    // Sequences are non-transactional — nothing rolls a nextval back — and this
+    // database is shared with every other suite, so anything that moves the
+    // sequence snapshots it first and puts it back in a finally.
+    const readSequence = async () => {
+      const { rows } = await pool.query('SELECT last_value, is_called FROM samples_barcode_seq')
+      return rows[0]
+    }
+
+    const restoreSequence = (snapshot) =>
+      pool.query(`SELECT setval('samples_barcode_seq', $1::bigint, $2)`, [
+        snapshot.last_value,
+        snapshot.is_called,
+      ])
+
+    // Every generated fixture carries the prefix in its LABEL — that is what
+    // cleanupFixtures deletes it by, since the barcode is the server's choice.
+    const generate = (label) =>
+      inject('POST', '/admin/samples', backofficeCookie, { label: `${PREFIX} ${label}` })
+
+    it('starts above every hand-typed number in evidence, not at 1', async () => {
+      // The corpus this had to dodge: `samples` is empty, `legacy_cuttings` has
+      // no barcode column at all, and the one recorded Atelier shape is
+      // `ATL-0049-217` — three-digit numbers, highest 217. 1000 is above all of
+      // them AND one digit wider, so the two number lines cannot be confused
+      // even with the prefix read off a tag.
+      const { rows } = await pool.query(
+        `SELECT start_value FROM pg_sequences
+          WHERE schemaname = 'public' AND sequencename = 'samples_barcode_seq'`
+      )
+      expect(rows).toHaveLength(1)
+      expect(Number(rows[0].start_value)).toBe(1000)
+    })
+
+    it('never hands the same number out twice — the actual complaint', async () => {
+      const barcodes = []
+      for (const n of [1, 2, 3]) {
+        const response = await generate(`serial ${n}`)
+        expect(response.statusCode).toBe(201)
+        barcodes.push(response.json().sample.barcode)
+      }
+      for (const barcode of barcodes) expect(barcode).toMatch(GENERATED)
+      expect(new Set(barcodes).size).toBe(3)
+      // A sequence is monotonic; a max(barcode)+1 that read stale would not be.
+      expect([...barcodes].sort()).toEqual(barcodes)
+    })
+
+    it('mints distinct numbers under concurrency, with no lock and no retry', async () => {
+      // This is what a sequence buys over `max(barcode) + 1`: three creates that
+      // overlap read no corpus, take no lock and cannot agree on a number. A
+      // max-plus-one either serialises them or mints the same tag three times —
+      // which IS the doubling-up being complained about.
+      const responses = await Promise.all([
+        generate('race a'),
+        generate('race b'),
+        generate('race c'),
+      ])
+      expect(responses.map((response) => response.statusCode)).toEqual([201, 201, 201])
+      const barcodes = responses.map((response) => response.json().sample.barcode)
+      for (const barcode of barcodes) expect(barcode).toMatch(GENERATED)
+      expect(new Set(barcodes).size).toBe(3)
+    })
+
+    it('lets a supplied barcode win, and does not spend a number doing it', async () => {
+      // Staff type barcodes off printed tags; the generator fills a gap and never
+      // overrides. The sequence being UNTOUCHED is the load-bearing half —
+      // Postgres does not evaluate the COALESCE arm it does not need, so a typed
+      // create leaves no hole in the minted series.
+      const before = await readSequence()
+
+      const response = await createSample(`${PREFIX}-9000`, { label: `${PREFIX} typed tag` })
+      expect(response.statusCode).toBe(201)
+      expect(response.json().sample.barcode).toBe(`${PREFIX}-9000`)
+
+      expect(await readSequence()).toEqual(before)
+    })
+
+    it('generates only on an OMITTED key — "" and null are 400s', async () => {
+      // A screen with an empty input box must not silently mint a tag the person
+      // filling it in did not ask for, so the route types `barcode` as a string
+      // with minLength 1 and neither value reaches the module.
+      for (const barcode of ['', null]) {
+        const response = await inject('POST', '/admin/samples', backofficeCookie, {
+          barcode,
+          label: `${PREFIX} empty tag`,
+        })
+        expect(response.statusCode).toBe(400)
+      }
+    })
+
+    it('answers a colliding GENERATED barcode with the same 409, never a retry', async () => {
+      // The generator does not make a collision impossible in general: move the
+      // sequence behind the corpus (a restore, a setval, a tag typed into the
+      // ATL-S- space) and a minted value can still hit samples_barcode_key. The
+      // correct answer is the database's refusal, exactly as for a typed
+      // duplicate — a retry loop would hide the real fault and spin.
+      const snapshot = await readSequence()
+      try {
+        await pool.query(`SELECT setval('samples_barcode_seq', 900000, false)`)
+        await pool.query(`INSERT INTO samples (barcode, label) VALUES ($1, $2)`, [
+          'ATL-S-900000',
+          `${PREFIX} squatting on the next number`,
+        ])
+
+        const response = await generate('collides')
+        expect(response.statusCode).toBe(409)
+        expect(response.json().message).toMatch(/barcode/i)
+
+        // Refused, not worked around: still exactly one row on that barcode.
+        const { rows } = await pool.query(
+          'SELECT count(*)::int AS n FROM samples WHERE barcode = $1',
+          ['ATL-S-900000']
+        )
+        expect(rows[0].n).toBe(1)
+      } finally {
+        await restoreSequence(snapshot)
       }
     })
   })

@@ -13,7 +13,10 @@
 //     by schema and the barcode is one segment further down).
 //   - A duplicate barcode is the database's 23505, mapped to a 409 by the module.
 //     A pre-check races the scanner — a concurrent device — and would still need
-//     the handler, so there is none.
+//     the handler, so there is none. That holds for a SERVER-MINTED barcode too:
+//     a create that omits `barcode` gets one off `samples_barcode_seq`
+//     (W20-US-002), and if the sequence is ever behind the corpus the answer is
+//     the same 409, never a retry.
 //   - DELETE goes through the shared lifecycle module and answers a refusal as a
 //     VALUE, not an exception: Fastify's error serializer drops custom
 //     properties, so a thrown error could not carry `blockers`, which is the
@@ -69,7 +72,11 @@ import {
 } from '../samples/showrooms.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 
-// Required on create, editable after — a printed tag can be mistyped.
+// Optional on create (W20-US-002) and editable after — a printed tag can be
+// mistyped. `minLength: 1` and the plain `string` type are what make "omitted"
+// the ONLY way to ask for a generated one: `''` and `null` are both 400s here,
+// so a screen with an empty input box cannot silently mint a tag the person
+// filling it in did not ask for.
 const barcodeProp = { type: 'string', minLength: 1, maxLength: 200 }
 
 // Optional columns, all nullable in the schema, so a PATCH clears one with an
@@ -134,10 +141,15 @@ const listQuerySchema = {
   },
 }
 
+// `barcode` is deliberately NOT required (W20-US-002). Omitting it is the
+// generate action itself — there is no separate mint endpoint, because a tag
+// handed out before the row exists is a number the office has to remember
+// again, which is the problem being solved. Nothing else is required either, so
+// `POST {}` is the CRM's "give me a blank barcoded tag" and the rest is filled
+// in by a PATCH.
 const createSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['barcode'],
   properties: {
     barcode: barcodeProp,
     ...sampleProps,

@@ -4,6 +4,12 @@
 # commit as the code. This is the single-screen project status board.
 #
 # Values: pending | in_progress | done | blocked
+#
+# 2026-08-12 — reconciled, then extended to the "August 12th updates" round
+# (planning-artifacts/prd-august-12th.md, epics-august-12th.md). Two things the
+# board did not say before: the 11-12 Aug commits carry no story IDs and their
+# work is recorded under w11b; and uncommitted work in the tree is in_progress,
+# never done.
 
 epics:
   w1-foundations:
@@ -34,6 +40,130 @@ epics:
     status: done
     stories:
       US-001: done      # Custom (non-D365) fields on the override layer
+  # Backfill. Real work shipped 11-12 Aug with no story ID, breaking the
+  # [W4-US-009] convention used consistently until 10 Aug, plus the work still
+  # in the tree. Branch is the one the commits are reachable from.
+  w11b-untracked-backfill:
+    name: "W11b Untracked work, reconciled 12 Aug"
+    branch: d365-custom-fields
+    status: in_progress
+    stories:
+      US-001: done      # 4b6808a manual sales orders: new order kind, migration 1786939200000, POST /admin/orders, priced line editing, guarded delete — reverses FR-19 (prd-august-12th.md §4 X5)
+      US-002: done      # c382c58 d365_overrides correction layer over the staging mirror
+      US-003: done      # fe2d042 correctness fix: sum an order's demand per colourway before moving stock — two lines on one colourway moved stock twice
+      US-004: done      # da971a2 trade applications carry the applicant's role in the embedded account
+      US-005: done      # d9854e9 CLAUDE.md split into per-directory guides
+      US-006: in_progress # IN TREE, uncommitted: pricing template v3 (scripts/lib/price-template.js)
+      US-007: in_progress # IN TREE, uncommitted: xlsx writer (scripts/lib/xlsx-write.js)
+      US-008: in_progress # IN TREE, uncommitted: price-sheet exporter (scripts/export-price-sheets.js)
+  w12-order-desk:
+    name: "W12 Sales order desk"
+    branch: aug12/w12-order-desk
+    status: pending
+    stories:
+      US-001: pending   # Migration: orders.client_reference and orders.customer_po_number
+      US-002: pending   # src/orders/order-filters.js — pure whitelist, ILIKE escaping, no database
+      US-003: pending   # GET /admin/orders consumes the filter module and paginates with a total
+      US-004: pending   # Back-office alert on every order-creation path
+      US-005: pending   # Client confirmation moves to creation; confirm keeps its own message
+      US-006: pending   # Reference and PO number in the admin order update whitelist
+      US-007: pending   # Packing slip: CRM print-window utility ported, driven by order lines (ADR 008)
+      US-008: pending   # AdminOrders — search bar, filters, pagination
+  w13-purchasing:
+    name: "W13 Purchase orders"
+    branch: aug12/w13-purchasing
+    status: pending
+    stories:
+      US-001: pending   # Migration: purchase_orders + the PO-number sequence
+      US-002: pending   # Migration: purchase_order_lines and allocations, partial unique index on the order line
+      US-003: pending   # Migration: purchase_order_receipts, CHECK (qty <> 0), consignment reference
+      US-004: pending   # Read models: derived received / outstanding / backorder balance
+      US-005: pending   # Derivation from confirmed sales-order lines grouped by brand
+      US-006: pending   # Purchase-order CRUD routes and list filters
+      US-007: pending   # Receipting route — append-only, over-receipt permitted
+      US-008: pending   # Lifecycle registry entry, fourth order blocker, cost-exposure test extension
+      US-009: pending   # AdminPurchaseOrders — list, derive, review
+      US-010: pending   # Receipting screen and purchase-order print
+  w14-supplier-invoices:
+    name: "W14 Consolidated supplier invoices"
+    branch: aug12/w14-supplier-invoices
+    status: pending
+    stories:
+      US-001: pending   # Migration: supplier_invoices
+      US-002: pending   # Migration: the join table, purchase_order_id UNIQUE
+      US-003: pending   # Invoice read model including the derived variance
+      US-004: pending   # Invoice CRUD, attach and detach, 409 and supplier-mismatch 422
+      US-005: pending   # List filters, date/amount matching search, cost-exposure test extension
+      US-006: pending   # AdminSupplierInvoices — create, attach, see the variance
+  w15-xero:
+    name: "W15 Xero"
+    branch: aug12/w15-xero
+    status: pending
+    stories:
+      US-001: pending   # WAVE 1, client-facing, not under Ralph: Custom Connection (F9), org choice, multi-currency, account/tax codes, who emails
+      US-002: pending   # WAVE 2 — migration: xero_connections, invoice-id column, sync log, colourways.xero_item_code
+      US-003: pending   # Token store — aes-256-gcm at rest; refresh under FOR UPDATE with a re-read
+      US-004: pending   # Injected Xero client and the capture double
+      US-005: pending   # Connect / callback routes and GET /admin/xero/status
+      US-006: pending   # Contact resolution — trade account then user; legacy_accounts backfill
+      US-007: pending   # Invoice mapper from the order read model
+      US-008: pending   # POST /admin/xero/invoices — non-null refusal, commit before call, no blind retry
+      US-009: pending   # CRM: push from the order screen, status panel, last error
+  w16-freight:
+    name: "W16 Freight and landed cost"
+    branch: aug12/w16-freight
+    status: in_progress
+    stories:
+      US-001: done      # Pricing parameters staged as legacy_tracking_options — migration 1787284800000, landed on aug12/w16-freight-parameters
+      US-002: pending   # Parameter read model: range → duty bands, clearance, freight, discount, trade markup
+      US-003: pending   # Freight-letter recovery planner — pure, reports, never writes
+      US-004: blocked   # BLOCKED on F1 (Derek): the exported Freight column agrees with the letter-implied rate on only 30 of 43 ranges, so the migration source is undecided. No rate is written anywhere until it is answered. Migration: the freight rate table
+      US-005: pending   # Freight rate resolver — null with a named reason, never zero
+      US-006: pending   # src/pricing/waterfall.js — partial result naming every missing input
+      US-007: pending   # Landed-cost preview route + cost-exposure test extension
+      US-008: pending   # Rate CRUD routes, effective_from append-only
+      US-009: pending   # Rate CSV round trip: export, edit, validate, apply
+      US-010: pending   # Freight panel on AdminSuppliers
+  w17-price-history:
+    name: "W17 Price history and drop detection"
+    branch: aug12/w17-price-history
+    status: pending
+    stories:
+      US-001: pending   # Migration: the two history tables, real FKs, source NOT NULL, manual-reason CHECK
+      US-002: pending   # Migration: the plpgsql capture triggers, with a loud comment (ADR 007)
+      US-003: pending   # Trigger coverage test — a bare SQL UPDATE on a raw connection
+      US-004: pending   # Manual edit demands a reason: 422 without it, source = 'manual'
+      US-005: pending   # Importer writes source = 'import' with source_file and date_effective
+      US-006: pending   # As-at rate lookup resolving on changed_at
+      US-007: pending   # Migration: last_seen_in_import, last_seen_source_file, discontinued_at
+      US-008: pending   # Drop detection scoped (supplier, category): coverage, suspect, explicit marking
+      US-009: pending   # CRM: history tab, coverage confirmation, discontinued red / suspect amber
+  w18-self-service-import:
+    name: "W18 Staff self-service imports"
+    branch: aug12/w18-self-service-import
+    status: pending
+    stories:
+      US-001: pending   # Migration: import_runs — who, when, which file, row counts
+      US-002: pending   # Dry-run endpoint: reports what would change, writes nothing
+      US-003: pending   # Apply: one transaction, idempotent, loud failure naming file:line
+      US-004: pending   # Unmappable category values reported per row rather than dropped
+      US-005: pending   # Delete the 7% duty placeholder
+      US-006: pending   # Correct the waterfall preview's step order to the incumbent's engine
+      US-007: pending   # Port the import wizard off importStore.js onto the API
+      US-008: pending   # Import run history screen
+  w19-reserves-cuttings:
+    name: "W19 Reserves and cuttings"
+    branch: aug12/w19-reserves-cuttings
+    status: pending
+    stories:
+      US-001: pending   # Migration: widen the orders.kind CHECK to a fifth kind (ADR 003)
+      US-002: pending   # Reserve create / list / decline / convert through the existing state machine
+      US-003: pending   # Migration: cutting requests in the sample-order shape, with an image URL
+      US-004: pending   # Cutting request module and routes; no inventory write
+      US-005: pending   # Lifecycle registry entries and delete/archive policy for both
+      US-006: pending   # PII test: legacy_cuttings.comments is never read, and no migration copies it
+      US-007: pending   # CRM /reserves — a request screen replacing the mirror-only view
+      US-008: pending   # CRM /cutting — writing for real, with the image field
   w2-crud:
     name: "W2 CRUD completion"
     branch: aug6/w2-crud
@@ -51,6 +181,44 @@ epics:
       US-010: done      # Standalone AdminCollections screen
       US-011: done      # AdminShipping screen
       US-012: done      # Delete on stock, supplier rates, orders and users screens
+  w20-samples-two:
+    name: "W20 Samples round two"
+    branch: aug12/w20-samples-two
+    status: pending
+    stories:
+      US-001: pending   # Migration: samples.unit_cost nullable with >= 0
+      US-002: pending   # Migration: the barcode sequence
+      US-003: pending   # Migration: email_templates
+      US-004: pending   # Outstanding-loans read across the register, filtered and paginated
+      US-005: pending   # Barcode generation endpoint; duplicates stay a database refusal
+      US-006: pending   # Template store with a fallback to the code template
+      US-007: pending   # Reminder compose and send, recorded — no scheduler
+      US-008: pending   # Sample value read/write with the null-vs-zero coercion; cost never client-facing
+      US-009: pending   # CRM: outstanding report, reminder work queue, compose-before-send
+      US-010: pending   # CRM register: generate a barcode, record a value
+  w21-reporting-codes:
+    name: "W21 Reporting codes"
+    branch: aug12/w21-reporting-codes
+    status: pending
+    stories:
+      US-001: pending   # Migration: products.product_range and brands.brand_code
+      US-002: pending   # Backfill planner — unambiguous only; ambiguous and unmatched reported
+      US-003: pending   # Supplier roll-up from the staged parameters, alias by alias
+      US-004: pending   # Report filter whitelist gains brand code and range
+      US-005: pending   # Coverage statement on every report using them
+      US-006: pending   # Stock-source labelling while the two stock figures disagree
+      US-007: pending   # CRM report filters
+  w22-scanner:
+    name: "W22 First-party phone scanner"
+    branch: aug12/w22-scanner
+    status: pending
+    stories:
+      US-001: pending   # Decoder spike (not under Ralph): choose a WASM decoder, measure the bundle
+      US-002: pending   # Scanner route over getUserMedia, decoder loaded on that route only
+      US-003: pending   # Decode → by-barcode lookup → result panel
+      US-004: pending   # Check-out and check-in from a scan, through the existing verb routes
+      US-005: pending   # Wedge input on the same screen; camera-refusal degradation
+      US-006: pending   # Pure scanner.js rules module with unit tests
   w3-suppliers:
     name: "W3 Suppliers"
     branch: aug6/w3-suppliers

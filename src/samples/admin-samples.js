@@ -31,7 +31,9 @@
 // The writes live here too (W4-US-005). Two rules shape them:
 //   - A duplicate barcode is the database's 23505 on `samples_barcode_key`,
 //     mapped to a 409. Never pre-checked: a pre-check races the scanner, which is
-//     a concurrent device, and would still need the handler.
+//     a concurrent device, and would still need the handler. That rule survives
+//     W20-US-002 unchanged and covers GENERATED barcodes too — see
+//     GENERATED_BARCODE below.
 //   - `out` is never accepted on a create or a PATCH. It is the one status that
 //     ASSERTS an open loan exists, and only check-out (US-006) writes both tables
 //     in the one transaction that can make that true. A status PATCH that could
@@ -69,6 +71,26 @@ export const WRITABLE_SAMPLE_STATUSES = Object.freeze(
 // The derivation, in one place. NULL-safe: a loan with no agreed date is not
 // overdue, and neither is a sample with no open loan (the join yields NULL).
 const OVERDUE_EXPRESSION = `COALESCE(ol.due_back_at < now(), false)`
+
+// The minted tag, when a create supplies no barcode (W20-US-002). Six
+// zero-padded digits behind `ATL-S-`, off `samples_barcode_seq` — the format,
+// the start value and the evidence for both live in
+// migrations/1787371200000_sample-barcode-sequence.js. It is spelled here and
+// NOT as a column DEFAULT so there is exactly one copy of it.
+//
+// It is a COALESCE arm rather than a preceding SELECT, and both halves of that
+// are load-bearing:
+//   - Postgres does not evaluate a COALESCE argument it does not need, so a
+//     SUPPLIED barcode never calls nextval and never burns a number. A supplied
+//     barcode wins outright — the generator fills a gap, it never overrides, and
+//     the tag printed on the object is the one the office typed.
+//   - The mint and the INSERT are one statement, so no number can be handed out
+//     for a row that then fails to land, and no second round trip opens a window
+//     for another writer.
+// A minted value can still hit `samples_barcode_key` if the sequence is ever
+// behind the corpus. That is the same 23505 → 409 a typed duplicate gets, and
+// deliberately NOT a retry loop: retrying hides the real fault and spins.
+const GENERATED_BARCODE = `'ATL-S-' || lpad(nextval('samples_barcode_seq')::text, 6, '0')`
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -419,8 +441,12 @@ export const getSample = (db, id) => readOne(db, 's.id = $1', id)
 export const getSampleByBarcode = (db, barcode) => readOne(db, 's.barcode = $1', barcode)
 
 /**
- * Register a new sample. The barcode is the tag on the object and is required;
- * a duplicate is the database's 23505, mapped to a 409 here.
+ * Register a new sample. The barcode is the tag on the object: supply it and it
+ * is used verbatim, OMIT it and the server mints the next one from
+ * `samples_barcode_seq` (W20-US-002 — "remember the next number"). An empty
+ * string is not an omission; the route's `minLength: 1` refuses one, so only an
+ * absent key generates. Either way a duplicate is the database's 23505, mapped
+ * to a 409 here.
  *
  * Every write returns through `getSample`, so a create, a patch, an archive and
  * a plain read all hand the CRM the SAME shape — parents by name, the open loan,
@@ -439,10 +465,11 @@ export const createSample = async (pool, input) => {
       `INSERT INTO samples
          (barcode, label, colourway_id, supplier_id, showroom_id, sample_type,
           location, status, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'in_library'), $9)
+       VALUES (COALESCE($1, ${GENERATED_BARCODE}), $2, $3, $4, $5, $6, $7,
+               COALESCE($8, 'in_library'), $9)
        RETURNING id`,
       [
-        input.barcode,
+        input.barcode ?? null,
         input.label ?? null,
         input.colourway_id ?? null,
         input.supplier_id ?? null,

@@ -21,4 +21,5 @@ export const LEGACY_ENTITY_ORDER = Object.freeze([
   'purchase_invoices',
   'reserves',
   'cuttings',
+  'tracking_options',
 ])

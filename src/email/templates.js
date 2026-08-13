@@ -5,9 +5,10 @@
 //
 // Templates (one per order-lifecycle moment):
 //   request_received        -> customer, after an order/backorder request (US-012)
-//   backoffice_new_request  -> staff, same moment (a new request needs verifying)
+//   backoffice_new_request  -> staff, whenever ANY path creates an order (W12 US-004)
 //   checkout_receipt        -> customer, after a paid Stripe checkout (US-011)
-//   order_confirmed         -> customer, when staff confirm + attach a Xero ref (US-014)
+//   order_confirmed         -> customer, when the order is CREATED (W12 US-005)
+//   order_invoiced          -> customer, when staff confirm + attach a Xero ref (W12 US-005)
 //   payment_received        -> customer, when staff mark the order paid (US-014)
 //   shipped                 -> customer, when staff ship the order (US-014)
 
@@ -57,6 +58,11 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
+  // Sent when the order is CREATED (FR-120), not when staff later confirm it —
+  // the client is told their order exists at the moment it does. A freshly
+  // created order carries no invoice reference, so the second branch is the one
+  // that renders on that path; the first is kept because nothing stops a caller
+  // creating an order that already has a ref.
   order_confirmed: ({ order_number, xero_invoice_ref }) => ({
     subject: `${BRAND}: order ${order_number} confirmed`,
     text: [
@@ -65,6 +71,23 @@ const TEMPLATES = Object.freeze({
       xero_invoice_ref
         ? `Invoice reference: ${xero_invoice_ref}`
         : 'An invoice will follow shortly.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // The back-office `confirm` transition: stock and cutting have been checked
+  // and the invoice has been raised in Xero. A message of its OWN (FR-121) —
+  // reusing order_confirmed here would send the client the same mail twice and
+  // tell them nothing new the second time.
+  order_invoiced: ({ order_number, xero_invoice_ref }) => ({
+    subject: `${BRAND}: invoice for order ${order_number}`,
+    text: [
+      `We've checked stock and cutting for order ${order_number} and raised your invoice.`,
+      '',
+      xero_invoice_ref
+        ? `Invoice reference: ${xero_invoice_ref}`
+        : 'The invoice will follow shortly.',
       '',
       `— ${BRAND}`,
     ].join('\n'),

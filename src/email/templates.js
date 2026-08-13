@@ -92,6 +92,35 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
+  // The SET LETTER behind an overdue-sample reminder (W20-US-007). The client
+  // asked for "a set letter, but the option to edit it", and this is the set
+  // one: `email_templates` overrides it without a deploy
+  // (src/email/template-store.js) and a staffer may rewrite any single send
+  // before it goes (src/samples/sample-reminders.js). Nothing sends it on a
+  // schedule — there is no scheduler, deliberately.
+  //
+  // Every field arrives pre-formatted: a template does no I/O and no date
+  // arithmetic, so `due_back_at` is already a human date and `days_overdue`
+  // already a number the caller derived. "Very politely", in her words — the
+  // letter never accuses, because plenty of these are Atelier's own oversight.
+  sample_loan_reminder: ({ holder_name, barcode, label, due_back_at, days_overdue }) => ({
+    subject: `${BRAND}: a gentle reminder about sample ${barcode}`,
+    text: [
+      `Hello${holder_name ? ` ${holder_name}` : ''},`,
+      '',
+      `Our records show you still have a sample from us:`,
+      '',
+      `  ${label || 'Sample'} (${barcode})`,
+      due_back_at ? `  Due back: ${due_back_at}` : '  No return date was agreed.',
+      days_overdue ? `  ${days_overdue} day(s) past the agreed date.` : '',
+      '',
+      'When you have finished with it, could we please arrange its return? If it',
+      'is already on its way back to us, thank you — please ignore this note.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
   // Acknowledgement to whoever submitted the storefront contact form.
   contact_received: ({ name }) => ({
     subject: `${BRAND}: thank you for your enquiry`,

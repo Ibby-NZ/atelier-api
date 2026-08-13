@@ -68,9 +68,15 @@ export const WRITABLE_SAMPLE_STATUSES = Object.freeze(
   SAMPLE_STATUSES.filter((status) => status !== 'out')
 )
 
-// The derivation, in one place. NULL-safe: a loan with no agreed date is not
-// overdue, and neither is a sample with no open loan (the join yields NULL).
-const OVERDUE_EXPRESSION = `COALESCE(ol.due_back_at < now(), false)`
+// The derivation, in ONE place, spelled once per alias — two spellings of it is
+// how a list and its badge start disagreeing. NULL-safe: a loan with no agreed
+// date is not overdue, and neither is a sample with no open loan (the join
+// yields NULL). The `returned_at IS NULL` half is carried by the caller's own
+// predicate: the open-loan join here, and the outstanding queue's WHERE in
+// ./sample-loan-queue.js, which IMPORTS this rather than re-spelling it.
+export const overdueExpression = (alias) => `COALESCE(${alias}.due_back_at < now(), false)`
+
+const OVERDUE_EXPRESSION = overdueExpression('ol')
 
 // The minted tag, when a create supplies no barcode (W20-US-002). Six
 // zero-padded digits behind `ATL-S-`, off `samples_barcode_seq` — the format,
@@ -130,7 +136,53 @@ const rethrowWriteError = (error) => {
   if (error?.code === '23514' && error.constraint === 'samples_status_check') {
     throw httpError(422, `status must be one of: ${SAMPLE_STATUSES.join(', ')}.`)
   }
+  if (error?.code === '23514' && error.constraint === 'samples_unit_cost_check') {
+    // `>= 0`, not `> 0`: zero is legal and means "free of charge, and we know
+    // it". Only a negative reaches here.
+    throw httpError(422, 'unit_cost cannot be negative. Leave it empty if nobody recorded a cost.')
+  }
   throw error
+}
+
+// --- What a sample cost (W20-US-001/US-008) ---------------------------------
+//
+// NULL AND 0 ARE DIFFERENT FACTS end to end, and `Number(null)` is 0, so a bare
+// `Number()` on this column turns every hanger nobody has costed into a gift.
+// One coercion, used everywhere the column is read.
+const numericOrNull = (value) => (value == null ? null : Number(value))
+
+// The finance columns, selected ONLY for a caller with finance visibility (see
+// `readOne`/`listSamples`). Fail-closed at the SQL rather than deleted from the
+// payload afterwards: a column that was never selected cannot be leaked by a
+// projection somebody forgot to apply, and every statement a non-finance read
+// issues can be asserted not to name it.
+const SAMPLE_COST_COLUMNS = `s.unit_cost, s.cost_currency`
+
+// Named once so a cost column added later has one place to be declared, and so
+// a test can assert a non-finance response carries none of them.
+export const SAMPLE_FINANCE_KEYS = Object.freeze(['unit_cost', 'cost_currency'])
+
+// Presence follows the SELECT: the keys exist on the payload exactly when the
+// query asked for them, so there is one decision and not two to drift apart.
+const costOf = (row) =>
+  Object.hasOwn(row, 'unit_cost')
+    ? { unit_cost: numericOrNull(row.unit_cost), cost_currency: row.cost_currency }
+    : {}
+
+// Reading a cost and writing one are the same permission. A staffer who may not
+// see what the library cost may not quietly restate it either, and a 403 here
+// beats a silent no-op — Ajv's `removeAdditional` does not strip a DECLARED
+// key, so without this the value would land. Enforced in the module because it
+// is also called directly.
+const assertCostWritable = (input, finance) => {
+  if (finance) return
+  const attempted = SAMPLE_FINANCE_KEYS.filter((key) => Object.hasOwn(input, key))
+  if (attempted.length > 0) {
+    throw httpError(
+      403,
+      `Your account does not have finance visibility, so it cannot set ${attempted.join(' or ')}.`
+    )
+  }
 }
 
 // Columns a create or a PATCH may ever write. Frozen and in-code, as buildUpdate
@@ -149,6 +201,11 @@ export const SAMPLE_UPDATE_COLUMNS = Object.freeze([
   'location',
   'status',
   'notes',
+  // W20-US-008. Writable only with finance visibility (assertCostWritable), and
+  // an explicit null clears the figure back to "nobody recorded a cost" — which
+  // is a different statement from 0, and both have to stay reachable.
+  'unit_cost',
+  'cost_currency',
 ])
 
 // `out` is refused in the module as well as at the route schema, because the
@@ -234,6 +291,9 @@ const toSample = (row, extra) =>
     overdue: row.overdue,
     loan_count: row.loan_count,
     open_loan: openLoanOf(row),
+    // Present only when the query selected them, i.e. only for a caller with
+    // finance visibility.
+    ...costOf(row),
     ...extra,
   })
 
@@ -262,8 +322,9 @@ const toLoan = (row) =>
   })
 
 // Escape the LIKE wildcards so a barcode containing an underscore matches that
-// literal character rather than any single one. Pairs with ESCAPE '\' in the SQL.
-const escapeLike = (value) => value.replace(/[\\%_]/g, (char) => `\\${char}`)
+// literal character rather than any single one. Pairs with ESCAPE '\' in the
+// SQL. Exported for ./sample-loan-queue.js, which searches the same corpus.
+export const escapeLike = (value) => value.replace(/[\\%_]/g, (char) => `\\${char}`)
 
 // WHERE fragments + bound params. Column names are in-code literals; every value
 // flows through a $n placeholder.
@@ -331,15 +392,29 @@ const buildWhere = ({ q, status, showroomId, supplierId, overdue, includeArchive
  * { samples, total } — the route builds the meta envelope, as every other admin
  * list here does.
  *
+ * `finance` decides whether the cost columns are SELECTED at all, and it
+ * defaults to false — a caller that says nothing gets no costs. The route
+ * derives it from `loadReportAccess`, never from anything the caller sent.
+ *
  * @param {import('pg').Pool} pool
  * @param {{ q?: string, status?: string, showroomId?: number, supplierId?: number,
  *           overdue?: boolean, includeArchived?: boolean, page?: number,
- *           limit?: number }} [options]
+ *           limit?: number, finance?: boolean }} [options]
  * @returns {Promise<{ samples: object[], total: number }>}
  */
 export const listSamples = async (
   pool,
-  { q, status, showroomId, supplierId, overdue, includeArchived = false, page, limit } = {}
+  {
+    q,
+    status,
+    showroomId,
+    supplierId,
+    overdue,
+    includeArchived = false,
+    page,
+    limit,
+    finance = false,
+  } = {}
 ) => {
   const safePage = Number.isInteger(page) && page > 0 ? page : DEFAULT_PAGE
   const safeLimit =
@@ -362,6 +437,7 @@ export const listSamples = async (
 
   const { rows } = await pool.query(
     `SELECT ${SAMPLE_COLUMNS},
+            ${finance ? `${SAMPLE_COST_COLUMNS},` : ''}
             ${SAMPLE_CONTEXT_COLUMNS}
        ${SAMPLE_FROM}
        ${where}
@@ -387,19 +463,21 @@ export const listSamples = async (
  */
 export const listSampleLoans = async (db, sampleId) => {
   const { rows } = await db.query(
-    `SELECT id, holder_name, trade_account_id, out_at, due_back_at, returned_at, notes,
-            COALESCE(returned_at IS NULL AND due_back_at < now(), false) AS overdue
-       FROM sample_loans
-      WHERE sample_id = $1
-      ORDER BY out_at DESC, id DESC`,
+    `SELECT l.id, l.holder_name, l.trade_account_id, l.out_at, l.due_back_at,
+            l.returned_at, l.notes,
+            l.returned_at IS NULL AND ${overdueExpression('l')} AS overdue
+       FROM sample_loans l
+      WHERE l.sample_id = $1
+      ORDER BY l.out_at DESC, l.id DESC`,
     [sampleId]
   )
   return rows.map(toLoan)
 }
 
-const readOne = async (db, predicate, value) => {
+const readOne = async (db, predicate, value, { finance = false } = {}) => {
   const { rows } = await db.query(
     `SELECT ${SAMPLE_COLUMNS},
+            ${finance ? `${SAMPLE_COST_COLUMNS},` : ''}
             ${SAMPLE_CONTEXT_COLUMNS}
        ${SAMPLE_FROM}
       WHERE ${predicate}`,
@@ -423,9 +501,10 @@ const readOne = async (db, predicate, value) => {
  *
  * @param {import('pg').Pool|import('pg').PoolClient} db
  * @param {number} id
+ * @param {{ finance?: boolean }} [options] cost columns are selected only when true
  * @returns {Promise<object|null>}
  */
-export const getSample = (db, id) => readOne(db, 's.id = $1', id)
+export const getSample = (db, id, options) => readOne(db, 's.id = $1', id, options)
 
 /**
  * One sample by barcode, or null. The scanner's read: an EXACT match on the
@@ -436,9 +515,11 @@ export const getSample = (db, id) => readOne(db, 's.id = $1', id)
  *
  * @param {import('pg').Pool|import('pg').PoolClient} db
  * @param {string} barcode
+ * @param {{ finance?: boolean }} [options] cost columns are selected only when true
  * @returns {Promise<object|null>}
  */
-export const getSampleByBarcode = (db, barcode) => readOne(db, 's.barcode = $1', barcode)
+export const getSampleByBarcode = (db, barcode, options) =>
+  readOne(db, 's.barcode = $1', barcode, options)
 
 /**
  * Register a new sample. The barcode is the tag on the object: supply it and it
@@ -454,19 +535,25 @@ export const getSampleByBarcode = (db, barcode) => readOne(db, 's.barcode = $1',
  * buys one renderer instead of two, which is what the screens actually need
  * (they re-read a row after every write anyway).
  *
+ * A cost may be recorded on the way in, but only with finance visibility — and
+ * `unit_cost: 0` is a real value meaning "free of charge", never an omission,
+ * so it is bound as given and never coalesced away.
+ *
  * @param {import('pg').Pool} pool
  * @param {object} input
+ * @param {{ finance?: boolean }} [options]
  * @returns {Promise<object>}
  */
-export const createSample = async (pool, input) => {
+export const createSample = async (pool, input, { finance = false } = {}) => {
   assertWritableStatus(input.status)
+  assertCostWritable(input, finance)
   try {
     const { rows } = await pool.query(
       `INSERT INTO samples
          (barcode, label, colourway_id, supplier_id, showroom_id, sample_type,
-          location, status, notes)
+          location, status, notes, unit_cost, cost_currency)
        VALUES (COALESCE($1, ${GENERATED_BARCODE}), $2, $3, $4, $5, $6, $7,
-               COALESCE($8, 'in_library'), $9)
+               COALESCE($8, 'in_library'), $9, $10, $11)
        RETURNING id`,
       [
         input.barcode ?? null,
@@ -478,9 +565,11 @@ export const createSample = async (pool, input) => {
         input.location ?? null,
         input.status ?? null,
         input.notes ?? null,
+        input.unit_cost ?? null,
+        input.cost_currency ?? null,
       ]
     )
-    return getSample(pool, rows[0].id)
+    return getSample(pool, rows[0].id, { finance })
   } catch (error) {
     return rethrowWriteError(error)
   }
@@ -491,13 +580,19 @@ export const createSample = async (pool, input) => {
  * keeps an explicit null — which clears a nullable column, e.g. un-homing a
  * sample from a showroom — distinct from an absent key.
  *
+ * `unit_cost: null` clears the figure back to "nobody recorded a cost";
+ * `unit_cost: 0` records "free of charge". `Object.hasOwn` is what keeps the
+ * two distinguishable from an absent key, and neither is ever coalesced.
+ *
  * @param {import('pg').Pool} pool
  * @param {number} id
  * @param {object} input
+ * @param {{ finance?: boolean }} [options]
  * @returns {Promise<object>}
  */
-export const updateSample = async (pool, id, input) => {
+export const updateSample = async (pool, id, input, { finance = false } = {}) => {
   assertWritableStatus(input.status)
+  assertCostWritable(input, finance)
   const { sets, params } = buildUpdate(input, SAMPLE_UPDATE_COLUMNS)
   try {
     const { rows } = await pool.query(
@@ -509,7 +604,7 @@ export const updateSample = async (pool, id, input) => {
     if (rows.length === 0) {
       throw httpError(404, `Sample ${id} not found.`)
     }
-    return getSample(pool, id)
+    return getSample(pool, id, { finance })
   } catch (error) {
     return rethrowWriteError(error)
   }
@@ -526,12 +621,13 @@ export const updateSample = async (pool, id, input) => {
  * @param {import('pg').Pool} pool
  * @param {number} id
  * @param {boolean} archived
+ * @param {{ finance?: boolean }} [options]
  * @returns {Promise<object|null>}
  */
-export const setSampleArchived = async (pool, id, archived) => {
+export const setSampleArchived = async (pool, id, archived, { finance = false } = {}) => {
   const row = await setArchived(pool, 'sample', id, archived, {
     extraSets: ['updated_at = now()'],
     returning: 'id',
   })
-  return row ? getSample(pool, row.id) : null
+  return row ? getSample(pool, row.id, { finance }) : null
 }

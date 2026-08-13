@@ -12,3 +12,36 @@ Extracted from the root CLAUDE.md (root conventions still apply). Loaded automat
 - Wiring: `buildApp({ ..., mailer })` (default null) passes the mailer into `orderRoutes`, `adminOrderRoutes`, `webhookRoutes`. Triggers: `POST /orders/request` → `notifyRequestReceived`; webhook after a *fresh* paid order (`result.order` truthy, i.e. not a replay) → `notifyCheckoutReceipt`; admin `confirm`/`mark-paid`/`ship` handlers → `notifyOrderTransition` (NOT `patch`/`decline` — patch could keep status `confirmed` and re-send). `processStripeEvent` now returns `user_id`/`guest_email`/`total_cents` on `result.order` so the receipt needs no extra query.
 - Config/env: `SMTP_HOST`/`SMTP_PORT`/`SMTP_SECURE`/`SMTP_USER`/`SMTP_PASS` (all optional), `EMAIL_FROM`, `BACKOFFICE_EMAIL` (non-secret defaults). `server.js` builds the transport+mailer; `buildApp` in tests gets `mailer` only when a test needs to observe sends (existing suites pass no mailer → null → no-op, unchanged).
 
+## The template store (W20-US-003 / US-006)
+
+- `template-store.js` — `renderStoredTemplate(db, name, data, { log })` returns the same
+  `{ subject, text }` `renderTemplate` does plus `source: 'database'|'code'`. It **prefers the
+  `email_templates` row and falls back to the code template**, and the fallback is TOTAL: a deleted
+  row, an empty table, an unmigrated database, a query that throws — every one of them returns the
+  code letter, logged, never thrown. That is what makes **DELETE the revert button** rather than a
+  destructive act, and it is why `src/email/templates.js` keeps a copy of every letter a row may
+  override.
+- **A stored template is TEXT WITH `{{ placeholders }}`, not code.** It cannot branch, format or
+  throw; a code template does all three (`formatCents`, the `xero_invoice_ref ? … : …` arm), which
+  is why the code copy stays the DEFAULT and the row is only an override. An unknown or null
+  placeholder renders **empty** — a staffer's typo becomes a visible gap in the draft they are about
+  to read before sending, which compose-before-send already catches, where a throw would 500 a work
+  queue.
+- **A row may only exist for a name the code also renders.** `/admin/email-templates/:name` spends
+  `TEMPLATE_NAMES` as a schema enum, so an unknown name is a 400 and never an orphan row. The check
+  is NOT a CHECK constraint: the vocabulary is JavaScript's and moves with a deploy, so a constraint
+  would have to be migrated in lockstep or start refusing rows the code is willing to render.
+- `listEmailTemplates` renders an un-overridden letter against a Proxy that answers every field with
+  its own `{{ name }}`, so the CRM's editor opens on the default text with its placeholders visible
+  rather than on an empty box or on `undefined`.
+- **`mailer.send` now takes two forms**: `{ template, data }` (rendered here, every order-lifecycle
+  notification) and `{ subject, text }` (sent VERBATIM). The second is what compose-before-send
+  needs — the body a staffer approved is the body that goes, and re-rendering it at send time would
+  deliver a different letter from the one on screen. `send` still never throws: a caller supplying
+  neither form comes back as `{ ok: false }` like any other failure.
+- Routes: `GET /admin/email-templates`, `PUT|DELETE /admin/email-templates/:name`
+  (`src/routes/admin-email-templates.js`, backoffice-only — a letter that goes out over Atelier's
+  name is not something a client edits). PUT is an upsert, so saving twice is one row and never a
+  409 a staffer has to interpret.
+- The one template using the store today is `sample_loan_reminder`; the sending path, and why there
+  is deliberately no scheduler behind it, live in `src/samples/CLAUDE.md`.

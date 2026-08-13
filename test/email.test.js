@@ -48,9 +48,14 @@ describe('email templates', () => {
         // The trade portal's invoice-copy request (both halves).
         'backoffice_invoice_copy_request',
         'invoice_copy_requested',
+        // The set letter behind an overdue-sample reminder (W20-US-007). It is
+        // the first template here that a STORED row may override
+        // (src/email/template-store.js) — and the code copy stays, because the
+        // override falls back to it.
+        'sample_loan_reminder',
       ])
     )
-    expect(TEMPLATE_NAMES).toHaveLength(10)
+    expect(TEMPLATE_NAMES).toHaveLength(11)
   })
 
   it('request_received names the order and promises contact within 24 hours', () => {

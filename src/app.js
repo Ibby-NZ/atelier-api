@@ -19,6 +19,8 @@ import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
 import { adminSampleRoutes } from './routes/admin-samples.js'
+import { adminSampleLoanRoutes } from './routes/admin-sample-loans.js'
+import { adminEmailTemplateRoutes } from './routes/admin-email-templates.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
@@ -152,6 +154,14 @@ export const buildApp = ({
     // is out, what is late back) plus the scanner's by-barcode lookup. Back
     // office only, same CORS allowance as every other CRM screen.
     api.register(adminSampleRoutes, { pool })
+    // /admin/sample-loans — the cross-register outstanding read and the
+    // reminders composed off it. Its own plugin because it is the one samples
+    // surface that needs the mailer: a reminder is a staff action off a work
+    // queue, sent on a click, never by a scheduler (there is none).
+    api.register(adminSampleLoanRoutes, { pool, mailer })
+    // /admin/email-templates — the staff-editable "set letter" behind those
+    // reminders. A row overrides the code template; deleting it reverts.
+    api.register(adminEmailTemplateRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })

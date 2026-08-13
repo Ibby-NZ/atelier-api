@@ -94,6 +94,17 @@ const CONSTRAINT_BLOCKERS = Object.freeze({
     relation: 'sample_loans',
     label: 'sample loans',
   }),
+  // The price-history RESTRICT edges (W17). Both entities probe them first;
+  // these entries keep a lost race naming the audit that blocked the delete
+  // rather than "related records".
+  price_list_item_price_history_price_list_item_id_fkey: Object.freeze({
+    relation: 'price_list_item_price_history',
+    label: 'recorded rate changes',
+  }),
+  product_price_history_product_id_fkey: Object.freeze({
+    relation: 'product_price_history',
+    label: 'recorded price changes',
+  }),
 })
 
 const UNKNOWN_CONSTRAINT_BLOCKER = Object.freeze({

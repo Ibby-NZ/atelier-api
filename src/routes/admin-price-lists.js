@@ -23,12 +23,18 @@ import {
   createPriceListItem,
   updatePriceListItem,
   setPriceListItemArchived,
+  markPriceListItemsDiscontinued,
   DEFAULT_PAGE,
   DEFAULT_LIMIT,
   MAX_LIMIT,
 } from '../pricing/admin-price-lists.js'
+import { getRateAsAt, listRateHistory, MAX_REASON_LENGTH } from '../pricing/price-history.js'
 import { CATEGORIES, UNITS, CURRENCIES, CLASS_LETTER } from '../../scripts/lib/price-template.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
+import { loadReportAccess } from '../reports/access.js'
+
+const httpError = (statusCode, message) =>
+  Object.assign(new Error(message), { statusCode })
 
 // A price-list item is the one row in this API whose deletion is not durable:
 // `npm run import:pricing` upserts on (supplier, category, code) and keeps rows
@@ -118,6 +124,12 @@ const createSchema = {
 // No `supplier`: it is create-only (part of the identity key). `category`, `code`
 // and the enum fields are editable; each is optional here (minProperties:1
 // enforces at-least-one).
+//
+// `reason` is NOT a column — it is the note recorded against a rate change, and
+// a patch that MOVES `wholesale_rate` is refused without it (422, raised in
+// src/pricing/admin-price-lists.js so the rule holds for every caller). It has
+// to be listed here or Ajv's removeAdditional would silently strip it and every
+// price change would fail as though the client had sent nothing.
 const patchSchema = {
   type: 'object',
   additionalProperties: false,
@@ -128,12 +140,57 @@ const patchSchema = {
     unit: unitProp,
     wholesale_rate: wholesaleRateProp,
     currency: currencyProp,
+    reason: { type: 'string', maxLength: MAX_REASON_LENGTH },
     ...optionalProps,
+  },
+}
+
+// The as-at lookup's only parameter. Same YYYY-MM-DD pattern as date_effective —
+// Fastify's bundled Ajv has no `format` keywords.
+const asAtQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['as_at'],
+  properties: {
+    as_at: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+  },
+}
+
+// Drop detection is scoped to (supplier, category) and both are required: per
+// file has no stable key (filenames carry the year) and per supplier would mark
+// a house's whole fabric range discontinued off its wallpaper list.
+const markDiscontinuedSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['supplier', 'category'],
+  properties: {
+    supplier: supplierProp,
+    category: categoryProp,
   },
 }
 
 export const adminPriceListRoutes = async (app, { pool }) => {
   const backoffice = app.guards.requireRole('backoffice')
+
+  // A wholesale rate is Atelier's BUY side, and its history is a run of them —
+  // the margin falls straight out of one divided into the matching trade price.
+  // So the two history reads sit behind finance visibility as well as the
+  // backoffice guard.
+  //
+  // `loadReportAccess(pool, request.user)` and never `request.user.can_view_finance`:
+  // guards load the user through PUBLIC_USER_COLUMNS, which does not carry the
+  // flag, so reading it off the record answers `undefined` — falsy today, and
+  // silently open the day that projection widens. Fails closed on a row that
+  // has gone.
+  const requireFinance = async (request) => {
+    const access = await loadReportAccess(pool, request.user)
+    if (!access.finance) {
+      throw httpError(
+        403,
+        'Reading what a rate used to be needs finance access. Ask a director.'
+      )
+    }
+  }
 
   app.get(
     '/admin/price-list-items',
@@ -183,8 +240,62 @@ export const adminPriceListRoutes = async (app, { pool }) => {
   app.patch(
     '/admin/price-list-items/:id',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: patchSchema } },
+    // `{ user: request.user }` is what puts a name on the change the capture
+    // trigger records, and it is passed uniformly — the same ctx shape every
+    // DELETE route hands deleteOrExplain.
     async (request) => ({
-      item: await updatePriceListItem(pool, request.params.id, request.body),
+      item: await updatePriceListItem(pool, request.params.id, request.body, {
+        user: request.user,
+      }),
+    })
+  )
+
+  // THE AS-AT LOOKUP — the reason this epic exists. "What were we paying for
+  // this on 1 June 2023?" is one indexed query, which is what lets the office
+  // stop encoding the year in an item code to keep an old price reachable.
+  //
+  // A date before anything was recorded is a 404 that names WHICH reason it is
+  // (never changed / the ledger starts later), because "no result" and "nothing
+  // recorded yet" read identically on a screen and only one is actionable.
+  app.get(
+    '/admin/price-list-items/:id/rate',
+    {
+      preHandler: backoffice,
+      schema: { params: idParamsSchema, querystring: asAtQuerySchema },
+    },
+    async (request) => {
+      await requireFinance(request)
+      return { rate: await getRateAsAt(pool, request.params.id, request.query.as_at) }
+    }
+  )
+
+  // Every recorded change for one item, newest first: date changed, old rate,
+  // new rate, reason — the four things the client asked to be able to see.
+  app.get(
+    '/admin/price-list-items/:id/price-history',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      await requireFinance(request)
+      const item = await getPriceListItem(pool, request.params.id)
+      if (!item) {
+        reply.code(404)
+        return {
+          error: 'Not Found',
+          message: `Price-list item ${request.params.id} not found.`,
+        }
+      }
+      return { changes: await listRateHistory(pool, request.params.id) }
+    }
+  )
+
+  // Drop detection, and it is a POST because it is a DECISION: an import records
+  // what it saw and flags nothing. The body is the (supplier, category) scope,
+  // and the response states coverage before the count it acted on.
+  app.post(
+    '/admin/price-list-items/mark-discontinued',
+    { preHandler: backoffice, schema: { body: markDiscontinuedSchema } },
+    async (request) => ({
+      result: await markPriceListItemsDiscontinued(pool, request.body),
     })
   )
 
@@ -220,11 +331,13 @@ export const adminPriceListRoutes = async (app, { pool }) => {
     }
   )
 
-  // A rate row has no dependants — nothing in the schema references
-  // price_list_items — so the registry entry carries no probes and no guard, and
-  // the only refusal left is 404. `replyDelete` still sends it, so the refusal
-  // shape stays identical to every other delete; only the success envelope is
-  // widened, by the one additive `warning` key.
+  // A rate row now has ONE dependant: its recorded price history, whose FK is
+  // ON DELETE RESTRICT precisely so a delete cannot destroy the audit (W17). So
+  // this route's refusals are 404 and a 409 naming the recorded changes, and the
+  // success envelope below is unreachable for any item whose rate has ever
+  // moved. That is correct: the reason to keep the row IS the history.
+  // `replyDelete` still sends the refusal, so its shape stays identical to every
+  // other delete; only the 200 is widened, by the one additive `warning` key.
   app.delete(
     '/admin/price-list-items/:id',
     { preHandler: backoffice, schema: { params: idParamsSchema } },

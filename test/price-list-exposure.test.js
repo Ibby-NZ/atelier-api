@@ -116,6 +116,17 @@ describe('cost-side exposure', () => {
       expect((await asTrade('/admin/price-list-items')).statusCode).toBe(403)
     })
 
+    // W17's price history is a RUN of wholesale rates for one code — strictly
+    // worse than the single rate above, since a series also gives up how the
+    // house's cost has moved. Both are backoffice-only AND finance-gated; the
+    // trade session fails the first gate, which is the one asserted here.
+    it('refuses an approved trade account the rate history', async () => {
+      expect((await asTrade('/admin/price-list-items/1/price-history')).statusCode).toBe(403)
+      expect(
+        (await asTrade('/admin/price-list-items/1/rate?as_at=2023-06-01')).statusCode
+      ).toBe(403)
+    })
+
     // Parameterised over the whole vocabulary, not just `prices`: `accounts`
     // carries 866 other clients' discount, credit limit, payment terms and
     // contact email, and `stock`/`sales-orders` carry trade prices and other

@@ -35,6 +35,20 @@ const countRows = async (pool) => {
   return rows[0].n
 }
 
+// A re-import that lands a NEW rate for a code already held records a row in
+// price_list_item_price_history, whose FK is ON DELETE RESTRICT (W17) — so the
+// history must go first or the cleanup itself raises 23503. Same class of trap
+// as orders before brands.
+const deleteBySupplier = async (pool, supplier) => {
+  await pool.query(
+    `DELETE FROM price_list_item_price_history
+      WHERE price_list_item_id IN
+            (SELECT id FROM price_list_items WHERE supplier = $1)`,
+    [supplier]
+  )
+  await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [supplier])
+}
+
 describe('price list import', () => {
   let pool
 
@@ -48,11 +62,11 @@ describe('price list import', () => {
       migrationsTable: 'pgmigrations',
       log: () => {},
     })
-    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [SUPPLIER])
+    await deleteBySupplier(pool, SUPPLIER)
   })
 
   afterAll(async () => {
-    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [SUPPLIER])
+    await deleteBySupplier(pool, SUPPLIER)
     await pool.end()
   })
 
@@ -184,11 +198,11 @@ describe('price_list_items template v3 columns', () => {
       migrationsTable: 'pgmigrations',
       log: () => {},
     })
-    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [V3_SUPPLIER])
+    await deleteBySupplier(pool, V3_SUPPLIER)
   })
 
   afterAll(async () => {
-    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [V3_SUPPLIER])
+    await deleteBySupplier(pool, V3_SUPPLIER)
     await pool.end()
   })
 
@@ -294,11 +308,11 @@ describe('price list import — v3 fields', () => {
       migrationsTable: 'pgmigrations',
       log: () => {},
     })
-    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [IMPORT_SUPPLIER])
+    await deleteBySupplier(pool, IMPORT_SUPPLIER)
   })
 
   afterAll(async () => {
-    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [IMPORT_SUPPLIER])
+    await deleteBySupplier(pool, IMPORT_SUPPLIER)
     await pool.end()
   })
 

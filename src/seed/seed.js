@@ -10,6 +10,7 @@ import {
   buildProductRows,
   buildShippingRateRows,
 } from './catalogue-data.js'
+import { setChangeContext } from '../pricing/price-history.js'
 
 const upsertBrands = async (client, rows) => {
   const idsByName = new Map()
@@ -172,6 +173,12 @@ export const runSeed = async (pool) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    // The products upsert refreshes retail_price_cents/trade_price_cents from
+    // the vendored snapshot, and a price change with no declared source is
+    // refused by the capture trigger on `products`. A first seed inserts and so
+    // captures nothing; a reseed after the snapshot repriced a design writes a
+    // history row saying the seed did it.
+    await setChangeContext(client, { source: 'import', sourceFile: 'seed' })
     const brandIds = await upsertBrands(client, buildBrandRows())
     const collections = await upsertCollections(client, buildCollectionRows(), brandIds)
     const productStats = await upsertProducts(client, buildProductRows(), brandIds)

@@ -171,6 +171,47 @@ describe('cost-side exposure', () => {
       })
       expect(res.statusCode).toBe(403)
     })
+
+    // W13. `purchase_order_lines.unit_price` is what Atelier PAYS a maison, in
+    // that maison's currency and for most of them already discount-inclusive —
+    // the same disclosure `price_list_items.wholesale_rate` is, arrived at by a
+    // different route. Divide one into the matching trade price and the margin
+    // falls out. Extended here rather than as a second exposure test, so there
+    // is one file that answers "what can an external party reach".
+    //
+    // Every payload is schema-VALID: Fastify validates BEFORE it runs a
+    // preHandler, so a malformed body asserts a 400 and would pass with the
+    // guard deleted.
+    const purchasingWrites = [
+      ['GET', '/admin/purchase-orders', undefined],
+      ['GET', '/admin/purchase-orders/1', undefined],
+      [
+        'POST',
+        '/admin/purchase-orders',
+        { brand_id: 1, lines: [{ colourway_id: 1, qty_ordered: 1 }] },
+      ],
+      ['POST', '/admin/purchase-orders/plan', {}],
+      ['POST', '/admin/purchase-orders/generate', {}],
+      ['PATCH', '/admin/purchase-orders/1', { notes: 'x' }],
+      ['POST', '/admin/purchase-orders/1/send', undefined],
+      ['POST', '/admin/purchase-orders/1/close', undefined],
+      ['POST', '/admin/purchase-orders/1/cancel', undefined],
+      ['DELETE', '/admin/purchase-orders/1', undefined],
+      ['POST', '/admin/purchase-order-lines/1/allocations', { order_line_id: 1, qty: 1 }],
+      ['POST', '/admin/purchase-order-lines/1/receipts', { qty: 1 }],
+    ]
+
+    for (const [method, url, payload] of purchasingWrites) {
+      it(`refuses an approved trade account ${method} ${url}`, async () => {
+        const res = await app.inject({
+          method,
+          url,
+          headers: { cookie: tradeCookie },
+          ...(payload === undefined ? {} : { payload }),
+        })
+        expect(res.statusCode).toBe(403)
+      })
+    }
   })
 
   describe('what the portal actually serves', () => {

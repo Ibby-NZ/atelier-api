@@ -3,9 +3,11 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { createMailer } from '../src/email/mailer.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const WEBHOOK_SECRET = 'whsec_test_webhook_secret'
+const BACKOFFICE = 'orders@test.example'
 const PREFIX = 'wh-test'
 const VALID_SIG = 'valid-sig'
 
@@ -358,6 +360,48 @@ describe('POST /webhooks/stripe', () => {
     // Replaying it is still idempotent.
     const replay = await post(event)
     expect(replay.json().duplicate).toBe(true)
+  })
+
+  // W12 US-004 (FR-119). A paid card sale used to mail the customer a receipt
+  // and tell the office nothing — the order reached the desk only when somebody
+  // opened the queue. The alert goes to the ONE configured address.
+  it('alerts the back office about a fresh paid order, once, and not on a replay', async () => {
+    const sent = []
+    const alerted = buildApp({
+      pool,
+      cookieSecret: TEST_COOKIE_SECRET,
+      stripe: makeStripeStub(),
+      stripeWebhookSecret: WEBHOOK_SECRET,
+      mailer: createMailer({
+        transport: { sendMail: async (message) => sent.push(message) },
+        from: 'Atelier <no-reply@test.example>',
+        backofficeEmail: BACKOFFICE,
+      }),
+      logger: false,
+    })
+    await alerted.ready()
+
+    const event = completedEvent(`evt_${PREFIX}_alert`, `cs_${PREFIX}_alert`, [
+      { sku: SKU.good, qty: 1 },
+    ])
+    const send = (payload) =>
+      alerted.inject({
+        method: 'POST',
+        url: '/webhooks/stripe',
+        headers: { 'stripe-signature': VALID_SIG, 'content-type': 'application/json' },
+        payload,
+      })
+
+    expect((await send(event)).statusCode).toBe(200)
+    const staff = sent.filter((message) => message.to === BACKOFFICE)
+    expect(staff).toHaveLength(1)
+    expect(staff[0].subject).toContain(`WEB-cs_${PREFIX}_alert`)
+
+    // A replay creates no order, so it must announce none either.
+    await send(event)
+    expect(sent.filter((message) => message.to === BACKOFFICE)).toHaveLength(1)
+
+    await alerted.close()
   })
 
   it('returns 503 when the webhook secret is not configured', async () => {

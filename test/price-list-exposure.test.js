@@ -162,6 +162,40 @@ describe('cost-side exposure', () => {
       }
     }
 
+    // W16. Freight is Atelier's landed cost by another name: the parameter read
+    // model serves the incumbent's duty bands, clearance, discount and trade
+    // markup per house, the recovery report serves the rate every one of those
+    // houses was charged, and the preview serves the whole waterfall. Divide
+    // any of it into the trade price and the margin falls out. The rate ledger
+    // is empty today, which is exactly why the guard has to be asserted now —
+    // the day it has rows in it is the day nobody re-reads this route file.
+    const freightSurface = [
+      ['GET', '/admin/freight/parameters', undefined],
+      ['GET', '/admin/freight/recovery', undefined],
+      ['GET', '/admin/freight/rates', undefined],
+      ['GET', '/admin/freight/rates/export.csv', undefined],
+      ['GET', '/admin/freight/landed-preview?range=X&wholesale_rate=1', undefined],
+      // Schema-VALID on purpose: Fastify validates BEFORE it runs a preHandler,
+      // so a malformed body would assert a 400 and pass with the guard deleted.
+      ['POST', '/admin/freight/rates', { rate: 30, unit: 'metre', range_name: 'X', effective_from: '2026-01-01' }],
+      ['POST', '/admin/freight/rates/validate', undefined],
+      ['POST', '/admin/freight/rates/apply', undefined],
+    ]
+    for (const [method, url, payload] of freightSurface) {
+      it(`refuses an approved trade account ${method} ${url}`, async () => {
+        const res = await app.inject({
+          method,
+          url,
+          headers: {
+            cookie: tradeCookie,
+            ...(method === 'POST' && payload === undefined ? { 'content-type': 'text/csv' } : {}),
+          },
+          ...(method === 'POST' ? { payload: payload ?? 'Supplier ID\r\n' } : {}),
+        })
+        expect(res.statusCode).toBe(403)
+      })
+    }
+
     it('refuses an approved trade account the legacy import', async () => {
       const res = await app.inject({
         method: 'POST',
@@ -201,6 +235,36 @@ describe('cost-side exposure', () => {
     ]
 
     for (const [method, url, payload] of sampleSurface) {
+    // W13. `purchase_order_lines.unit_price` is what Atelier PAYS a maison, in
+    // that maison's currency and for most of them already discount-inclusive —
+    // the same disclosure `price_list_items.wholesale_rate` is, arrived at by a
+    // different route. Divide one into the matching trade price and the margin
+    // falls out. Extended here rather than as a second exposure test, so there
+    // is one file that answers "what can an external party reach".
+    //
+    // Every payload is schema-VALID: Fastify validates BEFORE it runs a
+    // preHandler, so a malformed body asserts a 400 and would pass with the
+    // guard deleted.
+    const purchasingWrites = [
+      ['GET', '/admin/purchase-orders', undefined],
+      ['GET', '/admin/purchase-orders/1', undefined],
+      [
+        'POST',
+        '/admin/purchase-orders',
+        { brand_id: 1, lines: [{ colourway_id: 1, qty_ordered: 1 }] },
+      ],
+      ['POST', '/admin/purchase-orders/plan', {}],
+      ['POST', '/admin/purchase-orders/generate', {}],
+      ['PATCH', '/admin/purchase-orders/1', { notes: 'x' }],
+      ['POST', '/admin/purchase-orders/1/send', undefined],
+      ['POST', '/admin/purchase-orders/1/close', undefined],
+      ['POST', '/admin/purchase-orders/1/cancel', undefined],
+      ['DELETE', '/admin/purchase-orders/1', undefined],
+      ['POST', '/admin/purchase-order-lines/1/allocations', { order_line_id: 1, qty: 1 }],
+      ['POST', '/admin/purchase-order-lines/1/receipts', { qty: 1 }],
+    ]
+
+    for (const [method, url, payload] of purchasingWrites) {
       it(`refuses an approved trade account ${method} ${url}`, async () => {
         const res = await app.inject({
           method,

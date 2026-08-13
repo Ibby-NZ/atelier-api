@@ -804,6 +804,227 @@ describe('back-office order management', () => {
     })
   })
 
+  // W12 US-003/US-006: the order desk's search bar, its filters, its paging, and
+  // the client's own two numbers that three of those filters search.
+  describe('search, filters and pagination', () => {
+    // Every reference below carries this, so each assertion scopes itself to the
+    // orders the test just made rather than to whatever else the database holds.
+    const TAG = 'W12DESK'
+
+    const patch = (id, body) =>
+      inject('PATCH', `/admin/orders/${id}`, backofficeCookie, body)
+
+    const list = (query = '') =>
+      inject('GET', `/admin/orders${query}`, backofficeCookie)
+
+    // Place a request and hang the client's own numbers off it through the
+    // admin update whitelist — which is US-006's write path, so the fixture and
+    // the feature are the same code.
+    const placeWith = async (reference, poNumber = null) => {
+      const placed = await placeRequest(1)
+      const response = await patch(placed.id, {
+        client_reference: reference,
+        customer_po_number: poNumber,
+      })
+      expect(response.statusCode).toBe(200)
+      return response.json().order
+    }
+
+    describe('the client reference and PO number (US-006)', () => {
+      it('writes both through the update whitelist and reads them back', async () => {
+        const order = await placeWith(`${TAG} lounge`, 'PO-4471')
+        expect(order.client_reference).toBe(`${TAG} lounge`)
+        expect(order.customer_po_number).toBe('PO-4471')
+
+        // Present on the LIST projection too, not only on the by-id read — the
+        // CRM's table shows them, and two queries over one projection is how
+        // those drift.
+        const listed = (await list(`?reference=${TAG}`)).json().orders
+        expect(listed[0].customer_po_number).toBe('PO-4471')
+      })
+
+      it('clears to NULL rather than to an empty string', async () => {
+        const order = await placeWith(`${TAG} clear-me`, 'PO-9')
+
+        // null is what the CRM sends when a field is explicitly emptied...
+        const nulled = await patch(order.id, { client_reference: null })
+        expect(nulled.json().order.client_reference).toBeNull()
+
+        // ...and '' is what a text input sends when a person deletes what they
+        // typed. Both mean absent; a stored '' is an absence every IS NULL read
+        // misses and every search matches.
+        const blanked = await patch(order.id, { customer_po_number: '' })
+        expect(blanked.json().order.customer_po_number).toBeNull()
+
+        const { rows } = await pool.query(
+          'SELECT client_reference, customer_po_number FROM orders WHERE id = $1',
+          [order.id]
+        )
+        expect(rows[0]).toEqual({ client_reference: null, customer_po_number: null })
+      })
+
+      it('leaves both alone when the patch does not mention them', async () => {
+        const order = await placeWith(`${TAG} untouched`, 'PO-KEEP')
+        const response = await patch(order.id, { notes: 'Something else.' })
+        expect(response.json().order.customer_po_number).toBe('PO-KEEP')
+      })
+
+      // The whole reason these two columns exist is that the number arrives
+      // late — often in an email after the client has already paid. A guard
+      // that refuses it past `confirmed` would make the feature unusable at
+      // exactly the moment it is needed.
+      it('records a PO number on a paid order, but still refuses a line edit', async () => {
+        const order = await placeWith(`${TAG} pays-first`)
+        await inject('POST', `/admin/orders/${order.id}/confirm`, backofficeCookie, {
+          xero_invoice_ref: 'INV-LATE-PO',
+        })
+        await inject('POST', `/admin/orders/${order.id}/mark-paid`, backofficeCookie)
+
+        const late = await patch(order.id, { customer_po_number: 'PO-LATE-1' })
+        expect(late.statusCode).toBe(200)
+        expect(late.json().order.status).toBe('paid')
+        expect(late.json().order.customer_po_number).toBe('PO-LATE-1')
+
+        // An annotation is not a licence to edit the commercial terms: money,
+        // lines and the reservation stay frozen once an order is paid.
+        const lines = await patch(order.id, { notes: 'nudge the header' })
+        expect(lines.statusCode).toBe(409)
+      })
+    })
+
+    describe('filters', () => {
+      it('finds an order by the client reference', async () => {
+        const wanted = await placeWith(`${TAG} Hutchinson lounge`)
+        await placeWith(`${TAG} Ponsonby apartment`)
+
+        const response = await list(`?reference=${encodeURIComponent('Hutchinson')}`)
+        expect(response.statusCode).toBe(200)
+        const ids = response.json().orders.map((o) => o.id)
+        expect(ids).toEqual([wanted.id])
+      })
+
+      // The reason this module does not reuse src/reports/filters.js. A slug is
+      // [a-z0-9-] by construction; a reference is whatever a person typed, so an
+      // unescaped `%` would match every order in the table and `_` any single
+      // character.
+      it('matches a reference containing % and _ LITERALLY', async () => {
+        const literal = await placeWith(`${TAG} 100%_A`)
+        // Differs from the above only where the metacharacters are: a wildcard
+        // search for "100%_A" would return this one too.
+        await placeWith(`${TAG} 100XYA`)
+
+        const response = await list(`?reference=${encodeURIComponent('100%_A')}`)
+        const ids = response.json().orders.map((o) => o.id)
+        expect(ids).toEqual([literal.id])
+      })
+
+      it('finds an order by the customer PO number', async () => {
+        const wanted = await placeWith(`${TAG} po-order`, 'PO-4471')
+        await placeWith(`${TAG} other-order`, 'PO-9999')
+
+        const ids = (await list('?po_number=4471')).json().orders.map((o) => o.id)
+        expect(ids).toEqual([wanted.id])
+      })
+
+      it('finds a guest order by client, which has no account row at all', async () => {
+        const guest = await placeWith(`${TAG} guest`)
+        const ids = (await list('?client=buyer%40example.com')).json().orders.map((o) => o.id)
+        expect(ids).toContain(guest.id)
+      })
+
+      it('finds an order under an account by the account name or email', async () => {
+        const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [
+          testEmail('shopper'),
+        ])
+        const created = await inject('POST', '/admin/orders', backofficeCookie, {
+          user_id: rows[0].id,
+          lines: [
+            { colourway_id: colourwayId.get(SKU.inStock), qty: 1, unit_price_cents: 100 },
+          ],
+        })
+        const id = created.json().order.id
+
+        const ids = (await list('?client=admin-ord-test.example.com'))
+          .json()
+          .orders.map((o) => o.id)
+        expect(ids).toContain(id)
+      })
+
+      it('searches the order number, the reference and the client from one box', async () => {
+        const order = await placeWith(`${TAG} freetext`)
+
+        const byNumber = (await list(`?q=${order.order_number}`)).json().orders
+        expect(byNumber.map((o) => o.id)).toEqual([order.id])
+
+        const byReference = (await list(`?q=${TAG}%20freetext`)).json().orders
+        expect(byReference.map((o) => o.id)).toEqual([order.id])
+      })
+
+      it('filters by a date range that includes today', async () => {
+        // Read the date from the database, not from the test process: `to` is
+        // resolved in the session's timezone and a transcribed UTC date is a day
+        // out in New Zealand for half of every day.
+        const { rows } = await pool.query('SELECT current_date::text AS today')
+        const today = rows[0].today
+        const order = await placeWith(`${TAG} dated`)
+
+        const inRange = (await list(`?reference=${TAG}&from=${today}&to=${today}`)).json()
+        expect(inRange.orders.map((o) => o.id)).toEqual([order.id])
+
+        const before = (await list(`?reference=${TAG}&to=2020-01-01`)).json()
+        expect(before.orders).toHaveLength(0)
+      })
+
+      it('400s an unusable filter value rather than answering with an empty list', async () => {
+        expect((await list('?from=yesterday')).statusCode).toBe(400)
+        expect((await list('?from=2026-08-31&to=2026-08-01')).statusCode).toBe(400)
+      })
+
+      it('narrows with status at the same time', async () => {
+        const order = await placeWith(`${TAG} statused`)
+        expect(
+          (await list(`?reference=${TAG}&status=requested`)).json().orders.map((o) => o.id)
+        ).toEqual([order.id])
+        expect(
+          (await list(`?reference=${TAG}&status=shipped`)).json().orders
+        ).toHaveLength(0)
+      })
+    })
+
+    describe('pagination', () => {
+      it('returns one page and the total of the whole filtered population', async () => {
+        await placeWith(`${TAG} page-one`)
+        await placeWith(`${TAG} page-two`)
+        await placeWith(`${TAG} page-three`)
+
+        const first = (await list(`?reference=${TAG}&limit=2`)).json()
+        expect(first.orders).toHaveLength(2)
+        // The total is the population, not the page — a total that counted only
+        // what is on screen agrees with everything visible and is wrong.
+        expect(first.meta).toEqual({ total: 3, page: 1, limit: 2 })
+
+        const second = (await list(`?reference=${TAG}&limit=2&page=2`)).json()
+        expect(second.orders).toHaveLength(1)
+        expect(second.meta.total).toBe(3)
+        // Disjoint pages, from one deterministic ORDER BY.
+        const ids = [...first.orders, ...second.orders].map((o) => o.id)
+        expect(new Set(ids).size).toBe(3)
+      })
+
+      it('defaults the page and the limit', async () => {
+        await placeWith(`${TAG} defaulted`)
+        const { meta } = (await list(`?reference=${TAG}`)).json()
+        expect(meta).toEqual({ total: 1, page: 1, limit: 50 })
+      })
+
+      it('400s an over-large limit rather than silently clamping it', async () => {
+        expect((await list('?limit=5000')).statusCode).toBe(400)
+        expect((await list('?limit=0')).statusCode).toBe(400)
+        expect((await list('?page=0')).statusCode).toBe(400)
+      })
+    })
+  })
+
   describe('not found', () => {
     it('returns 404 for an unknown order id', async () => {
       const response = await inject('GET', '/admin/orders/99999999', backofficeCookie)

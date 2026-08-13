@@ -81,14 +81,23 @@ export const designs = [
     composition: '48% Viscose / 33% Cotton / 19% Linen', width: '140cm', application: 'Upholstery', rubs: '40,000',
     priceBand: 'NZ$420 / m', status: 'In stock', statusTone: 'sage', ...pimg('Atlas'),
     // duty/retailMarkup (P3/P6): variable and optional per product; inHouse (P5): Atelier's own textiles.
-    duty: '7%', retailMarkup: '×2.2', inHouse: false,
+    //
+    // EVERY `duty: '7%'` IN THIS FILE WAS A PLACEHOLDER AND IS NOW null. The
+    // incumbent's 19,327-row export carries a blank Duty Rate on 17,871 rows and
+    // an 'A' on 1,456, and class A is a flat 5% — 7% appears in no band on any
+    // range (docs/d365-export-analysis.md). Blank is therefore both the measured
+    // majority and this file's own existing word for "no duty step", which is
+    // why the placeholder is deleted rather than corrected: duty is per RANGE,
+    // and a per-design constant is the wrong shape whatever number it holds.
+    // Larsen keeps its '5%' — that one matches the measured class-A band.
+    duty: null, retailMarkup: '×2.2', inHouse: false,
     colourways: hero.colourways,
   },
   {
     brand: 'Manuel Canovas', supplier: 'Manuel Canovas', design: 'Madina', currency: 'EUR',
     composition: '100% Linen', width: '150cm', application: 'Drapery', rubs: '—',
     priceBand: 'NZ$310 / m', status: 'In stock', statusTone: 'sage', ...pimg('Madina Beige'),
-    duty: '7%', retailMarkup: '×2.2', inHouse: false,
+    duty: null, retailMarkup: '×2.2', inHouse: false,
     colourways: [
       { name: 'Beige', sku: 'MC-MAD-01', tone: ['#E6DAC2', '#C2AE86'], real: true },
       { name: 'Jade', sku: 'MC-MAD-02', tone: ['#7FA39A', '#3E6258'], real: true },
@@ -110,7 +119,7 @@ export const designs = [
     brand: 'Dominique Kieffer by Rubelli', supplier: 'Rubelli Venezia', design: 'Rigatto', currency: 'EUR',
     composition: '54% Viscose / 34% Polyester / 12% Linen', width: '138cm', application: 'Upholstery', rubs: '30,000',
     priceBand: 'NZ$455 / m', status: 'In stock', statusTone: 'sage', ...pimg('Rigatto Cushion Cover - Blanc'),
-    duty: '7%', retailMarkup: '×2.4', inHouse: false,
+    duty: null, retailMarkup: '×2.4', inHouse: false,
     colourways: [
       { name: 'Blanc', sku: 'DK-RIG-01', tone: ['#EDE6D6', '#CFC2A6'], real: true },
       { name: 'Mahogany', sku: 'DK-RIG-02', tone: ['#9A5B45', '#5E3023'], real: true },
@@ -133,7 +142,7 @@ export const designs = [
     priceBand: 'NZ$365 / m', status: 'In stock', statusTone: 'sage', ...pimg('Swedish Tree'),
     // P6 — not all products carry a retail markup: this range is trade-only (retailMarkup null),
     // so if shown on the website it is login-gated until a retail price is set (P5).
-    duty: '7%', retailMarkup: null, inHouse: false,
+    duty: null, retailMarkup: null, inHouse: false,
     colourways: [
       { name: 'Aqua', sku: 'CF-SWT-01', tone: ['#9CBEC0', '#5E8A8D'] },
       { name: 'Rose', sku: 'CF-SWT-02', tone: ['#D8B6B2', '#B07F78'] },
@@ -155,7 +164,12 @@ export const pricing = {
   // discount (P2) are now genuine, applied parameters; Trade markup (P7) replaces the old trade discount.
   params: [
     { label: 'Forex margin', value: '10%' }, { label: 'Supplier discount', value: '5%' },
-    { label: 'Duty', value: '7%' }, { label: 'Freight', value: '8%' }, { label: 'Clearance', value: '2%' },
+    // Duty is deliberately NOT in this list. It was '7%', which the incumbent's
+    // own export disproves (5% on duty class A, and per-range exceptions — see
+    // pricing.js's P3 note and docs/d365-export-analysis.md). A parameter row
+    // showing a made-up number reads as a decided one, so the row is gone until
+    // the broker's table (A10) makes it a real per-range parameter.
+    { label: 'Freight', value: '8%' }, { label: 'Clearance', value: '2%' },
     { label: 'Retail markup', value: '×2.2' }, { label: 'Trade markup', value: '55%' },
   ],
   // Trade markup (P7) can be a percentage of cost OR a flat dollar value add — toggle in the engine.
@@ -175,8 +189,11 @@ export const pricing = {
     { n: 1, name: 'Wholesale Rate', op: `€48.00 / m  ·  FX €${fxTable.EUR.actual} per NZ$1 (NZ$${nzdMultiplier('EUR', { withMargin: false }).toFixed(2)} / €1)  ·  +10% forex margin`, value: nzd(canonical.wholesale) },
     // Renamed from "Export Price" (Workshop 30 Jun, decision 6): wholesale less the supplier's discount.
     { n: 2, name: 'Supplier Discounted Price', op: '− 5% supplier discount', value: nzd(canonical.supplierDiscounted) },
-    { n: 3, name: 'Price ex Duty', op: '+ Freight 8%  + Clearance 2%', value: nzd(canonical.priceExDuty) },
-    { n: 4, name: 'Price incl Duty · COGS', op: '+ Duty 7%', value: nzd(canonical.cogs), key: true },
+    // Steps 3 and 4 swapped ends when the order was corrected against the
+    // incumbent's engine: duty is struck on the supplier-discounted price, then
+    // freight is added, then clearance is taken over both.
+    { n: 3, name: 'Price incl Duty', op: '+ Duty (per range — none set, A10)', value: nzd(canonical.priceInclDuty) },
+    { n: 4, name: 'COGS', op: '+ Freight 8%,  then × Clearance 2%', value: nzd(canonical.cogs), key: true },
     { n: 5, name: 'Landed Cost', op: 'Cost to warehouse (NZD)', value: nzd(canonical.landed) },
     { n: 6, name: 'Retail Sell', op: '× 2.2 retail markup', value: nzd(canonical.retail) },
     { n: 7, name: 'Trade Sell', op: '+ 55% trade markup on cost', value: nzd(canonical.trade), key: true },

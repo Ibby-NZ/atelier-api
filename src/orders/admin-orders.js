@@ -58,9 +58,18 @@ const requireStatus = (order, allowed, action) => {
   }
 }
 
+// The account's own name/email, so a screen can say who an order is for. An
+// order attributed to a login carries only `user_id`; without this the CRM had
+// nothing to render but "Account #4". LEFT JOIN because a guest order has no
+// account, and `orders.user_id` is SET NULL when one is deleted.
+const ORDER_FROM = `orders o
+       LEFT JOIN users u ON u.id = o.user_id`
+
 const ORDER_COLUMNS = `o.id,
         o.user_id,
         o.guest_email,
+        u.name AS client_name,
+        u.email AS client_email,
         o.order_number,
         o.kind,
         o.status,
@@ -134,6 +143,8 @@ const toOrder = (row, lineRows) => {
     id: row.id,
     user_id: row.user_id,
     guest_email: row.guest_email,
+    client_name: row.client_name ?? null,
+    client_email: row.client_email ?? null,
     order_number: row.order_number,
     kind: row.kind,
     status: row.status,
@@ -178,7 +189,7 @@ export const listAdminOrders = async (
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   const { rows } = await pool.query(
     `SELECT ${ORDER_COLUMNS}
-       FROM orders o
+       FROM ${ORDER_FROM}
        ${where}
       ORDER BY o.created_at DESC, o.id DESC`,
     params
@@ -196,7 +207,7 @@ export const listAdminOrders = async (
  */
 export const getAdminOrder = async (db, id) => {
   const { rows } = await db.query(
-    `SELECT ${ORDER_COLUMNS} FROM orders o WHERE o.id = $1`,
+    `SELECT ${ORDER_COLUMNS} FROM ${ORDER_FROM} WHERE o.id = $1`,
     [id]
   )
   const row = rows[0]

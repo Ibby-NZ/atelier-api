@@ -71,6 +71,13 @@ const FILTER_PROPERTIES = {
   from: { type: 'string', maxLength: 32 },
   to: { type: 'string', maxLength: 32 },
   brand: brandFilter,
+  // Free text, not slugs — a brand code is `CF` and a range is
+  // `RAMM, SON & CROCKER`. Ajv's removeAdditional STRIPS a property this object
+  // does not name, so a filter added to src/reports/filters.js and not to here
+  // would answer 200 having filtered nothing. The length cap is the boundary
+  // check; the shape rule is still the filter module's.
+  brand_code: { type: 'string', maxLength: 100 },
+  range: { type: 'string', maxLength: 100 },
   product_type: { type: 'string', enum: [...PRODUCT_TYPES] },
   collection: { type: 'string', maxLength: 200 },
   kind: { type: 'string', enum: [...ORDER_KINDS] },

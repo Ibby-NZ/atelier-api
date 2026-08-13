@@ -29,6 +29,7 @@
 //     value when the population holds more than one.
 
 import { defineColumns } from './access.js'
+import { dimensionCoverage } from './coverage.js'
 import { buildRevenueScope, SCOPE_NAME } from './revenue-lines.js'
 import { clampLimit, DEFAULT_ROW_LIMIT } from './limits.js'
 
@@ -92,7 +93,10 @@ const rowsSql = (cte, limitPlaceholder) => `WITH ${cte}
 // over the rows that survived the limit — a total that only added up the visible
 // page would be wrong in exactly the way nobody checks.
 const summarySql = (cte) => `WITH ${cte}
-   SELECT COUNT(DISTINCT order_id)::int AS orders,
+   SELECT COUNT(*)::int AS lines,
+          COUNT(*) FILTER (WHERE brand_code IS NOT NULL)::int AS with_brand_code,
+          COUNT(*) FILTER (WHERE product_range IS NOT NULL)::int AS with_range,
+          COUNT(DISTINCT order_id)::int AS orders,
           COUNT(DISTINCT brand_id)::int AS houses,
           COUNT(DISTINCT product_id)::int AS designs,
           COUNT(DISTINCT (brand_id, product_id, currency))::int AS rows_total,
@@ -197,6 +201,14 @@ export const productPerformanceReport = async (db, filters = {}, { limit } = {})
         requested_from: filters.from ?? null,
         requested_to: filters.to ?? null,
         historic_sales: 'header-only, not included',
+        // How much of THIS population carries W21's two dimensions. Without it
+        // a `range` filter that matched nothing is indistinguishable from a
+        // range that sold nothing — and today the first is the likely answer.
+        dimensions: dimensionCoverage({
+          rows: summary.lines,
+          with_brand_code: summary.with_brand_code,
+          with_range: summary.with_range,
+        }),
         note: COVERAGE_NOTE,
       }),
     }),

@@ -36,6 +36,7 @@
 //     exactly the over-allocation a stock report exists to surface.
 
 import { defineColumns } from './access.js'
+import { dimensionCoverage, stockSource } from './coverage.js'
 import { buildReportFilters, partitionFilters } from './filters.js'
 import { clampLimit, DEFAULT_ROW_LIMIT } from './limits.js'
 
@@ -46,7 +47,16 @@ export const STOCK_TITLE = 'Stock holdings by colourway'
 // `orders` at all, so `from`, `to`, `kind` and `status` are questions about a
 // lifecycle this report does not touch. buildReportFilters throws on an unknown
 // name here, which is what makes this list a declaration rather than a comment.
-export const STOCK_FILTERS = Object.freeze(['brand', 'product_type', 'collection'])
+// `brand_code` and `range` join it because both columns are already in this
+// FROM (`b` and `p`); the four it still declines are the ones about a lifecycle
+// it does not touch.
+export const STOCK_FILTERS = Object.freeze([
+  'brand',
+  'brand_code',
+  'range',
+  'product_type',
+  'collection',
+])
 
 // No `finance` column, deliberately — see the header. Order is the table's and
 // the CSV header's; maskReport builds every row from this list.
@@ -105,6 +115,8 @@ const rowsSql = (clauses, limitPlaceholder) => `SELECT c.sku,
 // total that only added up the visible page agrees with everything on screen
 // and is wrong.
 const summarySql = (clauses) => `SELECT COUNT(*)::int AS rows_total,
+          COUNT(*) FILTER (WHERE b.brand_code IS NOT NULL)::int AS with_brand_code,
+          COUNT(*) FILTER (WHERE p.product_range IS NOT NULL)::int AS with_range,
           COUNT(DISTINCT b.id)::int AS houses,
           COUNT(DISTINCT p.id)::int AS designs,
           COALESCE(SUM(i.qty_available), 0) AS on_hand,
@@ -195,9 +207,18 @@ export const stockReport = async (db, filters = {}, { limit } = {}) => {
       over_allocated: summary.over_allocated,
       coverage: Object.freeze({
         source: 'live inventory',
+        // Which table the three quantities were read out of. Every stock figure
+        // this API reports says so while the two staged D365 totals disagree by
+        // 2.65× and cannot be reconciled — see src/reports/coverage.js.
+        stock_source: stockSource('inventory'),
         as_at: new Date().toISOString(),
         holdings_only: true,
         valuation: 'none — no landed cost source (A1 open)',
+        dimensions: dimensionCoverage({
+          rows: summary.rows_total,
+          with_brand_code: summary.with_brand_code,
+          with_range: summary.with_range,
+        }),
         note: STOCK_COVERAGE_NOTE,
       }),
     }),

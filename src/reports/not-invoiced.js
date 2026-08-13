@@ -32,6 +32,7 @@
 //     many lines carry no price.
 
 import { defineColumns } from './access.js'
+import { dimensionCoverage, stockSource } from './coverage.js'
 import { buildRevenueScope, SCOPE_NAME } from './revenue-lines.js'
 import { clampLimit, DEFAULT_ROW_LIMIT } from './limits.js'
 
@@ -121,6 +122,8 @@ const rowsSql = (cte, kindPlaceholder, limitPlaceholder) => `WITH ${cte}
 
 const summarySql = (cte, kindPlaceholder) => `WITH ${cte}
    SELECT COUNT(*)::int AS lines,
+          COUNT(*) FILTER (WHERE s.brand_code IS NOT NULL)::int AS with_brand_code,
+          COUNT(*) FILTER (WHERE s.product_range IS NOT NULL)::int AS with_range,
           COUNT(DISTINCT s.order_id)::int AS orders,
           COALESCE(SUM(s.qty), 0) AS qty,
           COUNT(*) FILTER (WHERE s.unpriced)::int AS unpriced_lines,
@@ -226,6 +229,14 @@ export const notInvoicedReport = async (db, filters = {}, { limit } = {}) => {
         requested_from: filters.from ?? null,
         requested_to: filters.to ?? null,
         value: 'not stated — request lines carry no price until Xero',
+        // `on_hand` is a stock figure, so it names its source like every other
+        // one in this API while the two staged D365 totals disagree by 2.65×.
+        stock_source: stockSource('inventory'),
+        dimensions: dimensionCoverage({
+          rows: summary.lines,
+          with_brand_code: summary.with_brand_code,
+          with_range: summary.with_range,
+        }),
         note: NOT_INVOICED_COVERAGE_NOTE,
       }),
     }),

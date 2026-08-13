@@ -48,6 +48,7 @@ import {
   DEFAULT_LIMIT,
   MAX_LIMIT,
 } from '../catalogue/admin-products.js'
+import { listProductPriceHistory, MAX_REASON_LENGTH } from '../pricing/price-history.js'
 
 // Shared property shapes. Nullable variants let a PATCH clear an optional field
 // with an explicit null.
@@ -214,6 +215,12 @@ const productCreateSchema = {
 }
 
 // No brand_id and no product_type: both are create-only (see the header).
+//
+// `reason` is not a column — it is the note recorded against a price change,
+// and a patch that MOVES retail_price_cents or trade_price_cents is refused
+// without it (422, raised in updateProduct so the rule holds for every caller).
+// It has to be declared here or Ajv's removeAdditional strips it silently and
+// every price edit fails as though the client had sent nothing.
 const productPatchSchema = {
   type: 'object',
   additionalProperties: false,
@@ -221,6 +228,7 @@ const productPatchSchema = {
   properties: {
     ...productDetailProps,
     show_on_website: { type: 'boolean' },
+    reason: { type: 'string', maxLength: MAX_REASON_LENGTH },
   },
 }
 
@@ -415,8 +423,31 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
       schema: { params: idParamsSchema, body: productPatchSchema },
     },
     async (request) => ({
-      product: await updateProduct(pool, request.params.id, request.body),
+      product: await updateProduct(pool, request.params.id, request.body, {
+        user: request.user,
+      }),
     })
+  )
+
+  // What the client asked for in as many words: on the product, date changed,
+  // old price, new price and a short reason. No finance gate — a retail or
+  // trade figure is money and is not a cost, the line src/reports/access.js
+  // draws and the CRM's REPORT_POLICY already applies. The buy-side history
+  // (/admin/price-list-items/:id/price-history) is the one that is gated.
+  app.get(
+    '/admin/products/:id/price-history',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const product = await getAdminProduct(pool, request.params.id)
+      if (!product) {
+        reply.code(404)
+        return {
+          error: 'Not Found',
+          message: `Product ${request.params.id} not found.`,
+        }
+      }
+      return { changes: await listProductPriceHistory(pool, request.params.id) }
+    }
   )
 
   // The SKU-level browse. Colourways are reachable through their product, but a

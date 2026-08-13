@@ -382,6 +382,15 @@ export const LIFECYCLE_ENTITIES = defineEntities({
             JOIN colourways c ON c.id = so.colourway_id
            WHERE c.product_id = $1`
       ),
+      // `product_price_history.product_id` is RESTRICT for the same reason the
+      // price-list side is: with CASCADE, deleting a design would destroy the
+      // record of every price it was ever sold at, silently. Direct edge, no
+      // colourway join — a price is the product's.
+      probe(
+        'product_price_history',
+        'recorded price changes',
+        'SELECT 1 FROM product_price_history WHERE product_id = $1'
+      ),
       // purchase_order_lines.colourway_id is RESTRICT (W13), same shape and
       // same reason as order_lines above: a purchase order is a commercial
       // record and must survive a catalogue tidy-up.
@@ -444,15 +453,27 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     probes: [],
   },
 
-  // Nothing references a rate row. Note for the screen that consumes this: a
-  // deleted item comes back on the next `npm run import:pricing`, because the
-  // upsert re-creates rows from the supplier's file. The confirm copy must say so.
+  // This entity's FIRST probe, and the FK behind it is load-bearing.
+  // `price_list_item_price_history.price_list_item_id` is ON DELETE RESTRICT
+  // rather than CASCADE precisely because a CASCADE would destroy the recorded
+  // rate history — the thing W17 exists to preserve — silently, and the next
+  // `npm run import:pricing` would re-create the row looking new. So an item
+  // whose rate has ever MOVED is refused, and REIMPORT_WARNING's success
+  // envelope is unreachable for it. An item that has only ever been imported at
+  // one rate has no history and still deletes: capture is on UPDATE only (see
+  // migrations/1788667200000_price-history-triggers.js).
   price_list_item: {
     table: 'price_list_items',
     idColumn: 'id',
     label: 'price-list item',
     archivable: true,
-    probes: [],
+    probes: [
+      probe(
+        'price_list_item_price_history',
+        'recorded rate changes',
+        'SELECT 1 FROM price_list_item_price_history WHERE price_list_item_id = $1'
+      ),
+    ],
   },
 
   // The two edges out of suppliers disagree, and only one of them would ever

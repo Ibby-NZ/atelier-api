@@ -71,8 +71,19 @@ const insertItem = async (pool, overrides = {}) => {
   return rows[0].id
 }
 
-const cleanupFixtures = (pool) =>
-  pool.query('DELETE FROM price_list_items WHERE supplier LIKE $1', [`${PREFIX}%`])
+// The recorded rate history goes FIRST: W17 made
+// price_list_item_price_history.price_list_item_id ON DELETE RESTRICT so a
+// delete cannot destroy the audit, which means the cleanup itself 23503s on any
+// fixture whose rate a test moved. Same class of trap as orders before brands.
+const cleanupFixtures = async (pool) => {
+  await pool.query(
+    `DELETE FROM price_list_item_price_history
+      WHERE price_list_item_id IN
+            (SELECT id FROM price_list_items WHERE supplier LIKE $1)`,
+    [`${PREFIX}%`]
+  )
+  await pool.query('DELETE FROM price_list_items WHERE supplier LIKE $1', [`${PREFIX}%`])
+}
 
 const deleteUsers = (pool) =>
   pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${DOMAIN}`])
@@ -277,7 +288,8 @@ describe('back-office price-list management', () => {
         'PATCH',
         `/admin/price-list-items/${fixtures.alphaFabric}`,
         backofficeCookie,
-        { wholesale_rate: 71.5 }
+        // A rate change carries its note or it is a 422 (W17 US-004).
+        { wholesale_rate: 71.5, reason: 'Supplier increase' }
       )
       const response = await inject(
         'GET',
@@ -369,7 +381,7 @@ describe('back-office price-list management', () => {
         'PATCH',
         `/admin/price-list-items/${fixtures.alphaFabric}`,
         backofficeCookie,
-        { wholesale_rate: 88.5 }
+        { wholesale_rate: 88.5, reason: 'Supplier increase' }
       )
       expect(response.statusCode).toBe(200)
       expect(response.json().item.wholesale_rate).toBe(88.5)

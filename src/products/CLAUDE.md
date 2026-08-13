@@ -31,6 +31,68 @@ the supplier pricing pipeline rather than reimplemented beside it.
   corresponding line of the committed JSON. `test/price-template.test.js`'s byte-pin block names the
   exact cells behind its first record.
 
+### The D365 workbooks (`npm run sheet:prices` / `npm run sheet:stock`)
+
+The sheet below covers `products` — the seeded catalogue. The two catalogues the office actually works
+from are in the D365 staging mirror, and `scripts/export-category-sheets.js` writes each as one workbook
+(an All tab plus a tab per house, the same rows twice):
+
+| dataset | table | rows | the CRM screen |
+| --- | --- | --- | --- |
+| `prices` | `legacy_product_prices` | 19,327 designs | Dynamics → Price list |
+| `stock` | `legacy_stock_items` | 7,611 items | **Stock → Reserves** (`GET /admin/legacy/stock` — the tab is labelled Reserves, the data is the stock ledger) |
+
+- **They stay two workbooks because they are two grains, and nothing joins them.**
+  `legacy_stock_items.product_price_list` is the price row's DESCRIPTION, not its code, and resolves to
+  exactly one price row for only 52% of items (`src/legacy/CLAUDE.md`). Do not add a lookup column.
+- **Neither export contains duplicate rows.** Verified on the corpus: both are distinct on `guid`, on
+  `row_checksum`, and on every business column combined. On the price list 381 CODES repeat, but 379 of
+  those are the same number issued by two different houses (TREND `7221` is a different design at a
+  different price from JANNELLI VOLPI `7221`) — a supplier's own numbering, not a global key. The 2
+  within-house repeats (`GARRETT LEATHER GS1500`, `STROHEIM 81634`) are D365 data entry: a second record
+  created later carrying a longer description, one of them with no price at all. `legacy_stock_items`
+  has no code collisions — `item_code` is unique across all 7,611 — but the key stays the GUID on both
+  sheets so they are read back the same way.
+- **The key is the D365 GUID, not the code.** 18,946 distinct codes over 19,327 designs, and two
+  `(range, code)` pairs repeat outright — a sheet matched on code could not identify those rows at all.
+  Same argument as `Product ID` on the CSV sheet.
+- **The stock sheet carries `On Hand` / `Available` / `Status` to be FILTERED on, not edited.** 3,455 of
+  the 7,611 items are Inactive and only ~370 hold any stock; a sheet that had silently dropped either
+  would read as "that is all the stock". Filtering is a click, and dropping is the part the office cannot
+  undo. The quantities are written as NUMBERS (everything else is a string) so they sort and total —
+  as text, "10" sorts below "2". A quantity D365 has not set stays an EMPTY cell, never a 0.
+- **89 stock rows carry no house and land on a `(No house)` tab.** Dropping them would lose them
+  silently; a tab named for the gap is the same statement the balance check makes.
+- **`--one-sheet` keeps the All tab alone** (`npm run sheet:stock -- --one-sheet`). The house tabs are a
+  view, so it removes a convenience and never a row — same rows, same count, same balance check. It is a
+  flag rather than a second dataset because the two outputs differ in nothing else.
+- **The house tabs are a VIEW, not a partition**: every design appears on `All Products` AND on its
+  house's tab, so a re-import must be idempotent per GUID and must tolerate the same GUID twice in one
+  file (the CSV sheet's `repeats` rule, arriving by a second door).
+- **`Category` is empty and `Suggested Category` is beside it**, derived from the D365 item type through
+  `CATEGORY_BY_ITEM_TYPE` — the same map the supplier price-list template reads, so the two pipelines
+  cannot drift on what `W/P` means. 112 price rows and 958 stock rows have an item type the four-value
+  vocabulary has no word for (Leather, Towels, Cushions, Bedding, Bed Linen, Candles, Furniture,
+  Rug/Carpet, Throws/Blankets, Samples and Displays, "No Group Selected") and come through blank; they
+  need a person.
+- **The Category cells carry an Excel dropdown**, which is the note this file says a CSV has nowhere to
+  put. It is the reason the workbook exists rather than a fifty-first CSV: an unknown category stops
+  being a row error reported after the fact and becomes a value the office cannot type.
+- **`scripts/lib/xlsx-write.js` is the writer, the mirror of the `xlsx.js`/`zip.js` READER** — no
+  dependency, because Node bundles `deflateRawSync` and (20.12+) `crc32`. A string cell goes through the
+  shared table and stays text, so a code like `81634` or `00815` stays the code; only an actual JS number
+  becomes a numeric cell, which is how the caller decides. The ZIP timestamps are fixed at the 1980 DOS
+  epoch, so the same rows produce the same bytes — the byte-identity gate the pricing pipeline already
+  relies on (the price workbook was proved unchanged that way when the stock dataset was added).
+- **Excel does not report a malformed part, it "repairs" it** — i.e. discards content and names nothing.
+  So `test/xlsx-write.test.js` asserts the two things a reader cannot: the `CT_Worksheet` child SEQUENCE
+  (`dimension` → `sheetViews` → `cols` → `sheetData` → `autoFilter` → `dataValidations`; out of order is
+  a repair) and the relationship/content-type graph. The round trip through this repo's own reader is the
+  other half.
+- **Nothing reads a filled workbook back yet.** A category typed against a D365 price row belongs in
+  `d365_overrides.extras` (the custom-field lane — `src/legacy/CLAUDE.md`), never in `patch`, which is
+  keyed on D365 column names.
+
 ### The sheet (`GET /admin/product-sheet/export.csv`)
 
 - **The header row is a CONTRACT, not a caption**: `Product ID,House,Collection,Design,Category`,

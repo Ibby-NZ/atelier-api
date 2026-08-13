@@ -5,7 +5,8 @@
 // Implements the pricing/discount logic from the workshop diagram:
 //  · P1 — Wholesale = foreign price ÷ annual actual rate (foreign per NZ$1) × (1 + forex margin) ≈ ÷ CRM rate
 //  · P2 — Supplier discount CHAIN — sequential/compounded; empty for discount-inclusive suppliers
-//  · P4 — Price incl. duty = COGS
+//  · P3 — Duty, struck on the supplier-discounted price
+//  · P4 — COGS = (price incl. duty + freight) × (1 + clearance)
 //  · P6 — Retail markup (× multiplier)
 //  · P7 — Trade markup taken from cost: percentage OR flat dollar value add
 //  · D3 — Client discount tiers: Tier 1 −10%, Tier 2 −5%
@@ -26,7 +27,20 @@ export const pricingInputs = {
   freightDollar: 30, // decision 1 (15 Jul) — flat $/unit add when freightMode is 'dollar'
   freightMode: 'percent', // 'percent' | 'dollar' — user preference toggle (Pricing Engine)
   clearance: 0.02,
-  duty: 0.07, // P3 — variable per range/product; not all products are dutiable
+  // P3 — NO DUTY IS STATED, and the absence is the point.
+  //
+  // This input used to read `duty: 0.07`, and the 7% was invented. The
+  // incumbent's own 19,327-row export says so: `Price Incl Duty ÷ Price ex Duty`
+  // is exactly 1.00 on 17,776 rows and 1.05 on 1,218, and 7% appears in no band
+  // on any range (docs/d365-export-analysis.md, "Step 4 — duty is a flat 5%,
+  // applied only to duty-class rows"). It is DELETED rather than corrected to
+  // 0.05 because the real table is per-RANGE — a flat 5% on duty class A with
+  // per-range exceptions — so a single constant here is the wrong SHAPE whatever
+  // number is in it, and a plausible wrong number is harder to notice than a
+  // missing one. `computeWaterfall` reads an absent duty as no duty step
+  // (`i.duty || 0`), so the preview now shows the waterfall without a duty
+  // parameter until the broker's table (A10) arrives and duty is resolved per
+  // range from `price_list_items.duty_class`.
   handling: 0.65, // warehouse handling ($/m)
   retailMarkup: 2.2, // P6 — × multiplier (Fabrics)
   tradeMarkup: 0.55, // P7 — +55% markup on cost (percentage mode)
@@ -52,12 +66,25 @@ export function computeWaterfall(i) {
   const chain = Array.isArray(i.discountChain) ? i.discountChain : i.supplierDiscount ? [i.supplierDiscount] : []
   const supplierDiscounted = applyDiscountChain(wholesale, chain)
   // Decision 1 (15 Jul): freight is a $ value OR a % of the supplier-discounted price, per preference.
-  // Percent mode is algebraically identical to the previous single line, so `canonical` is unchanged.
   const freightCost =
     i.freightMode === 'dollar' ? (i.freightDollar || 0) : supplierDiscounted * (i.freight || 0)
-  const priceExDuty = supplierDiscounted * (1 + (i.clearance || 0)) + freightCost
-  const duty = i.duty || 0 // P3 — absent duty ⇒ 0 (product carries no duty)
-  const cogs = priceExDuty * (1 + duty) // P4 — Price incl. duty = COGS
+  // P3/P4 — DUTY FIRST, THEN FREIGHT, THEN CLEARANCE OVER BOTH.
+  //
+  // This order is measured, not chosen. The incumbent's engine computes
+  // `(price incl duty + freight$) × (1 + clearance%)`, and that reproduces
+  // 19,197 of the 19,201 usable rows of the D365 Product Prices export. The
+  // previous line here did the opposite — clearance and freight on the
+  // supplier-discounted price, duty struck last on the total — which strikes
+  // duty on freight the office already paid and compounds clearance under duty
+  // instead of over it. On the canonical figures the two disagree by about 6%,
+  // which is a material margin error on luxury goods and exactly the "1% error
+  // compounded across 8 steps" the build spec §3.5 warns against shipping.
+  //
+  // `duty` is absent by default now (see pricingInputs): an unstated duty is no
+  // duty step, so the multiplication is by 1 and the step is a pass-through.
+  const duty = i.duty || 0
+  const priceInclDuty = supplierDiscounted * (1 + duty)
+  const cogs = (priceInclDuty + freightCost) * (1 + (i.clearance || 0))
   const landed = cogs + (i.handling || 0)
   // P6 — retail markup is optional per product; a null multiplier ⇒ no retail price (trade-only).
   const retail = i.retailMarkup ? landed * i.retailMarkup : null
@@ -71,7 +98,11 @@ export function computeWaterfall(i) {
   return {
     wholesale: round2(wholesale),
     supplierDiscounted: round2(supplierDiscounted),
-    priceExDuty: round2(priceExDuty),
+    // Renamed with the step order: this value now INCLUDES duty and excludes
+    // freight and clearance, the exact opposite of what `priceExDuty` held.
+    // Keeping the old key for the new number is the one change that would be
+    // silently wrong on every screen that reads it.
+    priceInclDuty: round2(priceInclDuty),
     cogs: round2(cogs),
     landed: round2(landed),
     retail: retail == null ? null : round2(retail),

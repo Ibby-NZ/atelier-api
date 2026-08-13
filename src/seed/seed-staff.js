@@ -11,6 +11,7 @@
 // backoffice, so directors keep full access). Trade/customer accounts are for the
 // storefront, never seeded here.
 
+import { pathToFileURL } from 'node:url'
 import { loadConfig } from '../config.js'
 import { createPool } from '../db.js'
 import { hashPassword } from '../auth/passwords.js'
@@ -64,7 +65,10 @@ const main = async () => {
   }
 }
 
-// Run when invoked directly (node src/seed/seed-staff.js), not when imported by tests.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Run when invoked directly (node src/seed/seed-staff.js), not when imported by
+// tests. `file://${process.argv[1]}` is the wrong spelling: import.meta.url is
+// percent-encoded and argv[1] is not, so one space in the checkout path makes
+// this false and `npm run seed:staff` exits 0 having seeded nothing.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await main()
 }

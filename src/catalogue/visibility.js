@@ -35,6 +35,24 @@ const TRADE_CATALOGUE_ROLES = Object.freeze(['trade', 'backoffice', 'director'])
 export const canSeeTradeCatalogue = (user) =>
   !!user && TRADE_CATALOGUE_ROLES.includes(effectiveRole(user))
 
+/**
+ * May this viewer be QUOTED and CHARGED `trade_price_cents`? Approved trade
+ * only — staff are excluded, exactly as on the catalogue read models (FR-3).
+ * The catalogue routes, the checkout and the webhook all derive their price
+ * basis from this one predicate: a figure shown on a product card and the
+ * amount Stripe takes have to come from the same rule.
+ *
+ * @param {{ role?: string, trade_approved?: boolean }|null|undefined} user
+ * @returns {boolean}
+ */
+export const canSeeTradePricing = (user) => !!user && effectiveRole(user) === 'trade'
+
+// Trade prices are precomputed through the pricing waterfall and stored in
+// integer NZD cents, whatever `products.currency` (the SUPPLIER's currency,
+// which belongs to the retail figure) says. A line priced off the trade figure
+// is therefore always quoted in NZD.
+export const TRADE_CURRENCY = 'NZD'
+
 // SQL predicate for "a house a signed-out visitor may browse". Every public
 // read model that reaches products has to apply this when the viewer is not
 // entitled — the listing, the detail lookup, the collection counts, and the two

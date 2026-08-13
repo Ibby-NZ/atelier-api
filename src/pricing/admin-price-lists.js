@@ -19,6 +19,11 @@
 
 import { buildUpdate } from '../catalogue/admin-brands.js'
 import { setArchived } from '../lifecycle/archive.js'
+import {
+  withChangeContext,
+  requireChangeReason,
+  raisePriceHistoryError,
+} from './price-history.js'
 
 export const DEFAULT_PAGE = 1
 export const DEFAULT_LIMIT = 50
@@ -82,12 +87,37 @@ const EDITABLE_COLUMNS = Object.freeze([
   'code_normalized',
 ])
 
+// The DERIVED half of drop detection: a later import covered this row's
+// (supplier, category) and did not name it. Stored `discontinued_at` is the
+// other half — a staff decision — and the two are not the same fact: without
+// the derived state a partial file silently produces nothing, and without the
+// stored one there is no way to dismiss a wrong suspicion.
+//
+// A row nothing has ever imported is NOT suspect (both sides NULL), and neither
+// is a whole (supplier, category) no import has covered. Cheap because
+// 1788753600000 indexes (supplier, category, last_seen_in_import), so the max
+// is an index-only backward scan.
+const SUSPECT_SQL = `(price_list_items.last_seen_in_import IS DISTINCT FROM (
+    SELECT max(s.last_seen_in_import) FROM price_list_items s
+     WHERE s.supplier = price_list_items.supplier
+       AND s.category = price_list_items.category
+  )) AS suspect`
+
 // Full row projection. "repeat" is quoted (reserved-ish keyword); pg still keys
 // the returned object as `repeat`.
 const ROW_COLUMNS = `id, supplier, product_range, category, code, code_normalized,
   description, contents, unit, width, "repeat", vertical_repeat, duty_class,
   wholesale_rate, currency, freight_class, date_effective, source_file,
-  created_at, updated_at, archived_at`
+  created_at, updated_at, archived_at,
+  last_seen_in_import, last_seen_source_file, discontinued_at`
+
+// What a READ selects: the row plus the derived state. Unqualified apart from
+// SUSPECT_SQL's own correlation, so every query using it must stay alias-free
+// (`FROM price_list_items`) — the rule BRAND_COLUMNS already carries. It is
+// deliberately NOT used as a RETURNING projection: the correlated subquery
+// would be evaluated against the pre-statement snapshot, so every write here
+// re-reads through getPriceListItem instead and one query owns the shape.
+const READ_COLUMNS = `${ROW_COLUMNS}, ${SUSPECT_SQL}`
 
 // Turns a DB row into the public admin shape. Immutable: builds a fresh frozen
 // object, never mutates the row. wholesale_rate arrives as a numeric string, so
@@ -115,6 +145,13 @@ const toPriceListItem = (row) =>
     created_at: row.created_at,
     updated_at: row.updated_at,
     archived_at: row.archived_at,
+    // Drop detection. `discontinued_at` is the SUPPLIER's decision recorded by
+    // staff; `archived_at` above is staff taking the row out of their own list.
+    // Neither implies the other and a discontinued item blocks nothing.
+    last_seen_in_import: row.last_seen_in_import ?? null,
+    last_seen_source_file: row.last_seen_source_file ?? null,
+    discontinued_at: row.discontinued_at ?? null,
+    suspect: row.suspect === true,
   })
 
 // Escape the LIKE wildcards so a search for "100%" matches a literal percent
@@ -189,7 +226,7 @@ export const listPriceListItems = async (
   const total = countResult.rows[0].total
 
   const { rows } = await pool.query(
-    `SELECT ${ROW_COLUMNS} FROM price_list_items
+    `SELECT ${READ_COLUMNS} FROM price_list_items
      ${where}
      ORDER BY supplier ASC, code ASC, id ASC
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -208,7 +245,7 @@ export const listPriceListItems = async (
  */
 export const getPriceListItem = async (pool, id) => {
   const { rows } = await pool.query(
-    `SELECT ${ROW_COLUMNS} FROM price_list_items WHERE id = $1`,
+    `SELECT ${READ_COLUMNS} FROM price_list_items WHERE id = $1`,
     [id]
   )
   return rows[0] ? toPriceListItem(rows[0]) : null
@@ -232,7 +269,7 @@ export const createPriceListItem = async (pool, input) => {
           contents, unit, width, "repeat", vertical_repeat, duty_class,
           wholesale_rate, currency, freight_class, date_effective, source_file)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-       RETURNING ${ROW_COLUMNS}`,
+       RETURNING id`,
       [
         input.supplier,
         input.product_range ?? null,
@@ -253,10 +290,30 @@ export const createPriceListItem = async (pool, input) => {
         input.source_file ?? 'manual-entry',
       ]
     )
-    return toPriceListItem(rows[0])
+    // Re-read: `suspect` is derived from the row's whole (supplier, category)
+    // group, which a RETURNING projection cannot see.
+    return getPriceListItem(pool, rows[0].id)
   } catch (error) {
     return rethrowConflict(error)
   }
+}
+
+/**
+ * Read the rate back so a patch that does not actually move it needs no reason.
+ * Advisory only, and deliberately outside the transaction: the table's CHECK is
+ * the real gate, so a value that changed under this read simply arrives at the
+ * database and is refused there. Probe first, database as backstop — the same
+ * order deleteOrExplain takes with its 23503.
+ */
+const rateIsMoving = async (pool, id, next) => {
+  const { rows } = await pool.query(
+    `SELECT wholesale_rate FROM price_list_items WHERE id = $1`,
+    [id]
+  )
+  if (rows.length === 0) {
+    throw httpError(404, `Price-list item ${id} not found.`)
+  }
+  return Number(rows[0].wholesale_rate) !== Number(next)
 }
 
 /**
@@ -265,12 +322,21 @@ export const createPriceListItem = async (pool, input) => {
  * `code_normalized` is recomputed so the pair stays in lockstep. 404 when the id
  * is unknown; a duplicate key is a 409.
  *
+ * A patch that MOVES `wholesale_rate` demands `input.reason` and answers 422
+ * without it — Shalakha's rule, and it lives here rather than in the route so it
+ * holds for the CRM, the AdminJS panel and any future caller (the `updateUser`
+ * posture). A patch that restates the same rate is not a change and needs
+ * nothing. The write runs inside a transaction that declares the change source,
+ * because that declaration is how the capture trigger learns who and why; see
+ * src/pricing/price-history.js.
+ *
  * @param {import('pg').Pool} pool
  * @param {number} id
  * @param {object} input
+ * @param {{ user?: { id: number } }} [ctx]
  * @returns {Promise<object>}
  */
-export const updatePriceListItem = async (pool, id, input) => {
+export const updatePriceListItem = async (pool, id, input, ctx = {}) => {
   // Recompute code_normalized in lockstep with a code change; leave it untouched
   // otherwise (it is never client-supplied).
   const patch = Object.hasOwn(input, 'code')
@@ -298,18 +364,34 @@ export const updatePriceListItem = async (pool, id, input) => {
     throw httpError(400, 'No updatable fields provided.')
   }
 
+  const reason =
+    Object.hasOwn(patch, 'wholesale_rate') &&
+    (await rateIsMoving(pool, id, patch.wholesale_rate))
+      ? requireChangeReason(input.reason)
+      : null
+
   try {
-    const { rows } = await pool.query(
-      `UPDATE price_list_items SET ${sets.join(', ')}, updated_at = now()
-        WHERE id = $${params.length + 1}
-        RETURNING ${ROW_COLUMNS}`,
-      [...params, id]
+    const updatedId = await withChangeContext(
+      pool,
+      { source: 'manual', reason, userId: ctx.user?.id ?? null },
+      async (client) => {
+        const { rows } = await client.query(
+          `UPDATE price_list_items SET ${sets.join(', ')}, updated_at = now()
+            WHERE id = $${params.length + 1}
+            RETURNING id`,
+          [...params, id]
+        )
+        if (rows.length === 0) {
+          throw httpError(404, `Price-list item ${id} not found.`)
+        }
+        return rows[0].id
+      }
     )
-    if (rows.length === 0) {
-      throw httpError(404, `Price-list item ${id} not found.`)
-    }
-    return toPriceListItem(rows[0])
+    return getPriceListItem(pool, updatedId)
   } catch (error) {
+    // The trigger's own refusals first (a wiring fault or a missing reason that
+    // slipped past the pre-check), then the existing duplicate-key path.
+    raisePriceHistoryError(error)
     return rethrowConflict(error)
   }
 }
@@ -326,7 +408,101 @@ export const updatePriceListItem = async (pool, id, input) => {
 export const setPriceListItemArchived = async (pool, id, archived) => {
   const row = await setArchived(pool, 'price_list_item', id, archived, {
     extraSets: ['updated_at = now()'],
-    returning: ROW_COLUMNS,
+    returning: 'id',
   })
-  return row ? toPriceListItem(row) : null
+  // Re-read for the same reason the create does: `suspect` is a fact about the
+  // row's whole (supplier, category) group and cannot ride on a RETURNING.
+  return row ? getPriceListItem(pool, row.id) : null
+}
+
+// Drop detection. One statement, so the coverage it reports and the rows it
+// marks come off ONE snapshot and the sentence staff read cannot be a lie about
+// what happened.
+//
+// SCOPE IS (supplier, category) AND NOT A FILE. Filenames carry the year
+// ("BOUSSAC FABRIC PL 2026.csv") and change annually, so file-to-file has no
+// stable key; per supplier is wrong the other way, because a house that sends
+// only its wallpaper list in March would mark its whole fabric range
+// discontinued.
+//
+// `latest` is the group's most recent import, not a wall-clock date: a row is
+// only ever judged against an import that actually covered its own
+// (supplier, category).
+const MARK_DISCONTINUED_SQL = `
+  WITH latest AS (
+    SELECT max(last_seen_in_import) AS at
+      FROM price_list_items
+     WHERE supplier = $1 AND category = $2
+  ),
+  scope AS (
+    SELECT last_seen_in_import, last_seen_source_file
+      FROM price_list_items
+     WHERE supplier = $1 AND category = $2
+  ),
+  marked AS (
+    UPDATE price_list_items p
+       SET discontinued_at = now()
+     WHERE p.supplier = $1 AND p.category = $2
+       AND p.discontinued_at IS NULL
+       AND (SELECT at FROM latest) IS NOT NULL
+       AND p.last_seen_in_import IS DISTINCT FROM (SELECT at FROM latest)
+    RETURNING p.id
+  )
+  SELECT (SELECT count(*)::int FROM scope) AS held,
+         (SELECT count(*)::int FROM scope
+           WHERE last_seen_in_import = (SELECT at FROM latest)) AS covered,
+         (SELECT count(*)::int FROM marked) AS marked,
+         (SELECT at FROM latest) AS last_import_at,
+         (SELECT last_seen_source_file FROM scope
+           WHERE last_seen_in_import = (SELECT at FROM latest) LIMIT 1) AS last_source_file`
+
+const groupLabel = (supplier, category) => `${supplier} ${category}`
+
+/**
+ * Mark every item of one (supplier, category) that the group's most recent
+ * import did not name as discontinued. An EXPLICIT STAFF ACT: no import run
+ * ever flags anything, it only records what it saw.
+ *
+ * The response states coverage before anything else — "this file covered 412 of
+ * the 2,516 codes we hold for Boussac fabric" — because that number is the whole
+ * defence against a partial file. No percentage threshold is coded.
+ * ponytail: add a refusal ceiling (and a `confirm` flag to override it) the
+ * first time somebody actually clicks through a coverage number that low; the
+ * count is already in hand, so it is one comparison.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ supplier: string, category: string }} scope
+ * @returns {Promise<Readonly<object>>}
+ */
+export const markPriceListItemsDiscontinued = async (pool, { supplier, category }) => {
+  const { rows } = await pool.query(MARK_DISCONTINUED_SQL, [supplier, category])
+  const { held, covered, marked, last_import_at, last_source_file } = rows[0]
+
+  if (held === 0) {
+    throw httpError(422, `No price-list items are held for ${groupLabel(supplier, category)}.`)
+  }
+  // Nothing marked and nothing markable: with no import behind the group there
+  // is no statement about what a supplier still lists, so there is nothing to
+  // infer from. A 422 rather than a 200 saying "0" — those read the same on a
+  // screen and only one of them is something a person can act on.
+  if (last_import_at === null) {
+    throw httpError(
+      422,
+      `No import has covered ${groupLabel(supplier, category)}, so there is nothing ` +
+        'to compare against. Run npm run import:pricing with that supplier\'s file first.'
+    )
+  }
+
+  return Object.freeze({
+    supplier,
+    category,
+    held,
+    covered,
+    marked,
+    last_import_at,
+    last_source_file,
+    message:
+      `${last_source_file ?? 'The last import'} covered ${covered} of the ${held} ` +
+      `codes held for ${groupLabel(supplier, category)} — marked ${marked} discontinued.`,
+  })
 }

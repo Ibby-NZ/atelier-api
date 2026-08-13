@@ -11,6 +11,16 @@
 
 import { slugFrom, rethrowConflict, buildUpdate } from './admin-brands.js'
 import { setArchived } from '../lifecycle/archive.js'
+import {
+  withChangeContext,
+  requireChangeReason,
+  raisePriceHistoryError,
+} from '../pricing/price-history.js'
+
+// A product's price is the PAIR, and either half moving is a price change. The
+// capture trigger watches both columns; this list is what decides whether the
+// caller owes a reason, so the two must stay in step.
+const PRICE_COLUMNS = Object.freeze(['retail_price_cents', 'trade_price_cents'])
 
 // Colourways are the largest catalogue table (one row per SKU, ~19k designs
 // once the colour files land), so the standalone list is the only admin
@@ -438,15 +448,25 @@ export const createProduct = async (pool, input) => {
  * Patch a product. The slug, brand and product_type are all immutable; a
  * non-null collection_id is checked against the product's own brand.
  *
+ * A patch that MOVES either price demands `input.reason` and answers 422
+ * without it — the client's rule, enforced here in the module rather than in the
+ * route so it holds for the CRM, the AdminJS panel and any future caller (the
+ * `updateUser` posture). Restating the same figures is not a change and needs
+ * nothing. The write runs in a transaction that declares the change source,
+ * which is how the capture trigger learns who and why.
+ *
  * @param {import('pg').Pool} pool
  * @param {number} id
  * @param {object} input
+ * @param {{ user?: { id: number } }} [ctx]
  * @returns {Promise<object>}
  */
-export const updateProduct = async (pool, id, input) => {
-  const { rows } = await pool.query(`SELECT id, brand_id FROM products WHERE id = $1`, [
-    id,
-  ])
+export const updateProduct = async (pool, id, input, ctx = {}) => {
+  const { rows } = await pool.query(
+    `SELECT id, brand_id, retail_price_cents, trade_price_cents
+       FROM products WHERE id = $1`,
+    [id]
+  )
   const existing = rows[0]
   if (!existing) {
     throw httpError(404, `Product ${id} not found.`)
@@ -459,12 +479,27 @@ export const updateProduct = async (pool, id, input) => {
     ? { ...input, name: input.name.trim() }
     : input
   const { sets, params } = buildUpdate(patch, PRODUCT_UPDATE_COLUMNS)
+
+  // Advisory: the table's CHECK is the real gate, so a figure that moved under
+  // this read simply reaches the database and is refused there.
+  const moving = PRICE_COLUMNS.some(
+    (column) =>
+      Object.hasOwn(patch, column) && (patch[column] ?? null) !== (existing[column] ?? null)
+  )
+  const reason = moving ? requireChangeReason(input.reason) : null
+
   try {
-    await pool.query(
-      `UPDATE products SET ${sets.join(', ')} WHERE id = $${params.length + 1}`,
-      [...params, id]
+    await withChangeContext(
+      pool,
+      { source: 'manual', reason, userId: ctx.user?.id ?? null },
+      (client) =>
+        client.query(
+          `UPDATE products SET ${sets.join(', ')} WHERE id = $${params.length + 1}`,
+          [...params, id]
+        )
     )
   } catch (error) {
+    raisePriceHistoryError(error)
     return rethrowConflict(error)
   }
   return getAdminProduct(pool, id)

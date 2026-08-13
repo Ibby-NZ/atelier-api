@@ -19,6 +19,7 @@ import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
 import { adminSampleRoutes } from './routes/admin-samples.js'
+import { adminPurchaseOrderRoutes } from './routes/admin-purchase-orders.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
@@ -152,6 +153,11 @@ export const buildApp = ({
     // is out, what is late back) plus the scanner's by-barcode lookup. Back
     // office only, same CORS allowance as every other CRM screen.
     api.register(adminSampleRoutes, { pool })
+    // /admin/purchase-orders + /admin/purchase-order-lines/:id/{allocations,receipts}
+    // — the buying desk: the day's confirmed demand grouped by house, sent,
+    // receipted against and closed. Back office only, and every cost figure on
+    // it is finance-gated on top of that guard.
+    api.register(adminPurchaseOrderRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })

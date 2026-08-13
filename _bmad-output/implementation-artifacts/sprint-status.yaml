@@ -187,10 +187,10 @@ epics:
     status: pending
     stories:
       US-001: pending   # Migration: samples.unit_cost nullable with >= 0
-      US-002: pending   # Migration: the barcode sequence
+      US-002: done      # Migration: the barcode sequence — 1787371200000, landed on aug12/w16-freight-parameters
       US-003: pending   # Migration: email_templates
       US-004: pending   # Outstanding-loans read across the register, filtered and paginated
-      US-005: pending   # Barcode generation endpoint; duplicates stay a database refusal
+      US-005: done      # Barcode minted when POST /admin/samples omits one; duplicates stay a database refusal
       US-006: pending   # Template store with a fallback to the code template
       US-007: pending   # Reminder compose and send, recorded — no scheduler
       US-008: pending   # Sample value read/write with the null-vs-zero coercion; cost never client-facing

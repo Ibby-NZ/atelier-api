@@ -139,19 +139,18 @@ describe('price list import', () => {
   })
 })
 
-const V2_SUPPLIER = 'PL Template Test Supplier'
+const V3_SUPPLIER = 'PL Template Test Supplier'
 
-// Raw SQL rather than importPriceLists: the importer does not write the v2
-// columns yet (that is a later story), and these assertions are about the
-// schema the migration left behind.
+// Raw SQL rather than importPriceLists: these assertions are about the schema
+// the migrations left behind, not about what any mapper emits.
 const RAW_INSERT = `
   INSERT INTO price_list_items
     (supplier, category, code, code_normalized, unit, wholesale_rate, currency, source_file,
-     freight_class, duty_class, brand_name, pattern_match, duty_percent)
+     freight_class, duty_class, product_range, pattern_match, duty_percent)
   VALUES ($1, 'fabric', $2, $2, 'metre', 42, 'EUR', 'PL TEMPLATE TEST.csv', $3, $4, $5, $6, $7)
   RETURNING *`
 
-describe('price_list_items template v2 columns', () => {
+describe('price_list_items template v3 columns', () => {
   let pool
   let config
 
@@ -159,17 +158,17 @@ describe('price_list_items template v2 columns', () => {
     const row = {
       freight_class: null,
       duty_class: null,
-      brand_name: null,
+      product_range: null,
       pattern_match: null,
       duty_percent: null,
       ...overrides,
     }
     return pool.query(RAW_INSERT, [
-      V2_SUPPLIER,
+      V3_SUPPLIER,
       code,
       row.freight_class,
       row.duty_class,
-      row.brand_name,
+      row.product_range,
       row.pattern_match,
       row.duty_percent,
     ])
@@ -185,11 +184,11 @@ describe('price_list_items template v2 columns', () => {
       migrationsTable: 'pgmigrations',
       log: () => {},
     })
-    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [V2_SUPPLIER])
+    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [V3_SUPPLIER])
   })
 
   afterAll(async () => {
-    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [V2_SUPPLIER])
+    await pool.query('DELETE FROM price_list_items WHERE supplier = $1', [V3_SUPPLIER])
     await pool.end()
   })
 
@@ -205,22 +204,33 @@ describe('price_list_items template v2 columns', () => {
   })
 
   it('defaults template_version to v1 and writes no duty or freight placeholder', async () => {
-    const { rows } = await insertRow('PLT-V2-DEFAULT')
+    const { rows } = await insertRow('PLT-V3-DEFAULT')
     expect(rows[0].template_version).toBe('v1')
     expect(rows[0].duty_percent).toBeNull()
     expect(rows[0].duty_class).toBeNull()
     expect(rows[0].freight_class).toBeNull()
   })
 
-  it('stores brand_name, pattern_match and duty_percent', async () => {
-    const { rows } = await insertRow('PLT-V2-FIELDS', {
-      // A house spelling that matches no `brands` row — brand_name is text, not
+  it('has no brand_name column — v3 folded Brand into product_range', async () => {
+    // The client read v2 back and said its Brand column duplicates Product
+    // Range, which their files have always filled with the house. v3 renames
+    // the label and keeps the column; migration 1787198400000 drops the other.
+    const { rows } = await pool.query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_name = 'price_list_items' AND column_name IN ('brand_name', 'product_range')`
+    )
+    expect(rows.map((row) => row.column_name)).toEqual(['product_range'])
+  })
+
+  it('stores the house, pattern_match and duty_percent', async () => {
+    const { rows } = await insertRow('PLT-V3-FIELDS', {
+      // A house spelling that matches no `brands` row — the column is text, not
       // an FK, precisely so a naming difference cannot fail a whole import.
-      brand_name: 'Colefax and Fowler (no such brands row)',
+      product_range: 'Colefax and Fowler (no such brands row)',
       pattern_match: 'V x 70H',
       duty_percent: 7.125,
     })
-    expect(rows[0].brand_name).toBe('Colefax and Fowler (no such brands row)')
+    expect(rows[0].product_range).toBe('Colefax and Fowler (no such brands row)')
     expect(rows[0].pattern_match).toBe('V x 70H')
     expect(Number(rows[0].duty_percent)).toBe(7.125)
   })
@@ -249,26 +259,25 @@ describe('price_list_items template v2 columns', () => {
   })
 })
 
-const IMPORT_SUPPLIER = 'PL Import V2 Supplier'
+const IMPORT_SUPPLIER = 'PL Import V3 Supplier'
 
-// What mapV2 emits on top of a v1 row. Kept as a spread so the v1 case below is
+// What mapV3 emits on top of a v1 row. Kept as a spread so the v1 case below is
 // literally "the same item without these keys", which is the whole contract.
-const V2_FIELDS = {
-  brand_name: 'Pattern House',
+const V3_FIELDS = {
   pattern_match: 'V x 70H',
   duty_percent: 7.125,
-  template_version: 'v2',
+  template_version: 'v3',
 }
 
-describe('price list import — v2 fields', () => {
+describe('price list import — v3 fields', () => {
   let pool
 
   const v1Item = (overrides = {}) => item({ supplier: IMPORT_SUPPLIER, ...overrides })
-  const v2Item = (overrides = {}) => v1Item({ ...V2_FIELDS, ...overrides })
+  const v3Item = (overrides = {}) => v1Item({ ...V3_FIELDS, ...overrides })
 
   const readRow = async (code) => {
     const { rows } = await pool.query(
-      `SELECT brand_name, pattern_match, duty_percent, template_version, wholesale_rate
+      `SELECT product_range, pattern_match, duty_percent, template_version, wholesale_rate
        FROM price_list_items WHERE supplier = $1 AND category = 'fabric' AND code = $2`,
       [IMPORT_SUPPLIER, code]
     )
@@ -299,61 +308,63 @@ describe('price list import — v2 fields', () => {
     await importPriceLists(pool, [v1Item({ code: 'PLI-V1' })])
     const row = await readRow('PLI-V1')
     expect(row.template_version).toBe('v1')
-    expect(row.brand_name).toBeNull()
     expect(row.pattern_match).toBeNull()
     expect(row.duty_percent).toBeNull()
   })
 
-  it('stores the four v2 fields', async () => {
-    await importPriceLists(pool, [v2Item({ code: 'PLI-V2' })])
-    const row = await readRow('PLI-V2')
-    expect(row.brand_name).toBe('Pattern House')
+  it('stores the three v3 fields', async () => {
+    await importPriceLists(pool, [v3Item({ code: 'PLI-V3' })])
+    const row = await readRow('PLI-V3')
     expect(row.pattern_match).toBe('V x 70H')
     expect(Number(row.duty_percent)).toBe(7.125)
-    expect(row.template_version).toBe('v2')
+    expect(row.template_version).toBe('v3')
   })
 
-  it('imports v1 and v2 items together in one batch', async () => {
+  it('lands the Brand cell in product_range, the column it renames', async () => {
+    await importPriceLists(pool, [v3Item({ code: 'PLI-BRAND', product_range: 'Pattern House' })])
+    expect((await readRow('PLI-BRAND')).product_range).toBe('Pattern House')
+  })
+
+  it('imports v1 and v3 items together in one batch', async () => {
     // One unnest binds both, so a mixed drop is where a missing-key NULL bites.
-    await importPriceLists(pool, [v1Item({ code: 'PLI-MIX-1' }), v2Item({ code: 'PLI-MIX-2' })])
+    await importPriceLists(pool, [v1Item({ code: 'PLI-MIX-1' }), v3Item({ code: 'PLI-MIX-2' })])
     expect((await readRow('PLI-MIX-1')).template_version).toBe('v1')
-    expect((await readRow('PLI-MIX-2')).template_version).toBe('v2')
+    expect((await readRow('PLI-MIX-2')).template_version).toBe('v3')
   })
 
   it('re-imports on the unchanged (supplier, category, code) key', async () => {
-    await importPriceLists(pool, [v2Item({ code: 'PLI-RE' })])
-    await importPriceLists(pool, [v2Item({ code: 'PLI-RE', wholesale_rate: 88.25, brand_name: 'Renamed House' })])
+    await importPriceLists(pool, [v3Item({ code: 'PLI-RE' })])
+    await importPriceLists(pool, [v3Item({ code: 'PLI-RE', wholesale_rate: 88.25, product_range: 'Renamed House' })])
     const { rows } = await pool.query(
-      'SELECT wholesale_rate, brand_name FROM price_list_items WHERE supplier = $1 AND code = $2',
+      'SELECT wholesale_rate, product_range FROM price_list_items WHERE supplier = $1 AND code = $2',
       [IMPORT_SUPPLIER, 'PLI-RE']
     )
     expect(rows).toHaveLength(1)
     expect(Number(rows[0].wholesale_rate)).toBe(88.25)
-    expect(rows[0].brand_name).toBe('Renamed House')
+    expect(rows[0].product_range).toBe('Renamed House')
   })
 
-  it('lets a later v1 file clear the v2 fields, as every other column already behaves', async () => {
-    await importPriceLists(pool, [v2Item({ code: 'PLI-BACK' })])
+  it('lets a later v1 file clear the v3 fields, as every other column already behaves', async () => {
+    await importPriceLists(pool, [v3Item({ code: 'PLI-BACK' })])
     await importPriceLists(pool, [v1Item({ code: 'PLI-BACK' })])
     const row = await readRow('PLI-BACK')
     expect(row.template_version).toBe('v1')
-    expect(row.brand_name).toBeNull()
+    expect(row.pattern_match).toBeNull()
     expect(row.duty_percent).toBeNull()
   })
 
   it.each([
-    ['a non-string brand_name', { brand_name: 42 }, /brand_name/],
     ['a blank pattern_match', { pattern_match: '  ' }, /pattern_match/],
     ['a blank template_version', { template_version: '' }, /template_version/],
     ['a non-numeric duty_percent', { duty_percent: '7.125' }, /duty_percent/],
   ])('validation rejects %s', (_label, overrides, pattern) => {
-    expect(() => validatePriceListItems([v2Item(overrides)])).toThrow(pattern)
+    expect(() => validatePriceListItems([v3Item(overrides)])).toThrow(pattern)
   })
 
   it('accepts a template_version the importer has never heard of', () => {
     // The accepted set is the converter's registry, not this validator's — an
     // older API importing a newer converter's file must still store the row.
-    expect(() => validatePriceListItems([v2Item({ template_version: 'v9' })])).not.toThrow()
+    expect(() => validatePriceListItems([v3Item({ template_version: 'v9' })])).not.toThrow()
   })
 })
 
@@ -384,13 +395,13 @@ describe('universal price list file', () => {
     expect(suppliers.size).toBeGreaterThanOrEqual(35)
   })
 
-  it('carries none of the v2 keys — the regeneration tripwire', () => {
-    // This file is regenerated in its OWN commit, converter unchanged. A v2
-    // mapper that wrote `brand_name: null` onto v1 rows — or reordered a key —
-    // would rewrite all 19.5k records, and a reviewer facing an 8 MB diff cannot
-    // tell that from a legitimate rate refresh. The first record is enough to
-    // catch it, and stays a v1 record: it sorts first on (supplier, category,
-    // code), so a genuine v2 drop landing later does not falsify this.
+  it('carries none of the v3 keys — the regeneration tripwire', () => {
+    // This file is regenerated in its OWN commit, converter unchanged. A v3
+    // mapper that wrote `pattern_match: null` onto v1 rows — or reordered a key
+    // — would rewrite all 19.5k records, and a reviewer facing an 8 MB diff
+    // cannot tell that from a legitimate rate refresh. The first record is
+    // enough to catch it, and stays a v1 record: it sorts first on (supplier,
+    // category, code), so a genuine v3 drop landing later does not falsify this.
     const [first] = items
     for (const key of ['brand_name', 'pattern_match', 'duty_percent', 'template_version']) {
       expect(Object.hasOwn(first, key)).toBe(false)

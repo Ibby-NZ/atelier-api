@@ -43,6 +43,7 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - `npm run migrate:create <name>` — new migration in `migrations/`, plain JS
 - `npm run seed` — idempotent catalogue + shipping-rate import (needs migrations applied)
 - `npm run push:legacy -- --api <url> --email <director>` — pushes the normalised D365 exports to a REMOTE API over HTTPS (`ATELIER_API_PASSWORD` in the environment). For servers with no shell; the local equivalent is `npm run import:legacy`.
+- `npm run sheet:prices` / `npm run sheet:stock` — the category workbooks for the two D365 catalogues: 19,327 price rows (`product-prices.xlsx`) and 7,611 stock items (`stock-items.xlsx`), both into `incoming/product-sheets/`. Needs `npm run convert:legacy` first; main checkout only, like every `incoming/` step.
 - `npm run lint` — ESLint 9 flat config (`eslint.config.js`)
 - `npm test` — vitest; tests hit real local Postgres (`atelier_dev`), need `.env` present
 
@@ -66,7 +67,7 @@ The deep per-domain docs live in nested CLAUDE.md files that load automatically 
 - `src/email/CLAUDE.md` — transactional mail (mailer never throws, no-op when null)
 - `src/admin/CLAUDE.md` — AdminJS panel (fails soft; security invariants that each fixed a confirmed exploit)
 - `src/lifecycle/CLAUDE.md` — delete/archive foundations + every hard DELETE route (entity names are single-quoted code literals, never path params)
-- `src/seed/CLAUDE.md` — seed, supplier price-list pipeline, pricing template v1/v2, colour-file converters + `import:colour` (converters in `scripts/` share it)
+- `src/seed/CLAUDE.md` — seed, supplier price-list pipeline, pricing template v1/v3, colour-file converters + `import:colour` (converters in `scripts/` share it)
 - `src/legacy/CLAUDE.md` — D365 staging import, `push:legacy`, `d365_overrides` correction layer + custom fields
 - `src/suppliers/CLAUDE.md` — suppliers vs brands, commercial terms (discount chains are MULTIPLICATIVE), backfill
 - `src/trade-accounts/CLAUDE.md` — trade client portal, viewer scoping, account-name collision rules

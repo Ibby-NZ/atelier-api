@@ -71,6 +71,32 @@ export function* sheetRows(zip, path, strings) {
   }
 }
 
+/** The first worksheet a price-list drop is written to. */
+export const FIRST_WORKSHEET = 'xl/worksheets/sheet1.xml'
+
+/**
+ * A whole worksheet as dense row ARRAYS: `[rowNumber, cells[]]`, the shape a
+ * CSV reader yields, so a caller can read a workbook and a CSV through one loop.
+ * A run of empty cells is omitted from the XML, so the row is rebuilt up to its
+ * own widest column and the gaps become ''.
+ *
+ * Lifted out of scripts/convert-price-lists.js unchanged (it took a path and
+ * this takes the bytes) so the API's upload route reads a workbook by exactly
+ * the rule the CLI converter does. The byte-identity gate on
+ * src/seed/data/price-lists.json is the proof that lifting it changed nothing.
+ */
+export function* worksheetGrid(buffer, path = FIRST_WORKSHEET) {
+  const zip = openWorkbook(buffer)
+  const strings = sharedStrings(zip)
+  for (const [rowNumber, cells] of sheetRows(zip, path, strings)) {
+    let width = 0
+    for (const index of cells.keys()) width = Math.max(width, index + 1)
+    const row = []
+    for (let index = 0; index < width; index += 1) row.push(cells.get(index) ?? '')
+    yield [rowNumber, row]
+  }
+}
+
 const pad = (value, width = 2) => String(value).padStart(width, '0')
 
 const isoDate = (ms) => {

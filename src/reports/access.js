@@ -100,6 +100,28 @@ export const loadReportAccess = async (db, user) => {
   return reportAccess({ ...user, can_view_finance: rows[0]?.can_view_finance === true })
 }
 
+/**
+ * A preHandler that refuses a caller without finance visibility.
+ *
+ * It lives here, once, because it is a security gate and a security gate with
+ * two copies is a security gate that drifts. The one rule it enforces that a
+ * hand-written copy keeps getting wrong is in loadReportAccess's own note above:
+ * `request.user.can_view_finance` is `undefined` on every request (the guards'
+ * projection does not carry the column), so reading it off the record answers
+ * "no" to everyone today and "yes" to everyone the day that projection widens.
+ * Only the resolved lookup is the fact.
+ *
+ * @param {{ query: Function }} db
+ * @param {string} message what the 403 tells the caller it needed and why
+ * @returns {(request: object) => Promise<void>}
+ */
+export const requireFinance = (db, message) => async (request) => {
+  const access = await loadReportAccess(db, request.user)
+  if (!access.finance) {
+    throw httpError(403, message)
+  }
+}
+
 // How a cell is meant to be read. The CSV writer and the CRM's cell pipeline
 // both need to know a figure from a name, and the column is the only place that
 // is stated once for the table and the file alike. `finance` is independent of

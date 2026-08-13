@@ -67,7 +67,7 @@ The deep per-domain docs live in nested CLAUDE.md files that load automatically 
 - `src/email/CLAUDE.md` — transactional mail (mailer never throws, no-op when null)
 - `src/admin/CLAUDE.md` — AdminJS panel (fails soft; security invariants that each fixed a confirmed exploit)
 - `src/lifecycle/CLAUDE.md` — delete/archive foundations + every hard DELETE route (entity names are single-quoted code literals, never path params)
-- `src/seed/CLAUDE.md` — seed, supplier price-list pipeline, pricing template v1/v3, colour-file converters + `import:colour` (converters in `scripts/` share it)
+- `src/seed/CLAUDE.md` — seed, supplier price-list pipeline, pricing template v1/v3, **self-service import (`/admin/price-lists/import/*`)**, the deleted duty placeholder + the corrected waterfall order, colour-file converters + `import:colour` (converters in `scripts/` share it)
 - `src/legacy/CLAUDE.md` — D365 staging import, `push:legacy`, `d365_overrides` correction layer + custom fields
 - `src/suppliers/CLAUDE.md` — suppliers vs brands, commercial terms (discount chains are MULTIPLICATIVE), backfill
 - `src/trade-accounts/CLAUDE.md` — trade client portal, viewer scoping, account-name collision rules

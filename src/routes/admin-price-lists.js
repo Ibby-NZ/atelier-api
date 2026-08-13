@@ -31,10 +31,7 @@ import {
 import { getRateAsAt, listRateHistory, MAX_REASON_LENGTH } from '../pricing/price-history.js'
 import { CATEGORIES, UNITS, CURRENCIES, CLASS_LETTER } from '../../scripts/lib/price-template.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
-import { loadReportAccess } from '../reports/access.js'
-
-const httpError = (statusCode, message) =>
-  Object.assign(new Error(message), { statusCode })
+import { requireFinance } from '../reports/access.js'
 
 // A price-list item is the one row in this API whose deletion is not durable:
 // `npm run import:pricing` upserts on (supplier, category, code) and keeps rows
@@ -175,22 +172,13 @@ export const adminPriceListRoutes = async (app, { pool }) => {
   // A wholesale rate is Atelier's BUY side, and its history is a run of them —
   // the margin falls straight out of one divided into the matching trade price.
   // So the two history reads sit behind finance visibility as well as the
-  // backoffice guard.
-  //
-  // `loadReportAccess(pool, request.user)` and never `request.user.can_view_finance`:
-  // guards load the user through PUBLIC_USER_COLUMNS, which does not carry the
-  // flag, so reading it off the record answers `undefined` — falsy today, and
-  // silently open the day that projection widens. Fails closed on a row that
-  // has gone.
-  const requireFinance = async (request) => {
-    const access = await loadReportAccess(pool, request.user)
-    if (!access.finance) {
-      throw httpError(
-        403,
-        'Reading what a rate used to be needs finance access. Ask a director.'
-      )
-    }
-  }
+  // backoffice guard. The gate itself is `src/reports/access.js`'s, shared with
+  // the import routes rather than copied: it resolves the flag through the
+  // DATABASE, never off `request.user`, and that distinction is the whole of it.
+  const financeOnly = requireFinance(
+    pool,
+    'Reading what a rate used to be needs finance access. Ask a director.'
+  )
 
   app.get(
     '/admin/price-list-items',
@@ -264,7 +252,7 @@ export const adminPriceListRoutes = async (app, { pool }) => {
       schema: { params: idParamsSchema, querystring: asAtQuerySchema },
     },
     async (request) => {
-      await requireFinance(request)
+      await financeOnly(request)
       return { rate: await getRateAsAt(pool, request.params.id, request.query.as_at) }
     }
   )
@@ -275,7 +263,7 @@ export const adminPriceListRoutes = async (app, { pool }) => {
     '/admin/price-list-items/:id/price-history',
     { preHandler: backoffice, schema: { params: idParamsSchema } },
     async (request, reply) => {
-      await requireFinance(request)
+      await financeOnly(request)
       const item = await getPriceListItem(pool, request.params.id)
       if (!item) {
         reply.code(404)

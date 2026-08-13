@@ -16,7 +16,7 @@
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, extname, basename, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { openWorkbook, sharedStrings, sheetRows } from './lib/xlsx.js'
+import { worksheetGrid } from './lib/xlsx.js'
 import { decodeText, csvRows } from './lib/text.js'
 import { dumps } from './lib/python-format.js'
 import {
@@ -63,19 +63,11 @@ const parseFilename = (stem) => {
   return { supplier, fileCategory: CATEGORY_BY_FILE_TOKEN.get(match[2] ?? '') ?? null }
 }
 
-const xlsxRows = function* (path) {
-  const zip = openWorkbook(readFileSync(path))
-  const strings = sharedStrings(zip)
-  for (const [lineNumber, cells] of sheetRows(zip, 'xl/worksheets/sheet1.xml', strings)) {
-    let width = 0
-    for (const index of cells.keys()) width = Math.max(width, index + 1)
-    const row = []
-    for (let index = 0; index < width; index += 1) row.push(cells.get(index) ?? '')
-    yield [lineNumber, row]
-  }
-}
-
-const rowsOf = (path, isXlsx) => (isXlsx ? xlsxRows(path) : csvRows(decodeText(readFileSync(path))))
+// `worksheetGrid` is this function's own body, moved into lib/xlsx.js so the
+// API's upload route reads a workbook by the same rule (src/pricing/price-list-import.js).
+const rowsOf = (path, isXlsx) => (isXlsx
+  ? worksheetGrid(readFileSync(path))
+  : csvRows(decodeText(readFileSync(path))))
 
 // Key counts are compared too: a v2 row carries keys a v1 row does not, so
 // comparing only the earlier row's keys would call the two identical and drop

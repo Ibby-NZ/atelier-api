@@ -15,6 +15,7 @@ import { adminUsersRoutes } from './routes/admin-users.js'
 import { adminTradeApplicationRoutes } from './routes/admin-trade-applications.js'
 import { adminInventoryRoutes } from './routes/admin-inventory.js'
 import { adminPriceListRoutes } from './routes/admin-price-lists.js'
+import { adminPriceListImportRoutes } from './routes/admin-price-list-import.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
@@ -136,6 +137,11 @@ export const buildApp = ({
     api.register(adminTradeAccountRoutes, { pool })
     api.register(adminInventoryRoutes, { pool })
     api.register(adminPriceListRoutes, { pool })
+    // /admin/price-lists/import/* — the office's own way in for a supplier price
+    // list, beside `npm run import:pricing`. Its own plugin scope because it
+    // registers a raw-body content-type parser (.csv AND .xlsx), which is
+    // encapsulated and must not reach any other route.
+    api.register(adminPriceListImportRoutes, { pool })
     // /admin/suppliers — who INVOICES Atelier, and which houses they invoice.
     // Back-office only: the record carries the freight terms, the PO address and
     // each house's discount, none of which may reach a client-facing response.

@@ -24,9 +24,105 @@ Extracted from the root CLAUDE.md (root conventions still apply). Loaded automat
   - **D365 writes `<x:row>`, Excel writes `<row>`.** Python's ElementTree resolved namespaces for free; the tag scanner resolves the document's prefix once from the root element and matches through it. Matching a bare tag name silently finds nothing — which reads as "not a dynamic worksheet export", not as a parser bug.
   - **An XML parser normalises literal CRLF in text content to LF** (XML 1.0 §2.11) before anything downstream sees it. Multi-line addresses and comment fields carry CRLF, so skipping this changes thousands of rows. A character reference (`&#13;`) is not literal and must survive, hence normalise-then-expand-entities.
   - **`Number()` is far looser than `float()`** — `''` is 0, `'0x10'` is 16. `parseNumber` is regex-gated so a malformed cell surfaces as a reported error instead of a plausible zero.
-- Cross-checked against `~/Documents/atelier-platform-demo` docs (Verum build spec REQ "price-list import templates", Action-List 13–15 Jul): the 14-column set matches the ratified template; `code_normalized` implements decision 6 (uniform code format, raw kept for traceability); unit vocabulary matches decision 7 (`metre|yard|roll|piece|hide|panel` — hide/panel have no template rows yet). `duty_class`/`freight_class` letters are stored **raw, uninterpreted**: the broker's duty table (A10) and a freight class→rate table are still owed — the CRM's `/import` wizard applies a 7% duty placeholder downstream; do NOT bake placeholders into this table. Pattern-match text stays embedded in `vertical_repeat` (corpus too messy for an enum: "Repetable", "HD", "V x 70H"…; definitive field list still owed from Charlotte).
+- Cross-checked against `~/Documents/atelier-platform-demo` docs (Verum build spec REQ "price-list import templates", Action-List 13–15 Jul): the 14-column set matches the ratified template; `code_normalized` implements decision 6 (uniform code format, raw kept for traceability); unit vocabulary matches decision 7 (`metre|yard|roll|piece|hide|panel` — hide/panel have no template rows yet). `duty_class`/`freight_class` letters are stored **raw, uninterpreted**: the broker's duty table (A10) and a freight class→rate table are still owed; do NOT bake placeholders into this table (the 7% one that used to sit downstream is gone — see "The duty placeholder"). Pattern-match text stays embedded in `vertical_repeat` (corpus too messy for an enum: "Repetable", "HD", "V x 70H"…; definitive field list still owed from Charlotte).
 - Upsert key `(supplier, category, code)`, `ON CONFLICT … DO UPDATE` — unlike inventory, a re-import is how new season rates land, so freshest wins; rows absent from later files are kept. `wholesale_rate` stays `numeric(12,4)` in the **supplier's currency** (not NZD cents — the pricing waterfall converts downstream). Whole import is one transaction, chunked `unnest` batches; `validatePriceListItems` rejects the batch before any SQL (also catches duplicate keys, which would break multi-row upsert).
 - `repeat` is a Postgres non-reserved word but quoted `"repeat"` in SQL anyway. Guarded by `test/price-lists.test.js`, which also validates the committed JSON (19.5k items, 40 suppliers).
+
+## Self-service import (`POST /admin/price-lists/import/*`)
+
+The office's own way in, beside the CLI. `src/pricing/price-list-import.js` + `src/routes/admin-price-list-import.js`,
+guarded by `test/price-list-import.test.js`.
+
+- **It is the same pipeline behind a request, and "same" is the whole design.** `matchTemplate` picks
+  the layout (the header row IS the version, here as there), the template's own `mapV1`/`mapV3` maps
+  every row, `upsertPriceListItems` (extracted from `importPriceLists`) is the write, and the rate
+  moves are recorded by W17's capture TRIGGER under `setChangeContext({ source: 'import', userId })`.
+  There is deliberately **no second mapper and no second write path**: `price-lists.json` is byte-pinned
+  to those mappers, and a writer that bypassed the ledger is exactly what W17 exists to prevent.
+- **This adds a second door; it does not retire the first.** `npm run convert:pricing` +
+  `npm run import:pricing` keep working and the byte-identity gate still holds.
+- **Three steps, the product sheet's shape**: `parsePriceListFile` (pure) → `matchPriceListFile`
+  (reads only, shared) → `applyPriceListFile` (one transaction). Two ROUTES, not a `?dry_run=` flag —
+  a request that can write must never be one query parameter away from one that cannot.
+- **The filename is NOT parsed.** The CLI derives a supplier and a category token out of
+  "BOUSSAC FABRIC PL 2026.csv", which this file already calls the most fragile input in the pipeline.
+  A request can just say, so `?supplier=` and `?category=` are the fallbacks the filename was — a v3
+  file's own Supplier CELL still wins per row, and a v1 file with neither is a 400 (it has no Supplier
+  column, so every row would carry the same complaint).
+- **`?category=` fills a BLANK Item Type cell and NOTHING else.** `mapV1` resolves
+  `CATEGORY_BY_ITEM_TYPE.get(cell) ?? fileCategory`, so with a fallback stated a cell saying "Leather"
+  would import silently AS a fabric. The parser therefore checks the cell itself BEFORE calling the
+  mapper and skips the mapper for an unmappable one — that check is US-004 and it has its own test.
+- **An unmappable category is reported with its row number and its value, in its own bucket**
+  (`unmappable_categories` beside `errors`). 112 D365 price rows and 958 stock rows say Leather,
+  Samples and Displays, Throws/Blankets, Towels, Cushions, Bedding, Candles, Furniture, Rug/Carpet or
+  "No Group Selected". **Do not widen the `category` CHECK to make them import** — whether the
+  four-value vocabulary grows a fifth word is the client's decision, and the report is what asks them.
+- **A file with any row error is refused WHOLE**, both routes, in the same words through one
+  `refusalBody`. That is what makes "never dropped" literally true: there is no partial landing for a
+  row to be dropped from. `rows === imported + skipped + duplicates + failed`, asserted.
+- **The format is sniffed from the BYTES** (`PK\x03\x04` ⇒ workbook), never from the filename or the
+  content-type — both are the caller's account of what it sent, the same reason `decodeText` sniffs
+  the encoding. `worksheetGrid` in `scripts/lib/xlsx.js` is the reader, LIFTED out of
+  `scripts/convert-price-lists.js` unchanged; the byte-identity gate over the 74-file corpus is the
+  proof the lift changed nothing. **No xlsx package, no multipart parser** — the content-type parser
+  is the product sheet's pattern with one MIME added.
+- **Unpriced rows (rate 0 — price on application) are `skipped`, never errors.** Writing one would
+  make the office quote nothing for a fabric.
+- **Finance-gated, not merely backoffice.** A wholesale rate is Atelier's buy side and the dry run
+  reports the old rate beside the new one. The gate is `requireFinance(pool, message)` from
+  `src/reports/access.js`, shared with the price-history reads rather than copied: it resolves
+  `can_view_finance` through the DATABASE, because the guards' projection does not carry the column
+  and reading it off `request.user` answers `undefined` for everyone.
+- **`price_list_imports` logs APPLIED imports only** (`migrations/1788840000000_price-list-imports.js`).
+  Who, when, which file, template version, four counts that balance. It deliberately stores no rate
+  count and no supplier: the rate moves are already in `price_list_item_price_history`, and
+  `created_at` is `now()` inside the import's own transaction, so it equals every history row's
+  `changed_at` exactly — that equality is the join, not a second foreign key. A v3 file can name
+  several suppliers, so one supplier column would have to lie.
+- **Re-applying the same file is idempotent where it matters**: every row upserts to the value it
+  already holds, the trigger's `WHEN` does not fire, no history is written. `last_seen_in_import` does
+  move (that is drop detection working) and a second `price_list_imports` row IS written, because a
+  second import genuinely happened.
+
+## The duty placeholder (deleted, W18 US-005)
+
+- **`src/seed/data/pricing.js` no longer states a duty at all, and the absence is the point.** It read
+  `duty: 0.07`. The incumbent's own 19,327-row export disproves it: `Price Incl Duty ÷ Price ex Duty`
+  is exactly 1.00 on 17,776 rows and 1.05 on 1,218, `Duty Rate` is blank on 17,871 and 'A' on 1,456,
+  and **7% appears in no band on any range** (`docs/d365-export-analysis.md`, "Step 4 — duty is a flat
+  5%, applied only to duty-class rows").
+- **Deleted, not corrected to 0.05.** The real table is per RANGE — a flat 5% on duty class A with
+  per-range exceptions — so a single constant is the wrong SHAPE whatever number is in it, and a
+  plausible wrong number is far harder to notice than a missing one. `computeWaterfall` reads an
+  absent duty as no duty step, so the preview shows the waterfall without a duty parameter until the
+  broker's table (A10) lands and duty resolves per range off `price_list_items.duty_class`.
+- **Everything that carried it went with it**: the `{ label: 'Duty', value: '7%' }' parameter row and
+  the `+ Duty 7%` step op in `src/seed/data/atelier.js`, and every per-design `duty: '7%'` in
+  `atelier.js` and `fabricutDesigns.js` (now `null`, which is that file's own existing word for "no
+  duty step" and the measured majority state). Larsen's `'5%'` stays — it matches the class-A band.
+  The CRM's own `src/utils/importer.js` still holds `DUTY_PLACEHOLDER = 0.07`; that is US-007's to
+  remove and is the last copy anywhere.
+
+## The waterfall step order (corrected, W18 US-006)
+
+- **`(price incl duty + freight$) × (1 + clearance%)` — duty BEFORE freight, clearance OVER both.**
+  Measured, not chosen: that order reproduces 19,197 of the 19,201 usable rows of the D365 Product
+  Prices export. `computeWaterfall` previously did the opposite — clearance and freight struck on the
+  supplier-discounted price, duty last on the total — which strikes duty on freight the office has
+  already paid and compounds clearance under duty instead of over it. On the canonical figures the two
+  disagree by about 6%, the "1% error compounded across 8 steps" the build spec §3.5 warns against.
+- **The returned key was RENAMED `priceExDuty` → `priceInclDuty`,** because the value changed sides: it
+  now includes duty and excludes freight and clearance, the exact opposite of what it held. Keeping
+  the old name for the new number is the one change that would be silently wrong on every screen
+  reading it. `src/seed/data/atelier.js`'s steps 3 and 4 are relabelled to match.
+- **Consequence to know: seeded `trade_price_cents` moved.** `tradeUnit()` derives from `canonical`,
+  so a reseed against an existing database updates every house product's trade price — and `runSeed`
+  already declares `{ source: 'import', sourceFile: 'seed' }`, so those moves are captured in
+  `product_price_history` rather than failing on AT001.
+- If `src/pricing/waterfall.js` (W16) ever lands on the same branch, **collapse this onto it** rather
+  than keeping two implementations of one order. It is not on the W18 branch, which is why the
+  correction was made here.
 
 ## Pricing template
 
@@ -35,7 +131,7 @@ Extracted from the root CLAUDE.md (root conventions still apply). Loaded automat
 - **v2's `brand_name` column is DROPPED** (`1787198400000_price-list-template-v3.js`). Dropping is only safe because nothing ever wrote it — every row everywhere is `template_version = 'v1'`, verified against the dev database and the client's own dump before the migration was written. `pattern_match`, `duty_percent` and `template_version` are untouched; v3 only moves where Pattern Match sits in the row.
 - **v2 is REMOVED from the registry rather than kept beside v3, and the version string is bumped rather than redefined.** Removed: a registered v2 would go on accepting the duplicate-Brand layout this replaces, and no file has ever come in through it. Bumped: v2's header was published to the client, and a version whose shape changes makes `template_version` lie about the past. A file still built to v2 now fails the loud `unexpected header … ; accepted: v1 […], v3 […]`, which is the right answer — it is a file to send back.
 - **Client questions still open, answered but not decided:** `Supplier` exists because the filename was the pipeline's most fragile input (a rename silently renamed a supplier, and one file could only ever hold one) — the cell wins, the filename is the fallback, and a per-supplier drop can leave it blank. `Duty Percent` is the seam for the broker's duty table (A10), which is still owed; nothing fills it today and `Duty Rate` beside it holds the broker's CLASS LETTER, not a number, which is very likely what makes the pair confusing. Dropping Duty Percent is one entry in `TEMPLATES` if the client would rather wait for the broker.
-- **`duty_percent` stays NULL until a real file carries a real number.** The broker's duty table (A10) is still owed; the CRM's `/import` wizard applies its 7% placeholder downstream and that placeholder must never be baked into this ledger. It carries no range CHECK on purpose — nobody has stated the legitimate range, and a guessed CHECK is exactly the mistake the old freight-class set was.
+- **`duty_percent` stays NULL until a real file carries a real number.** The broker's duty table (A10) is still owed, and the 7% placeholder that used to be applied downstream is **deleted** (W18 US-005 — see "The duty placeholder" below); nothing anywhere invents a duty rate now. It carries no range CHECK on purpose — nobody has stated the legitimate range, and a guessed CHECK is exactly the mistake the old freight-class set was.
 - **`duty_class` and `freight_class` are a single uppercase letter (`~ '^[A-Z]$'`), still stored raw and uninterpreted.** The original sets (`'A'`–`'E'` for freight, nothing for duty) encoded a guess about a broker table nobody has, so the first `F` from a supplier would have rejected the client's own file as if it were a bug in ours. A Postgres CHECK passes on NULL, so widening needed no backfill across the 19.5k rows. `src/seed/price-lists.js`'s `FREIGHT_CLASSES`/`DUTY_CLASSES` are the narrower application-layer gate and are widened separately.
 - **Only `freight_class` is a widen. `duty_class` is a NEW constraint and is therefore `NOT VALID`.** Every existing `freight_class` already satisfied `IN ('A'..'E')`, a subset of `^[A-Z]$`, so re-adding that one validates the table and cannot fail. `duty_class` had **no** CHECK from the day the table was created and `POST`/`PATCH /admin/price-list-items` accepted 200 characters of free text into it, which the CRM still renders as a plain input — so a database with real back-office use can hold a staff-typed note like "Pending broker confirmation", and a validating constraint aborts the entire migration on it (`23514 … is violated by some row`, reproduced on a scratch database). `NOT VALID` enforces the shape on every INSERT and UPDATE from here on and leaves existing rows alone; a fresh database is unaffected either way. Validating it is a second migration, after somebody audits the column — the letters are stored raw and uninterpreted, so nothing reads a legacy value in the meantime.
 - **`template_version` records which header row a row came in through, and has no CHECK.** The accepted set lives in the code registry, not the schema — pinning it here would make every new template a migration. It is the converter's verdict written down, never a cell read from the file: **the header row IS the version** (a version cell can be misdeclared by deleting a column, whereas a header mismatch fails loudly).

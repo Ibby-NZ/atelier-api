@@ -122,6 +122,18 @@ describe('products.category migration', () => {
     expect(productVocabulary).toEqual(vocabularyOf(priceList).sort())
   })
 
+  it('shares it with supplier_freight_rates.category too — three tables, one vocabulary', async () => {
+    // W16 US-004 joined the comparison: a freight rate is filed by the same
+    // merchandising axis, so a value added to one of the three and not the
+    // others silently stops matching rather than raising anywhere.
+    const [product, freight] = await Promise.all([
+      constraintDefinition(pool, 'products_category_check'),
+      constraintDefinition(pool, 'supplier_freight_rates_category_check'),
+    ])
+    expect(freight).not.toBeNull()
+    expect(vocabularyOf(freight).sort()).toEqual(vocabularyOf(product).sort())
+  })
+
   it('is independent of product_type — a finished good may be a wallpaper', async () => {
     // product_type drives the colourway's inventory unit (metres vs units);
     // category is the merchandising axis the rate ledger files by. Conflating

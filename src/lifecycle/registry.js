@@ -316,6 +316,15 @@ export const LIFECYCLE_ENTITIES = defineEntities({
         'supplier terms',
         'SELECT 1 FROM supplier_brand_terms WHERE brand_id = $1'
       ),
+      // purchase_orders.brand_id is RESTRICT (W13): a house that has been
+      // ordered from is a live commercial relationship and the paper sent to it
+      // is the evidence. The database would refuse anyway; the probe is what
+      // reports HOW MANY and runs before anything is destroyed.
+      probe(
+        'purchase_orders',
+        'purchase orders',
+        'SELECT 1 FROM purchase_orders WHERE brand_id = $1'
+      ),
     ],
   },
 
@@ -382,6 +391,16 @@ export const LIFECYCLE_ENTITIES = defineEntities({
         'recorded price changes',
         'SELECT 1 FROM product_price_history WHERE product_id = $1'
       ),
+      // purchase_order_lines.colourway_id is RESTRICT (W13), same shape and
+      // same reason as order_lines above: a purchase order is a commercial
+      // record and must survive a catalogue tidy-up.
+      probe(
+        'purchase_order_lines',
+        'purchase-order lines',
+        `SELECT 1 FROM purchase_order_lines pol
+            JOIN colourways c ON c.id = pol.colourway_id
+           WHERE c.product_id = $1`
+      ),
     ],
   },
 
@@ -412,6 +431,11 @@ export const LIFECYCLE_ENTITIES = defineEntities({
         'sample_orders',
         'sample orders',
         'SELECT 1 FROM sample_orders WHERE colourway_id = $1'
+      ),
+      probe(
+        'purchase_order_lines',
+        'purchase-order lines',
+        'SELECT 1 FROM purchase_order_lines WHERE colourway_id = $1'
       ),
     ],
   },
@@ -472,6 +496,24 @@ export const LIFECYCLE_ENTITIES = defineEntities({
         'price_list_items',
         'price-list items',
         'SELECT 1 FROM price_list_items WHERE supplier_id = $1'
+      ),
+      // purchase_orders.supplier_id is RESTRICT (W13). The `brands` probe above
+      // does NOT cover it: a purchase order snapshots the house it was
+      // addressed to and outlives the brand link being changed, so a supplier
+      // can carry purchase orders while pointing at no live house.
+      probe(
+        'purchase_orders',
+        'purchase orders',
+        'SELECT 1 FROM purchase_orders WHERE supplier_id = $1'
+      ),
+      // supplier_invoices.supplier_id is RESTRICT (W14), and it is NOT covered
+      // by the purchase-orders probe above: an invoice is entered against the
+      // house that sent it and can be keyed before anything has been ordered,
+      // so a supplier can carry a bill and no purchase order at all.
+      probe(
+        'supplier_invoices',
+        'supplier invoices',
+        'SELECT 1 FROM supplier_invoices WHERE supplier_id = $1'
       ),
     ],
   },
@@ -583,8 +625,22 @@ export const LIFECYCLE_ENTITIES = defineEntities({
   // `beforeDelete` exists at all. And an order that has been invoiced or shipped
   // is the audit trail, which is what the guard protects.
   //
-  // No probes: nothing in the schema references `orders` except `order_lines`,
-  // which the order owns outright. `order_lines`, `webhook_events`, trade
+  // THE FOURTH BLOCKER (W13-US-008). `purchase_order_line_allocations.order_line_id`
+  // is RESTRICT, so an order that has already been ordered FROM A SUPPLIER is no
+  // longer a mis-key anyone can delete — somebody's money is committed against
+  // it at a house. The probe reaches it through `order_lines`, the same shape
+  // the `product` entry uses to see its grandchildren, and it counts RELEASED
+  // allocations too: a cancelled purchase order still records that this order
+  // was once bought against, and deleting the order would destroy the other half
+  // of that record.
+  //
+  // Without the probe the delete would still be refused — the cascade to
+  // `order_lines` dies on the RESTRICT edge — but as a bare 23503 reading
+  // "related records", after `beforeDelete` had already handed the reservation
+  // back inside the same transaction. `CONSTRAINT_BLOCKERS` in delete.js names
+  // the constraint as well, for the lost race.
+  //
+  // `order_lines`, `webhook_events`, `purchase_order_receipts`, trade
   // applications, trade accounts and every legacy_* table still need no entry —
   // absence from this registry is the normal protection, since requireEntity
   // throws on an unknown name.
@@ -595,7 +651,95 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     archivable: true,
     guard: orderGuard,
     beforeDelete: releaseOrderReservation,
-    probes: [],
+    probes: [
+      probe(
+        'purchase_order_line_allocations',
+        'supplier purchase-order allocations',
+        `SELECT 1 FROM purchase_order_line_allocations a
+            JOIN order_lines ol ON ol.id = a.order_line_id
+           WHERE ol.order_id = $1`
+      ),
+    ],
+  },
+
+  // A purchase order is deletable only while nothing hangs off it (FR-147): a
+  // mis-keyed draft, a derivation somebody ran twice. Its LINES cascade — they
+  // are the document's own body — but a receipt is a record of goods that
+  // physically arrived and an allocation is a claim against a sales order, and
+  // both refuse.
+  //
+  // `archivable: false`, and there is no `archived_at` column to match
+  // (`test/lifecycle-registry.test.js` asserts the two agree). `cancelled` and
+  // `closed` already take a finished purchase order off every list AND say why,
+  // which `archived_at` cannot; a second vocabulary for "take it off my screen"
+  // is how two lists start disagreeing about what is open.
+  //
+  // `purchase_order_receipt` has NO ENTRY HERE AT ALL and must not get one. The
+  // ledger is append-only — a mistake is reversed by a negative row — and
+  // absence from this registry is what makes a DELETE route against it
+  // impossible to register rather than merely refused.
+  purchase_order: {
+    table: 'purchase_orders',
+    idColumn: 'id',
+    label: 'purchase order',
+    archivable: false,
+    probes: [
+      probe(
+        'purchase_order_receipts',
+        'goods receipts',
+        `SELECT 1 FROM purchase_order_receipts r
+            JOIN purchase_order_lines l ON l.id = r.purchase_order_line_id
+           WHERE l.purchase_order_id = $1`
+      ),
+      probe(
+        'purchase_order_line_allocations',
+        'sales-order allocations',
+        `SELECT 1 FROM purchase_order_line_allocations a
+            JOIN purchase_order_lines l ON l.id = a.purchase_order_line_id
+           WHERE l.purchase_order_id = $1`
+      ),
+      // THE THIRD BLOCKER (W14-US-002). A purchase order that has been INVOICED
+      // is on somebody's ledger: `supplier_invoice_allocations.purchase_order_id`
+      // is RESTRICT, so the database would refuse anyway, and the probe is what
+      // reports it as a named blocker before anything is destroyed. The way out
+      // is to detach it from the invoice first, which is a deliberate act
+      // rather than a cascade.
+      probe(
+        'supplier_invoice_allocations',
+        'supplier invoices',
+        'SELECT 1 FROM supplier_invoice_allocations WHERE purchase_order_id = $1'
+      ),
+    ],
+  },
+
+  // A supplier invoice is deletable only while nothing is attached to it
+  // (FR-159): a bill keyed twice, or one entered against the wrong house.
+  // `supplier_invoice_allocations.supplier_invoice_id` is RESTRICT, so the
+  // probe and the database agree; the probe wins because it reports HOW MANY
+  // purchase orders are in the way and runs before anything is destroyed.
+  //
+  // `archivable: false`, and there is no `archived_at` column to match
+  // (`test/lifecycle-registry.test.js` asserts the two agree) — the same
+  // argument `purchase_order` makes. `matched` and `disputed` already take an
+  // invoice off the list somebody is working through AND say why, which
+  // `archived_at` cannot.
+  //
+  // Detaching is deliberately NOT reachable from here. It is its own route
+  // (`DELETE /admin/supplier-invoices/:id/allocations/:poId`), because taking a
+  // purchase order off a bill is a commercial decision about that purchase
+  // order and not a step in tidying an invoice away.
+  supplier_invoice: {
+    table: 'supplier_invoices',
+    idColumn: 'id',
+    label: 'supplier invoice',
+    archivable: false,
+    probes: [
+      probe(
+        'supplier_invoice_allocations',
+        'purchase orders',
+        'SELECT 1 FROM supplier_invoice_allocations WHERE supplier_invoice_id = $1'
+      ),
+    ],
   },
 })
 

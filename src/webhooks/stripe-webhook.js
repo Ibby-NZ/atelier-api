@@ -7,25 +7,31 @@
 // from the database off the cart (sku + qty) stashed in the session metadata by
 // the checkout endpoint (US-010). shipping_cents is carried in metadata.
 
-// Re-resolve each cart line's colourway + current retail price from the DB.
-const resolveCartLines = async (client, cart) => {
+// Re-resolve each cart line's colourway + current price from the DB, on the
+// price BASIS the session was quoted on (`metadata.trade`, written by the
+// checkout endpoint). Resolving retail for a session Stripe charged at trade
+// would record an order for money nobody paid.
+const resolveCartLines = async (client, cart, trade) => {
   const lines = []
   for (const { sku, qty } of cart) {
     const { rows } = await client.query(
-      `SELECT c.id AS colourway_id, p.name, p.retail_price_cents
+      `SELECT c.id AS colourway_id, p.name, p.retail_price_cents, p.trade_price_cents
          FROM colourways c
          JOIN products p ON p.id = c.product_id
         WHERE c.sku = $1`,
       [sku]
     )
     const row = rows[0]
-    if (!row || row.retail_price_cents === null) {
-      throw new Error(`Webhook cannot resolve a retail price for SKU "${sku}".`)
+    const unitPriceCents = row
+      ? (trade ? row.trade_price_cents : null) ?? row.retail_price_cents
+      : null
+    if (unitPriceCents === null) {
+      throw new Error(`Webhook cannot resolve a price for SKU "${sku}".`)
     }
     lines.push({
       colourway_id: row.colourway_id,
       qty,
-      unit_price_cents: row.retail_price_cents,
+      unit_price_cents: unitPriceCents,
     })
   }
   return lines
@@ -65,7 +71,7 @@ const createPaidOrder = async (client, session) => {
   const zone = session.metadata?.zone ?? null
   const shippingCents = Number(session.metadata?.shipping_cents ?? 0)
 
-  const lines = await resolveCartLines(client, cart)
+  const lines = await resolveCartLines(client, cart, session.metadata?.trade === 'true')
   const subtotalCents = lines.reduce(
     (sum, line) => sum + line.unit_price_cents * line.qty,
     0
@@ -93,7 +99,7 @@ const createPaidOrder = async (client, session) => {
         subtotal_cents, shipping_cents, total_cents, shipping_zone, stripe_session_id,
         shipping_address, contact_phone)
      VALUES ($1, $2, $3, 'checkout', 'paid', $4, $5, $6, $7, $8, $9, $10)
-     RETURNING id, order_number, user_id, guest_email, total_cents`,
+     RETURNING id, order_number, kind, user_id, guest_email, total_cents`,
     [
       userId,
       guestEmail,
@@ -124,10 +130,12 @@ const createPaidOrder = async (client, session) => {
   }
 
   // guest_email / user_id / total_cents let the caller send a checkout receipt
-  // (US-015) without a second query.
+  // (US-015) without a second query; `kind` lets it name the order in the
+  // back-office alert (W12 US-004) without re-reading the row it just wrote.
   return {
     id: order.id,
     order_number: order.order_number,
+    kind: order.kind,
     user_id: order.user_id,
     guest_email: order.guest_email,
     total_cents: order.total_cents,

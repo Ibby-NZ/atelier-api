@@ -105,6 +105,49 @@ const CONSTRAINT_BLOCKERS = Object.freeze({
     relation: 'product_price_history',
     label: 'recorded price changes',
   }),
+  // Purchasing's five RESTRICT edges (W13). Every one has a probe that normally
+  // reports it first; these entries are what keep a lost race — a purchase
+  // order raised between the probe and the DELETE — naming the actual blocker
+  // rather than "related records".
+  //
+  // The allocation entry is the load-bearing one: it is the fourth blocker on
+  // the ORDER delete, and the constraint fires from inside the cascade to
+  // `order_lines` rather than on the `orders` row itself.
+  purchase_order_line_allocations_order_line_id_fkey: Object.freeze({
+    relation: 'purchase_order_line_allocations',
+    label: 'supplier purchase-order allocations',
+  }),
+  purchase_order_lines_colourway_id_fkey: Object.freeze({
+    relation: 'purchase_order_lines',
+    label: 'purchase-order lines',
+  }),
+  purchase_order_receipts_purchase_order_line_id_fkey: Object.freeze({
+    relation: 'purchase_order_receipts',
+    label: 'goods receipts',
+  }),
+  purchase_orders_brand_id_fkey: Object.freeze({
+    relation: 'purchase_orders',
+    label: 'purchase orders',
+  }),
+  purchase_orders_supplier_id_fkey: Object.freeze({
+    relation: 'purchase_orders',
+    label: 'purchase orders',
+  }),
+  // The supplier-invoice RESTRICT edges (W14). Each has a probe that normally
+  // reports it first; these keep a lost race — a purchase order attached to a
+  // bill between the probe and the DELETE — naming the actual blocker.
+  supplier_invoice_allocations_supplier_invoice_id_fkey: Object.freeze({
+    relation: 'supplier_invoice_allocations',
+    label: 'purchase orders',
+  }),
+  supplier_invoice_allocations_purchase_order_id_fkey: Object.freeze({
+    relation: 'supplier_invoice_allocations',
+    label: 'supplier invoices',
+  }),
+  supplier_invoices_supplier_id_fkey: Object.freeze({
+    relation: 'supplier_invoices',
+    label: 'supplier invoices',
+  }),
 })
 
 const UNKNOWN_CONSTRAINT_BLOCKER = Object.freeze({

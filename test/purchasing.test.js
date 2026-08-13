@@ -840,8 +840,11 @@ describe('W13 purchase orders', () => {
         .filter((file) => file.endsWith('.js'))
         .map((file) => join(SRC, 'purchasing', file)),
       join(SRC, 'routes', 'admin-purchase-orders.js'),
+      // W14's route file is in the same boundary: a supplier invoice records
+      // what arrived commercially and still writes no stock.
+      join(SRC, 'routes', 'admin-supplier-invoices.js'),
       ...readdirSync(MIGRATIONS)
-        .filter((file) => file.includes('purchase-order'))
+        .filter((file) => /purchase-order|supplier-invoice/.test(file))
         .map((file) => join(MIGRATIONS, file)),
     ]
 

@@ -82,11 +82,13 @@ describe('report filters', () => {
       expect(Object.isFrozen(REPORT_FILTER_NAMES)).toBe(true)
     })
 
-    it('names exactly the seven filters the reports accept', () => {
+    it('names exactly the nine filters the reports accept', () => {
       expect([...REPORT_FILTER_NAMES]).toEqual([
         'from',
         'to',
         'brand',
+        'brand_code',
+        'range',
         'product_type',
         'collection',
         'kind',
@@ -1037,7 +1039,13 @@ describe('W5-US-007 — stock and not-invoiced, declared', () => {
     // Its FROM starts at `inventory` and has no `orders` in it, so a lifecycle
     // filter there would be a broken query rather than a narrowing.
     it('honours only the filters whose columns it has', () => {
-      expect([...STOCK_FILTERS]).toEqual(['brand', 'product_type', 'collection'])
+      expect([...STOCK_FILTERS]).toEqual([
+        'brand',
+        'brand_code',
+        'range',
+        'product_type',
+        'collection',
+      ])
       for (const name of STOCK_FILTERS) {
         expect(REPORT_FILTER_NAMES).toContain(name)
       }

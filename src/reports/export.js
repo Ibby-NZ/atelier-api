@@ -116,6 +116,25 @@ const notesOf = (report) => {
     notes.push(['Coverage', meta.coverage.note])
   }
 
+  // The two W21 statements reach the FILE and not only the screen, for the same
+  // reason `Coverage` does: this is the copy that leaves the building, and a
+  // stock column with no source named is read as the only stock figure there is.
+  const stock = meta.coverage?.stock_source
+  if (stock) {
+    notes.push(['Stock source', `${stock.label} (${stock.table}). ${stock.disagreement}`])
+  }
+
+  // Stated as a fraction of this file's own rows, so "no range sold" can be told
+  // from "the range column is not filled in yet".
+  const dimensions = meta.coverage?.dimensions
+  if (dimensions) {
+    notes.push([
+      'Dimensions',
+      `Brand code on ${dimensions.brand_code} of ${dimensions.rows} rows, ` +
+        `range on ${dimensions.range} of ${dimensions.rows}. ${dimensions.note}`,
+    ])
+  }
+
   // Labels only, because that is all maskReport put on the payload — the KEY of
   // a withheld figure is the machine name of something this caller may not have.
   // Saying so is what stops a masked export reading as a complete one.

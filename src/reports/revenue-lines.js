@@ -78,6 +78,12 @@ const LIVE_ORDER_LINES = Object.freeze({
     product_slug: 'p.slug',
     product_name: 'p.name',
     product_type: 'p.product_type',
+    // W21's two reporting dimensions. They are in the scope rather than in each
+    // report because both are filterable everywhere the scope reaches, and
+    // because every report states how much of ITS population carries them
+    // (src/reports/coverage.js) — a count each report would otherwise re-derive
+    // from a second join.
+    product_range: 'p.product_range',
     // What unit_price_cents is denominated in. `orders` carries no currency of
     // its own, so this is the only thing that says whether two line values may
     // be added — a report totalling across currencies would be a made-up
@@ -86,6 +92,7 @@ const LIVE_ORDER_LINES = Object.freeze({
     brand_id: 'b.id',
     brand_slug: 'b.slug',
     brand_name: 'b.name',
+    brand_code: 'b.brand_code',
     collection_slug: 'col.slug',
     qty: 'ol.qty',
     unit_price_cents: 'ol.unit_price_cents',

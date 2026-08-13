@@ -262,6 +262,30 @@ describe('cost-side exposure', () => {
       ['DELETE', '/admin/purchase-orders/1', undefined],
       ['POST', '/admin/purchase-order-lines/1/allocations', { order_line_id: 1, qty: 1 }],
       ['POST', '/admin/purchase-order-lines/1/receipts', { qty: 1 }],
+      // W14. A supplier invoice is the buy side stated outright — what a maison
+      // actually charged Atelier over a whole billing cycle, plus the freight
+      // and duty on top of it — so it is a STRONGER disclosure than
+      // `unit_price`, not a weaker one, and `/unbilled` hands over the costed
+      // totals of everything not yet billed. Extended here rather than as a
+      // second exposure test, so there is one file that answers "what can an
+      // external party reach".
+      ['GET', '/admin/supplier-invoices', undefined],
+      ['GET', '/admin/supplier-invoices/unbilled', undefined],
+      [
+        'POST',
+        '/admin/supplier-invoices',
+        {
+          supplier_id: 1,
+          invoice_number: 'INV-1',
+          invoice_date: '2026-08-01',
+          total_amount: 10,
+        },
+      ],
+      ['GET', '/admin/supplier-invoices/1', undefined],
+      ['PATCH', '/admin/supplier-invoices/1', { notes: 'x' }],
+      ['DELETE', '/admin/supplier-invoices/1', undefined],
+      ['POST', '/admin/supplier-invoices/1/allocations', { purchase_order_id: 1 }],
+      ['DELETE', '/admin/supplier-invoices/1/allocations/1', undefined],
     ]
 
     for (const [method, url, payload] of purchasingWrites) {

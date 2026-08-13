@@ -485,6 +485,15 @@ export const LIFECYCLE_ENTITIES = defineEntities({
         'purchase orders',
         'SELECT 1 FROM purchase_orders WHERE supplier_id = $1'
       ),
+      // supplier_invoices.supplier_id is RESTRICT (W14), and it is NOT covered
+      // by the purchase-orders probe above: an invoice is entered against the
+      // house that sent it and can be keyed before anything has been ordered,
+      // so a supplier can carry a bill and no purchase order at all.
+      probe(
+        'supplier_invoices',
+        'supplier invoices',
+        'SELECT 1 FROM supplier_invoices WHERE supplier_id = $1'
+      ),
     ],
   },
 
@@ -667,6 +676,47 @@ export const LIFECYCLE_ENTITIES = defineEntities({
         `SELECT 1 FROM purchase_order_line_allocations a
             JOIN purchase_order_lines l ON l.id = a.purchase_order_line_id
            WHERE l.purchase_order_id = $1`
+      ),
+      // THE THIRD BLOCKER (W14-US-002). A purchase order that has been INVOICED
+      // is on somebody's ledger: `supplier_invoice_allocations.purchase_order_id`
+      // is RESTRICT, so the database would refuse anyway, and the probe is what
+      // reports it as a named blocker before anything is destroyed. The way out
+      // is to detach it from the invoice first, which is a deliberate act
+      // rather than a cascade.
+      probe(
+        'supplier_invoice_allocations',
+        'supplier invoices',
+        'SELECT 1 FROM supplier_invoice_allocations WHERE purchase_order_id = $1'
+      ),
+    ],
+  },
+
+  // A supplier invoice is deletable only while nothing is attached to it
+  // (FR-159): a bill keyed twice, or one entered against the wrong house.
+  // `supplier_invoice_allocations.supplier_invoice_id` is RESTRICT, so the
+  // probe and the database agree; the probe wins because it reports HOW MANY
+  // purchase orders are in the way and runs before anything is destroyed.
+  //
+  // `archivable: false`, and there is no `archived_at` column to match
+  // (`test/lifecycle-registry.test.js` asserts the two agree) — the same
+  // argument `purchase_order` makes. `matched` and `disputed` already take an
+  // invoice off the list somebody is working through AND say why, which
+  // `archived_at` cannot.
+  //
+  // Detaching is deliberately NOT reachable from here. It is its own route
+  // (`DELETE /admin/supplier-invoices/:id/allocations/:poId`), because taking a
+  // purchase order off a bill is a commercial decision about that purchase
+  // order and not a step in tidying an invoice away.
+  supplier_invoice: {
+    table: 'supplier_invoices',
+    idColumn: 'id',
+    label: 'supplier invoice',
+    archivable: false,
+    probes: [
+      probe(
+        'supplier_invoice_allocations',
+        'purchase orders',
+        'SELECT 1 FROM supplier_invoice_allocations WHERE supplier_invoice_id = $1'
       ),
     ],
   },

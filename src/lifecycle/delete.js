@@ -122,6 +122,21 @@ const CONSTRAINT_BLOCKERS = Object.freeze({
     relation: 'purchase_orders',
     label: 'purchase orders',
   }),
+  // The supplier-invoice RESTRICT edges (W14). Each has a probe that normally
+  // reports it first; these keep a lost race — a purchase order attached to a
+  // bill between the probe and the DELETE — naming the actual blocker.
+  supplier_invoice_allocations_supplier_invoice_id_fkey: Object.freeze({
+    relation: 'supplier_invoice_allocations',
+    label: 'purchase orders',
+  }),
+  supplier_invoice_allocations_purchase_order_id_fkey: Object.freeze({
+    relation: 'supplier_invoice_allocations',
+    label: 'supplier invoices',
+  }),
+  supplier_invoices_supplier_id_fkey: Object.freeze({
+    relation: 'supplier_invoices',
+    label: 'supplier invoices',
+  }),
 })
 
 const UNKNOWN_CONSTRAINT_BLOCKER = Object.freeze({

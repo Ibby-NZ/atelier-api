@@ -203,6 +203,141 @@ receipted against and closed. Four tables —
   receipt in full, close — that asserts the stock row is byte-identical afterwards. `moveReservation`
   stays the sole writer, and a second one breaks the reservation arithmetic SILENTLY.
 
+## Consolidated supplier invoices (W14)
+
+**One supplier sends ONE invoice covering MANY purchase orders, every two to four weeks.** That
+sentence is the whole epic. W13 groups purchase orders by **brand** and one supplier sells several
+brands, so there are always more purchase orders than invoices — a bill covering purchase orders
+raised for two houses of one supplier is the ORDINARY case, not an edge one. Two tables —
+`migrations/1787803200000_supplier-invoices.js` (the header),
+`1787889600000_supplier-invoice-allocations.js` (the join) — behind
+`src/routes/admin-supplier-invoices.js`, all `requireRole('backoffice')` (director inherits), with
+`src/purchasing/supplier-invoices.js` holding every rule.
+
+- **`purchase_order_id` is UNIQUE on the join, and it is a PLAIN unique rather than the partial one
+  `purchase_order_line_allocations` carries.** A purchase order appears on exactly one invoice. A
+  re-attach after a correction leaves two rows claiming one purchase order, every downstream report
+  double-counts that spend, and **nothing in the data says which row was the mistake** — both are
+  plausible and the error surfaces as a wrong total months later. It is not partial because there is
+  no released-then-re-claimed life here: a `detached_at` predicate is exactly the shape that lets two
+  live rows exist for one purchase order. **Detach is therefore a hard DELETE of the row**, and what
+  makes it "an explicit act that is recorded" (FR-159) is that it is a route of its own
+  (`DELETE /admin/supplier-invoices/:id/allocations/:poId`) rather than a side effect of saving a
+  form. Trade-off stated plainly: this table cannot answer "which invoice was this on before?".
+- **`supplier_id` IS accepted from the caller here, and that is not a contradiction of the purchase
+  order's derivation.** A purchase order is addressed to the house Atelier picked by choosing a
+  BRAND, so its supplier is a derivation with a right answer the client cannot see. An invoice
+  ARRIVES from a house; the house is the primary fact on the paper and there is nothing to derive it
+  from. What replaces the derivation is the next bullet.
+- **An invoice's supplier must equal every allocated purchase order's supplier, enforced in the
+  module as a 422 NAMING THE PURCHASE ORDER and both houses.** Expressing it in SQL needs a
+  composite `(id, supplier_id)` unique on both parents plus two chained composite foreign keys and a
+  denormalised `supplier_id` on the join — three columns and two constraints to say one sentence,
+  and the copy then has its own way of being wrong. `supplier_id` is also absent from
+  `SUPPLIER_INVOICE_UPDATE_COLUMNS` and must stay absent: moving an invoice to another house would
+  leave every already-attached purchase order belonging to the old one, retroactively and silently,
+  through a field that looks like a typo fix.
+- **`SUM(allocations.amount)` is deliberately NOT constrained against `total_amount`, and no CHECK
+  may ever be added.** The unreconciled difference IS the product — the screen exists to show a
+  person how much of a €48,000 bill they have accounted for so far — so a constraint would refuse
+  exactly the half-done state the feature is for. It could not be written anyway: a CHECK sees one
+  row and this is an aggregate over a set. `unallocated_amount` is derived at read time and stored
+  nowhere, and `status = 'matched'` is a JUDGEMENT a person makes, never arithmetic anything
+  computes. A test parses every live CHECK on both tables and asserts none of them mentions the sum.
+- **Two different differences live on the read model and they answer different questions.**
+  `unallocated_amount` = total less what has been apportioned so far — how far through the
+  reconciliation the office is. `variance` = total less what those purchase orders SAID they would
+  cost (FR-154) — the commercial question, did the house bill what it quoted. Reported on screen,
+  written nowhere. `variance` is `null` while any attached purchase order carries an unpriced line
+  (`unpriced_purchase_orders` says how many), the "a figure that cannot be added is ABSENT" rule one
+  grain up from W13's `total_cost`; a variance against a partial cost reads as a discrepancy that is
+  really a missing price.
+- **The variance is measured against the FULL invoice total, freight and duty INCLUDED, and that is
+  a deliberate refusal rather than an oversight.** Freight and duty are RECORDED AND NEVER
+  APPORTIONED (ADR 006): they are the ACTUAL charges for a consignment where `shipping_rates` is a
+  forward estimate for a customer, both are correct, and merging them is the failure. The rule for
+  pushing a non-line charge down onto a purchase-order line or a range is **owed by the client**, so
+  a variance quietly computed against `total - freight - duty` would be this API inventing that rule
+  and hiding it inside a subtraction. The two amounts travel beside the variance so a person can do
+  it themselves. `fx_rate` is likewise recorded RAW and is multiplied by nothing — the FX basis
+  (invoice date? payment date? the rate the bank gave?) is still open (A9).
+- **A purchase-order cost is computed as `SUM(round(qty_ordered * unit_price, 2))`, which is
+  `toLine`'s arithmetic expressed at this grain.** The invoice screen and the purchase-order screen
+  must not disagree by a rounding rule about what one purchase order cost. `SUM` skips NULLs, so the
+  `count(*) FILTER (WHERE unit_price IS NULL)` beside it is what stops a partly-priced order
+  reporting a partial figure as the whole.
+- **`amount` on the join is NULLABLE, the `unit_price` posture.** A consolidated invoice frequently
+  does not break its total down per purchase order — it may not even quote Atelier's purchase-order
+  numbers — so "attached, but nobody has said how much of the total is this one" is a real and
+  common state. NULL is that; 0 is "charged at nil, and we know it"; `Number(null)` is 0, so
+  `unstated_allocations` counts the rows contributing nothing rather than letting them be invisible.
+- **`(supplier_id, lower(btrim(invoice_number)))` is unique, never `invoice_number` alone.** An
+  invoice number is unique to the house that issued it — two maisons both numbering from 1001 is
+  ordinary, and a global unique would refuse the second one's paperwork outright. It is
+  `lower(btrim(…))` because the number is TYPED BY A HUMAN off a piece of paper (`  inv-2291 ` and
+  `INV-2291` are the same bill keyed twice), the `supplier_aliases` posture. The 409 names the row
+  ON FILE and its date, found by a query — echoing the caller's own spelling back reads as though
+  the two are unrelated bills.
+- **`invoice_date` is a `date` and leaves through `::text`.** pg's default parser turns a `date`
+  into a JS Date at LOCAL midnight, which serialises as `2026-07-31T12:00:00.000Z` under an NZ
+  session for an invoice dated the 1st of August — the paper says one day and the screen says
+  another. A calendar day carries no instant. The date filters are consequently INCLUSIVE on `to`
+  (`<= $n::date`), which is the opposite of the next-day-exclusive rule the `timestamptz` filters
+  follow, and each is correct for its own column type.
+- **`status` is on the PATCH while attach and detach are verbs, and that is one rule rather than an
+  exception to it.** "Verbs, not status PATCHes" is about a move that writes two tables or writes a
+  state and the stamp that dates it. `status` here writes one column of one row and dates nothing;
+  attaching writes the join and carries its own refusals and its own attribution. There is no
+  state-machine module beside `po-states.js` either: `matched` and `disputed` have no illegal
+  moves between them, and a spine would be a rule to fight rather than a rule to keep.
+- **`/unbilled` is a SEARCH, not a join (FR-158).** It is an open question whether a supplier's
+  consolidated invoice quotes Atelier's purchase-order numbers at all; where it does not, matching
+  is by DATE AND AMOUNT off the paper. So `q` (our own number) is one filter among several rather
+  than the model, `amount_min`/`amount_max` are two plain bounds rather than a "tolerance" (a
+  tolerance is a policy — absolute? percentage? of which figure? — nobody has settled), and
+  **nothing here solves the subset-sum**: which COMBINATION of purchase orders adds to the invoice
+  total is combinatorial and nobody asked for it. Cancelled purchase orders are excluded — an order
+  the office says never happened is not something a house bills for, and leaving them in is
+  permanent noise. **An amount search is finance end to end and answers 403 with a reason** to a
+  login without the grant, the `maskReport` posture: "no rows" and "you may not see this" are
+  indistinguishable on a screen and only the second is actionable.
+- **The dependency between the two purchasing modules runs ONE WAY.** `supplier-invoices.js` imports
+  nothing from `admin-purchase-orders.js`; the purchase-order read model imports
+  `loadInvoiceStateByPurchaseOrderId` from it, so a purchase order carries `supplier_invoice` (null
+  until it is billed) without the two forming a cycle. Same rule `receipts.js` states in the other
+  direction.
+- **Finance gating is the W13 gate, unchanged**: `loadReportAccess(pool, request.user)`, never
+  `reportAccess(request.user)`. Every money key is DELETED from the payload rather than nulled;
+  `allocation_count`, the houses each line is for and the invoice's identity all stay, so the bill
+  is still navigable by a showroom login. `test/price-list-exposure.test.js` is extended (not
+  duplicated) — a supplier invoice is a STRONGER disclosure than `unit_price`, being what a maison
+  actually charged across a whole cycle with the freight and duty on top.
+
+### Lifecycle (W14)
+
+- **`supplier_invoice` is in the registry with one probe and `archivable: false`** — no `archived_at`
+  column, matching `purchase_order`, because `matched` and `disputed` already take a bill off the
+  working list AND say why. Deleting one is refused while purchase orders are attached (FR-159); the
+  way out is to detach, which is a decision about those purchase orders rather than a step in tidying
+  an invoice away. **`supplier_invoice_allocation` has NO entry and must not get one** — absence is
+  what makes a DELETE route against the join impossible to register.
+- **Three new RESTRICT edges, three probes, three `CONSTRAINT_BLOCKERS` entries.** The purchase-order
+  delete gains a THIRD blocker (an invoiced purchase order is on somebody's ledger) and `supplier`
+  gains a `supplier_invoices` probe — **not redundant with its purchase-orders probe**, because an
+  invoice can be keyed against a house before anything has been ordered from it.
+
+### Deliberately not built (W14)
+
+- **Nothing derives a landed cost.** See the freight/duty bullet: the apportionment rule is owed by
+  the client, and this round records the information without changing anything — which is the
+  client's own description of what they want.
+- **No refusal for attaching a CANCELLED purchase order.** A house wrongly billing for an order that
+  was cancelled is exactly the discrepancy the variance exists to surface, and refusing the attach
+  would leave the office with a bill they cannot record. It is excluded from `/unbilled` (it is not
+  something to go looking for) and accepted if somebody attaches it deliberately.
+- **No credit notes.** `amount >= 0` and `total_amount >= 0`; a credit against a bill is a different
+  document with its own rules and nobody has stated them.
+
 ### Deliberately not built
 
 - **Receipting does not feed stock.** That is a decision, not an omission — see the invariant above.

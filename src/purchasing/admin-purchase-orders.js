@@ -64,6 +64,11 @@ import { buildUpdate } from '../catalogue/admin-brands.js'
 import { RESERVING_KINDS, HELD_STATUSES } from '../orders/order-states.js'
 import { planPurchaseOrders } from './po-plan.js'
 import { loadReceiptsByLineId } from './receipts.js'
+// W14. The dependency runs ONE WAY — `supplier-invoices.js` imports nothing
+// from here — so a purchase order can say which bill it is on without the two
+// modules forming a cycle. Same rule `receipts.js` states in the other
+// direction.
+import { loadInvoiceStateByPurchaseOrderId } from './supplier-invoices.js'
 import {
   STATUS_STAMPS,
   receiptState,
@@ -252,7 +257,7 @@ const summarise = (lines, finance) => {
   return summary
 }
 
-const toPurchaseOrder = (row, lines, finance) =>
+const toPurchaseOrder = (row, lines, finance, invoice) =>
   Object.freeze({
     id: row.id,
     po_number: row.po_number,
@@ -276,6 +281,13 @@ const toPurchaseOrder = (row, lines, finance) =>
     notes: row.notes,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    // Which supplier invoice, if any, has already billed for this purchase
+    // order (W14-US-003). `null` is "not billed yet", which is what the
+    // matching search lists. It is a whole object rather than a bare id because
+    // the one thing a buyer asks is WHICH bill, and the invoice number is what
+    // is written on the paper in their hand. The amount inside it is
+    // finance-gated by the loader.
+    supplier_invoice: invoice ?? null,
     ...summarise(lines, finance),
     lines: Object.freeze(lines),
   })
@@ -380,10 +392,20 @@ export const listPurchaseOrders = async (pool, options = {}) => {
     finance,
     { withReceipts: false }
   )
+  const invoices = await loadInvoiceStateByPurchaseOrderId(
+    pool,
+    rows.map((row) => row.id),
+    finance
+  )
 
   return {
     purchase_orders: rows.map((row) =>
-      toPurchaseOrder(row, linesByPurchaseOrder.get(row.id) ?? [], finance)
+      toPurchaseOrder(
+        row,
+        linesByPurchaseOrder.get(row.id) ?? [],
+        finance,
+        invoices.get(row.id)
+      )
     ),
     total: countResult.rows[0].total,
   }
@@ -407,7 +429,8 @@ export const getPurchaseOrder = async (db, id, { finance = false } = {}) => {
   const row = rows[0]
   if (!row) return null
   const lines = await loadLinesByPurchaseOrderId(db, [id], finance, { withReceipts: true })
-  return toPurchaseOrder(row, lines.get(id) ?? [], finance)
+  const invoices = await loadInvoiceStateByPurchaseOrderId(db, [id], finance)
+  return toPurchaseOrder(row, lines.get(id) ?? [], finance, invoices.get(id))
 }
 
 // ---------------------------------------------------------------------------

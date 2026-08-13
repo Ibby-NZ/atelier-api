@@ -20,6 +20,7 @@ import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
 import { adminSampleRoutes } from './routes/admin-samples.js'
 import { adminPurchaseOrderRoutes } from './routes/admin-purchase-orders.js'
+import { adminSupplierInvoiceRoutes } from './routes/admin-supplier-invoices.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
@@ -158,6 +159,11 @@ export const buildApp = ({
     // receipted against and closed. Back office only, and every cost figure on
     // it is finance-gated on top of that guard.
     api.register(adminPurchaseOrderRoutes, { pool })
+    // /admin/supplier-invoices — one house's bill across a 2-4 week cycle, and
+    // which purchase orders it covers. Back office only, every money figure on
+    // it finance-gated, and the variance between the bill and what those orders
+    // said they would cost is reported and never written.
+    api.register(adminSupplierInvoiceRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })

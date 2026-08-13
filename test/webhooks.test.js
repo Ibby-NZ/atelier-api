@@ -9,7 +9,11 @@ const WEBHOOK_SECRET = 'whsec_test_webhook_secret'
 const PREFIX = 'wh-test'
 const VALID_SIG = 'valid-sig'
 
-const SKU = { good: `${PREFIX}-GOOD`, other: `${PREFIX}-OTHER` }
+const SKU = {
+  good: `${PREFIX}-GOOD`,
+  other: `${PREFIX}-OTHER`,
+  trade: `${PREFIX}-TRADE`,
+}
 
 // Stripe stub: constructEvent parses the raw body back into an event, but only
 // when the signature header matches — otherwise it throws like the real SDK.
@@ -39,12 +43,13 @@ const seedFixtures = async (pool) => {
 
   const { rows: products } = await pool.query(
     `INSERT INTO products
-       (brand_id, name, slug, product_type, retail_price_cents, currency, show_on_website)
+       (brand_id, name, slug, product_type, retail_price_cents, trade_price_cents, currency, show_on_website)
      VALUES
-       ($1, 'Wh Good',  $2, 'finished_good', 4500, 'NZD', true),
-       ($1, 'Wh Other', $3, 'finished_good', 2000, 'NZD', true)
+       ($1, 'Wh Good',  $2, 'finished_good', 4500, NULL, 'NZD', true),
+       ($1, 'Wh Other', $3, 'finished_good', 2000, NULL, 'NZD', true),
+       ($1, 'Wh Trade', $4, 'finished_good', 4500, 9900, 'NZD', true)
      RETURNING id, slug`,
-    [brandId, `${PREFIX}-good`, `${PREFIX}-other`]
+    [brandId, `${PREFIX}-good`, `${PREFIX}-other`, `${PREFIX}-trade`]
   )
   const idBySlug = new Map(products.map((p) => [p.slug, p.id]))
 
@@ -58,11 +63,12 @@ const seedFixtures = async (pool) => {
   }
   const goodCw = await cw(`${PREFIX}-good`, SKU.good)
   const otherCw = await cw(`${PREFIX}-other`, SKU.other)
+  const tradeCw = await cw(`${PREFIX}-trade`, SKU.trade)
 
   await pool.query(
     `INSERT INTO inventory (colourway_id, qty_available, qty_reserved, unit)
-     VALUES ($1, 10, 0, 'units'), ($2, 10, 0, 'units')`,
-    [goodCw, otherCw]
+     VALUES ($1, 10, 0, 'units'), ($2, 10, 0, 'units'), ($3, 10, 0, 'units')`,
+    [goodCw, otherCw, tradeCw]
   )
 }
 
@@ -86,12 +92,15 @@ const completedEvent = (eventId, sessionId, cart, extra = {}) => ({
       id: sessionId,
       client_reference_id: null,
       customer_details: { email: 'buyer@example.test' },
+      ...extra,
+      // metadata last so a caller can override ONE key (the price basis) without
+      // restating the cart.
       metadata: {
         cart: JSON.stringify(cart),
         zone: 'Auckland',
         shipping_cents: '1200',
+        ...extra.metadata,
       },
-      ...extra,
     },
   },
 })
@@ -186,6 +195,27 @@ describe('POST /webhooks/stripe', () => {
     // Inventory decremented by ordered qty.
     expect(await availabilityBySku(SKU.good)).toBe(8)
     expect(await availabilityBySku(SKU.other)).toBe(9)
+  })
+
+  // The session was quoted (and charged) on a basis; re-resolving on any other
+  // one records an order for money nobody paid.
+  it('re-resolves prices on the basis the session was quoted on', async () => {
+    const trade = completedEvent(
+      `evt_${PREFIX}_trade`,
+      `cs_${PREFIX}_trade`,
+      [{ sku: SKU.trade, qty: 1 }],
+      { metadata: { trade: 'true' } }
+    )
+    expect((await post(trade)).statusCode).toBe(200)
+    const [tradeOrder] = await orderBySession(`cs_${PREFIX}_trade`)
+    expect(tradeOrder.subtotal_cents).toBe(9900)
+
+    const retail = completedEvent(`evt_${PREFIX}_retail`, `cs_${PREFIX}_retail`, [
+      { sku: SKU.trade, qty: 1 },
+    ])
+    expect((await post(retail)).statusCode).toBe(200)
+    const [retailOrder] = await orderBySession(`cs_${PREFIX}_retail`)
+    expect(retailOrder.subtotal_cents).toBe(4500)
   })
 
   it('stores the delivery address and phone Stripe collected', async () => {

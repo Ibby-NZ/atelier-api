@@ -198,6 +198,23 @@ describe('back-office order management', () => {
       const response = await inject('GET', '/admin/orders?status=bogus', backofficeCookie)
       expect(response.statusCode).toBe(400)
     })
+
+    // The list and the by-id read are two queries over one projection, so the
+    // account join has to be in both or a screen names the client only when it
+    // opens the order.
+    it('names the client on every listed order placed under an account', async () => {
+      const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [
+        testEmail('shopper'),
+      ])
+      const created = await inject('POST', '/admin/orders', backofficeCookie, {
+        user_id: rows[0].id,
+        lines: [{ colourway_id: colourwayId.get(SKU.inStock), qty: 1, unit_price_cents: 100 }],
+      })
+      const id = created.json().order.id
+      const response = await inject('GET', '/admin/orders', backofficeCookie)
+      const order = response.json().orders.find((o) => o.id === id)
+      expect(order.client_email).toBe(testEmail('shopper'))
+    })
   })
 
   describe('full lifecycle', () => {
@@ -365,6 +382,9 @@ describe('back-office order management', () => {
       expect(order.user_id).toBe(rows[0].id)
       // An account's address lives on the account; duplicating it here goes stale.
       expect(order.guest_email).toBeNull()
+      // ...which is why the read joins it back: without this the CRM can only
+      // say "Account #<id>" on every order placed under a login.
+      expect(order.client_email).toBe(testEmail('shopper'))
       expect(order.reservation_state).toBe('held')
       // 4 x 125.50 — the whole point of a manual order over a request.
       expect(order.subtotal_cents).toBe(50200)
@@ -384,6 +404,9 @@ describe('back-office order management', () => {
       const order = response.json().order
       expect(order.user_id).toBeNull()
       expect(order.guest_email).toBe('ada@example.com')
+      // No account, so nothing to join — the guest email is the only client.
+      expect(order.client_name).toBeNull()
+      expect(order.client_email).toBeNull()
       // The same packing a storefront request writes, so one CRM renderer reads both.
       expect(order.notes).toContain('Name: Ada Lovelace')
       expect(order.notes).toContain('Phone: 021 555')

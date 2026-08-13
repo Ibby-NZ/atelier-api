@@ -4,7 +4,7 @@
  *
  * The colour files are price lists — every one of the seventeen workbooks
  * prints a 2026 rate beside the colourway — and the office already has a
- * ratified shape for a supplier rate: the v2 template in lib/price-template.js,
+ * ratified shape for a supplier rate: the v3 template in lib/price-template.js,
  * which `npm run convert:pricing` reads. So this emits that template rather
  * than a shape of its own: a CSV whose header row IS the template's, which
  * means the rates land through the same vocabularies, the same code
@@ -26,23 +26,36 @@ import { matchTemplate, CATEGORY_BY_ITEM_TYPE } from '../price-template.js'
 /**
  * The template's columns as a supplier's own drop spells them, in order.
  *
- * v1's fourteen, then v2's four. `matchTemplate` lowercases and collapses
- * whitespace before comparing, so these are the human-readable spellings and
- * the match is still exact.
+ * v3's seventeen. `matchTemplate` lowercases and collapses whitespace before
+ * comparing, so these are the human-readable spellings and the match is still
+ * exact.
  */
 export const RATE_HEADER = Object.freeze([
-  'Date Effective', 'Product Range', 'Code', 'Description', 'Item Type',
-  'Pack Type', 'Contents', 'Width', 'Repeat', 'Vertical Repeat',
-  'Duty Rate', 'Wholesale Rate', 'Currency', 'Freight Rate',
-  'Supplier', 'Brand', 'Pattern Match', 'Duty Percent',
+  'Date Effective', 'Brand', 'Code', 'Description', 'Item Type',
+  'Unit', 'Contents', 'Width', 'Horizontal Repeat', 'Vertical Repeat',
+  'Pattern Match', 'Duty Rate', 'Wholesale Rate', 'Currency', 'Freight Rate',
+  'Supplier', 'Duty Percent',
 ])
 
-/** The rate field each column is written from, in the same order. */
+/**
+ * The rate field each column is written from, in the same order.
+ *
+ * The FIELD names are the adapters' and keep v1's vocabulary (`packType`,
+ * `repeat`) — a sheet's column map is also its header-recognition rule, so
+ * renaming a field there would change which header rows match. Only the
+ * template's labels moved.
+ *
+ * `productRange` is no longer written to any column: v3 has one Brand column
+ * and it holds the house. Seven adapters still read a book or collection name
+ * into that field (S. Harris's "PARADIGM", Colefax's books) and it now goes
+ * nowhere — the template has no column for a collection. Ask the client for one
+ * before inventing it.
+ */
 const COLUMN_FIELDS = Object.freeze([
-  'dateEffective', 'productRange', 'code', 'description', 'itemType',
+  'dateEffective', 'brand', 'code', 'description', 'itemType',
   'packType', 'contents', 'width', 'repeat', 'verticalRepeat',
-  'dutyRate', 'wholesale', 'currency', 'freightRate',
-  'supplier', 'brand', 'patternMatch', 'dutyPercent',
+  'patternMatch', 'dutyRate', 'wholesale', 'currency', 'freightRate',
+  'supplier', 'dutyPercent',
 ])
 
 /** The version this header declares, or a throw naming what it matched instead. */

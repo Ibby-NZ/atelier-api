@@ -1455,10 +1455,10 @@ const cellsByColumn = (rate) =>
   Object.fromEntries(RATE_HEADER.map((label, index) => [label, rateCells(rate)[index]]))
 
 describe('colour-rates — the emitted shape IS the pricing template', () => {
-  it('matches a registered template exactly, and it is v2', () => {
-    expect(RATE_TEMPLATE.version).toBe('v2')
+  it('matches a registered template exactly, and it is v3', () => {
+    expect(RATE_TEMPLATE.version).toBe('v3')
     expect(matchTemplate([...RATE_HEADER])).toBe(RATE_TEMPLATE)
-    expect(RATE_HEADER).toHaveLength(18)
+    expect(RATE_HEADER).toHaveLength(17)
   })
 
   it('fails at import if the header ever stops matching a template', () => {
@@ -1469,15 +1469,19 @@ describe('colour-rates — the emitted shape IS the pricing template', () => {
   it('writes each field into its own column, and nothing into the three no file fills', () => {
     expect(cellsByColumn(RATE)).toEqual({
       'Date Effective': '02/02/2026',
-      'Product Range': 'PARADIGM',
+      // v3 has ONE brand column and the house goes in it. The book this row
+      // came out of ("PARADIGM") has no column in the template the client
+      // ratified, so it is read and not written — see rate-template.js.
+      Brand: 'S. Harris',
       Code: '22042',
       Description: 'A LA CARTE',
       'Item Type': 'Fabrics',
-      'Pack Type': 'p/y',
+      Unit: 'p/y',
       Contents: '75% Viscose',
       Width: '57',
-      Repeat: '28.62',
+      'Horizontal Repeat': '28.62',
       'Vertical Repeat': '41.25',
+      'Pattern Match': '',
       // Nothing is invented into these three. The broker's duty table and the
       // freight class table are still owed, and a placeholder written here
       // would be indistinguishable from a rate a supplier quoted.
@@ -1486,8 +1490,6 @@ describe('colour-rates — the emitted shape IS the pricing template', () => {
       Currency: 'US Dollar',
       'Freight Rate': '',
       Supplier: 'S Harris',
-      Brand: 'S. Harris',
-      'Pattern Match': '',
       'Duty Percent': '',
     })
   })
@@ -1505,7 +1507,7 @@ describe('colour-rates — the emitted shape IS the pricing template', () => {
     // read back by lib/price-template.js itself, not by a copy of its rules.
     const rows = [...csvRows(serialiseRates([RATE]))]
     const template = matchTemplate(rows[0][1])
-    expect(template.version).toBe('v2')
+    expect(template.version).toBe('v3')
     const errors = []
     const skipped = []
     const item = template.map(rows[1][1], {
@@ -1526,11 +1528,11 @@ describe('colour-rates — the emitted shape IS the pricing template', () => {
       currency: 'USD',
       wholesale_rate: 75.2,
       date_effective: '2026-02-02',
-      brand_name: 'S. Harris',
+      product_range: 'S. Harris',
       duty_class: null,
       freight_class: null,
       duty_percent: null,
-      template_version: 'v2',
+      template_version: 'v3',
     })
   })
 
@@ -1640,9 +1642,11 @@ describe('colour-rates — one row per ledger key', () => {
 
   it("collapses a design's colourway rows onto its rate", () => {
     // Same key, same money, a cell belonging to the colourway differs. The
-    // ledger holds one row per key, so both cannot be written.
+    // ledger holds one row per key, so both cannot be written. (The differing
+    // cell has to be one v3 still WRITES — a row differing only in the book it
+    // came out of is now an exact repeat, because v3 has no column for a book.)
     const { records, duplicates, collapsed } = collectRates([
-      RATE, rate({ productRange: 'ANOTHER BOOK', sourceRow: 106 }),
+      RATE, rate({ contents: '75% Viscose, 25% Linen', sourceRow: 106 }),
     ])
     expect(records).toEqual([RATE])
     expect(duplicates).toBe(0)

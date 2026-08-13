@@ -20,6 +20,8 @@ import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminFreightRoutes } from './routes/admin-freight.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
 import { adminSampleRoutes } from './routes/admin-samples.js'
+import { adminSampleLoanRoutes } from './routes/admin-sample-loans.js'
+import { adminEmailTemplateRoutes } from './routes/admin-email-templates.js'
 import { adminPurchaseOrderRoutes } from './routes/admin-purchase-orders.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
@@ -160,6 +162,14 @@ export const buildApp = ({
     // is out, what is late back) plus the scanner's by-barcode lookup. Back
     // office only, same CORS allowance as every other CRM screen.
     api.register(adminSampleRoutes, { pool })
+    // /admin/sample-loans — the cross-register outstanding read and the
+    // reminders composed off it. Its own plugin because it is the one samples
+    // surface that needs the mailer: a reminder is a staff action off a work
+    // queue, sent on a click, never by a scheduler (there is none).
+    api.register(adminSampleLoanRoutes, { pool, mailer })
+    // /admin/email-templates — the staff-editable "set letter" behind those
+    // reminders. A row overrides the code template; deleting it reverts.
+    api.register(adminEmailTemplateRoutes, { pool })
     // /admin/purchase-orders + /admin/purchase-order-lines/:id/{allocations,receipts}
     // — the buying desk: the day's confirmed demand grouped by house, sent,
     // receipted against and closed. Back office only, and every cost figure on

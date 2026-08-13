@@ -89,4 +89,29 @@ export const REPRESENTED_HOUSES = Object.freeze([
     country: 'France',
     currency: 'EUR',
   }),
+  // --- Added 13 Aug 2026, from the client's brand copy -------------------
+  // Three houses the 4 Aug roster omitted but whose page copy the client
+  // wrote. Without a brands row the storefront's /brands wall (API-driven)
+  // cannot list them and /brands/<slug> falls back to the markdown file id
+  // for its heading, so the copy would render under "fox-linton".
+  // `website_url` is deliberately absent from brand-websites.js for all
+  // three: no roster link was supplied, and a guessed URL renders as a
+  // "Visit website" action that may be dead. Staff add it in the CRM.
+  Object.freeze({
+    name: 'Fox Linton',
+    slug: 'fox-linton',
+    country: 'England',
+    currency: 'GBP',
+  }),
+  // Passementerie and curtain hardware, Paris. slugify() strips the grave
+  // accent, so "Houlès" is `houles`.
+  Object.freeze({ name: 'Houlès', slug: 'houles', country: 'France', currency: 'EUR' }),
+  // Milanese wallcovering house; makes the Armani Casa and Missoni papers we
+  // already carry under their own brands.
+  Object.freeze({
+    name: 'Jannelli & Volpi',
+    slug: 'jannelli-volpi',
+    country: 'Italy',
+    currency: 'EUR',
+  }),
 ])

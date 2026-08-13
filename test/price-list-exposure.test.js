@@ -206,6 +206,35 @@ describe('cost-side exposure', () => {
       expect(res.statusCode).toBe(403)
     })
 
+    // `samples.unit_cost` (W20-US-001) is Atelier's buy side on a physical
+    // object, so it joins the same net rather than getting an exposure test of
+    // its own — FR-264: sample cost never reaches a client-facing response.
+    // Beyond the cost, the register says WHERE every object is and WHO has it,
+    // including other clients' names on `sample_loans.holder_name`, which the
+    // outstanding read and the reminder drafts both carry.
+    //
+    // Every payload is schema-VALID: Fastify validates before a preHandler
+    // runs, so a malformed body would 400 and pass with the guard deleted.
+    const sampleSurface = [
+      ['GET', '/admin/samples', undefined],
+      ['GET', '/admin/samples/by-barcode/anything', undefined],
+      ['GET', '/admin/samples/1', undefined],
+      ['POST', '/admin/samples', { barcode: 'exposure-test-sample', unit_cost: 1 }],
+      ['PATCH', '/admin/samples/1', { unit_cost: 1 }],
+      // The cross-register read and the letters that quote it.
+      ['GET', '/admin/sample-loans', undefined],
+      ['POST', '/admin/sample-loans/reminders/preview', { loan_ids: [1] }],
+      [
+        'POST',
+        '/admin/sample-loans/reminders',
+        { loan_id: 1, to: 'someone@example.test', subject: 'x', body: 'y' },
+      ],
+      // The letters themselves go out over Atelier's name.
+      ['GET', '/admin/email-templates', undefined],
+      ['PUT', '/admin/email-templates/sample_loan_reminder', { subject: 'x', body: 'y' }],
+    ]
+
+    for (const [method, url, payload] of sampleSurface) {
     // W13. `purchase_order_lines.unit_price` is what Atelier PAYS a maison, in
     // that maison's currency and for most of them already discount-inclusive —
     // the same disclosure `price_list_items.wholesale_rate` is, arrived at by a

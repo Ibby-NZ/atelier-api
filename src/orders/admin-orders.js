@@ -377,6 +377,21 @@ const ORDER_HEADER_COLUMNS = Object.freeze([
   'customer_po_number',
 ])
 
+// The two columns that are ANNOTATIONS rather than commercial terms. Neither
+// moves money, stock or a reservation, so neither is gated on the order still
+// being editable — a client's PO number almost never arrives before the order
+// is raised, and on a paid order it is precisely the thing the office is trying
+// to record. Everything else in ORDER_HEADER_COLUMNS stays behind the status
+// guard, because changing where an order ships after it shipped is a different
+// question that nobody has asked for.
+const ANNOTATION_COLUMNS = Object.freeze(['client_reference', 'customer_po_number'])
+
+/** True when a patch touches nothing but those annotations. */
+const isAnnotationOnly = (patch) => {
+  const keys = Object.keys(patch)
+  return keys.length > 0 && keys.every((key) => ANNOTATION_COLUMNS.includes(key))
+}
+
 const applyOrderHeader = async (client, id, patch) => {
   const sets = []
   const params = [id]
@@ -421,7 +436,9 @@ const applyOrderHeader = async (client, id, patch) => {
  */
 export const editOrderLines = (pool, id, patch) =>
   withOrderTxn(pool, id, async (client, order) => {
-    requireStatus(order, ['requested', 'confirmed'], 'edit')
+    if (!isAnnotationOnly(patch)) {
+      requireStatus(order, ['requested', 'confirmed'], 'edit')
+    }
 
     const edits = patch.lines ?? []
     const adds = patch.add_lines ?? []

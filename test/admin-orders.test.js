@@ -868,6 +868,28 @@ describe('back-office order management', () => {
         const response = await patch(order.id, { notes: 'Something else.' })
         expect(response.json().order.customer_po_number).toBe('PO-KEEP')
       })
+
+      // The whole reason these two columns exist is that the number arrives
+      // late — often in an email after the client has already paid. A guard
+      // that refuses it past `confirmed` would make the feature unusable at
+      // exactly the moment it is needed.
+      it('records a PO number on a paid order, but still refuses a line edit', async () => {
+        const order = await placeWith(`${TAG} pays-first`)
+        await inject('POST', `/admin/orders/${order.id}/confirm`, backofficeCookie, {
+          xero_invoice_ref: 'INV-LATE-PO',
+        })
+        await inject('POST', `/admin/orders/${order.id}/mark-paid`, backofficeCookie)
+
+        const late = await patch(order.id, { customer_po_number: 'PO-LATE-1' })
+        expect(late.statusCode).toBe(200)
+        expect(late.json().order.status).toBe('paid')
+        expect(late.json().order.customer_po_number).toBe('PO-LATE-1')
+
+        // An annotation is not a licence to edit the commercial terms: money,
+        // lines and the reservation stay frozen once an order is paid.
+        const lines = await patch(order.id, { notes: 'nudge the header' })
+        expect(lines.statusCode).toBe(409)
+      })
     })
 
     describe('filters', () => {

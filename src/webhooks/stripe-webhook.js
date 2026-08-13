@@ -99,7 +99,7 @@ const createPaidOrder = async (client, session) => {
         subtotal_cents, shipping_cents, total_cents, shipping_zone, stripe_session_id,
         shipping_address, contact_phone)
      VALUES ($1, $2, $3, 'checkout', 'paid', $4, $5, $6, $7, $8, $9, $10)
-     RETURNING id, order_number, user_id, guest_email, total_cents`,
+     RETURNING id, order_number, kind, user_id, guest_email, total_cents`,
     [
       userId,
       guestEmail,
@@ -130,10 +130,12 @@ const createPaidOrder = async (client, session) => {
   }
 
   // guest_email / user_id / total_cents let the caller send a checkout receipt
-  // (US-015) without a second query.
+  // (US-015) without a second query; `kind` lets it name the order in the
+  // back-office alert (W12 US-004) without re-reading the row it just wrote.
   return {
     id: order.id,
     order_number: order.order_number,
+    kind: order.kind,
     user_id: order.user_id,
     guest_email: order.guest_email,
     total_cents: order.total_cents,

@@ -8,11 +8,35 @@ import { resolveOrderRecipient } from './recipients.js'
 
 // Admin status -> the template announcing that transition (US-014). A status not
 // in this map (e.g. 'declined') sends nothing.
+//
+// `confirmed` maps to `order_invoiced`, NOT to `order_confirmed`: the client's
+// confirmation now goes out when the order is CREATED (US-005, FR-120), so
+// confirming has to say something of its own or it re-sends a mail the client
+// already has (FR-121). Two events, two messages.
 const TRANSITION_TEMPLATES = Object.freeze({
-  confirmed: 'order_confirmed',
+  confirmed: 'order_invoiced',
   paid: 'payment_received',
   shipped: 'shipped',
 })
+
+// The back office's alert that an order exists, whichever path created it
+// (US-004, FR-119).
+//
+// **ONE address — `mailer.backofficeEmail`, the configured admin@ — and never a
+// per-salesperson list.** That restriction is the client's actual requirement,
+// not an implementation detail waiting to be "improved" into a routing table:
+// an order that lands in one person's inbox is an order nobody else covers when
+// that person is away.
+const sendBackofficeAlert = (mailer, order, customerEmail) =>
+  mailer.send({
+    template: 'backoffice_new_request',
+    to: mailer.backofficeEmail,
+    data: {
+      order_number: order.order_number,
+      kind: order.kind,
+      customer_email: customerEmail ?? null,
+    },
+  })
 
 /**
  * A new fabric/backorder request (US-012): acknowledge to the customer and alert
@@ -25,15 +49,61 @@ export const notifyRequestReceived = async (mailer, { order, customerEmail }) =>
   if (!mailer) {
     return
   }
-  const data = { order_number: order.order_number, kind: order.kind }
   if (customerEmail) {
-    await mailer.send({ template: 'request_received', to: customerEmail, data })
+    await mailer.send({
+      template: 'request_received',
+      to: customerEmail,
+      data: { order_number: order.order_number, kind: order.kind },
+    })
   }
-  await mailer.send({
-    template: 'backoffice_new_request',
-    to: mailer.backofficeEmail,
-    data: { ...data, customer_email: customerEmail ?? null },
-  })
+  await sendBackofficeAlert(mailer, order, customerEmail)
+}
+
+/**
+ * Alert the back office about a new order on a path that already sends the
+ * client its own message — the Stripe checkout, which sends a receipt naming the
+ * amount paid (US-004, FR-119). Before this, a card sale reached the office only
+ * when somebody opened the queue.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ query: Function }} db
+ * @param {{ order_number: string, kind: string, guest_email?: string|null, user_id?: number|null }} order
+ */
+export const notifyBackofficeNewOrder = async (mailer, db, order) => {
+  if (!mailer) {
+    return
+  }
+  await sendBackofficeAlert(mailer, order, await resolveOrderRecipient(db, order))
+}
+
+/**
+ * A newly created order that has no message of its own: the client's
+ * confirmation (US-005, FR-120) and the back-office alert (US-004, FR-119) in
+ * one call. Today that is the back office's own `POST /admin/orders`, which
+ * notified nobody at all — neither the client it was keyed for nor the desk.
+ *
+ * The confirmation is deliberately the same `order_confirmed` copy the `confirm`
+ * transition used to send, moved rather than duplicated; `confirm` now sends
+ * `order_invoiced` instead.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ query: Function }} db
+ * @param {{ order_number: string, kind: string, guest_email?: string|null, user_id?: number|null }} order
+ */
+export const notifyOrderCreated = async (mailer, db, order) => {
+  if (!mailer) {
+    return
+  }
+  const to = await resolveOrderRecipient(db, order)
+  if (to) {
+    await mailer.send({
+      template: 'order_confirmed',
+      to,
+      // A new order has no invoice yet; the template's own branch says so.
+      data: { order_number: order.order_number, xero_invoice_ref: null },
+    })
+  }
+  await sendBackofficeAlert(mailer, order, to)
 }
 
 /**

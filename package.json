@@ -18,6 +18,8 @@
     "convert:colour": "node scripts/convert-colour-files.js",
     "import:colour": "node src/seed/import-colourways.js",
     "convert:legacy": "node scripts/convert-d365-exports.js",
+    "sheet:prices": "node scripts/export-category-sheets.js prices",
+    "sheet:stock": "node scripts/export-category-sheets.js stock",
     "import:legacy": "node src/seed/import-legacy.js",
     "push:legacy": "node src/seed/push-legacy.js",
     "lint": "eslint .",

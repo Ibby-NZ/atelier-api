@@ -12,9 +12,25 @@
  * src/seed/data/price-lists.json is committed and byte-pinned, so any change to
  * what it emits (key order included) surfaces as an 8 MB diff.
  *
- * v2 is a strict SUPERSET of v1: the same fourteen columns, in the same order,
- * with Supplier, Brand, Pattern Match and Duty Percent appended. So `mapV2`
- * delegates the shared cells to `mapV1` and appends its own keys after them.
+ * v3 is the client's own correction of v2, and v2 is GONE rather than kept
+ * beside it. v2 appended Supplier, Brand, Pattern Match and Duty Percent to
+ * v1's fourteen; the client read it back and said the Brand column duplicates
+ * Product Range, which their files have always filled with the house name
+ * (measured: 19,447 of the 19,514 committed rows put the supplier's own house
+ * in Product Range — the 67 exceptions are one Jannelli & Volpi range). So v3
+ * folds the two into ONE column called Brand, renames Pack Type to Unit and
+ * Repeat to Horizontal Repeat, and moves Pattern Match up beside the two
+ * repeats it belongs with.
+ *
+ * v2 is removed, not superseded, because no row anywhere came in through it:
+ * every row in the committed file and in the client's database is v1, and the
+ * client rejected the layout before a supplier ever filled one in. Leaving it
+ * registered would go on accepting the very shape this replaces. v1 stays
+ * registered forever — 74 drops and 19.5k rows arrived through it.
+ *
+ * The version STRING still only ever means one header, which is why this is v3
+ * and not a redefinition of v2: v2's header was published to the client, and a
+ * version that changes shape makes `template_version` lie about the past.
  */
 import { excelDate } from './xlsx.js'
 import { parseNumber, round4, generalFormat, floatRepr } from './python-format.js'
@@ -228,9 +244,9 @@ export const mapV1 = (row, context) => {
     return fail(`bad date "${rawDate}"`)
   }
 
-  // A v1 row emits NONE of the v2-only keys — not even as null. Every one of the
+  // A v1 row emits NONE of the v3-only keys — not even as null. Every one of the
   // 19.5k records in the committed price-lists.json was written without them, so
-  // adding `brand_name: null` to each would turn the next regeneration into a
+  // adding `pattern_match: null` to each would turn the next regeneration into a
   // total 8 MB diff for no information. An absent key and an explicit null mean
   // the same thing to the importer, which binds NULL either way (the single
   // exception is template_version, whose NOT NULL DEFAULT a bound NULL would
@@ -256,19 +272,39 @@ export const mapV1 = (row, context) => {
   }
 }
 
-const V2_HEADER = Object.freeze([
-  ...V1_HEADER, 'supplier', 'brand', 'pattern match', 'duty percent',
+/**
+ * v3: seventeen columns. Same fourteen meanings v1 carries, three of them
+ * relabelled to what the office actually calls them, plus Pattern Match beside
+ * the repeats and Supplier and Duty Percent at the end.
+ *
+ * Product Range -> Brand is a RENAME, not a new field. The cell has always held
+ * the house; v2's separate Brand column was the duplicate, and it is gone.
+ */
+const V3_HEADER = Object.freeze([
+  'date effective', 'brand', 'code', 'description', 'item type',
+  'unit', 'contents', 'width', 'horizontal repeat', 'vertical repeat',
+  'pattern match', 'duty rate', 'wholesale rate', 'currency', 'freight rate',
+  'supplier', 'duty percent',
 ])
+
+/**
+ * Where each of v1's fourteen cells sits in a v3 row, in v1's own order.
+ *
+ * v3 inserts Pattern Match at index 10, so everything from Duty Rate on shifts
+ * by one and `mapV1` — which reads by POSITION — can no longer be handed a v3
+ * row directly the way it could a v2 one. Rebuilding a v1-shaped row here is
+ * what keeps the shared columns mapped by mapV1 alone: re-listing them in a
+ * second mapper is how the byte-pinned price-lists.json would rot.
+ */
+const V1_CELL_IN_V3 = Object.freeze([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14])
 
 /** Python's `round(x, 3)` — the scale of price_list_items.duty_percent. */
 const round3 = (value) => Number(value.toFixed(3))
 
-export const mapV2 = (row, context) => {
-  const cells = []
-  for (let index = V1_HEADER.length; index < V2_HEADER.length; index += 1) {
-    cells.push((row[index] ?? '').trim())
-  }
-  const [supplierCell, brand, patternMatch, rawDutyPercent] = cells
+export const mapV3 = (row, context) => {
+  const patternMatch = (row[10] ?? '').trim()
+  const supplierCell = (row[15] ?? '').trim()
+  const rawDutyPercent = (row[16] ?? '').trim()
 
   // The Supplier cell WINS over the filename — the filename was the most fragile
   // input in the pipeline (a rename or a new naming habit silently renamed a
@@ -277,7 +313,11 @@ export const mapV2 = (row, context) => {
   const supplier = supplierCell || context.supplier
   if (!supplier) return failRow(context, 'empty supplier and none in the filename')
 
-  const item = mapV1(row, { ...context, supplier })
+  // The Brand cell lands in `product_range`, the column v1's Product Range has
+  // always written. The label is what the client corrected; the storage is 19.5k
+  // rows deep and its name is internal, so renaming the column would buy a
+  // migration, a byte-pin translation layer and nothing anybody can see.
+  const item = mapV1(V1_CELL_IN_V3.map((index) => row[index] ?? ''), { ...context, supplier })
   if (item === null) return null
 
   let dutyPercent = null
@@ -297,17 +337,16 @@ export const mapV2 = (row, context) => {
   // declared — written down, never a cell read from the file.
   return {
     ...item,
-    brand_name: brand || null,
     pattern_match: patternMatch || null,
     duty_percent: dutyPercent,
-    template_version: 'v2',
+    template_version: 'v3',
   }
 }
 
 /** Accepted templates, newest last — first exact header match wins. */
 export const TEMPLATES = Object.freeze([
   Object.freeze({ version: 'v1', header: V1_HEADER, map: mapV1 }),
-  Object.freeze({ version: 'v2', header: V2_HEADER, map: mapV2 }),
+  Object.freeze({ version: 'v3', header: V3_HEADER, map: mapV3 }),
 ])
 
 const normaliseLabel = (cell) => String(cell).toLowerCase().split(/\s+/).filter(Boolean).join(' ')

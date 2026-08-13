@@ -58,4 +58,14 @@ export const BRAND_STORIES = Object.freeze({
     'Lyon silk house holding one of the world’s largest weaving archives, working traditional silk mastery under the Entreprise du Patrimoine Vivant label.',
   vervain:
     'Quintessential silks and wallcoverings, worked with designers including Barry Dixon and Denise McGaha (Fabricut family).',
+
+  // --- Added 13 Aug 2026, with the three houses the roster omitted --------
+  // Written from the client's own brand copy rather than from the houses'
+  // websites; the years are the ones that copy states.
+  'fox-linton':
+    'British house founded by designer Mary Fox Linton, weaving indoor and outdoor cloth and throws in wool, linen, silk and velvet at specialist mills across Britain and Europe.',
+  houles:
+    'Founded 1928 in Paris, a fourth-generation maison of passementerie — tassels, fringes, cords, braids and tiebacks — and of curtain poles, finials and fittings.',
+  'jannelli-volpi':
+    'Founded 1961, a family-run Milanese wallpaper house, maker of the licensed Armani/Casa and Missoni wallcovering collections.',
 })

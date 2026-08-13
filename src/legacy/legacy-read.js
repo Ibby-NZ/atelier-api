@@ -32,7 +32,7 @@ import {
   LEGACY_ENTITIES,
   entityConfig,
 } from './read-entities.js'
-import { baseSnapshotSql, mergedProjection } from './override-schema.js'
+import { SYNTHETIC_COLUMNS, baseSnapshotSql, mergedProjection } from './override-schema.js'
 
 export { LEGACY_ENTITIES, ENTITIES, entityConfig }
 
@@ -57,6 +57,10 @@ const mapRow = (row, config) => {
   out.origin = isLocal ? 'local' : 'd365'
   if (!Object.hasOwn(out, 'overridden_fields')) out.overridden_fields = []
   if (!Object.hasOwn(out, 'archived_at')) out.archived_at = null
+  // The fast path selects the staging columns only, so the synthetic ones have
+  // to be defaulted here or a key appears and disappears depending on whether
+  // anyone has ever corrected this entity.
+  if (!Object.hasOwn(out, 'custom_fields')) out.custom_fields = {}
   return out
 }
 
@@ -94,8 +98,12 @@ const buildWhere = (config, { q, filters = {} } = {}, bound = []) => {
   return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params }
 }
 
-/** The three synthetic columns every merged row carries, in projection order. */
-const MERGED_EXTRAS = ['is_local', 'archived_at', 'overridden_fields']
+/**
+ * The synthetic columns every merged row carries, in projection order. Named in
+ * override-schema.js beside the projection that emits them, so this list cannot
+ * disagree with that one about either membership or order.
+ */
+const MERGED_EXTRAS = SYNTHETIC_COLUMNS
 
 /**
  * The `merged` CTE: the staging rows with their corrections applied, plus the

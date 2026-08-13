@@ -19,8 +19,11 @@
 // 200 imply more than happened.
 
 import {
+  MAX_CUSTOM_FIELDS,
   baseSnapshotSql,
   castProbeSql,
+  normaliseCustomFields,
+  normaliseCustomRevertList,
   normaliseOverridePatch,
   normaliseRevertList,
 } from './override-schema.js'
@@ -99,7 +102,8 @@ const dropEmptyOverride = (client, entity, guid) =>
   client.query(
     `DELETE FROM d365_overrides
       WHERE entity = $1 AND guid = $2
-        AND NOT local AND archived_at IS NULL AND patch = '{}'::jsonb`,
+        AND NOT local AND archived_at IS NULL
+        AND patch = '{}'::jsonb AND extras = '{}'::jsonb`,
     [entity, guid]
   )
 
@@ -115,19 +119,41 @@ const dropEmptyOverride = (client, entity, guid) =>
  * A column named in both `set` and `revert` is a 422 rather than a precedence
  * rule nobody can see from the request.
  *
- * @param {{ set?: object, revert?: string[], userId?: number|null }} input
+ * `custom` / `revertCustom` are the same two verbs over the fields D365 has no
+ * column for. They ride in the SAME statement and merge the same way, so a
+ * correction and a custom field written at once are one atomic write, and two
+ * staff editing different custom fields cannot lose each other's work either.
+ *
+ * @param {{ set?: object, revert?: string[], custom?: object,
+ *           revertCustom?: string[], userId?: number|null }} input
  */
-export const setLegacyOverrides = async (pool, entity, guid, { set, revert, userId = null } = {}) => {
+export const setLegacyOverrides = async (
+  pool,
+  entity,
+  guid,
+  { set, revert, custom, revertCustom, userId = null } = {}
+) => {
   const config = entityConfig(entity)
   const patch = normaliseOverridePatch(entity, set ?? {})
   const reverted = normaliseRevertList(entity, revert ?? [])
+  const extras = normaliseCustomFields(entity, custom ?? {})
+  const revertedCustom = normaliseCustomRevertList(entity, revertCustom ?? [])
 
-  if (!Object.keys(patch).length && !reverted.length) {
-    throw httpError(422, 'Provide at least one column to set or revert.')
+  if (
+    !Object.keys(patch).length &&
+    !reverted.length &&
+    !Object.keys(extras).length &&
+    !revertedCustom.length
+  ) {
+    throw httpError(422, 'Provide at least one column or custom field to set or revert.')
   }
   const clash = reverted.filter((column) => Object.hasOwn(patch, column))
   if (clash.length) {
     throw httpError(422, `Cannot set and revert the same column: ${clash.join(', ')}.`)
+  }
+  const customClash = revertedCustom.filter((key) => Object.hasOwn(extras, key))
+  if (customClash.length) {
+    throw httpError(422, `Cannot set and revert the same custom field: ${customClash.join(', ')}.`)
   }
 
   await withTxn(pool, async (client) => {
@@ -149,17 +175,19 @@ export const setLegacyOverrides = async (pool, entity, guid, { set, revert, user
     const written = Object.keys(patch)
     const { rows } = await client.query(
       `INSERT INTO d365_overrides
-              (entity, guid, patch, base, local, created_by_user_id, updated_by_user_id)
+              (entity, guid, patch, base, extras, local, created_by_user_id, updated_by_user_id)
        SELECT $1, $2, $3::jsonb - $4::text[],
               COALESCE((SELECT ${baseSnapshotSql(entity, 't', written)} FROM ${config.table} t WHERE t.guid = $2), '{}'::jsonb),
+              $6::jsonb - $7::text[],
               false, $5, $5
        ON CONFLICT (entity, guid) DO UPDATE
           SET patch = (d365_overrides.patch || EXCLUDED.patch) - $4::text[],
               base = (d365_overrides.base - $4::text[]) || EXCLUDED.base,
+              extras = (d365_overrides.extras || EXCLUDED.extras) - $7::text[],
               updated_by_user_id = EXCLUDED.updated_by_user_id,
               updated_at = now()
-       RETURNING local, patch`,
-      [entity, guid, JSON.stringify(patch), reverted, userId]
+       RETURNING local, patch, extras`,
+      [entity, guid, JSON.stringify(patch), reverted, userId, JSON.stringify(extras), revertedCustom]
     )
 
     // Refused AFTER the write and inside the transaction, so the rollback undoes
@@ -170,6 +198,17 @@ export const setLegacyOverrides = async (pool, entity, guid, { set, revert, user
       throw httpError(
         422,
         'Reverting every field would leave this locally raised record empty. Delete it instead.'
+      )
+    }
+
+    // The cap is per RECORD, and only the merged result knows the total: the
+    // request carrying the fifty-first field may be carrying exactly one. Checked
+    // in the same place and for the same reason as the guard above — a pre-read
+    // would be counting a value another transaction is about to change.
+    if (Object.keys(row.extras).length > MAX_CUSTOM_FIELDS) {
+      throw httpError(
+        422,
+        `That would leave this record with more than ${MAX_CUSTOM_FIELDS} custom fields. Remove some first.`
       )
     }
 
@@ -195,11 +234,19 @@ export const setLegacyOverrides = async (pool, entity, guid, { set, revert, user
  * to a local guid at all — `POST /admin/trade-accounts` resolves the account out
  * of `legacy_accounts` first, so it 422s, which is the right answer.
  */
-export const createLocalLegacyRecord = async (pool, entity, { values, userId = null } = {}) => {
+export const createLocalLegacyRecord = async (
+  pool,
+  entity,
+  { values, custom, userId = null } = {}
+) => {
   const patch = normaliseOverridePatch(entity, values ?? {})
+  const extras = normaliseCustomFields(entity, custom ?? {})
   // Counting KEYS is not enough: `{ name: null }` is one key and produces a
   // record with every column null — the same phantom a revert-to-nothing would
-  // leave, arriving through the front door.
+  // leave, arriving through the front door. Custom fields do not satisfy it
+  // either: search, the filters and every ORDER BY run over the DECLARED
+  // columns, so a record identified only by a custom field is a blank row in the
+  // list that nothing can find.
   if (!Object.values(patch).some((value) => value !== null)) {
     throw httpError(422, 'Provide at least one column value that is not null.')
   }
@@ -208,10 +255,10 @@ export const createLocalLegacyRecord = async (pool, entity, { values, userId = n
     await proveCastable(client, entity, patch)
     const { rows } = await client.query(
       `INSERT INTO d365_overrides
-              (entity, guid, patch, base, local, created_by_user_id, updated_by_user_id)
-       VALUES ($1, gen_random_uuid(), $2::jsonb, '{}'::jsonb, true, $3, $3)
+              (entity, guid, patch, base, extras, local, created_by_user_id, updated_by_user_id)
+       VALUES ($1, gen_random_uuid(), $2::jsonb, '{}'::jsonb, $4::jsonb, true, $3, $3)
        RETURNING guid`,
-      [entity, JSON.stringify(patch), userId]
+      [entity, JSON.stringify(patch), userId, JSON.stringify(extras)]
     )
     return rows[0].guid
   })

@@ -17,7 +17,11 @@ const SKU = {
   noPrice: `${PREFIX}-NOPRICE`,
   low: `${PREFIX}-LOW`,
   fabric: `${PREFIX}-FABRIC`,
+  trade: `${PREFIX}-TRADE`,
 }
+
+const PASSWORD = 'checkout-test-password-123'
+const TRADE_EMAIL = `${PREFIX}-trader@example.test`
 
 // A Stripe stub that records the params of the last create() call and returns a
 // deterministic session. No network, no SDK.
@@ -63,13 +67,17 @@ const seedFixtures = async (pool) => {
   const brandId = brands[0].id
 
   const { rows: products } = await pool.query(
+    // The trade fixture is priced in EUR at retail and carries a trade figure:
+    // trade money is NZD cents whatever `currency` says, so the two are only
+    // told apart when they disagree.
     `INSERT INTO products
-       (brand_id, name, slug, product_type, retail_price_cents, currency, show_on_website)
+       (brand_id, name, slug, product_type, retail_price_cents, trade_price_cents, currency, show_on_website)
      VALUES
-       ($1, 'Chk Good',   $2, 'finished_good', 4500, 'NZD', true),
-       ($1, 'Chk NoPrice',$3, 'finished_good', NULL, 'NZD', true),
-       ($1, 'Chk Low',    $4, 'finished_good', 2000, 'NZD', true),
-       ($1, 'Chk Fabric', $5, 'fabric',        NULL, 'NZD', true)
+       ($1, 'Chk Good',   $2, 'finished_good', 4500, NULL, 'NZD', true),
+       ($1, 'Chk NoPrice',$3, 'finished_good', NULL, NULL, 'NZD', true),
+       ($1, 'Chk Low',    $4, 'finished_good', 2000, NULL, 'NZD', true),
+       ($1, 'Chk Fabric', $5, 'fabric',        NULL, NULL, 'NZD', true),
+       ($1, 'Chk Trade',  $6, 'finished_good', 4500, 9900, 'EUR', true)
      RETURNING id, slug`,
     [
       brandId,
@@ -77,6 +85,7 @@ const seedFixtures = async (pool) => {
       `${PREFIX}-noprice`,
       `${PREFIX}-low`,
       `${PREFIX}-fabric`,
+      `${PREFIX}-trade`,
     ]
   )
   const idBySlug = new Map(products.map((p) => [p.slug, p.id]))
@@ -93,14 +102,16 @@ const seedFixtures = async (pool) => {
   const noPriceCw = await cw(`${PREFIX}-noprice`, SKU.noPrice)
   const lowCw = await cw(`${PREFIX}-low`, SKU.low)
   const fabricCw = await cw(`${PREFIX}-fabric`, SKU.fabric)
+  const tradeCw = await cw(`${PREFIX}-trade`, SKU.trade)
 
   await pool.query(
     `INSERT INTO inventory (colourway_id, qty_available, qty_reserved, unit)
      VALUES ($1, 10, 0, 'units'),
             ($2, 10, 0, 'units'),
             ($3, 1, 0, 'units'),
-            ($4, 60, 0, 'metres')`,
-    [goodCw, noPriceCw, lowCw, fabricCw]
+            ($4, 60, 0, 'metres'),
+            ($5, 10, 0, 'units')`,
+    [goodCw, noPriceCw, lowCw, fabricCw, tradeCw]
   )
 
   await pool.query(
@@ -112,6 +123,7 @@ const seedFixtures = async (pool) => {
 
 const cleanup = async (pool) => {
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
+  await pool.query('DELETE FROM users WHERE email LIKE $1', [`${PREFIX}-%`])
   await pool.query('DELETE FROM shipping_rates WHERE zone LIKE $1', [
     '%Checkout%Zone',
   ])
@@ -122,8 +134,15 @@ describe('POST /checkout/session', () => {
   let app
   let stripe
 
-  const post = (payload) =>
-    app.inject({ method: 'POST', url: '/checkout/session', payload })
+  let tradeCookie
+
+  const post = (payload, cookie) =>
+    app.inject({
+      method: 'POST',
+      url: '/checkout/session',
+      payload,
+      headers: cookie ? { cookie } : {},
+    })
 
   beforeAll(async () => {
     const config = loadConfig()
@@ -147,6 +166,26 @@ describe('POST /checkout/session', () => {
       logger: false,
     })
     await app.ready()
+
+    // An approved trade shopper, for the price-basis tests. Registered once —
+    // register shares a 10-per-15-min bucket with login.
+    await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: TRADE_EMAIL, password: PASSWORD, name: 'Chk Trader' },
+    })
+    await pool.query(
+      `UPDATE users SET role = 'trade', trade_approved = true WHERE email = $1`,
+      [TRADE_EMAIL]
+    )
+    const login = await app.inject({
+      method: 'POST',
+      url: '/auth/login',
+      payload: { email: TRADE_EMAIL, password: PASSWORD },
+    })
+    expect(login.statusCode).toBe(200)
+    const setCookie = login.headers['set-cookie']
+    tradeCookie = (Array.isArray(setCookie) ? setCookie[0] : setCookie).split(';')[0]
   })
 
   afterAll(async () => {
@@ -200,13 +239,38 @@ describe('POST /checkout/session', () => {
     expect(response.json().message).toMatch(/fabric/i)
   })
 
-  it('rejects finished goods with no retail price (422)', async () => {
+  it('rejects finished goods with no price at all (422)', async () => {
     const response = await post({
       lines: [{ sku: SKU.noPrice, qty: 1 }],
       zone: ZONE,
     })
     expect(response.statusCode).toBe(422)
-    expect(response.json().message).toMatch(/retail price/i)
+    expect(response.json().message).toMatch(/no price/i)
+  })
+
+  // FR-3: the figure on the product card and the amount Stripe takes come from
+  // the same gate. Charging retail while the card said "Trade $X" is the bug.
+  it('charges an approved trade shopper the trade price, in NZD', async () => {
+    const response = await post(
+      { lines: [{ sku: SKU.trade, qty: 2 }], zone: ZONE },
+      tradeCookie
+    )
+    expect(response.statusCode).toBe(200)
+    const product = stripe.lastCreateParams.line_items[0]
+    expect(product.price_data.unit_amount).toBe(9900)
+    // Trade money is NZD cents, never the product's own (here EUR) currency.
+    expect(product.price_data.currency).toBe('nzd')
+    // The basis the webhook has to re-resolve on.
+    expect(stripe.lastCreateParams.metadata.trade).toBe('true')
+  })
+
+  it('charges everyone else the retail price', async () => {
+    const response = await post({ lines: [{ sku: SKU.trade, qty: 1 }], zone: ZONE })
+    expect(response.statusCode).toBe(200)
+    const product = stripe.lastCreateParams.line_items[0]
+    expect(product.price_data.unit_amount).toBe(4500)
+    expect(product.price_data.currency).toBe('eur')
+    expect(stripe.lastCreateParams.metadata.trade).toBe('false')
   })
 
   it('rejects an order that exceeds available stock (422)', async () => {

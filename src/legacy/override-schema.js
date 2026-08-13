@@ -36,6 +36,25 @@ const OVERRIDABLE_TYPES = Object.freeze(['text', 'numeric', 'boolean', 'timestam
 // The key column. Overriding it would re-point the record at another row.
 const KEY_COLUMN = 'guid'
 
+/**
+ * The synthetic columns every merged row carries, IN PROJECTION ORDER — the
+ * order mergedProjection() pushes them in, which is the order the two UNION
+ * branches line up by. Exported so src/legacy/legacy-read.js names them once
+ * rather than keeping a second list that could disagree about either membership
+ * or order.
+ *
+ * assertEntities() refuses a declared column sharing one of these names: both
+ * would be emitted, Postgres would allow the duplicate output name, and the pg
+ * driver would keep whichever came last — a staging value silently overwritten
+ * by a synthetic one, or the reverse.
+ */
+export const SYNTHETIC_COLUMNS = Object.freeze([
+  'is_local',
+  'archived_at',
+  'overridden_fields',
+  'custom_fields',
+])
+
 /** Column -> declared cast type for one read entity, resolved through LEGACY_TABLES. */
 const columnTypes = (entity) => {
   const config = ENTITIES[entity]
@@ -173,6 +192,98 @@ export const normaliseOverridePatch = (entity, values) => {
   return patch
 }
 
+// ---------------------------------------------------------------------------
+// Custom fields — the ones D365 has no column for
+// ---------------------------------------------------------------------------
+
+/**
+ * A custom field's key uses the same vocabulary as a column name, so one CRM
+ * renderer serves both and a key is never something a reader has to quote.
+ */
+export const CUSTOM_KEY_PATTERN = /^[a-z][a-z0-9_]{0,39}$/
+
+/**
+ * Bounds, because `extras` is free-form and this is a trust boundary: without
+ * them a jsonb blob on a record grows without limit and every merged read of the
+ * entity carries it.
+ */
+export const MAX_CUSTOM_FIELDS = 50
+export const MAX_CUSTOM_VALUE_LENGTH = 2000
+
+const assertCustomKey = (entity, key) => {
+  if (!CUSTOM_KEY_PATTERN.test(key)) {
+    throw httpError(
+      422,
+      `"${key}" is not a valid custom field name — lower-case letters, digits and underscores, starting with a letter, up to 40 characters.`
+    )
+  }
+  // A custom field may not SHADOW a D365 column. Two values under one name
+  // cannot be told apart by anyone reading the record, `overridden_fields` would
+  // disagree with `custom_fields` about what has been corrected, and the meaning
+  // would change under the office if D365 ever started exporting that column.
+  if (key === KEY_COLUMN || overridableColumns(entity).includes(key)) {
+    throw httpError(
+      422,
+      `"${key}" is already a ${entity} column — correct it with "set" instead of adding a custom field.`
+    )
+  }
+}
+
+/**
+ * Validate a proposed custom-field map and return the JSON object to merge into
+ * `extras`.
+ *
+ * Values stay FLAT and scalar, like `patch`: an object or an array has no
+ * renderer, no search story and no way to be corrected field by field. `null` is
+ * a field that exists with no value — removing it is `revert_custom`, exactly as
+ * `set: { col: null }` clears a column and `revert` restores D365's value.
+ */
+export const normaliseCustomFields = (entity, values) => {
+  const keys = Object.keys(values)
+  if (keys.length > MAX_CUSTOM_FIELDS) {
+    throw httpError(422, `At most ${MAX_CUSTOM_FIELDS} custom fields per record.`)
+  }
+
+  const custom = {}
+  for (const key of keys) {
+    assertCustomKey(entity, key)
+    const value = values[key]
+
+    if (value === null || typeof value === 'boolean') {
+      custom[key] = value
+      continue
+    }
+    if (typeof value === 'number') {
+      // Defensive: JSON cannot carry a non-finite number, but this module is
+      // also called directly.
+      if (!Number.isFinite(value)) {
+        throw httpError(422, `"${key}" must be a finite number.`)
+      }
+      custom[key] = value
+      continue
+    }
+    if (typeof value === 'string') {
+      if (value.length > MAX_CUSTOM_VALUE_LENGTH) {
+        throw httpError(422, `"${key}" is longer than ${MAX_CUSTOM_VALUE_LENGTH} characters.`)
+      }
+      custom[key] = value
+      continue
+    }
+    throw httpError(422, `"${key}" must be text, a number, true, false or null.`)
+  }
+  return custom
+}
+
+/**
+ * Reject a custom revert list by key SHAPE and de-duplicate it. Existence is
+ * deliberately not checked — dropping a key that is not there is a no-op, and
+ * the alternative is a 422 that depends on a race with another correction.
+ */
+export const normaliseCustomRevertList = (entity, keys) => {
+  for (const key of keys) assertCustomKey(entity, key)
+  return [...new Set(keys)]
+}
+
 /** Reject a revert list naming anything not overridable, and de-duplicate it. */
 export const normaliseRevertList = (entity, columns) => {
   const overridable = new Set(overridableColumns(entity))
@@ -233,13 +344,19 @@ export const mergedProjection = (entity) => {
     }
   }
 
-  // Three synthetic columns, in the same position in both branches. `is_local`
+  // Four synthetic columns, in the same position in both branches. `is_local`
   // is derived from which branch emitted the row rather than read back from the
   // column, so it can never contradict the tables.
   const overriddenFields =
     "CASE WHEN o.patch IS NULL THEN '{}'::text[] ELSE ARRAY(SELECT jsonb_object_keys(o.patch)) END AS overridden_fields"
-  staged.push('false AS is_local', 'o.archived_at AS archived_at', overriddenFields)
-  local.push('true AS is_local', 'o.archived_at AS archived_at', overriddenFields)
+  // The fields D365 has no column for. Emitted as jsonb — no cast, so no value
+  // stored here can raise 22P02 and take the whole listing down, which is the
+  // reason it is one free-form column rather than typed ones. The COALESCE is
+  // for the staged branch's LEFT JOIN, where a record with no correction at all
+  // has no `o` row.
+  const customFields = "COALESCE(o.extras, '{}'::jsonb) AS custom_fields"
+  staged.push('false AS is_local', 'o.archived_at AS archived_at', overriddenFields, customFields)
+  local.push('true AS is_local', 'o.archived_at AS archived_at', overriddenFields, customFields)
 
   return { staged, local }
 }
@@ -341,9 +458,19 @@ export const assertEntities = () => {
         throw new Error(`Read entity "${entity}" marks non-overridable column "${column}" commercial.`)
       }
     }
+    for (const column of config.columns) {
+      if (SYNTHETIC_COLUMNS.includes(column)) {
+        throw new Error(
+          `Read entity "${entity}" declares column "${column}", which the merged read emits synthetically.`
+        )
+      }
+    }
     const { staged, local } = mergedProjection(entity)
     if (staged.length !== local.length) {
       throw new Error(`Read entity "${entity}" produced misaligned UNION branches.`)
+    }
+    if (staged.length !== config.columns.length + SYNTHETIC_COLUMNS.length) {
+      throw new Error(`Read entity "${entity}" projects a column SYNTHETIC_COLUMNS does not name.`)
     }
   }
 }

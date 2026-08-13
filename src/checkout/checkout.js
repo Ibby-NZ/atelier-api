@@ -8,7 +8,11 @@
 // order without a pending row here.
 
 import { getShippingQuote } from '../shipping/rates.js'
-import { canSeeTradeCatalogue } from '../catalogue/visibility.js'
+import {
+  canSeeTradeCatalogue,
+  canSeeTradePricing,
+  TRADE_CURRENCY,
+} from '../catalogue/visibility.js'
 
 // Throw an Error whose statusCode Fastify will honour on the reply.
 const httpError = (statusCode, message) =>
@@ -28,8 +32,15 @@ const CARD_PAYMENT_UNAVAILABLE =
   'Card payment is unavailable right now. Please get in touch and we will complete your order.'
 
 // Resolves each requested { sku, qty } against the catalogue, enforcing that the
-// product is a purchasable finished good with a retail price and enough stock.
-// Returns priced lines; throws a 422 on the first line that fails a rule.
+// product is a purchasable finished good with a price this viewer may be charged
+// and enough stock. Returns priced lines; throws a 422 on the first line that
+// fails a rule.
+//
+// `includeTrade` is the PRICE gate (FR-3, approved trade only) and is the same
+// predicate the catalogue read models use — so the figure the shopper was shown
+// on the card is the figure Stripe takes. Without it the store quoted the trade
+// price and charged retail. A trade figure is integer NZD cents whatever the
+// product's own currency says, so the line's currency moves with it.
 //
 // `includeTradeOnly` closes the same door the catalogue does: a SKU a visitor
 // cannot browse is a SKU they cannot buy. Without it the gate would be cosmetic
@@ -37,7 +48,11 @@ const CARD_PAYMENT_UNAVAILABLE =
 // transact on a represented house while signed out. It is answered with the
 // SAME 422 as an unknown SKU deliberately: a checkout error is not the place to
 // confirm which designs exist.
-export const validateCheckoutLines = async (pool, lines, { includeTradeOnly = false } = {}) => {
+export const validateCheckoutLines = async (
+  pool,
+  lines,
+  { includeTradeOnly = false, includeTrade = false } = {}
+) => {
   const validated = []
   for (const { sku, qty } of lines) {
     const { rows } = await pool.query(
@@ -46,6 +61,7 @@ export const validateCheckoutLines = async (pool, lines, { includeTradeOnly = fa
               p.slug AS product_slug,
               p.product_type,
               p.retail_price_cents,
+              p.trade_price_cents,
               p.currency,
               p.show_on_website,
               b.trade_only,
@@ -68,8 +84,10 @@ export const validateCheckoutLines = async (pool, lines, { includeTradeOnly = fa
         `"${row.name}" is a fabric — use an order request, not card checkout.`
       )
     }
-    if (row.retail_price_cents === null) {
-      throw httpError(422, `"${row.name}" has no retail price for card checkout.`)
+    const tradePriceCents = includeTrade ? row.trade_price_cents : null
+    const unitPriceCents = tradePriceCents ?? row.retail_price_cents
+    if (unitPriceCents === null) {
+      throw httpError(422, `"${row.name}" has no price for card checkout.`)
     }
 
     // pg returns numeric columns as strings; a missing inventory row reads as 0.
@@ -89,8 +107,8 @@ export const validateCheckoutLines = async (pool, lines, { includeTradeOnly = fa
       qty,
       colourway_id: row.colourway_id,
       name: row.name,
-      unit_price_cents: row.retail_price_cents,
-      currency: row.currency,
+      unit_price_cents: unitPriceCents,
+      currency: tradePriceCents === null ? row.currency : TRADE_CURRENCY,
     })
   }
   return validated
@@ -130,8 +148,10 @@ export const createCheckoutSession = async (
     throw httpError(503, CARD_PAYMENT_UNAVAILABLE)
   }
 
+  const trade = canSeeTradePricing(user)
   const validated = await validateCheckoutLines(pool, lines, {
     includeTradeOnly: canSeeTradeCatalogue(user),
+    includeTrade: trade,
   })
 
   // One Stripe session charges in one currency, and the shipping line is priced
@@ -158,7 +178,12 @@ export const createCheckoutSession = async (
   ]
 
   // The webhook rebuilds the order from this metadata (US-011). Only sku + qty
-  // are carried; every price is re-resolved server-side there too.
+  // are carried; every price is re-resolved server-side there too. `trade` is
+  // the price BASIS, not a price: the webhook has to re-resolve on the same
+  // basis this session was quoted on, or an approved trade shopper pays the
+  // trade figure at Stripe and the order records retail. It is written by this
+  // server and returned inside a signature-verified event — the same standing
+  // `shipping_cents` already has.
   const cart = validated.map(({ sku, qty }) => ({ sku, qty }))
 
   const session = await stripe.checkout.sessions.create({
@@ -178,6 +203,7 @@ export const createCheckoutSession = async (
       cart: JSON.stringify(cart),
       zone,
       shipping_cents: String(quote.rate_cents),
+      trade: String(trade),
     },
   })
 

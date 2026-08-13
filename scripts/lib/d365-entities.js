@@ -535,4 +535,44 @@ export const ENTITIES = {
       modifiedon: col('modified_on', DATETIME),
     },
   },
+  // ---- 12 Aug pull ---------------------------------------------------------
+  // The pricing PARAMETER table — the incumbent's waterfall inputs, one row per
+  // (house x product line) Atelier prices differently. `fulmxero_name` is the
+  // join key into the three range corpora (99.6% of priced rows);
+  // `fulmxero_supplierid` is a lookup rendered as a display name and matches 3
+  // of 28 legacy accounts, so it is a label, not a key.
+  //
+  // TWO FILES, ONE ENTITY: "Xero Range" (58 rows) and "Xero Type" (17) are two
+  // saved views over `fulmxero_trackingoption` with different view signatures
+  // and identical column sets. main() already buckets by TABLE and dedupes on
+  // the D365 GUID, so both land in one tracking_options.json with no change
+  // here. Type carries no parameters at all — every rate hangs off a Range row.
+  //
+  // See docs/xero-tracking-option-analysis.md.
+  fulmxero_trackingoption: {
+    table: 'tracking_options',
+    columns: {
+      fulmxero_trackingoptionid: col('guid'),
+      fulmxero_trackingcategoryid: col('tracking_category'),
+      fulmxero_name: col('name'),
+      fulmxero_supplierid: col('supplier'),
+      // The duty letter is on the PRICE ROW and its rate is here; a blank letter
+      // reads as 0%. Only band A is exercised by either corpus.
+      fulmxero_dutyratea: col('duty_rate_a', NUM),
+      fulmxero_dutyrateb: col('duty_rate_b', NUM),
+      fulmxero_dutyratec: col('duty_rate_c', NUM),
+      // `clearance` is a PERCENTAGE although its display name carries no "(%)",
+      // and `freight` is DOLLARS per unit although it sits between two
+      // percentages. Staging keeps the source name and the source polarity —
+      // same rule as the `do_not_*` consent flags; interpretation is downstream.
+      fulmxero_clearance: col('clearance', NUM),
+      fulmxero_freight: col('freight', NUM),
+      fulmxero_discount: col('discount', NUM),
+      atelier_trademarkup: col('trade_markup', NUM),
+      fulmar_minqtytoavoidsurcharge: col('min_qty_to_avoid_surcharge', NUM),
+      fulmar_surchargeperunit: col('surcharge_per_unit', NUM),
+      statecode: col('status'),
+      modifiedon: col('modified_on', DATETIME),
+    },
+  },
 }

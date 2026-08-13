@@ -3,7 +3,12 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
-import { LEGACY_ENTITIES, listLegacy } from '../src/legacy/legacy-read.js'
+import { ENTITIES, LEGACY_ENTITIES, listLegacy } from '../src/legacy/legacy-read.js'
+import {
+  MAX_CUSTOM_FIELDS,
+  MAX_CUSTOM_VALUE_LENGTH,
+  SYNTHETIC_COLUMNS,
+} from '../src/legacy/override-schema.js'
 import { importLegacyEntity } from '../src/seed/legacy-import.js'
 
 // Back-office corrections to the D365 staging mirror. The feature's whole reason
@@ -199,6 +204,16 @@ describe('D365 override layer', () => {
           [GUID.alpha]
         )
       ).rejects.toThrow(/d365_overrides_entity_check/)
+    })
+
+    it('refuses at boot a declared column that shadows a synthetic one', async () => {
+      // Both would be emitted, Postgres allows the duplicate output name, and the
+      // driver keeps whichever came last — a staging value silently overwritten
+      // by a synthetic one, or the reverse. assertEntities is the tripwire.
+      for (const name of SYNTHETIC_COLUMNS) {
+        expect(LEGACY_ENTITIES.some((entity) => ENTITIES[entity].columns.includes(name))).toBe(false)
+      }
+      expect(SYNTHETIC_COLUMNS).toContain('custom_fields')
     })
 
     it('allows one override row per record', async () => {
@@ -561,6 +576,230 @@ describe('D365 override layer', () => {
   })
 
   // -------------------------------------------------------------------------
+  describe('custom fields', () => {
+    // Fields D365 has no column for at all. They live in `d365_overrides.extras`,
+    // NOT in `patch`: patch's keys are D365 column names and are what
+    // overridden_fields, base and stale_fields are all keyed on, so a custom key
+    // there would be reported as an overridden D365 field and would be snapshotted
+    // against a column that does not exist.
+    const setCustom = (custom, guid = GUID.alpha, cookie = bossCookie) =>
+      call('PATCH', `/admin/legacy/accounts/${guid}`, cookie, { custom })
+
+    it('is an empty object on a record nobody has touched, on both query paths', async () => {
+      // The fast path skips the merged CTE entirely, so without a default in
+      // mapRow the key would appear and disappear depending on whether anyone had
+      // ever corrected the entity.
+      const list = (await call('GET', `/admin/legacy/accounts?q=${encodeURIComponent(PREFIX)}`, bossCookie)).json()
+      expect(list.meta.merged).toBe(false)
+      expect(list.items[0].custom_fields).toEqual({})
+
+      const { record } = (await call('GET', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie)).json()
+      expect(record.custom_fields).toEqual({})
+    })
+
+    it('attaches a field D365 does not have, and reads it back everywhere', async () => {
+      const res = await setCustom({ site_contact: 'Ana', install_week: 12, on_hold: false })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().record.custom_fields).toEqual({
+        site_contact: 'Ana',
+        install_week: 12,
+        on_hold: false,
+      })
+
+      const list = (await call('GET', `/admin/legacy/accounts?q=${encodeURIComponent(PREFIX)}`, bossCookie)).json()
+      const row = list.items.find((item) => item.guid === GUID.alpha)
+      expect(row.custom_fields.site_contact).toBe('Ana')
+
+      const { record } = (await call('GET', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie)).json()
+      expect(record.custom_fields.install_week).toBe(12)
+    })
+
+    it('never reports a custom key as an overridden D365 field', async () => {
+      // The reason extras is its own column. overridden_fields, base and
+      // stale_fields are the D365 columns' vocabulary and must stay that way.
+      await setCustom({ site_contact: 'Ana' })
+      const { record } = (await call('GET', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie)).json()
+      expect(record.overridden_fields).toEqual([])
+      expect(record.override.fields).toEqual([])
+      expect(record.override.base).toEqual({})
+      expect(record.override.stale_fields).toEqual([])
+      // And the D365 columns are untouched.
+      expect(record.name).toBe(`${PREFIX} Alpha`)
+    })
+
+    it('accumulates across separate requests and loses neither of two at once', async () => {
+      await setCustom({ site_contact: 'Ana' })
+      await setCustom({ install_week: 12 })
+      await Promise.all([setCustom({ courier: 'NZ Post' }), setCustom({ po_ref: 'PO-9' })])
+
+      const { record } = (await call('GET', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie)).json()
+      expect(record.custom_fields).toEqual({
+        site_contact: 'Ana',
+        install_week: 12,
+        courier: 'NZ Post',
+        po_ref: 'PO-9',
+      })
+    })
+
+    it('distinguishes an empty value from a removed field', async () => {
+      // Same semantics as set/revert on a D365 column, so there is one rule.
+      await setCustom({ site_contact: 'Ana', courier: 'NZ Post' })
+      const cleared = (await setCustom({ site_contact: null })).json().record
+      expect(cleared.custom_fields).toEqual({ site_contact: null, courier: 'NZ Post' })
+
+      const removed = (await call('PATCH', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie, {
+        revert_custom: ['site_contact'],
+      })).json().record
+      expect(removed.custom_fields).toEqual({ courier: 'NZ Post' })
+    })
+
+    it('keeps the custom fields when the last column correction is reverted', async () => {
+      // dropEmptyOverride deletes an override row whose patch is empty. Without
+      // its extras guard this revert silently destroys every custom field beside
+      // the correction.
+      await call('PATCH', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie, {
+        set: { name: `${PREFIX} Ours` },
+        custom: { site_contact: 'Ana' },
+      })
+      const after = (await call('PATCH', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie, {
+        revert: ['name'],
+      })).json().record
+      expect(after.name).toBe(`${PREFIX} Alpha`)
+      expect(after.custom_fields).toEqual({ site_contact: 'Ana' })
+    })
+
+    it('drops the override row once the last custom field goes too', async () => {
+      await setCustom({ site_contact: 'Ana' })
+      await call('PATCH', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie, {
+        revert_custom: ['site_contact'],
+      })
+      const { rows } = await pool.query('SELECT 1 FROM d365_overrides WHERE guid = $1', [GUID.alpha])
+      expect(rows).toHaveLength(0)
+    })
+
+    it('survives the import, which is the whole point of storing it here', async () => {
+      await setCustom({ site_contact: 'Ana' })
+      await importLegacyEntity(pool, 'accounts', [
+        { guid: GUID.alpha, name: `${PREFIX} FromD365`, source_file: 'refresh.xlsx', raw: {} },
+      ])
+      const { record } = (await call('GET', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie)).json()
+      expect(record.custom_fields).toEqual({ site_contact: 'Ana' })
+      expect(record.name).toBe(`${PREFIX} FromD365`)
+    })
+
+    it('is clerical work: backoffice needs no finance access for it', async () => {
+      // touchesCommercial classifies by declared column name and cannot classify
+      // a free-form key, so the finance gate deliberately does not reach here.
+      // A custom field carries only what a staff member typed.
+      const res = await setCustom({ margin_note: 'chased Tuesday' })
+      expect(res.statusCode).toBe(200)
+    })
+
+    it('accepts a patch that carries nothing but custom fields', async () => {
+      const res = await setCustom({ site_contact: 'Ana' })
+      expect(res.statusCode).toBe(200)
+    })
+
+    it('raises a local record carrying custom fields', async () => {
+      const res = await call('POST', '/admin/legacy/accounts', chiefCookie, {
+        values: { name: `${PREFIX} Local Ltd` },
+        custom: { site_contact: 'Ana' },
+      })
+      expect(res.statusCode).toBe(201)
+      const { record } = res.json()
+      expect(record.origin).toBe('local')
+      expect(record.custom_fields).toEqual({ site_contact: 'Ana' })
+    })
+
+    it('422s a create identified only by custom fields', async () => {
+      // Search and filters run over declared columns, so such a record is a blank
+      // row in the list that nothing can find — the phantom the null-values rule
+      // already refuses, arriving by another door.
+      const res = await call('POST', '/admin/legacy/accounts', chiefCookie, {
+        values: { name: null },
+        custom: { site_contact: 'Ana' },
+      })
+      expect(res.statusCode).toBe(422)
+    })
+
+    describe('validation', () => {
+      const REFUSALS = [
+        ['a key shadowing a D365 column', { custom: { credit_limit: 1 } }, /credit_limit/],
+        ['a key shadowing the record guid', { custom: { guid: 'x' } }, /guid/],
+        ['an upper-case key', { custom: { SiteContact: 'Ana' } }, /SiteContact/],
+        ['a key with a space', { custom: { 'site contact': 'Ana' } }, /site contact/],
+        ['a key starting with a digit', { custom: { '1st_contact': 'Ana' } }, /1st_contact/],
+        ['an object value', { custom: { site_contact: { name: 'Ana' } } }, /site_contact/],
+        ['an array value', { custom: { site_contact: ['Ana'] } }, /site_contact/],
+        ['an over-long value', { custom: { note: 'x'.repeat(MAX_CUSTOM_VALUE_LENGTH + 1) } }, /note/],
+        [
+          'more fields than the cap',
+          {
+            custom: Object.fromEntries(
+              Array.from({ length: MAX_CUSTOM_FIELDS + 1 }, (_, i) => [`f_${i}`, 'x'])
+            ),
+          },
+          new RegExp(String(MAX_CUSTOM_FIELDS)),
+        ],
+        ['a key set and reverted at once', { custom: { a_note: 'x' }, revert_custom: ['a_note'] }, /a_note/],
+        ['a revert of a key that is not a custom key', { revert_custom: ['Not A Key'] }, /Not A Key/],
+      ]
+
+      for (const [label, body, reason] of REFUSALS) {
+        it(`refuses ${label} with a 422 naming it`, async () => {
+          const res = await call('PATCH', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie, body)
+          expect(res.statusCode).toBe(422)
+          // Assert the REASON, or a case passes on the wrong refusal.
+          expect(res.json().message).toMatch(reason)
+          const { rows } = await pool.query('SELECT 1 FROM d365_overrides WHERE guid = $1', [GUID.alpha])
+          expect(rows).toHaveLength(0)
+        })
+      }
+
+      it('caps the fields per RECORD, not per request, and rolls the write back', async () => {
+        // The cap is meaningless per request: the merge is
+        // `extras || EXCLUDED.extras`, so fifty fields at a time twice over is a
+        // hundred on the record. The request carrying the fifty-first may be
+        // carrying exactly one.
+        const fill = Object.fromEntries(
+          Array.from({ length: MAX_CUSTOM_FIELDS }, (_, i) => [`f_${i}`, 'x'])
+        )
+        expect((await setCustom(fill)).statusCode).toBe(200)
+
+        const res = await setCustom({ one_too_many: 'x' })
+        expect(res.statusCode).toBe(422)
+        expect(res.json().message).toMatch(new RegExp(String(MAX_CUSTOM_FIELDS)))
+
+        const { record } = (await call('GET', `/admin/legacy/accounts/${GUID.alpha}`, bossCookie)).json()
+        expect(Object.keys(record.custom_fields)).toHaveLength(MAX_CUSTOM_FIELDS)
+        expect(record.custom_fields.one_too_many).toBeUndefined()
+      })
+
+      it('lets a replacement in at the cap, since the total does not move', async () => {
+        const fill = Object.fromEntries(
+          Array.from({ length: MAX_CUSTOM_FIELDS }, (_, i) => [`f_${i}`, 'x'])
+        )
+        await setCustom(fill)
+        const res = await setCustom({ f_0: 'corrected' })
+        expect(res.statusCode).toBe(200)
+        expect(res.json().record.custom_fields.f_0).toBe('corrected')
+      })
+
+      it('400s a patch whose custom object is empty', async () => {
+        const res = await setCustom({})
+        expect(res.statusCode).toBe(400)
+      })
+
+      it('keeps a null the schema would otherwise coerce to an empty string', async () => {
+        // Ajv runs coerceTypes, so a union type on the values would deliver '' for
+        // a deliberate null. The type check lives in override-schema.js instead.
+        const { record } = (await setCustom({ site_contact: null })).json()
+        expect(record.custom_fields.site_contact).toBeNull()
+      })
+    })
+  })
+
+  // -------------------------------------------------------------------------
   describe('every entity, not just accounts', () => {
     // Three of the four merged projections were never executed by any test —
     // including both timestamp columns and the only multi-term ORDER BY.
@@ -581,6 +820,18 @@ describe('D365 override layer', () => {
         const detail = (await call('GET', `/admin/legacy/${entity}/${fixture.guid}`, bossCookie)).json()
         expect(detail.record[fixture.column]).toBe(value)
         expect(detail.record.override.fields).toEqual([fixture.column])
+      })
+
+      it(`attaches a custom field to ${entity}`, async () => {
+        const patched = await call('PATCH', `/admin/legacy/${entity}/${fixture.guid}`, bossCookie, {
+          custom: { site_contact: `Ana ${entity}` },
+        })
+        expect(patched.statusCode).toBe(200)
+        expect(patched.json().record.custom_fields).toEqual({ site_contact: `Ana ${entity}` })
+
+        const detail = (await call('GET', `/admin/legacy/${entity}/${fixture.guid}`, bossCookie)).json()
+        expect(detail.record.custom_fields.site_contact).toBe(`Ana ${entity}`)
+        expect(detail.record.overridden_fields).toEqual([])
       })
 
       it(`orders and counts ${entity} identically on both query paths`, async () => {

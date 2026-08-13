@@ -51,7 +51,14 @@ const sampleSourceFiles = () => {
         .filter((path) => path.endsWith('.js'))
     )
   }
-  if (existsSync('src/routes/admin-samples.js')) files.push('src/routes/admin-samples.js')
+  // Every samples route file, not just `admin-samples.js`: W20-US-004/US-007
+  // put the loan queue and its reminders in `admin-sample-loans.js`, and a
+  // hard-coded single filename would have left that outside the net.
+  files.push(
+    ...readdirSync('src/routes')
+      .filter((name) => /^admin-sample.*\.js$/.test(name))
+      .map((name) => join('src/routes', name))
+  )
   return files
 }
 

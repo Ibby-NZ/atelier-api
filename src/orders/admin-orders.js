@@ -24,6 +24,16 @@ import { reserves } from './order-states.js'
 // The same packing the storefront's request flow writes, so `orders.notes` reads
 // identically however the order was raised.
 import { buildNotes } from './order-request.js'
+// The free-text search layer: pure, and the only place a filter value becomes
+// SQL. See src/orders/order-filters.js for why it is not src/reports/filters.js.
+import { buildOrderFilters } from './order-filters.js'
+
+// Paging for the order desk, in the shape src/pricing/admin-price-lists.js
+// established. MAX_LIMIT is spent as the route schema's `maximum`, so an
+// over-large limit is a 400 rather than a page size nobody asked for.
+export const DEFAULT_PAGE = 1
+export const DEFAULT_LIMIT = 50
+export const MAX_LIMIT = 200
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -58,9 +68,18 @@ const requireStatus = (order, allowed, action) => {
   }
 }
 
+// The account's own name/email, so a screen can say who an order is for. An
+// order attributed to a login carries only `user_id`; without this the CRM had
+// nothing to render but "Account #4". LEFT JOIN because a guest order has no
+// account, and `orders.user_id` is SET NULL when one is deleted.
+const ORDER_FROM = `orders o
+       LEFT JOIN users u ON u.id = o.user_id`
+
 const ORDER_COLUMNS = `o.id,
         o.user_id,
         o.guest_email,
+        u.name AS client_name,
+        u.email AS client_email,
         o.order_number,
         o.kind,
         o.status,
@@ -71,6 +90,8 @@ const ORDER_COLUMNS = `o.id,
         o.xero_invoice_ref,
         o.shipping_address,
         o.contact_phone,
+        o.client_reference,
+        o.customer_po_number,
         o.notes,
         o.archived_at,
         o.created_at`
@@ -134,6 +155,8 @@ const toOrder = (row, lineRows) => {
     id: row.id,
     user_id: row.user_id,
     guest_email: row.guest_email,
+    client_name: row.client_name ?? null,
+    client_email: row.client_email ?? null,
     order_number: row.order_number,
     kind: row.kind,
     status: row.status,
@@ -146,6 +169,10 @@ const toOrder = (row, lineRows) => {
     // orders have none until the back office adds them.
     shipping_address: row.shipping_address ?? null,
     contact_phone: row.contact_phone ?? null,
+    // The client's OWN two numbers (FR-115). `customer_po_number` is the PO the
+    // CLIENT issued to us — never one of our purchase orders (W13).
+    client_reference: row.client_reference ?? null,
+    customer_po_number: row.customer_po_number ?? null,
     notes: row.notes,
     archived_at: row.archived_at ?? null,
     created_at: row.created_at,
@@ -155,17 +182,33 @@ const toOrder = (row, lineRows) => {
 }
 
 /**
- * List orders (optionally filtered by status), newest first, each with lines
- * and reservation state.
+ * One page of orders, newest first, each with lines and reservation state, plus
+ * the `total` the whole filtered population holds (FR-118 — no admin list
+ * returns the table).
+ *
+ * `filters` is the output of `parseOrderFilters` (free text, client, date range,
+ * reference, PO number); `status` and `includeArchived` stay here because they
+ * are enum/boolean gates the route schema already validates, not free text.
  *
  * @param {import('pg').Pool} pool
- * @param {{ status?: string }} [filter]
- * @returns {Promise<object[]>}
+ * @param {{
+ *   status?: string,
+ *   includeArchived?: boolean,
+ *   filters?: object,
+ *   page?: number,
+ *   limit?: number,
+ * }} [options]
+ * @returns {Promise<{ orders: object[], total: number }>}
  */
 export const listAdminOrders = async (
   pool,
-  { status, includeArchived = false } = {}
+  { status, includeArchived = false, filters = {}, page, limit } = {}
 ) => {
+  const safePage = Number.isInteger(page) && page > 0 ? page : DEFAULT_PAGE
+  const safeLimit =
+    Number.isInteger(limit) && limit > 0 ? Math.min(limit, MAX_LIMIT) : DEFAULT_LIMIT
+  const offset = (safePage - 1) * safeLimit
+
   const params = []
   const clauses = []
   if (status) {
@@ -175,19 +218,36 @@ export const listAdminOrders = async (
   if (!includeArchived) {
     clauses.push('o.archived_at IS NULL')
   }
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+  // The search filters bind AFTER the ones above, which is why they are handed
+  // the params array rather than starting their own numbering.
+  const search = buildOrderFilters(filters, { params })
+  const allClauses = [...clauses, ...search.clauses]
+  const where = allClauses.length ? `WHERE ${allClauses.join(' AND ')}` : ''
+
+  // The count runs over the same FROM and the same WHERE — a total computed off
+  // a different query is a total that disagrees with its own list. The users
+  // join has to be in it too: `client` and `q` search that table.
+  const countResult = await pool.query(
+    `SELECT count(*)::int AS total FROM ${ORDER_FROM} ${where}`,
+    search.params
+  )
+
   const { rows } = await pool.query(
     `SELECT ${ORDER_COLUMNS}
-       FROM orders o
+       FROM ${ORDER_FROM}
        ${where}
-      ORDER BY o.created_at DESC, o.id DESC`,
-    params
+      ORDER BY o.created_at DESC, o.id DESC
+      LIMIT $${search.params.length + 1} OFFSET $${search.params.length + 2}`,
+    [...search.params, safeLimit, offset]
   )
   const linesByOrderId = await loadLinesByOrderId(
     pool,
     rows.map((row) => row.id)
   )
-  return rows.map((row) => toOrder(row, linesByOrderId.get(row.id)))
+  return {
+    orders: rows.map((row) => toOrder(row, linesByOrderId.get(row.id))),
+    total: countResult.rows[0].total,
+  }
 }
 
 /**
@@ -196,7 +256,7 @@ export const listAdminOrders = async (
  */
 export const getAdminOrder = async (db, id) => {
   const { rows } = await db.query(
-    `SELECT ${ORDER_COLUMNS} FROM orders o WHERE o.id = $1`,
+    `SELECT ${ORDER_COLUMNS} FROM ${ORDER_FROM} WHERE o.id = $1`,
     [id]
   )
   const row = rows[0]
@@ -302,7 +362,35 @@ const recomputeOrderMoney = (client, id) =>
 // The header fields staff may correct while an order is still being priced.
 // Frozen code literals fed to a dynamic SET clause — column names are never user
 // input, values are always placeholders (the buildUpdate posture).
-const ORDER_HEADER_COLUMNS = Object.freeze(['notes', 'guest_email', 'contact_phone'])
+//
+// `client_reference` and `customer_po_number` are the client's own two numbers
+// (US-006, FR-127). They are editable rather than create-only because a PO
+// number is almost never known when the order is raised — it arrives in a later
+// email, and an order nobody can attach it to is one the client's accounts
+// payable will not pay. `customer_po_number` is THEIRS, not one of our purchase
+// orders (W13).
+const ORDER_HEADER_COLUMNS = Object.freeze([
+  'notes',
+  'guest_email',
+  'contact_phone',
+  'client_reference',
+  'customer_po_number',
+])
+
+// The two columns that are ANNOTATIONS rather than commercial terms. Neither
+// moves money, stock or a reservation, so neither is gated on the order still
+// being editable — a client's PO number almost never arrives before the order
+// is raised, and on a paid order it is precisely the thing the office is trying
+// to record. Everything else in ORDER_HEADER_COLUMNS stays behind the status
+// guard, because changing where an order ships after it shipped is a different
+// question that nobody has asked for.
+const ANNOTATION_COLUMNS = Object.freeze(['client_reference', 'customer_po_number'])
+
+/** True when a patch touches nothing but those annotations. */
+const isAnnotationOnly = (patch) => {
+  const keys = Object.keys(patch)
+  return keys.length > 0 && keys.every((key) => ANNOTATION_COLUMNS.includes(key))
+}
 
 const applyOrderHeader = async (client, id, patch) => {
   const sets = []
@@ -311,7 +399,11 @@ const applyOrderHeader = async (client, id, patch) => {
     // hasOwn, not a truthiness test: an explicit null clears the column and an
     // absent key must leave it alone.
     if (!Object.hasOwn(patch, column)) continue
-    params.push(patch[column])
+    // A cleared field clears to NULL, never to '' (FR-127). The CRM's inputs
+    // send back an empty string when a person deletes what they typed, and a
+    // stored '' is an absence that every `IS NULL` read misses and every search
+    // matches — two spellings of "nothing" is one too many.
+    params.push(patch[column] === '' ? null : patch[column])
     sets.push(`${column} = $${params.length}`)
   }
   if (sets.length === 0) return
@@ -338,11 +430,15 @@ const applyOrderHeader = async (client, id, patch) => {
  *   notes?: string|null,
  *   guest_email?: string|null,
  *   contact_phone?: string|null,
+ *   client_reference?: string|null,
+ *   customer_po_number?: string|null,
  * }} patch
  */
 export const editOrderLines = (pool, id, patch) =>
   withOrderTxn(pool, id, async (client, order) => {
-    requireStatus(order, ['requested', 'confirmed'], 'edit')
+    if (!isAnnotationOnly(patch)) {
+      requireStatus(order, ['requested', 'confirmed'], 'edit')
+    }
 
     const edits = patch.lines ?? []
     const adds = patch.add_lines ?? []

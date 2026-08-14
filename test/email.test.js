@@ -60,7 +60,9 @@ describe('email templates', () => {
         'sample_loan_reminder',
       ])
     )
-    expect(TEMPLATE_NAMES).toHaveLength(11)
+    // The count is the tripwire: arrayContaining passes on a superset, so
+    // without it a template added and never listed above goes unnoticed.
+    expect(TEMPLATE_NAMES).toHaveLength(12)
   })
 
   it('request_received names the order and promises contact within 24 hours', () => {

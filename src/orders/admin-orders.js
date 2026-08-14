@@ -202,7 +202,7 @@ const toOrder = (row, lineRows) => {
  */
 export const listAdminOrders = async (
   pool,
-  { status, includeArchived = false, filters = {}, page, limit } = {}
+  { status, kind, includeArchived = false, filters = {}, page, limit } = {}
 ) => {
   const safePage = Number.isInteger(page) && page > 0 ? page : DEFAULT_PAGE
   const safeLimit =
@@ -214,6 +214,16 @@ export const listAdminOrders = async (
   if (status) {
     params.push(status)
     clauses.push(`o.status = $${params.length}`)
+  }
+  // The channel an order arrived through — `checkout` is the website, `manual`
+  // is one the office keyed. An enum, so it sits beside `status` rather than
+  // going through buildOrderFilters, which exists for free text.
+  //
+  // Without this the CRM's Source filter can only narrow the page it already
+  // fetched, and would print a server total above a narrowed table.
+  if (kind) {
+    params.push(kind)
+    clauses.push(`o.kind = $${params.length}`)
   }
   if (!includeArchived) {
     clauses.push('o.archived_at IS NULL')

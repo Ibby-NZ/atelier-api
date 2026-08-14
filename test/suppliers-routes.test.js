@@ -22,6 +22,7 @@ import { buildApp } from '../src/app.js'
 import { deleteOrExplain } from '../src/lifecycle/delete.js'
 import { DISCOUNT_METHOD_ENUM } from '../src/routes/admin-suppliers.js'
 import { SUPPLIER_UPDATE_COLUMNS } from '../src/suppliers/admin-suppliers.js'
+import { createSupplierBrandTerms } from '../src/suppliers/supplier-terms.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'w3-routes-test'
@@ -102,6 +103,7 @@ describe('back-office supplier routes', () => {
   let pool
   let app
   let backofficeCookie
+  let clerkCookie
   let customerCookie
 
   const inject = (method, url, cookie, payload) =>
@@ -133,6 +135,23 @@ describe('back-office supplier routes', () => {
     backofficeCookie = sessionCookieFrom(boss)
     await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [
       testEmail('boss'),
+    ])
+
+    // Terms are cost data, so backoffice alone is not the gate: the boss also
+    // carries finance visibility, and the clerk is the showroom login that does
+    // not. Both are backoffice — the difference is the whole point.
+    await pool.query(`UPDATE users SET can_view_finance = true WHERE email = $1`, [
+      testEmail('boss'),
+    ])
+
+    const clerk = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: testEmail('clerk'), password: PASSWORD, name: 'Clerk' },
+    })
+    clerkCookie = sessionCookieFrom(clerk)
+    await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [
+      testEmail('clerk'),
     ])
 
     const shopper = await app.inject({
@@ -167,6 +186,13 @@ describe('back-office supplier routes', () => {
       ['POST', '/admin/suppliers/1/archive', undefined],
       ['POST', '/admin/suppliers/1/restore', undefined],
       ['DELETE', '/admin/suppliers/1', undefined],
+      ['GET', '/admin/suppliers/1/brand-terms', undefined],
+      ['POST', '/admin/suppliers/1/brand-terms', { brand_id: 1 }],
+      ['PATCH', '/admin/suppliers/1/brand-terms/1', { markup: 2 }],
+      ['DELETE', '/admin/suppliers/1/brand-terms/1', undefined],
+      ['POST', '/admin/suppliers/1/brand-terms/1/tiers', { label: 'Guarded', pct: 0.4 }],
+      ['PATCH', '/admin/suppliers/1/brand-terms/1/tiers/1', { pct: 0.4 }],
+      ['DELETE', '/admin/suppliers/1/brand-terms/1/tiers/1', undefined],
     ]
 
     it.each(ROUTES)('%s %s is 401 for an anonymous caller', async (method, url, payload) => {
@@ -537,6 +563,354 @@ describe('back-office supplier routes', () => {
       expect(pool.log[1]).toContain('FROM suppliers WHERE id = $1 FOR UPDATE')
       expect(pool.log[1]).not.toContain('FOR NO KEY UPDATE')
       expect(pool.log[2]).toContain('count(*)')
+    })
+  })
+
+  // The write path for `supplier_brand_terms` / `supplier_discount_tiers`, which
+  // `npm run backfill:suppliers` was the only writer of.
+  //
+  // The number every one of these tests is really about is x0.36. A chain is
+  // MULTIPLICATIVE, so {0.4, 0.4} is 36% of list and not the 20% a summed 0.8
+  // would give — the office typing it has no other way to see which it got, so
+  // the write RESPONSE carries the evaluated multiplier.
+  describe('commercial terms', () => {
+    const termsPath = (supplierId, ...rest) =>
+      `/admin/suppliers/${supplierId}/brand-terms${rest.map((part) => `/${part}`).join('')}`
+
+    // One supplier, one house it invoices, one set of terms — the shape every
+    // test here starts from.
+    const seedTerms = async (body = {}) => {
+      const supplierId = await insertSupplier(pool, 'terms')
+      const brandId = await insertBrand(pool, 'terms-house', supplierId)
+      const created = await inject('POST', termsPath(supplierId), backofficeCookie, {
+        brand_id: brandId,
+        ...body,
+      })
+      return { supplierId, brandId, created }
+    }
+
+    it('creates a chain and answers with what it evaluates to', async () => {
+      const { created } = await seedTerms({ discount_chain: [0.4, 0.4], markup: 2.2 })
+
+      expect(created.statusCode).toBe(201)
+      const { terms } = created.json()
+      expect(terms.discount_chain).toEqual([0.4, 0.4])
+      expect(terms.net_source).toBe('chain')
+      expect(terms.net_multiplier).toBeCloseTo(0.36, 10)
+      // A summed chain would be 0.8 off, i.e. a x0.2 multiplier — 44% of list
+      // undercharged on every metre.
+      expect(terms.net_multiplier).not.toBeCloseTo(0.2, 10)
+      expect(terms.markup).toBe(2.2)
+      expect(terms.discount).toBeNull()
+      // The house name, without which a terms list is a column of opaque ids.
+      expect(terms.brand_slug).toBe(`${PREFIX}-terms-house`)
+    })
+
+    it('400s a chain rate that is not a fraction below 1', async () => {
+      const supplierId = await insertSupplier(pool, 'terms')
+      const brandId = await insertBrand(pool, 'terms-house', supplierId)
+
+      const response = await inject('POST', termsPath(supplierId), backofficeCookie, {
+        brand_id: brandId,
+        discount_chain: [0.4, 1],
+      })
+
+      expect(response.statusCode).toBe(400)
+      const { rows } = await pool.query(
+        'SELECT count(*)::int AS n FROM supplier_brand_terms WHERE brand_id = $1',
+        [brandId]
+      )
+      expect(rows[0].n).toBe(0)
+    })
+
+    it('422s a bad chain element at the module too, since a CHECK cannot see inside an array', async () => {
+      const supplierId = await insertSupplier(pool, 'terms')
+      const brandId = await insertBrand(pool, 'terms-house', supplierId)
+
+      // The route schema refuses this first; the module is the belt to that
+      // braces, and it is the ONLY gate for any other caller — no CHECK can
+      // validate an array's elements, so `chainMultiplier` is spent as the
+      // validator rather than the rule being written a second time.
+      await expect(
+        createSupplierBrandTerms(pool, supplierId, {
+          brand_id: brandId,
+          discount_chain: [0.4, 1],
+        })
+      ).rejects.toMatchObject({ statusCode: 422 })
+    })
+
+    it('422s a flat discount and a chain on one row, in the shape CHECK’s words', async () => {
+      const { created } = await seedTerms({ discount: 0.5, discount_chain: [0.4, 0.4] })
+
+      expect(created.statusCode).toBe(422)
+      expect(created.json().message).toMatch(/never both/i)
+    })
+
+    it('409s a second set of terms for the same house', async () => {
+      const { supplierId, brandId } = await seedTerms({ discount: 0.5 })
+
+      const again = await inject('POST', termsPath(supplierId), backofficeCookie, {
+        brand_id: brandId,
+        discount: 0.4,
+      })
+
+      expect(again.statusCode).toBe(409)
+      expect(again.json().message).toMatch(/already has terms/i)
+    })
+
+    it('422s terms for a house that does not exist', async () => {
+      const supplierId = await insertSupplier(pool, 'terms')
+
+      const response = await inject('POST', termsPath(supplierId), backofficeCookie, {
+        brand_id: 99999999,
+      })
+
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toMatch(/no house/i)
+    })
+
+    it('moves the multiplier with the chain on a PATCH, and back to a flat rate', async () => {
+      const { supplierId, created } = await seedTerms({ discount_chain: [0.4, 0.4] })
+      const termsId = created.json().terms.id
+
+      const rechained = await inject(
+        'PATCH',
+        termsPath(supplierId, termsId),
+        backofficeCookie,
+        { discount_chain: [0.5, 0.1] }
+      )
+      expect(rechained.statusCode).toBe(200)
+      expect(rechained.json().terms.net_multiplier).toBeCloseTo(0.45, 10)
+
+      // Clearing the chain and setting a flat rate in one body: the shape CHECK
+      // allows it because the chain lands empty.
+      const flat = await inject('PATCH', termsPath(supplierId, termsId), backofficeCookie, {
+        discount_chain: [],
+        discount: 0.25,
+      })
+      expect(flat.json().terms.net_source).toBe('flat')
+      expect(flat.json().terms.net_multiplier).toBeCloseTo(0.75, 10)
+    })
+
+    it('adds tiers, resolves the fallback, and says which label can never match', async () => {
+      const { supplierId, created } = await seedTerms()
+      const termsId = created.json().terms.id
+
+      const wallpaper = await inject(
+        'POST',
+        termsPath(supplierId, termsId, 'tiers'),
+        backofficeCookie,
+        { label: 'Wallpaper', pct: 0.4 }
+      )
+      expect(wallpaper.statusCode).toBe(201)
+
+      const fallback = await inject(
+        'POST',
+        termsPath(supplierId, termsId, 'tiers'),
+        backofficeCookie,
+        { label: 'All other collections', pct: 0.5, is_fallback: true }
+      )
+
+      // A tier write answers with the PARENT: a tier changes what the whole row
+      // resolves to, and a bare tier tells the office nothing.
+      const { terms } = fallback.json()
+      expect(terms.net_source).toBe('tier')
+      expect(terms.net_label).toBe('All other collections')
+      expect(terms.net_multiplier).toBeCloseTo(0.5, 10)
+      // `label` is free text matched against the LINE's category, not the
+      // products.category enum — so the write path reports which labels can ever
+      // match rather than refusing the ones that cannot. `is_fallback` is what
+      // makes the unmatched case (the common one) survivable.
+      expect(terms.tiers.map((tier) => [tier.label, tier.matches_category])).toEqual([
+        ['Wallpaper', true],
+        ['All other collections', false],
+      ])
+    })
+
+    it('409s a second fallback and a label differing only in case', async () => {
+      const { supplierId, created } = await seedTerms()
+      const termsId = created.json().terms.id
+      const tiersUrl = termsPath(supplierId, termsId, 'tiers')
+
+      await inject('POST', tiersUrl, backofficeCookie, {
+        label: 'All other collections',
+        pct: 0.5,
+        is_fallback: true,
+      })
+
+      const second = await inject('POST', tiersUrl, backofficeCookie, {
+        label: 'Everything else',
+        pct: 0.45,
+        is_fallback: true,
+      })
+      expect(second.statusCode).toBe(409)
+      expect(second.json().message).toMatch(/fallback/i)
+
+      const cased = await inject('POST', tiersUrl, backofficeCookie, {
+        label: '  all other COLLECTIONS ',
+        pct: 0.45,
+      })
+      expect(cased.statusCode).toBe(409)
+      expect(cased.json().message).toMatch(/label/i)
+    })
+
+    it('422s a blank tier label, which would match nothing and take the index slot', async () => {
+      const { supplierId, created } = await seedTerms()
+      const termsId = created.json().terms.id
+
+      const response = await inject(
+        'POST',
+        termsPath(supplierId, termsId, 'tiers'),
+        backofficeCookie,
+        { label: '   ', pct: 0.4 }
+      )
+      expect(response.statusCode).toBe(422)
+    })
+
+    it('patches a tier and recomputes the parent', async () => {
+      const { supplierId, created } = await seedTerms()
+      const termsId = created.json().terms.id
+      const added = await inject(
+        'POST',
+        termsPath(supplierId, termsId, 'tiers'),
+        backofficeCookie,
+        { label: 'All other collections', pct: 0.5, is_fallback: true }
+      )
+      const tierId = added.json().terms.tiers[0].id
+
+      const patched = await inject(
+        'PATCH',
+        termsPath(supplierId, termsId, 'tiers', tierId),
+        backofficeCookie,
+        { pct: 0.2 }
+      )
+
+      expect(patched.statusCode).toBe(200)
+      expect(patched.json().terms.net_multiplier).toBeCloseTo(0.8, 10)
+    })
+
+    it('refuses to delete terms carrying tiers, then lets them go once the tier does', async () => {
+      const { supplierId, created } = await seedTerms({ discount: 0.45 })
+      const termsId = created.json().terms.id
+      const added = await inject(
+        'POST',
+        termsPath(supplierId, termsId, 'tiers'),
+        backofficeCookie,
+        { label: 'Wallpaper', pct: 0.4 }
+      )
+      const tierId = added.json().terms.tiers[0].id
+
+      // supplier_discount_tiers.supplier_brand_term_id is CASCADE, so without the
+      // probe this succeeds and the rates that actually applied go with it.
+      const blocked = await inject(
+        'DELETE',
+        termsPath(supplierId, termsId),
+        backofficeCookie
+      )
+      expect(blocked.statusCode).toBe(409)
+      expect(blocked.json().blockers).toEqual([
+        { relation: 'supplier_discount_tiers', label: 'discount tiers', count: 1, capped: false },
+      ])
+      // No archived_at on either table: there is no soft alternative to offer.
+      expect(blocked.json().archivable).toBe(false)
+
+      const tierGone = await inject(
+        'DELETE',
+        termsPath(supplierId, termsId, 'tiers', tierId),
+        backofficeCookie
+      )
+      expect(tierGone.statusCode).toBe(200)
+      expect(tierGone.json()).toEqual({
+        deleted: { entity: 'supplier_discount_tier', id: tierId },
+      })
+
+      const termsGone = await inject(
+        'DELETE',
+        termsPath(supplierId, termsId),
+        backofficeCookie
+      )
+      expect(termsGone.statusCode).toBe(200)
+      const { rows } = await pool.query(
+        'SELECT count(*)::int AS n FROM supplier_brand_terms WHERE id = $1',
+        [termsId]
+      )
+      expect(rows[0].n).toBe(0)
+    })
+
+    it('404s terms and tiers reached through another supplier', async () => {
+      const { supplierId, created } = await seedTerms({ discount: 0.5 })
+      const termsId = created.json().terms.id
+      const added = await inject(
+        'POST',
+        termsPath(supplierId, termsId, 'tiers'),
+        backofficeCookie,
+        { label: 'Wallpaper', pct: 0.4 }
+      )
+      const tierId = added.json().terms.tiers[0].id
+      const other = await insertSupplier(pool, 'bystander')
+
+      // brand_id is unique across the whole table, so a terms id means something
+      // without a supplier — the scope clause is what stops one supplier's path
+      // reaching another's terms.
+      for (const [method, url, payload] of [
+        ['PATCH', termsPath(other, termsId), { markup: 2 }],
+        ['DELETE', termsPath(other, termsId), undefined],
+        ['POST', termsPath(other, termsId, 'tiers'), { label: 'Sneak', pct: 0.4 }],
+        ['PATCH', termsPath(other, termsId, 'tiers', tierId), { pct: 0.1 }],
+        ['DELETE', termsPath(other, termsId, 'tiers', tierId), undefined],
+      ]) {
+        const response = await inject(method, url, backofficeCookie, payload)
+        expect(response.statusCode, `${method} ${url}`).toBe(404)
+      }
+
+      const { rows } = await pool.query(
+        'SELECT markup FROM supplier_brand_terms WHERE id = $1',
+        [termsId]
+      )
+      expect(rows[0].markup).toBeNull()
+    })
+
+    it('lists a supplier’s terms with the meta envelope, and 400s a limit past the maximum', async () => {
+      const { supplierId } = await seedTerms({ discount_chain: [0.4, 0.4] })
+
+      const listed = await inject(
+        'GET',
+        `${termsPath(supplierId)}?page=1&limit=10`,
+        backofficeCookie
+      )
+      expect(listed.statusCode).toBe(200)
+      const body = listed.json()
+      expect(body.meta).toEqual({ total: 1, page: 1, limit: 10 })
+      expect(body.terms[0].net_multiplier).toBeCloseTo(0.36, 10)
+
+      const tooMany = await inject(
+        'GET',
+        `${termsPath(supplierId)}?limit=100000`,
+        backofficeCookie
+      )
+      expect(tooMany.statusCode).toBe(400)
+    })
+
+    it('refuses a backoffice login with no finance visibility, on every verb', async () => {
+      const { supplierId, brandId, created } = await seedTerms({ discount: 0.5 })
+      const termsId = created.json().terms.id
+
+      // `backoffice` covers the showroom as well as the accounts desk, which is
+      // why can_view_finance exists as a second, revocable permission — and why
+      // a login that may not SEE a cost may not SET one either.
+      for (const [method, url, payload] of [
+        ['GET', termsPath(supplierId), undefined],
+        ['POST', termsPath(supplierId), { brand_id: brandId }],
+        ['PATCH', termsPath(supplierId, termsId), { markup: 2 }],
+        ['DELETE', termsPath(supplierId, termsId), undefined],
+        ['POST', termsPath(supplierId, termsId, 'tiers'), { label: 'Nope', pct: 0.4 }],
+        ['PATCH', termsPath(supplierId, termsId, 'tiers', 1), { pct: 0.4 }],
+        ['DELETE', termsPath(supplierId, termsId, 'tiers', 1), undefined],
+      ]) {
+        const response = await inject(method, url, clerkCookie, payload)
+        expect(response.statusCode, `${method} ${url}`).toBe(403)
+        expect(response.json().message).toMatch(/finance visibility/i)
+      }
     })
   })
 

@@ -18,6 +18,9 @@ import {
   setOrderArchived,
 } from '../orders/admin-orders.js'
 import { parseOrderFilters } from '../orders/order-filters.js'
+// The single source of truth for the kind vocabulary — retyping it here is how
+// the CHECK and the filter drift apart on the next kind.
+import { ORDER_KINDS } from '../reports/filters.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { notifyOrderTransition, notifyOrderCreated } from '../email/notifications.js'
 
@@ -32,6 +35,7 @@ const listQuerySchema = {
   additionalProperties: false,
   properties: {
     status: { type: 'string', enum: ORDER_STATUSES },
+    kind: { type: 'string', enum: ORDER_KINDS },
     include_archived: { type: 'boolean', default: false },
     q: { type: 'string', maxLength: 200 },
     client: { type: 'string', maxLength: 200 },
@@ -189,6 +193,7 @@ export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
     async (request) => {
       const { page, limit } = request.query
       const { orders, total } = await listAdminOrders(pool, {
+        kind: request.query.kind,
         status: request.query.status,
         includeArchived: request.query.include_archived,
         // Throws a 400 naming the filter when a value is unusable; Fastify

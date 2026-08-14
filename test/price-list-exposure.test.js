@@ -246,6 +246,17 @@ describe('cost-side exposure', () => {
     ]
 
     for (const [method, url, payload] of sampleSurface) {
+      it(`refuses an approved trade account ${method} ${url}`, async () => {
+        const res = await app.inject({
+          method,
+          url,
+          headers: { cookie: tradeCookie },
+          ...(payload === undefined ? {} : { payload }),
+        })
+        expect(res.statusCode).toBe(403)
+      })
+    }
+
     // W13. `purchase_order_lines.unit_price` is what Atelier PAYS a maison, in
     // that maison's currency and for most of them already discount-inclusive —
     // the same disclosure `price_list_items.wholesale_rate` is, arrived at by a
@@ -300,6 +311,37 @@ describe('cost-side exposure', () => {
     ]
 
     for (const [method, url, payload] of purchasingWrites) {
+      it(`refuses an approved trade account ${method} ${url}`, async () => {
+        const res = await app.inject({
+          method,
+          url,
+          headers: { cookie: tradeCookie },
+          ...(payload === undefined ? {} : { payload }),
+        })
+        expect(res.statusCode).toBe(403)
+      })
+    }
+
+    // A supplier's commercial terms are the buy side in its rawest form: the
+    // discount off a maison's list price, which is both Atelier's margin and
+    // that maison's confidential term. Every verb, not just GET — the write
+    // routes SET the rate, so a trade session reaching one would not merely read
+    // the margin but move it.
+    //
+    // Every payload is schema-VALID: Fastify validates BEFORE it runs a
+    // preHandler, so a malformed body asserts a 400 and would pass with the
+    // guard deleted.
+    const termsSurface = [
+      ['GET', '/admin/suppliers/1/brand-terms', undefined],
+      ['POST', '/admin/suppliers/1/brand-terms', { brand_id: 1 }],
+      ['PATCH', '/admin/suppliers/1/brand-terms/1', { markup: 2 }],
+      ['DELETE', '/admin/suppliers/1/brand-terms/1', undefined],
+      ['POST', '/admin/suppliers/1/brand-terms/1/tiers', { label: 'x', pct: 0.4 }],
+      ['PATCH', '/admin/suppliers/1/brand-terms/1/tiers/1', { pct: 0.4 }],
+      ['DELETE', '/admin/suppliers/1/brand-terms/1/tiers/1', undefined],
+    ]
+
+    for (const [method, url, payload] of termsSurface) {
       it(`refuses an approved trade account ${method} ${url}`, async () => {
         const res = await app.inject({
           method,

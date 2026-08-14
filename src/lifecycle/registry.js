@@ -518,6 +518,37 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     ],
   },
 
+  // A house's negotiated terms. `supplier_discount_tiers.supplier_brand_term_id`
+  // is CASCADE, so a bare DELETE takes every tier under the row and reports
+  // success — the office deletes what it reads as one flat rate and silently
+  // loses the three rates that actually applied. The probe is what makes it
+  // explain itself instead. Not archivable: the table has no `archived_at`, and
+  // a set of terms is either on file or absent (same shape as shipping_rate).
+  supplier_brand_term: {
+    table: 'supplier_brand_terms',
+    idColumn: 'id',
+    label: 'set of terms',
+    archivable: false,
+    probes: [
+      probe(
+        'supplier_discount_tiers',
+        'discount tiers',
+        'SELECT 1 FROM supplier_discount_tiers WHERE supplier_brand_term_id = $1'
+      ),
+    ],
+  },
+
+  // Nothing references a tier, so there is no probe to write. It is registered
+  // rather than deleted with a bare statement so the DELETE route answers the
+  // same envelope every other one does, and so the 404 comes from the same place.
+  supplier_discount_tier: {
+    table: 'supplier_discount_tiers',
+    idColumn: 'id',
+    label: 'discount tier',
+    archivable: false,
+    probes: [],
+  },
+
   // Three SET NULL edges out of users, all of them commercial record: orders
   // would become anonymous guest orders with no guest_email, and the business
   // record behind a trade application would lose its applicant.

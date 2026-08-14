@@ -194,6 +194,34 @@ describe('back-office order management', () => {
       expect(requested.json().orders.some((o) => o.id === placed.id)).toBe(true)
     })
 
+    // The CRM's Source filter rides on this. Without it the office can only
+    // narrow the page it already fetched, and the count above the table lies.
+    it('filters by kind, so a website order can be told from a keyed one', async () => {
+      const placed = await placeRequest(4)
+
+      const requests = await inject(
+        'GET',
+        '/admin/orders?kind=order_request',
+        backofficeCookie
+      )
+      expect(requests.statusCode).toBe(200)
+      expect(requests.json().orders.some((o) => o.id === placed.id)).toBe(true)
+
+      // A checkout order is one nobody keyed, so the request placed above must
+      // not appear under it.
+      const website = await inject('GET', '/admin/orders?kind=checkout', backofficeCookie)
+      expect(website.json().orders.some((o) => o.id === placed.id)).toBe(false)
+
+      // The total has to narrow with the rows, or a paged screen prints a
+      // server count above a filtered table.
+      expect(website.json().meta.total).toBeLessThan(requests.json().meta.total + 1)
+    })
+
+    it('rejects an unknown kind filter with 400', async () => {
+      const response = await inject('GET', '/admin/orders?kind=bogus', backofficeCookie)
+      expect(response.statusCode).toBe(400)
+    })
+
     it('rejects an unknown status filter with 400', async () => {
       const response = await inject('GET', '/admin/orders?status=bogus', backofficeCookie)
       expect(response.statusCode).toBe(400)

@@ -126,6 +126,7 @@ const brandCreateSchema = {
     // Defaults closed — see createBrand.
     trade_only: { type: 'boolean', default: true },
     website_url: nullableUrl,
+    image_url: nullableUrl,
   },
 }
 
@@ -141,6 +142,7 @@ const brandPatchSchema = {
     is_international: { type: 'boolean' },
     trade_only: { type: 'boolean' },
     website_url: nullableUrl,
+    image_url: nullableUrl,
     featured_rank: featuredRankProp,
   },
 }

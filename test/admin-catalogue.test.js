@@ -533,6 +533,24 @@ describe('back-office catalogue admin', () => {
       expect(response.statusCode).toBe(400)
     })
 
+    // Same public-`src` gate as a collection's image, so the same three cases.
+    it('sets, clears and validates the image URL', async () => {
+      const created = await createBrandFixture('House', {
+        image_url: 'https://www.atelier.co.nz/img/house.jpg',
+      })
+      expect(created.image_url).toBe('https://www.atelier.co.nz/img/house.jpg')
+
+      const clear = await inject('PATCH', `/admin/brands/${created.id}`, backofficeCookie, {
+        image_url: null,
+      })
+      expect(clear.json().brand.image_url).toBeNull()
+
+      const bad = await inject('PATCH', `/admin/brands/${created.id}`, backofficeCookie, {
+        image_url: 'javascript:alert(1)',
+      })
+      expect(bad.statusCode).toBe(422)
+    })
+
     it('sets, clears and validates the website URL', async () => {
       const created = await createBrandFixture('House')
 

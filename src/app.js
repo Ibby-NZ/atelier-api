@@ -26,6 +26,7 @@ import { adminEmailTemplateRoutes } from './routes/admin-email-templates.js'
 import { adminPurchaseOrderRoutes } from './routes/admin-purchase-orders.js'
 import { adminSupplierInvoiceRoutes } from './routes/admin-supplier-invoices.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
+import { adminXeroRoutes } from './routes/admin-xero.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
 import { accountRoutes } from './routes/account.js'
@@ -40,6 +41,9 @@ export const buildApp = ({
   storeBaseUrl = 'http://localhost:4321',
   crmBaseUrl = 'http://localhost:5273',
   mailer = null,
+  // The Xero service (src/xero/service.js). null = not configured; the
+  // /admin/xero routes answer 503, same posture as checkout without Stripe.
+  xero = null,
   // Client-facing trade price lists (GET /account/price-lists). Off unless the
   // numbers behind trade_price_cents are real — see src/config.js.
   tradePriceListsEnabled = false,
@@ -189,6 +193,10 @@ export const buildApp = ({
     api.register(adminSupplierInvoiceRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
+    // /admin/xero/* — connection lifecycle, contact/item sync, invoice push
+    // (C4). The service may be null (unconfigured) — the routes say so with
+    // a 503 rather than the plugin being absent and answering 404.
+    api.register(adminXeroRoutes, { pool, xero, crmBaseUrl })
     api.register(adminLegacyRoutes, { pool })
     // POST /admin/legacy/import/:entity — the only write path into those same
     // tables, director-only. Its own plugin scope: it parses application/gzip

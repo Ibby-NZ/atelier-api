@@ -74,6 +74,7 @@ The deep per-domain docs live in nested CLAUDE.md files that load automatically 
 - `src/products/CLAUDE.md` — category spreadsheet round trip (export/validate/apply), hardened CSV reader/writer
 - `src/reports/CLAUDE.md` — reporting: filters, revenue scope, finance masking, CSV export, stock/not-invoiced
 - `src/samples/CLAUDE.md` — samples register (samples are NOT stock), loans, sample orders, showrooms
+- `src/xero/CLAUDE.md` — Xero integration: connection lifecycle (rotating refresh tokens under a row lock), contact match-before-create, idempotent invoice push
 - `scripts/CLAUDE.md` — pointer to the pipeline docs above
 - `.github/CLAUDE.md` — CI workflow constraints (Node 22, postgres:14 service, no typecheck step)
 

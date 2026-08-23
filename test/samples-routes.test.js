@@ -387,8 +387,10 @@ describe('back-office sample routes', () => {
   describe('server-generated barcodes (W20-US-002)', () => {
     // The shape is spelled out here rather than imported from the module: a test
     // that derives its expectation from the code under test asserts nothing.
-    // Six fixed digits behind `ATL-S-` — argued in
-    // migrations/1787371200000_sample-barcode-sequence.js.
+    // Six digits behind `ATL-S-` — argued in
+    // migrations/1787371200000_sample-barcode-sequence.js. Six is the FLOOR
+    // width, which is all the sequence reaches in its normal range; the
+    // capacity test below pins the seven-digit shape with literal strings.
     const GENERATED = /^ATL-S-\d{6}$/
 
     // Sequences are non-transactional — nothing rolls a nextval back — and this
@@ -505,6 +507,44 @@ describe('back-office sample routes', () => {
         )
         expect(rows[0].n).toBe(1)
       } finally {
+        await restoreSequence(snapshot)
+      }
+    })
+
+    it('keeps minting past two million — lpad must never truncate the number (C16)', async () => {
+      // Postgres's lpad TRUNCATES a string longer than its target, so a fixed
+      // `lpad(n::text, 6, '0')` folds every sequence value from 1,000,000 back
+      // into the already-spent six-digit space — `lpad('2000000', 6, '0')` is
+      // '200000' — capping the register at ~999,000 tags when C16 requires two
+      // million. The width is a floor now (`GREATEST(length(n::text), 6)`), and
+      // the expectations here are LITERAL strings on purpose: a regex derived
+      // from the same padding logic would truncate right along with it.
+      const snapshot = await readSequence()
+      try {
+        await pool.query(`SELECT setval('samples_barcode_seq', 2000000, false)`)
+
+        const first = await generate('past two million a')
+        expect(first.statusCode).toBe(201)
+        expect(first.json().sample.barcode).toBe('ATL-S-2000000')
+
+        // The second mint is the duplicate-proof half of the claim: under
+        // truncation both creates collapse onto 'ATL-S-200000' and every
+        // generated create from here on is a permanent 409.
+        const second = await generate('past two million b')
+        expect(second.statusCode).toBe(201)
+        expect(second.json().sample.barcode).toBe('ATL-S-2000001')
+
+        // Cosmetic and accepted: a seven-digit tag sorts lexically BEFORE
+        // `ATL-S-9xxxxx` ('1' < '9' at the seventh character), so past a
+        // million the register's `ORDER BY barcode` stops being chronological.
+        // Uniqueness is the guarantee; this pins the trade-off as intended
+        // rather than leaving it to be "fixed" back into truncation.
+        expect('ATL-S-2000000' < 'ATL-S-900000').toBe(true)
+      } finally {
+        // Sequences are non-transactional and this database is shared with
+        // every other suite — put it back exactly where it was, as the
+        // collision test above does. The minted rows themselves carry the
+        // prefix in their labels, which is what cleanupFixtures deletes by.
         await restoreSequence(snapshot)
       }
     })

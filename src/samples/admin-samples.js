@@ -78,25 +78,49 @@ export const overdueExpression = (alias) => `COALESCE(${alias}.due_back_at < now
 
 const OVERDUE_EXPRESSION = overdueExpression('ol')
 
-// The minted tag, when a create supplies no barcode (W20-US-002). Six
-// zero-padded digits behind `ATL-S-`, off `samples_barcode_seq` — the format,
-// the start value and the evidence for both live in
+// The minted tag, when a create supplies no barcode (W20-US-002). At least six
+// digits behind `ATL-S-`, zero-padded up to six, off `samples_barcode_seq` —
+// the format, the start value and the evidence for both live in
 // migrations/1787371200000_sample-barcode-sequence.js. It is spelled here and
 // NOT as a column DEFAULT so there is exactly one copy of it.
+//
+// THE SIX IS A FLOOR, NOT A FIXED WIDTH (C16 hardening). Postgres's lpad
+// TRUNCATES a string longer than its target length, so the original
+// `lpad(n::text, 6, '0')` folded every sequence value from 1,000,000 upward
+// back into the already-spent six-digit space — `lpad('2000000', 6, '0')` is
+// `'200000'` — and each of those mints is a permanent 23505 → 409 against the
+// tag that genuinely owns the truncated number. Real capacity was ~999,000
+// tags, under the two million C16 requires. `GREATEST(length(n::text), 6)`
+// keeps every value <= 999999 reading exactly as it always has and lets a
+// seventh digit through whole, so the series can never wrap into itself.
+// The cost is COSMETIC ONLY: a seven-digit tag sorts lexically before
+// `ATL-S-9xxxxx` ('1' < '9' at the seventh character), so past a million tags
+// the register's default `ORDER BY s.barcode` stops being chronological.
+// Uniqueness is the guarantee the mint exists to give; lexical-equals-
+// chronological was a bonus and still holds for the first million.
+//
+// The scalar subquery exists because the width needs the value TWICE
+// (`length(n::text)` and the lpad itself) and a second nextval would mint a
+// second number: the FROM binds ONE nextval call to `n` and both uses read it.
 //
 // It is a COALESCE arm rather than a preceding SELECT, and both halves of that
 // are load-bearing:
 //   - Postgres does not evaluate a COALESCE argument it does not need, so a
 //     SUPPLIED barcode never calls nextval and never burns a number. A supplied
 //     barcode wins outright — the generator fills a gap, it never overrides, and
-//     the tag printed on the object is the one the office typed.
+//     the tag printed on the object is the one the office typed. That survives
+//     the subquery: an uncorrelated scalar subquery is an InitPlan, run only
+//     when its value is first referenced, and a taken first arm never
+//     references it — test/samples-routes.test.js asserts the sequence is
+//     untouched by a typed create.
 //   - The mint and the INSERT are one statement, so no number can be handed out
 //     for a row that then fails to land, and no second round trip opens a window
 //     for another writer.
 // A minted value can still hit `samples_barcode_key` if the sequence is ever
 // behind the corpus. That is the same 23505 → 409 a typed duplicate gets, and
 // deliberately NOT a retry loop: retrying hides the real fault and spins.
-const GENERATED_BARCODE = `'ATL-S-' || lpad(nextval('samples_barcode_seq')::text, 6, '0')`
+const GENERATED_BARCODE = `'ATL-S-' || (SELECT lpad(n::text, GREATEST(length(n::text), 6), '0')
+                                          FROM nextval('samples_barcode_seq') AS n)`
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })

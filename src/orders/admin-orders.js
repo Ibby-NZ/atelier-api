@@ -88,6 +88,7 @@ const ORDER_COLUMNS = `o.id,
         o.total_cents,
         o.shipping_zone,
         o.xero_invoice_ref,
+        o.xero_invoice_id,
         o.shipping_address,
         o.contact_phone,
         o.client_reference,
@@ -165,6 +166,9 @@ const toOrder = (row, lineRows) => {
     total_cents: row.total_cents,
     shipping_zone: row.shipping_zone,
     xero_invoice_ref: row.xero_invoice_ref,
+    // Set by the Xero invoice push (C4) — its presence is the duplicate gate,
+    // so a pushed order can never be pushed twice.
+    xero_invoice_id: row.xero_invoice_id ?? null,
     // Card checkouts carry the delivery details Stripe collected; request-kind
     // orders have none until the back office adds them.
     shipping_address: row.shipping_address ?? null,

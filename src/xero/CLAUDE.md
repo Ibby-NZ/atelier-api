@@ -1,0 +1,69 @@
+# atelier-api — Xero integration (C4)
+
+Extracted from the root CLAUDE.md (root conventions still apply). Loaded
+automatically when working in this directory.
+
+## Shape
+
+- `xero-http.js` — the raw HTTP seam (token endpoint, /connections, one
+  `accounting()` caller). Deliberately NOT the xero-node SDK: the SDK does
+  OpenID discovery over the network at initialise time, and four stable
+  endpoints do not justify the tree. Tests fake THIS interface, so the whole
+  service runs for real above a scripted network.
+- `connection-store.js` — the single `xero_connection` row (CHECK id = 1).
+  `withConnectionLock` is the FOR UPDATE wrapper every refresh runs under.
+- `mapping.js` — pure platform↔Xero translation. All money and truncation
+  rules live here and are proven by `test/xero-mapping.test.js` with no DB.
+- `service.js` — the ONE object the rest of the API sees. `buildApp({ xero })`
+  takes it (null = unconfigured → routes 503, the Stripe posture);
+  `server.js` builds the real one from `config.xero`.
+- `routes/admin-xero.js` — status/connect/callback/disconnect, contact + item
+  sync, invoice push. Connect/disconnect are **director-only**; the rest is
+  backoffice.
+
+## Invariants — each one guards a real failure mode
+
+- **Xero refresh tokens are SINGLE-USE and rotate.** Every refresh happens
+  inside `withConnectionLock`, and expiry is re-checked INSIDE the lock so the
+  second worker in the queue uses the fresh token instead of spending the dead
+  one (which would brick the connection until a director reconnects).
+- **Contacts are matched before they are created** — email first, then exact
+  name (`matchContact`). Atelier's clients already exist in Xero (the old
+  D365 connector put them there); create-on-miss without a search would mint
+  duplicates Xero cannot merge. Contact Name is Xero's uniqueness key, so a
+  name-taken refusal retries once as `Name (email)`.
+- **Invoice pushes are idempotent at both ends**: `Idempotency-Key
+  atelier-order-<id>` makes Xero return the SAME invoice on a retry, and
+  `orders.xero_invoice_id` (now in the admin order shape — that's the
+  duplicate gate) 409s a second push. The push also fills `xero_invoice_ref`
+  with Xero's InvoiceNumber, so the confirm flow's manual field fills itself;
+  confirm itself is untouched and still accepts a typed ref.
+- **The OAuth `state` nonce is single-use**: `takePendingState` reads AND
+  clears in one statement, so a replayed callback matches nothing. The
+  callback route answers with REDIRECTS to the CRM (`?connected=1/0`), never
+  JSON — it is a browser navigation, not an API call.
+- **Item sync keys on SKU** (`POST /Items` upserts on Code) — re-running is a
+  refresh, never a duplicate. Code truncates to 30 chars, Name to 50.
+- `expires_at_ms` in the stored token set is OUR computed absolute expiry
+  (minted-at + expires_in); Xero itself only sends the relative form.
+
+## Config
+
+All under `config.xero` (null unless BOTH `XERO_CLIENT_ID` and
+`XERO_CLIENT_SECRET` are set — see `.env.example` for the full list).
+`XERO_GRANT_TYPE=authorization_code` (default; any free Xero app, director
+consents once via the CRM) or `client_credentials` (paid Custom Connection, no
+consent step, `status()` reports connected as soon as it is configured).
+`XERO_REDIRECT_URI` must EXACTLY match a URI registered on the Xero app.
+Money posture: `XERO_LINE_AMOUNT_TYPES=Exclusive` (NZ trade convention) and
+`XERO_SALES_ACCOUNT_CODE=200` — confirm both with the accountant before
+production. `XERO_INVOICE_STATUS=DRAFT` exists for a cautious rollout, but
+Xero cannot EMAIL a draft, so the email-on-push option degrades to a warning.
+
+## Tests
+
+- `test/xero-mapping.test.js` — pure, runs anywhere.
+- `test/admin-xero.test.js` — real service + real DB + `createFakeXero()`
+  scripting the HTTP seam (`findLast` so a test's script shadows the
+  defaults). Covers the state nonce, rotation-under-expiry, both duplicate
+  gates, the email warning path, and both sync directions.

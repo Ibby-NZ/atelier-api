@@ -11,6 +11,20 @@ const DEFAULT_SMTP_PORT = 587
 const DEFAULT_EMAIL_FROM = 'Atelier Textiles <no-reply@ateliertextiles.example>'
 const DEFAULT_BACKOFFICE_EMAIL = 'orders@ateliertextiles.example'
 const MIN_COOKIE_SECRET_LENGTH = 32
+// Xero defaults. The scopes are the code-flow set (offline_access is what
+// yields the refresh token); a custom connection ignores the scope PARAM and
+// uses the scopes configured on the Xero app itself. Account 200 is Xero's
+// stock "Sales" revenue account; NZ trade invoices are conventionally quoted
+// GST-exclusive, hence Exclusive.
+const DEFAULT_XERO_SCOPES =
+  'openid profile email offline_access accounting.transactions accounting.contacts accounting.settings'
+const DEFAULT_XERO_SALES_ACCOUNT_CODE = '200'
+const DEFAULT_XERO_LINE_AMOUNT_TYPES = 'Exclusive'
+const DEFAULT_XERO_INVOICE_STATUS = 'AUTHORISED'
+const DEFAULT_XERO_INVOICE_DUE_DAYS = 30
+const XERO_GRANT_TYPES = ['authorization_code', 'client_credentials']
+const XERO_LINE_AMOUNT_TYPES = ['Exclusive', 'Inclusive', 'NoTax']
+const XERO_INVOICE_STATUSES = ['DRAFT', 'AUTHORISED']
 
 // TRUST_PROXY accepts anything Fastify's trustProxy does: 'true', a hop count,
 // or an address/keyword list ('127.0.0.1', 'loopback'). Prefer the address form
@@ -20,6 +34,48 @@ const parseTrustProxy = (value) => {
   if (value === 'true') return true
   const hops = Number(value)
   return Number.isInteger(hops) && hops > 0 ? hops : value
+}
+
+// Xero (C4). null unless BOTH id and secret are set — the integration is
+// disabled whole, never half-configured. Validation throws here, at boot,
+// because a bad enum value would otherwise surface as a Xero 400 on the
+// first invoice push, days later and on somebody else's screen.
+const parseXero = (env, port) => {
+  const clientId = env.XERO_CLIENT_ID
+  const clientSecret = env.XERO_CLIENT_SECRET
+  if (!clientId && !clientSecret) return null
+  if (!clientId || !clientSecret) {
+    throw new Error('Set both XERO_CLIENT_ID and XERO_CLIENT_SECRET, or neither.')
+  }
+  const grantType = env.XERO_GRANT_TYPE ?? 'authorization_code'
+  if (!XERO_GRANT_TYPES.includes(grantType)) {
+    throw new Error(`XERO_GRANT_TYPE must be one of: ${XERO_GRANT_TYPES.join(', ')}.`)
+  }
+  const lineAmountTypes = env.XERO_LINE_AMOUNT_TYPES ?? DEFAULT_XERO_LINE_AMOUNT_TYPES
+  if (!XERO_LINE_AMOUNT_TYPES.includes(lineAmountTypes)) {
+    throw new Error(`XERO_LINE_AMOUNT_TYPES must be one of: ${XERO_LINE_AMOUNT_TYPES.join(', ')}.`)
+  }
+  const invoiceStatus = env.XERO_INVOICE_STATUS ?? DEFAULT_XERO_INVOICE_STATUS
+  if (!XERO_INVOICE_STATUSES.includes(invoiceStatus)) {
+    throw new Error(`XERO_INVOICE_STATUS must be one of: ${XERO_INVOICE_STATUSES.join(', ')}.`)
+  }
+  const invoiceDueDays = Number(env.XERO_INVOICE_DUE_DAYS ?? DEFAULT_XERO_INVOICE_DUE_DAYS)
+  if (!Number.isInteger(invoiceDueDays) || invoiceDueDays < 0) {
+    throw new Error('XERO_INVOICE_DUE_DAYS must be a non-negative integer.')
+  }
+  return Object.freeze({
+    clientId,
+    clientSecret,
+    grantType,
+    // Must match a redirect URI registered on the Xero app EXACTLY. The
+    // default only fits local dev; production sets the public API origin.
+    redirectUri: env.XERO_REDIRECT_URI ?? `http://localhost:${port}/admin/xero/callback`,
+    scopes: env.XERO_SCOPES ?? DEFAULT_XERO_SCOPES,
+    salesAccountCode: env.XERO_SALES_ACCOUNT_CODE ?? DEFAULT_XERO_SALES_ACCOUNT_CODE,
+    lineAmountTypes,
+    invoiceStatus,
+    invoiceDueDays,
+  })
 }
 
 export const loadConfig = (env = process.env) => {
@@ -90,5 +146,7 @@ export const loadConfig = (env = process.env) => {
     // limit collapses to one shared bucket. Set TRUST_PROXY (e.g. '127.0.0.1'
     // for same-host nginx) so Fastify reads the real client from X-Forwarded-For.
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
+    // Xero (C4): null disables the integration (routes answer 503).
+    xero: parseXero(env, Number(env.PORT ?? DEFAULT_PORT)),
   })
 }

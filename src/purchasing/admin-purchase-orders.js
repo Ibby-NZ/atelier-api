@@ -150,6 +150,8 @@ const LINE_COLUMNS = `l.id,
         l.colourway_id,
         l.qty_ordered,
         l.unit_price,
+        l.is_sample,
+        l.sample_barcode,
         l.supplier_code,
         l.notes,
         c.sku,
@@ -209,6 +211,11 @@ const toLine = (row, allocations, receipts, finance) => {
     sku: row.sku,
     colourway_name: row.colourway_name,
     product_name: row.product_name,
+    // Not money and not masked: which lines are samples, and which tag each one
+    // names, is what a receipting screen needs whoever is holding it. The PRICE
+    // of a sample line is `unit_price` and is finance-gated like every other.
+    is_sample: row.is_sample === true,
+    sample_barcode: row.sample_barcode,
     supplier_code: row.supplier_code,
     notes: row.notes,
     qty_ordered: ordered,
@@ -485,7 +492,7 @@ export const withPurchaseOrderTxn = async (pool, id, fn, { finance = false } = {
 // them breaks.
 const lockLine = async (client, lineId) => {
   const { rows } = await client.query(
-    `SELECT id, purchase_order_id, qty_ordered
+    `SELECT id, purchase_order_id, qty_ordered, is_sample
        FROM purchase_order_lines
       WHERE id = $1
       FOR UPDATE`,
@@ -524,6 +531,18 @@ const liveAllocatedQty = async (client, lineId) => {
  */
 export const insertAllocation = async (client, lineId, { orderLineId, qty }) => {
   const line = await lockLine(client, lineId)
+  // A sample line is never demand bought against a sales order (C18). The
+  // derivation cannot reach one — its lines come from open sales demand and a
+  // sample is added by hand — so the manual allocate route is the only caller
+  // this refuses, and it is refused HERE because this is the one path that
+  // writes an allocation.
+  if (line.is_sample) {
+    throw httpError(
+      422,
+      'This is a sample line — a hanger or cutting bought for the library, not ' +
+        'stock bought against a sales order — so it cannot cover sales demand.'
+    )
+  }
   const allocated = await liveAllocatedQty(client, lineId)
   if (round2(allocated + qty) > line.qty_ordered) {
     throw httpError(
@@ -670,8 +689,9 @@ const insertPurchaseOrderHeader = async (client, group, user) => {
 const insertLine = async (client, purchaseOrderId, line) => {
   const { rows } = await client.query(
     `INSERT INTO purchase_order_lines
-       (purchase_order_id, colourway_id, qty_ordered, unit_price, supplier_code, notes)
-     VALUES ($1, $2, $3, $4, $5, $6)
+       (purchase_order_id, colourway_id, qty_ordered, unit_price, is_sample,
+        sample_barcode, supplier_code, notes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id`,
     [
       purchaseOrderId,
@@ -680,11 +700,32 @@ const insertLine = async (client, purchaseOrderId, line) => {
       // NULL, never 0. Nothing in this schema can derive a purchase price for a
       // colourway, and `Number(null)` is 0 — a zero purchase price reads as free.
       line.unit_price ?? null,
+      // The derivation's planner produces no `is_sample` at all, which is what
+      // keeps a derived line a goods line BY CONSTRUCTION: a sample is added by
+      // hand to a purchase order, never derived from demand.
+      line.is_sample === true,
+      line.sample_barcode ?? null,
       line.supplier_code ?? null,
       line.notes ?? null,
     ]
   )
   return rows[0].id
+}
+
+// The two-column CHECK's friendly answer. A 23514 is a rejected value, not a
+// server fault, so a direct caller must not meet it as a 500 — the same mapping
+// src/samples/admin-samples.js makes for samples_unit_cost_check.
+const rethrowSampleBarcodeCheck = (error) => {
+  if (
+    error?.code === '23514' &&
+    error.constraint === 'purchase_order_lines_sample_barcode_check'
+  ) {
+    throw httpError(
+      422,
+      'A sample barcode only belongs on a sample line. Mark the line as a sample, ' +
+        'or clear the barcode.'
+    )
+  }
 }
 
 /**
@@ -825,6 +866,7 @@ export const createPurchaseOrder = async (
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK')
+    rethrowSampleBarcodeCheck(error)
     if (error?.code === '23503') {
       throw httpError(422, 'One of those colourways does not exist.')
     }
@@ -857,10 +899,16 @@ export const PURCHASE_ORDER_UPDATE_COLUMNS = Object.freeze([
 
 // What a line PATCH may write. `colourway_id` is absent: a line naming the wrong
 // design is a different line, and editing it would silently re-point every
-// allocation and receipt already hanging off it.
+// allocation and receipt already hanging off it. `is_sample` and
+// `sample_barcode` ARE here — a goods line keyed without its sample tick is the
+// ordinary mistake, and correcting the paper must not mean re-keying the line —
+// with the one guard below: a line already covering sales demand cannot become
+// a sample, because a sample line never allocates demand.
 const LINE_UPDATE_COLUMNS = Object.freeze([
   'qty_ordered',
   'unit_price',
+  'is_sample',
+  'sample_barcode',
   'supplier_code',
   'notes',
 ])
@@ -883,12 +931,32 @@ const applyLinePatch = async (client, purchaseOrderId, edit) => {
       )
     }
   }
+  // The invariant "a sample line has no sales-order allocation" has a second
+  // door: flipping a GOODS line that already covers demand. The allocations
+  // would sit untouched on a line the rest of the system may no longer allocate
+  // against or count as demand — the same silent break the qty_ordered guard
+  // above closes, under the same lock.
+  if (edit.is_sample === true && line.is_sample !== true) {
+    const allocated = await liveAllocatedQty(client, edit.id)
+    if (allocated > 0) {
+      throw httpError(
+        422,
+        `${allocated} is allocated to sales orders from this line, so it cannot ` +
+          'become a sample line. A sample never covers sales demand.'
+      )
+    }
+  }
   const { sets, params } = buildUpdate(edit, LINE_UPDATE_COLUMNS)
-  await client.query(
-    `UPDATE purchase_order_lines SET ${sets.join(', ')}, updated_at = now()
-      WHERE id = $${params.length + 1}`,
-    [...params, edit.id]
-  )
+  try {
+    await client.query(
+      `UPDATE purchase_order_lines SET ${sets.join(', ')}, updated_at = now()
+        WHERE id = $${params.length + 1}`,
+      [...params, edit.id]
+    )
+  } catch (error) {
+    rethrowSampleBarcodeCheck(error)
+    throw error
+  }
 }
 
 /**

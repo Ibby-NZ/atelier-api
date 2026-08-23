@@ -29,6 +29,13 @@
 // a fact about the warehouse, and the read model reports `over` so the office
 // can take it up with the house.
 //
+// THE ONE OTHER TABLE THIS MODULE WRITES IS `samples`, AND ONLY ITS COST (C18).
+// A receipt against a sample line flows the line's `unit_price` into
+// `samples.unit_cost` by barcode — a COST, never a quantity, so "samples are
+// not stock" holds exactly as before: no samples column mirrors an inventory
+// figure and nothing here counts a hanger. See `createReceipt`'s header for the
+// full semantics (0 flows, NULL does not, unmatched is reported not minted).
+//
 // This module does NOT import `admin-purchase-orders.js`. The dependency runs
 // one way — that module loads receipts for its read model — so the route, not
 // this file, re-reads the purchase order after a receipt lands.
@@ -93,10 +100,11 @@ export const loadReceiptsByLineId = async (db, lineIds) => {
 /**
  * Book goods in against one purchase-order line.
  *
- * Returns `{ receipt, purchase_order_id }` rather than the whole purchase
- * order: the route re-reads through `getPurchaseOrder` so a receipt hands the
- * CRM exactly the shape a plain read does, and keeping that call in the route
- * is what stops this module and `admin-purchase-orders.js` importing each other.
+ * Returns `{ receipt, purchase_order_id, sample_register }` rather than the
+ * whole purchase order: the route re-reads through `getPurchaseOrder` so a
+ * receipt hands the CRM exactly the shape a plain read does, and keeping that
+ * call in the route is what stops this module and `admin-purchase-orders.js`
+ * importing each other.
  *
  * The only status refused is `cancelled`. A cancelled purchase order is one the
  * office says never happened, and its allocations have been released back to the
@@ -106,11 +114,37 @@ export const loadReceiptsByLineId = async (db, lineIds) => {
  * because the paperwork is behind makes the register argue with the person
  * holding the rolls.
  *
+ * RECEIPTING A SAMPLE LINE FLOWS ITS VALUE INTO THE REGISTER (C18): a receipt
+ * against a line with `is_sample` and a `sample_barcode` writes the line's
+ * `unit_price` into `samples.unit_cost` and the order's snapshot `currency`
+ * into `cost_currency`, for the register row that barcode names. The semantics
+ * travel intact — a priced line writes its price, 0 INCLUDED (the zero-cost
+ * free hanger is a fact worth recording), while a line with a NULL price
+ * writes NOTHING, so "nobody priced this" never overwrites or becomes a value.
+ * It ONLY updates an existing row: the tag is often registered after the
+ * hanger arrives, so an unmatched barcode is reported in `sample_register`
+ * rather than minted into a row nobody described — staff register the tag and
+ * key the value by hand (the manual field on the sample is the fallback).
+ *
+ * The INSERT and the register write share ONE transaction. A receipt recorded
+ * with its value lost — or a value written for an arrival that failed to book —
+ * is two statements about one event disagreeing, which is the whole reason the
+ * ledger is append-only in the first place. The deciding facts (is the line a
+ * sample, which tag, what price) are read INSIDE the transaction, so the value
+ * that flows is the line's price at the moment the goods were booked.
+ *
+ * This is deliberately NOT finance-gated. The price was keyed onto the
+ * purchase order by an ungated purchasing write, and the receipt merely carries
+ * it across by barcode — the warehouse door books samples in without ever
+ * SEEING the figure (reads of it stay gated everywhere), and refusing the flow
+ * for a non-finance receiver would silently drop a value the office recorded.
+ *
  * @param {import('pg').Pool} pool
  * @param {number} lineId
  * @param {{ qty: number, received_at?: string, consignment_ref?: string|null, notes?: string|null }} input
  * @param {{ user?: { id: number } }} [ctx]
- * @returns {Promise<{ receipt: object, purchase_order_id: number }>}
+ * @returns {Promise<{ receipt: object, purchase_order_id: number,
+ *   sample_register: { updated: string[], unmatched: string[] } }>}
  */
 export const createReceipt = async (pool, lineId, input, { user = null } = {}) => {
   const { rows: lineRows } = await pool.query(
@@ -143,12 +177,17 @@ export const createReceipt = async (pool, lineId, input, { user = null } = {}) =
     )
   }
 
+  const updated = []
+  const unmatched = []
+  const client = await pool.connect()
+  let receiptRow
   try {
+    await client.query('BEGIN')
     // COALESCE rather than a bare placeholder: the column is NOT NULL with a
     // `now()` default, and binding an explicit null would violate the NOT NULL
     // instead of taking the default. `received_at` is its own column so a
     // delivery keyed in on Monday can still carry Friday's date.
-    const { rows } = await pool.query(
+    const { rows } = await client.query(
       `INSERT INTO purchase_order_receipts
          (purchase_order_line_id, qty, received_at, consignment_ref, received_by, notes)
        VALUES ($1, $2, COALESCE($3::timestamptz, now()), $4, $5, $6)
@@ -162,11 +201,44 @@ export const createReceipt = async (pool, lineId, input, { user = null } = {}) =
         input.notes ?? null,
       ]
     )
-    return Object.freeze({
-      receipt: toReceipt(rows[0]),
-      purchase_order_id: line.purchase_order_id,
-    })
+    receiptRow = rows[0]
+
+    // The sample facts, read fresh inside the transaction rather than reused
+    // from the status read above — the value that flows must be the line's
+    // price at the moment the goods were booked, not at the moment the request
+    // was validated.
+    const { rows: sampleRows } = await client.query(
+      `SELECT l.is_sample, l.sample_barcode, l.unit_price, po.currency
+         FROM purchase_order_lines l
+         JOIN purchase_orders po ON po.id = l.purchase_order_id
+        WHERE l.id = $1`,
+      [lineId]
+    )
+    const sampleLine = sampleRows[0]
+    // `unit_price == null` is "nobody priced this" and flows NOTHING — the
+    // register's NULL means exactly that and must survive the receipt. A priced
+    // 0 DOES flow: that is the zero-cost free hanger, a recorded fact.
+    if (
+      sampleLine?.is_sample === true &&
+      sampleLine.sample_barcode != null &&
+      sampleLine.unit_price != null
+    ) {
+      // An UPDATE, never an upsert. Only the office describes a sample —
+      // a row minted here would carry a barcode and nothing else, and the
+      // register would fill with tags nobody can identify.
+      const written = await client.query(
+        `UPDATE samples
+            SET unit_cost = $2, cost_currency = $3, updated_at = now()
+          WHERE barcode = $1`,
+        [sampleLine.sample_barcode, sampleLine.unit_price, sampleLine.currency]
+      )
+      if (written.rowCount > 0) updated.push(sampleLine.sample_barcode)
+      else unmatched.push(sampleLine.sample_barcode)
+    }
+
+    await client.query('COMMIT')
   } catch (error) {
+    await client.query('ROLLBACK')
     // The route's `received_at` pattern can only police the SHAPE (Fastify's
     // bundled Ajv carries no `format` keywords), so `2026-02-31` reaches pg as a
     // 22007/22008. A rejected value must never surface as a 500 — the same
@@ -175,5 +247,19 @@ export const createReceipt = async (pool, lineId, input, { user = null } = {}) =
       throw httpError(422, `"${input.received_at}" is not a real date and time.`)
     }
     throw error
+  } finally {
+    client.release()
   }
+
+  return Object.freeze({
+    receipt: toReceipt(receiptRow),
+    purchase_order_id: line.purchase_order_id,
+    // Always present, so the CRM reads one shape whether or not the line was a
+    // sample. `unmatched` is the actionable half: the tag is not in the
+    // register, so no value flowed — register it and key the value manually.
+    sample_register: Object.freeze({
+      updated: Object.freeze(updated),
+      unmatched: Object.freeze(unmatched),
+    }),
+  })
 }

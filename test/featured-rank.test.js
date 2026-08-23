@@ -199,12 +199,18 @@ describe('featured_rank migration', () => {
   })
 
   it('applied its ranks to whatever seeded rows this database holds', async () => {
-    // Migrations run against an empty database in CI, so every one of these is
-    // absent there and the loop asserts nothing. On a seeded database — which is
-    // the case the migration exists for — it proves the ranks actually landed.
+    // Migrations run against an empty database in CI, so the backfill matched
+    // nothing there — but a row can still EXIST by the time this suite runs:
+    // the seed suite imports the real catalogue into the shared CI database and
+    // leaves it, and a brand created AFTER the migration holds featured_rank
+    // NULL through no fault of the backfill. So the skip condition is "no
+    // rank", not "no row" — the `!== undefined` guard let that NULL through
+    // and failed the first-ever CI run on a pristine database. On a seeded
+    // dev database — the case the migration exists for — the ranks are
+    // non-null and every one is still asserted.
     for (const entry of FEATURED_BRANDS) {
       const rank = await rankOf(pool, 'brands', entry.slug)
-      if (rank !== undefined) expect(rank).toEqual(entry.rank)
+      if (rank != null) expect(rank).toEqual(entry.rank)
     }
     for (const entry of FEATURED_COLLECTIONS) {
       const { rows } = await pool.query(
@@ -213,7 +219,7 @@ describe('featured_rank migration', () => {
           WHERE b.slug = $1 AND c.slug = $2`,
         [entry.brand_slug, entry.slug]
       )
-      if (rows.length > 0) expect(rows[0].featured_rank).toEqual(entry.rank)
+      if (rows[0]?.featured_rank != null) expect(rows[0].featured_rank).toEqual(entry.rank)
     }
   })
 })

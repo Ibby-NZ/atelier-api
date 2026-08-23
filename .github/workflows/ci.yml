@@ -17,7 +17,11 @@ name: CI
 
 on:
   pull_request:
-    branches: [august-6th-updates]
+    # main is where feature branches PR now; august-6th-updates stays listed
+    # for any remaining early-August integration PRs. Without main here, a PR
+    # into main runs NO gates at all — the DB suites' only executions happen
+    # in this job, since the dev machines have no local Postgres.
+    branches: [main, august-6th-updates]
 
 # Read-only. This workflow can clone the repository and nothing else — it cannot
 # push, tag, or write to main.

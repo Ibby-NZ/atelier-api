@@ -25,6 +25,7 @@ import {
   FILTER_COLUMNS,
   REPORT_FILTER_NAMES,
   PRODUCT_TYPES,
+  PRODUCT_CATEGORIES,
   ORDER_KINDS,
   ORDER_STATUSES,
   parseReportFilters,
@@ -40,8 +41,11 @@ import {
 import {
   PRODUCT_PERFORMANCE,
   PRODUCT_PERFORMANCE_COLUMNS,
+  PRODUCT_PERFORMANCE_CATEGORY_COLUMNS,
+  PRODUCT_PERFORMANCE_GROUPINGS,
   COVERAGE_NOTE,
   TOTALS_LABELS,
+  CATEGORY_TOTALS_LABELS,
 } from '../src/reports/product-performance.js'
 import { DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT, clampLimit } from '../src/reports/limits.js'
 import {
@@ -82,7 +86,7 @@ describe('report filters', () => {
       expect(Object.isFrozen(REPORT_FILTER_NAMES)).toBe(true)
     })
 
-    it('names exactly the nine filters the reports accept', () => {
+    it('names exactly the ten filters the reports accept', () => {
       expect([...REPORT_FILTER_NAMES]).toEqual([
         'from',
         'to',
@@ -90,6 +94,7 @@ describe('report filters', () => {
         'brand_code',
         'range',
         'product_type',
+        'category',
         'collection',
         'kind',
         'status',
@@ -223,9 +228,12 @@ describe('report filters', () => {
     })
 
     describe('the vocabularies', () => {
-      it('accepts every product type, kind and status the schema allows', () => {
+      it('accepts every product type, category, kind and status the schema allows', () => {
         for (const value of PRODUCT_TYPES) {
           expect(parseReportFilters({ product_type: value }).product_type).toBe(value)
+        }
+        for (const value of PRODUCT_CATEGORIES) {
+          expect(parseReportFilters({ category: value }).category).toBe(value)
         }
         for (const value of ORDER_KINDS) {
           expect(parseReportFilters({ kind: value }).kind).toBe(value)
@@ -248,6 +256,19 @@ describe('report filters', () => {
           400
         )
       })
+
+      // The merchandising axis, not the inventory-unit one: `wallpaper` is a
+      // category and NOT a product_type, and each filter refuses the other's
+      // vocabulary — the office's most likely crossover typo is a 400 naming
+      // the filter, never a report matching nothing.
+      it('keeps category and product_type as two vocabularies, each refusing the other', () => {
+        expect([...PRODUCT_CATEGORIES]).toEqual(['fabric', 'wallpaper', 'trimming', 'accessory'])
+
+        const error = statusOf(() => parseReportFilters({ category: 'finished_good' }))
+        expect(error.statusCode).toBe(400)
+        expect(error.message).toContain('"category"')
+        expect(error.message).toContain('wallpaper')
+      })
     })
 
     it('caps the echoed value so an error message cannot become a payload', () => {
@@ -264,6 +285,7 @@ describe('report filters', () => {
         to: '2026-08-06',
         brand: 'pierre-frey,liberty-london',
         product_type: 'fabric',
+        category: 'wallpaper',
         collection: 'cappuccino',
         kind: 'checkout',
         status: 'paid',
@@ -276,11 +298,12 @@ describe('report filters', () => {
         '2026-08-06',
         ['pierre-frey', 'liberty-london'],
         'fabric',
+        'wallpaper',
         'cappuccino',
         'checkout',
         'paid',
       ])
-      for (const value of ['2026-01-01', 'pierre-frey', 'fabric', 'cappuccino', 'paid']) {
+      for (const value of ['2026-01-01', 'pierre-frey', 'fabric', 'wallpaper', 'cappuccino', 'paid']) {
         expect(where).not.toContain(value)
       }
       expect(where).toBe(
@@ -289,9 +312,10 @@ describe('report filters', () => {
           'o.created_at < ($2::date + 1)',
           'b.slug = ANY($3::text[])',
           'p.product_type = $4',
-          'col.slug = $5',
-          'o.kind = $6',
-          'o.status = $7',
+          'p.category = $5',
+          'col.slug = $6',
+          'o.kind = $7',
+          'o.status = $8',
         ].join(' AND ')
       )
     })
@@ -714,12 +738,45 @@ describe('product performance', () => {
       'brand_name',
       'product_name',
       'product_type',
+      'category',
       'currency',
       'orders',
       'qty',
       'value_cents',
       'unpriced_lines',
     ])
+  })
+
+  // Rebecca-R1's grain: fabrics, trims and wallpapers as rows of one table.
+  // Type and currency stay in it because a quantity needs a unit and a value a
+  // currency — the two rules the by-design view already lives by.
+  describe('the category grouping', () => {
+    it('offers exactly the one grouping, as a frozen registry', () => {
+      expect([...PRODUCT_PERFORMANCE_GROUPINGS]).toEqual(['category'])
+      expect(Object.isFrozen(PRODUCT_PERFORMANCE_GROUPINGS)).toBe(true)
+    })
+
+    it('declares the category grain’s columns, leading with the axis it groups by', () => {
+      expect(PRODUCT_PERFORMANCE_CATEGORY_COLUMNS.map((column) => column.key)).toEqual([
+        'category',
+        'product_type',
+        'currency',
+        'orders',
+        'qty',
+        'value_cents',
+        'unpriced_lines',
+      ])
+    })
+
+    it('declares no finance column at either grain', () => {
+      expect(PRODUCT_PERFORMANCE_CATEGORY_COLUMNS.filter((column) => column.finance)).toEqual([])
+    })
+
+    it('labels the grouped totals row in the column that grain leads with', () => {
+      const [first] = PRODUCT_PERFORMANCE_CATEGORY_COLUMNS
+      expect(Object.keys(CATEGORY_TOTALS_LABELS)).toEqual([first.key])
+      expect(CATEGORY_TOTALS_LABELS.category).toBe('All categories')
+    })
   })
 
   // A sell value is money and is not a cost. The CRM's own policy leaves a sell
@@ -1014,6 +1071,7 @@ describe('W5-US-007 — stock and not-invoiced, declared', () => {
         'sku',
         'brand_name',
         'product_name',
+        'category',
         'colourway_name',
         'unit',
         'on_hand',
@@ -1044,6 +1102,7 @@ describe('W5-US-007 — stock and not-invoiced, declared', () => {
         'brand_code',
         'range',
         'product_type',
+        'category',
         'collection',
       ])
       for (const name of STOCK_FILTERS) {

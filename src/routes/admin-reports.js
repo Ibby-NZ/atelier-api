@@ -29,14 +29,23 @@
 // handlers have to keep. The export differs in exactly three ways: it asks for
 // every row, it accepts no `limit`, and it has its own tighter bucket.
 
-import { parseReportFilters, PRODUCT_TYPES, ORDER_KINDS, ORDER_STATUSES } from '../reports/filters.js'
+import {
+  parseReportFilters,
+  PRODUCT_TYPES,
+  PRODUCT_CATEGORIES,
+  ORDER_KINDS,
+  ORDER_STATUSES,
+} from '../reports/filters.js'
 import { loadReportAccess, maskReport } from '../reports/access.js'
 import {
   toReportCsv,
   reportCsvFilename,
   REPORT_CSV_CONTENT_TYPE,
 } from '../reports/export.js'
-import { productPerformanceReport } from '../reports/product-performance.js'
+import {
+  productPerformanceReport,
+  PRODUCT_PERFORMANCE_GROUPINGS,
+} from '../reports/product-performance.js'
 import { stockReport } from '../reports/stock.js'
 import { notInvoicedReport } from '../reports/not-invoiced.js'
 import { DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT } from '../reports/limits.js'
@@ -79,6 +88,7 @@ const FILTER_PROPERTIES = {
   brand_code: { type: 'string', maxLength: 100 },
   range: { type: 'string', maxLength: 100 },
   product_type: { type: 'string', enum: [...PRODUCT_TYPES] },
+  category: { type: 'string', enum: [...PRODUCT_CATEGORIES] },
   collection: { type: 'string', maxLength: 200 },
   kind: { type: 'string', enum: [...ORDER_KINDS] },
   status: { type: 'string', enum: [...ORDER_STATUSES] },
@@ -117,10 +127,26 @@ export const adminReportRoutes = async (app, { pool }) => {
   /**
    * Register a report's table and its export off ONE builder.
    *
+   * `groupings` is declared per report and reaches BOTH schemas: a report that
+   * offers none never declares `group` at all, so Ajv strips one a caller sends
+   * rather than a builder silently ignoring it — the same posture the export
+   * takes with `limit`. The grouped export stays the grouped table's file,
+   * because both hand the same `group` to the same builder.
+   *
    * @param {string} path the table's path; the file is `<path>/export.csv`
    * @param {(db: unknown, filters: object, options: object) => Promise<object>} build
+   * @param {{ groupings?: readonly string[] }} [options]
    */
-  const registerReport = (path, build) => {
+  const registerReport = (path, build, { groupings } = {}) => {
+    const groupProperty = groupings ? { group: { type: 'string', enum: [...groupings] } } : {}
+    const tableSchema = {
+      ...reportQuerySchema,
+      properties: { ...reportQuerySchema.properties, ...groupProperty },
+    }
+    const fileSchema = {
+      ...exportQuerySchema,
+      properties: { ...exportQuerySchema.properties, ...groupProperty },
+    }
     // The payload IS the envelope — `{ report, title, columns, rows, totals, meta }`
     // — rather than being wrapped in a named key like the list routes. A report
     // is one document, and its own name is already the `report` field the CRM
@@ -130,11 +156,14 @@ export const adminReportRoutes = async (app, { pool }) => {
       {
         preHandler: backoffice,
         config: { rateLimit: REPORT_RATE_LIMIT },
-        schema: { querystring: reportQuerySchema },
+        schema: { querystring: tableSchema },
       },
       async (request) => {
         const filters = parseReportFilters(request.query)
-        const report = await build(pool, filters, { limit: request.query.limit })
+        const report = await build(pool, filters, {
+          limit: request.query.limit,
+          group: request.query.group,
+        })
         return maskReport(report, await loadReportAccess(pool, request.user))
       }
     )
@@ -146,14 +175,17 @@ export const adminReportRoutes = async (app, { pool }) => {
       {
         preHandler: backoffice,
         config: { rateLimit: EXPORT_RATE_LIMIT },
-        schema: { querystring: exportQuerySchema },
+        schema: { querystring: fileSchema },
       },
       async (request, reply) => {
         const filters = parseReportFilters(request.query)
         // `limit: null` is the every-row contract. It is unreachable from the
         // table route (whose schema caps at MAX_ROW_LIMIT), which is what makes
         // "the export is not the current page" true while both share a builder.
-        const report = await build(pool, filters, { limit: null })
+        const report = await build(pool, filters, {
+          limit: null,
+          group: request.query.group,
+        })
 
         // Masked BEFORE the writer sees a row, and before either header is set:
         // maskReport throws 403 for a report a caller may not have, and that
@@ -174,7 +206,9 @@ export const adminReportRoutes = async (app, { pool }) => {
 
   // One line per report, table and file alike. A report that could not be
   // registered this way would be one whose export did not share its builder.
-  registerReport('/admin/reports/product-performance', productPerformanceReport)
+  registerReport('/admin/reports/product-performance', productPerformanceReport, {
+    groupings: PRODUCT_PERFORMANCE_GROUPINGS,
+  })
   registerReport('/admin/reports/stock', stockReport)
   registerReport('/admin/reports/not-invoiced', notInvoicedReport)
 }

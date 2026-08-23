@@ -13,6 +13,8 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { listBrands, getBrandBySlug } from '../src/catalogue/brands.js'
+import { createBrand, updateBrand, getAdminBrand } from '../src/catalogue/admin-brands.js'
+import { createProduct, updateProduct } from '../src/catalogue/admin-products.js'
 import {
   planReportingCodes,
   itemCodeToken,
@@ -176,6 +178,107 @@ describe('W21-US-001 — products.product_range and brands.brand_code', () => {
     // The VALUE, not only the key: a renamed column passes a key scan while
     // still shipping the designation.
     expect(JSON.stringify({ brands, detail })).not.toContain('ZZ')
+  })
+
+  // C22 — the write path. Migration 1788408000000 says both columns ship empty
+  // and are "filled from the CRM one house at a time"; these are the module
+  // whitelist entries that make that sentence true, exercised through the same
+  // functions the routes call.
+  describe('the write path from the CRM', () => {
+    it('stores a code typed against a house and reads it back on the admin model', async () => {
+      const id = await insertBrand({ slug: 'coded' })
+
+      const updated = await updateBrand(pool, id, { brand_code: 'CF' })
+
+      expect(updated.brand_code).toBe('CF')
+      expect((await getAdminBrand(pool, id)).brand_code).toBe('CF')
+    })
+
+    // The CRM's inputs send '' when a person deletes what they typed, and the
+    // column's CHECK refuses a stored blank — so a cleared field stores NULL
+    // (the order-header rule) rather than surfacing as an opaque 23514.
+    it('clears a code to NULL on an empty or whitespace-only input', async () => {
+      const id = await insertBrand({ slug: 'cleared', brandCode: 'CF' })
+
+      expect((await updateBrand(pool, id, { brand_code: '' })).brand_code).toBeNull()
+
+      await updateBrand(pool, id, { brand_code: 'CF' })
+      expect((await updateBrand(pool, id, { brand_code: '   ' })).brand_code).toBeNull()
+    })
+
+    // The F18 case again, this time through the CRM's own verb: the database
+    // refuses, and the office reads a 409 in its own words rather than a 500.
+    it('surfaces the per-supplier clash as a 409, case- and space-insensitively', async () => {
+      const supplierId = await insertSupplier('fabricut')
+      await insertBrand({ slug: 'stroheim', supplierId, brandCode: 'ST' })
+      const second = await insertBrand({ slug: 'stoker', supplierId })
+
+      await expect(updateBrand(pool, second, { brand_code: '  st ' })).rejects.toMatchObject({
+        statusCode: 409,
+        message: expect.stringMatching(/brand code/),
+      })
+    })
+
+    it('writes product_range and clears it the same way', async () => {
+      const brandId = await insertBrand({ slug: 'range-writes' })
+      const { rows } = await pool.query(
+        `INSERT INTO products (brand_id, name, slug, product_type, currency)
+         VALUES ($1, $2, $3, 'fabric', 'NZD') RETURNING id`,
+        [brandId, `${PREFIX} Ranged`, `${PREFIX}-ranged`]
+      )
+      const productId = rows[0].id
+
+      const updated = await updateProduct(pool, productId, { product_range: ' PIERRE FREY ' })
+      expect(updated.product_range).toBe('PIERRE FREY')
+
+      const cleared = await updateProduct(pool, productId, { product_range: '' })
+      expect(cleared.product_range).toBeNull()
+    })
+
+    it('takes both on create, blanks stored as NULL', async () => {
+      const brand = await createBrand(pool, {
+        name: `${PREFIX} created house`,
+        currency: 'NZD',
+        brand_code: ' cf ',
+      })
+      expect(brand.brand_code).toBe('cf')
+
+      const product = await createProduct(pool, {
+        brand_id: brand.id,
+        name: `${PREFIX} created design`,
+        product_type: 'fabric',
+        currency: 'NZD',
+        product_range: '   ',
+      })
+      expect(product.product_range).toBeNull()
+    })
+
+    // Ajv's removeAdditional STRIPS an unlisted body key rather than 400ing it,
+    // so a whitelist entry without its schema property answers 200 having
+    // written nothing — the exact failure src/reports/CLAUDE.md records for
+    // can_view_finance. The same posture as the querystring scan above.
+    it('is named in the catalogue route’s body schemas', () => {
+      const source = readFileSync(
+        new URL('../src/routes/admin-catalogue.js', import.meta.url),
+        'utf8'
+      )
+      const brandCreate = source.slice(
+        source.indexOf('const brandCreateSchema'),
+        source.indexOf('const brandPatchSchema')
+      )
+      const brandPatch = source.slice(
+        source.indexOf('const brandPatchSchema'),
+        source.indexOf('const collectionCreateSchema')
+      )
+      const productProps = source.slice(
+        source.indexOf('const productDetailProps'),
+        source.indexOf('const idParamsSchema')
+      )
+
+      expect(brandCreate).toContain('brand_code:')
+      expect(brandPatch).toContain('brand_code:')
+      expect(productProps).toContain('product_range:')
+    })
   })
 })
 

@@ -27,6 +27,12 @@ const CONFLICT_MESSAGES = Object.freeze({
     'That brand already has a collection with that name.',
   products_slug_key: 'A product with that name already exists for this brand.',
   colourways_sku_key: 'That SKU is already in use.',
+  // Per supplier, not global (migration 1788408000000): a code identifies a
+  // house inside the invoicing entity that bills it, and the index folds through
+  // lower(btrim(...)) — so "cf" against an existing "CF" under the same supplier
+  // lands here too.
+  brands_supplier_brand_code_unique:
+    'That supplier already has a house with that brand code.',
 })
 
 // Friendly 422 text per foreign key. Same degradation rule as above: a rename
@@ -108,8 +114,11 @@ export const buildUpdate = (input, columns) => {
 
 // `supplier_id` is on the ADMIN projection only. It is a commercial fact — who
 // invoices this house — and belongs nowhere near the public read models in
-// catalogue/brands.js, which serve signed-out visitors.
-const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, featured_rank, supplier_id, archived_at, created_at`
+// catalogue/brands.js, which serve signed-out visitors. `brand_code` follows it:
+// it is the office's D365 reporting designation, deliberately absent from the
+// public brand read model (test/reporting-codes.test.js scans for the VALUE as
+// well as the key), and readable here because the CRM is where it is typed in.
+const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, featured_rank, supplier_id, brand_code, archived_at, created_at`
 
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
@@ -140,6 +149,12 @@ const BRAND_UPDATE_COLUMNS = Object.freeze([
   // RESTRICT, so pointing at a supplier that does not exist is a 23503 the
   // route turns into a 422 rather than a silent no-op.
   'supplier_id',
+  // The W21 reporting dimension. Migration 1788408000000 found no defensible
+  // source for it in any corpus Atelier has delivered, so the column ships
+  // empty and is filled from the CRM one house at a time — which is this
+  // whitelist entry. Uniqueness is per supplier (see CONFLICT_MESSAGES) and a
+  // clash surfaces as a 409, never a pre-check.
+  'brand_code',
 ])
 
 const toBrand = (row, extra) =>
@@ -155,10 +170,30 @@ const toBrand = (row, extra) =>
     website_url: row.website_url ?? null,
     featured_rank: row.featured_rank ?? null,
     supplier_id: row.supplier_id ?? null,
+    brand_code: row.brand_code ?? null,
     archived_at: row.archived_at ?? null,
     created_at: row.created_at,
     ...extra,
   })
+
+/**
+ * Normalise a staff-typed reporting label (a brand code, a product range) on
+ * its way to a column whose CHECK refuses a blank: a cleared CRM input arrives
+ * as '' and must store NULL, never '' — a stored blank is a second spelling of
+ * "unset" that every `IS NULL` read misses (the order-header rule, FR-127).
+ * Trimmed rather than passed through, because '   ' is the same statement as ''
+ * and would otherwise reach the CHECK as an opaque 23514.
+ *
+ * @param {unknown} value
+ * @returns {string|null}
+ */
+export const reportingLabelFrom = (value) => {
+  if (value === null || value === undefined) {
+    return null
+  }
+  const trimmed = String(value).trim()
+  return trimmed === '' ? null : trimmed
+}
 
 /**
  * Normalise a URL destined for a public storefront `href`/`src` (brand website,
@@ -285,8 +320,8 @@ export const createBrand = async (pool, input) => {
   const slug = slugFrom(name)
   try {
     const { rows } = await pool.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url, brand_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING ${BRAND_COLUMNS}`,
       [
         name,
@@ -300,6 +335,7 @@ export const createBrand = async (pool, input) => {
         // unticked.
         input.trade_only ?? true,
         websiteUrlFrom(input.website_url),
+        reportingLabelFrom(input.brand_code),
       ]
     )
     return toBrand(rows[0])
@@ -322,6 +358,9 @@ export const updateBrand = async (pool, id, input) => {
     : input
   if (Object.hasOwn(patch, 'website_url')) {
     patch = { ...patch, website_url: websiteUrlFrom(patch.website_url) }
+  }
+  if (Object.hasOwn(patch, 'brand_code')) {
+    patch = { ...patch, brand_code: reportingLabelFrom(patch.brand_code) }
   }
   const { sets, params } = buildUpdate(patch, BRAND_UPDATE_COLUMNS)
   try {

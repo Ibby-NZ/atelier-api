@@ -25,6 +25,7 @@ import { adminSampleLoanRoutes } from './routes/admin-sample-loans.js'
 import { adminEmailTemplateRoutes } from './routes/admin-email-templates.js'
 import { adminPurchaseOrderRoutes } from './routes/admin-purchase-orders.js'
 import { adminSupplierInvoiceRoutes } from './routes/admin-supplier-invoices.js'
+import { adminReserveRoutes } from './routes/admin-reserves.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
@@ -187,6 +188,12 @@ export const buildApp = ({
     // it finance-gated, and the variance between the bill and what those orders
     // said they would cost is reported and never written.
     api.register(adminSupplierInvoiceRoutes, { pool })
+    // /admin/reserves — reserve & cutting dockets (account-first, lines with a
+    // per-line status machine) and the per-supplier report jette closes a
+    // shipment against. Back office only; replaces the D365 fulmar_reserve and
+    // cutting forms. Deliberately does NOT touch inventory.qty_reserved — a
+    // reserve here asks a HOUSE to hold stock at their end.
+    api.register(adminReserveRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     api.register(adminLegacyRoutes, { pool })

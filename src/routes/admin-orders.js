@@ -65,6 +65,20 @@ const priceProp = { type: 'integer', minimum: 0 }
 const qtyProp = { type: 'number', exclusiveMinimum: 0 }
 const cutProp = { type: ['string', 'null'], maxLength: 2000 }
 
+// The manual pricing override (Rebecca-R2). The schema pins only the shape a
+// database CHECK also pins (0–100); the POLICY — 0/5/10 for any back-office
+// user, anything else director-only and carrying a reason — lives in
+// src/orders/discounts.js, because only the handler knows the caller's role.
+// Both keys MUST be here as well as in the module: Ajv's `removeAdditional`
+// would otherwise strip them silently and the discount would simply never
+// arrive.
+const discountPctProp = { type: 'number', minimum: 0, maximum: 100 }
+const discountReasonProp = { type: ['string', 'null'], maxLength: 2000 }
+// A reason may not travel alone — it is set (or cleared) WITH the percentage
+// it justifies, so a body carrying only `discount_reason` is a 400 rather
+// than a key `applyDiscount` would silently ignore.
+const discountDependencies = { discount_reason: ['discount_pct'] }
+
 // Editing an order: quantities, prices, cut requirements, lines added or
 // removed, and the contact header. Every key is optional and `anyOf` demands at
 // least one — Ajv runs `removeAdditional`, so an unknown key is stripped rather
@@ -84,7 +98,12 @@ const editBodySchema = {
     { required: ['contact_phone'] },
     { required: ['client_reference'] },
     { required: ['customer_po_number'] },
+    // Deliberately no `discount_reason` member: a reason alone changes nothing
+    // (see discountDependencies), so it cannot be the key that makes a body
+    // non-empty.
+    { required: ['discount_pct'] },
   ],
+  dependencies: discountDependencies,
   properties: {
     lines: {
       type: 'array',
@@ -133,6 +152,8 @@ const editBodySchema = {
     // (or an empty string, which the module folds to null) clears them.
     client_reference: { type: ['string', 'null'], maxLength: 200 },
     customer_po_number: { type: ['string', 'null'], maxLength: 200 },
+    discount_pct: discountPctProp,
+    discount_reason: discountReasonProp,
   },
 }
 
@@ -144,6 +165,7 @@ const createBodySchema = {
   type: 'object',
   additionalProperties: false,
   required: ['lines'],
+  dependencies: discountDependencies,
   properties: {
     user_id: { type: 'integer', minimum: 1 },
     contact: {
@@ -172,6 +194,8 @@ const createBodySchema = {
       },
     },
     notes: { type: ['string', 'null'], maxLength: 2000 },
+    discount_pct: discountPctProp,
+    discount_reason: discountReasonProp,
   },
 }
 
@@ -213,7 +237,11 @@ export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
     '/admin/orders',
     { preHandler: backoffice, schema: { body: createBodySchema } },
     async (request, reply) => {
-      const order = await createManualOrder(pool, request.body)
+      // request.user rides along for the discount gate: the route guard admits
+      // all of backoffice (director inherits), so only the handler's view of
+      // the caller's role can hold the director-only line — the admin-users
+      // self-protection posture. It also stamps `discount_applied_by`.
+      const order = await createManualOrder(pool, request.body, request.user)
       // The client's confirmation goes out at CREATION (US-005) and the back
       // office is alerted at the same moment (US-004) — this path notified
       // nobody at all before. Never fails the order: the mailer swallows
@@ -245,7 +273,13 @@ export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
       schema: { params: idParamsSchema, body: editBodySchema },
     },
     async (request) => {
-      const order = await editOrderLines(pool, request.params.id, request.body)
+      // The actor, for the same two reasons as the create route above.
+      const order = await editOrderLines(
+        pool,
+        request.params.id,
+        request.body,
+        request.user
+      )
       return { order }
     }
   )

@@ -24,6 +24,10 @@ import { reserves } from './order-states.js'
 // The same packing the storefront's request flow writes, so `orders.notes` reads
 // identically however the order was raised.
 import { buildNotes } from './order-request.js'
+// The discount tiers and the director-only override gate (Rebecca-R2) — pure,
+// like order-states.js, so the CRM can mirror the tiers and the gate tests
+// without a database.
+import { checkDiscountWrite } from './discounts.js'
 // The free-text search layer: pure, and the only place a filter value becomes
 // SQL. See src/orders/order-filters.js for why it is not src/reports/filters.js.
 import { buildOrderFilters } from './order-filters.js'
@@ -86,6 +90,9 @@ const ORDER_COLUMNS = `o.id,
         o.subtotal_cents,
         o.shipping_cents,
         o.total_cents,
+        o.discount_pct,
+        o.discount_reason,
+        o.discount_applied_by,
         o.shipping_zone,
         o.xero_invoice_ref,
         o.shipping_address,
@@ -163,6 +170,13 @@ const toOrder = (row, lineRows) => {
     subtotal_cents: row.subtotal_cents,
     shipping_cents: row.shipping_cents,
     total_cents: row.total_cents,
+    // The manual pricing override (Rebecca-R2), ADMIN shape only: the customer
+    // toOrder (order-history.js) stays without it, because the totals already
+    // reflect the discount and who authorised it is the office's business.
+    // pg numeric arrives as a string ('7.50') — the CRM coerces, like qty.
+    discount_pct: row.discount_pct,
+    discount_reason: row.discount_reason ?? null,
+    discount_applied_by: row.discount_applied_by ?? null,
     shipping_zone: row.shipping_zone,
     xero_invoice_ref: row.xero_invoice_ref,
     // Card checkouts carry the delivery details Stripe collected; request-kind
@@ -353,21 +367,55 @@ const lockColourway = async (client, colourwayId) => {
   return { colourwayId: row.id, hasInventory: row.stocked !== null }
 }
 
-// Recompute the money from the lines. `qty` is numeric(12,2), so the product is
-// numeric too — ROUND then cast, once, over the whole order rather than per line
-// (rounding each line would multiply the error by the line count). `shipping_cents`
-// is left exactly as it was; nothing here prices freight.
+// Recompute the money from the lines — THE one place a total is computed, so
+// every path (line edit, added line, removal, a discount change) agrees by
+// construction. `qty` is numeric(12,2), so the product is numeric too — ROUND
+// then cast, once, over the whole order rather than per line (rounding each
+// line would multiply the error by the line count).
+//
+// The discount (Rebecca-R2) is an INPUT to this recompute, never a second
+// spelling of the total: `subtotal_cents` stays the un-discounted figure, the
+// discount is taken once over it (same rounding argument as the lines), and
+// `shipping_cents` rides on top exactly as it was — the discount is off the
+// goods, and nothing here prices freight. Mirrored by `discountedTotalCents`
+// in ./discounts.js; the DB suite asserts the two agree.
 const recomputeOrderMoney = (client, id) =>
   client.query(
     `UPDATE orders o
         SET subtotal_cents = t.sum,
-            total_cents = t.sum + o.shipping_cents
+            total_cents = ROUND(t.sum * (1 - o.discount_pct / 100))::int + o.shipping_cents
        FROM (SELECT COALESCE(ROUND(SUM(qty * unit_price_cents)), 0)::int AS sum
                FROM order_lines
               WHERE order_id = $1) t
       WHERE o.id = $1`,
     [id]
   )
+
+// Write a discount change (Rebecca-R2). The pct and its reason travel as a
+// PAIR: whenever the patch carries `discount_pct`, the reason is set from the
+// same patch — absent folds to null, so a stale justification can never
+// outlive the percentage it justified — and `discount_applied_by` is stamped
+// from the SESSION, never from the body, because who authorised an override is
+// exactly the fact the body must not be able to state. The tier/role/reason
+// gate is `checkDiscountWrite` (./discounts.js): standard tiers for anyone the
+// route guard admitted, anything else director-only with a reason (403/422).
+//
+// The caller runs `recomputeOrderMoney` after this — the discount changes the
+// total, and the total is only ever computed in that one place.
+const applyDiscount = async (client, id, patch, actor) => {
+  if (!Object.hasOwn(patch, 'discount_pct')) return
+  const reason =
+    typeof patch.discount_reason === 'string' && patch.discount_reason.trim() !== ''
+      ? patch.discount_reason
+      : null
+  checkDiscountWrite({ pct: patch.discount_pct, reason, role: actor?.role })
+  await client.query(
+    `UPDATE orders
+        SET discount_pct = $2, discount_reason = $3, discount_applied_by = $4
+      WHERE id = $1`,
+    [id, patch.discount_pct, reason, actor.id]
+  )
+}
 
 // The header fields staff may correct while an order is still being priced.
 // Frozen code literals fed to a dynamic SET clause — column names are never user
@@ -442,9 +490,13 @@ const applyOrderHeader = async (client, id, patch) => {
  *   contact_phone?: string|null,
  *   client_reference?: string|null,
  *   customer_po_number?: string|null,
+ *   discount_pct?: number,
+ *   discount_reason?: string|null,
  * }} patch
+ * @param {{ id: number, role: string }} [actor] request.user — the discount
+ *   gate reads the role and the audit column records the id
  */
-export const editOrderLines = (pool, id, patch) =>
+export const editOrderLines = (pool, id, patch, actor) =>
   withOrderTxn(pool, id, async (client, order) => {
     if (!isAnnotationOnly(patch)) {
       requireStatus(order, ['requested', 'confirmed'], 'edit')
@@ -534,6 +586,11 @@ export const editOrderLines = (pool, id, patch) =>
     }
 
     await applyOrderHeader(client, id, patch)
+    // The discount before the recompute, so the total the transaction commits
+    // already reflects it. A discount is a commercial term, not an annotation:
+    // it changes the invoice amount, so it sits behind the status guard above
+    // exactly like a price edit does.
+    await applyDiscount(client, id, patch, actor)
     await recomputeOrderMoney(client, id)
   })
 
@@ -556,10 +613,13 @@ export const editOrderLines = (pool, id, patch) =>
  *   contact?: { name?: string, email?: string, phone?: string },
  *   lines: Array<{ colourway_id: number, qty: number, unit_price_cents: number, cut_requirements?: string|null }>,
  *   notes?: string|null,
+ *   discount_pct?: number,
+ *   discount_reason?: string|null,
  * }} input
+ * @param {{ id: number, role: string }} [actor] request.user — see editOrderLines
  * @returns {Promise<object>} the created order
  */
-export const createManualOrder = async (pool, input) => {
+export const createManualOrder = async (pool, input, actor) => {
   const contact = input.contact ?? {}
   const userId = input.user_id ?? null
   // An order nobody can be billed for is not a sales order. One of the two forms
@@ -569,6 +629,20 @@ export const createManualOrder = async (pool, input) => {
       422,
       'A sales order needs a client: either an account (user_id) or contact details.'
     )
+  }
+
+  // A discount keyed at creation runs the same gate a PATCH does (Rebecca-R2):
+  // standard tiers for any back-office user, anything else director-only with a
+  // reason. Checked before the transaction opens — a refused order should cost
+  // no BEGIN. Absent means 0, the column default, with nobody stamped as having
+  // applied anything.
+  const hasDiscount = Object.hasOwn(input, 'discount_pct')
+  const discountReason =
+    typeof input.discount_reason === 'string' && input.discount_reason.trim() !== ''
+      ? input.discount_reason
+      : null
+  if (hasDiscount) {
+    checkDiscountWrite({ pct: input.discount_pct, reason: discountReason, role: actor?.role })
   }
 
   const client = await pool.connect()
@@ -604,8 +678,9 @@ export const createManualOrder = async (pool, input) => {
       .join('\n')
 
     const { rows } = await client.query(
-      `INSERT INTO orders (user_id, guest_email, order_number, kind, status, notes)
-       VALUES ($1, $2, $3, 'manual', 'requested', $4)
+      `INSERT INTO orders (user_id, guest_email, order_number, kind, status, notes,
+                           discount_pct, discount_reason, discount_applied_by)
+       VALUES ($1, $2, $3, 'manual', 'requested', $4, $5, $6, $7)
        RETURNING id`,
       [
         userId,
@@ -614,6 +689,11 @@ export const createManualOrder = async (pool, input) => {
         userId === null ? (contact.email ?? null) : null,
         `SO-${randomUUID().slice(0, 8).toUpperCase()}`,
         notes === '' ? null : notes,
+        hasDiscount ? input.discount_pct : 0,
+        discountReason,
+        // From the session, never the body — who authorised a discount is the
+        // one fact the caller must not be able to state.
+        hasDiscount ? (actor?.id ?? null) : null,
       ]
     )
     orderId = rows[0].id

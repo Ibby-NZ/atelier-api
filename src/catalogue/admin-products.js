@@ -9,7 +9,12 @@
 //     from product_type) in one transaction, so a colourway can never exist
 //     without stock tracking.
 
-import { slugFrom, rethrowConflict, buildUpdate } from './admin-brands.js'
+import {
+  slugFrom,
+  rethrowConflict,
+  buildUpdate,
+  reportingLabelFrom,
+} from './admin-brands.js'
 import { setArchived } from '../lifecycle/archive.js'
 import {
   withChangeContext,
@@ -62,6 +67,7 @@ const PRODUCT_COLUMNS = `p.id,
         p.name,
         p.slug,
         p.product_type,
+        p.product_range,
         p.composition,
         p.width,
         p.application,
@@ -87,6 +93,12 @@ const PRODUCT_FROM = `FROM products p
 const PRODUCT_UPDATE_COLUMNS = Object.freeze([
   'name',
   'collection_id',
+  // The W21 reporting dimension (migration 1788408000000): Atelier's own
+  // spelling of the house's product line, filled from the CRM one house at a
+  // time. Free text, not an FK — the range vocabulary lives in a staging mirror
+  // that is re-imported wholesale. A cleared input stores NULL, never '' (the
+  // CHECK refuses a blank), via reportingLabelFrom below.
+  'product_range',
   'composition',
   'width',
   'application',
@@ -118,6 +130,7 @@ const toProduct = (row, extra) =>
     name: row.name,
     slug: row.slug,
     product_type: row.product_type,
+    product_range: row.product_range ?? null,
     composition: row.composition,
     width: row.width,
     application: row.application,
@@ -413,11 +426,12 @@ export const createProduct = async (pool, input) => {
   try {
     const { rows } = await pool.query(
       `INSERT INTO products (
-         brand_id, collection_id, name, slug, product_type, composition, width,
-         application, rubs, price_band, lead_time, retail_price_cents,
-         trade_price_cents, currency, show_on_website, hi_res_asset_url
+         brand_id, collection_id, name, slug, product_type, product_range,
+         composition, width, application, rubs, price_band, lead_time,
+         retail_price_cents, trade_price_cents, currency, show_on_website,
+         hi_res_asset_url
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        RETURNING id`,
       [
         brand.id,
@@ -425,6 +439,7 @@ export const createProduct = async (pool, input) => {
         name,
         slug,
         input.product_type,
+        reportingLabelFrom(input.product_range),
         input.composition ?? null,
         input.width ?? null,
         input.application ?? null,
@@ -475,9 +490,12 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
     await requireCollectionInBrand(pool, input.collection_id, existing.brand_id)
   }
 
-  const patch = Object.hasOwn(input, 'name')
+  let patch = Object.hasOwn(input, 'name')
     ? { ...input, name: input.name.trim() }
     : input
+  if (Object.hasOwn(patch, 'product_range')) {
+    patch = { ...patch, product_range: reportingLabelFrom(patch.product_range) }
+  }
   const { sets, params } = buildUpdate(patch, PRODUCT_UPDATE_COLUMNS)
 
   // Advisory: the table's CHECK is the real gate, so a figure that moved under

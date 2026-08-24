@@ -20,6 +20,7 @@
 // order and catalogue read models already carry.
 
 import { ORDER_STATUSES } from '../orders/admin-orders.js'
+import { CATEGORIES } from '../../scripts/lib/price-template.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -36,6 +37,11 @@ export const FILTER_COLUMNS = Object.freeze({
   brand_code: 'b.brand_code',
   range: 'p.product_range',
   product_type: 'p.product_type',
+  // Rebecca-R1's merchandising axis (fabric / wallpaper / trimming / accessory)
+  // — NOT product_type, which is the inventory-unit split. An exact-match enum,
+  // never free text: the vocabulary is CHECKed on the column, so a fragment
+  // match would only ever hide a typo.
+  category: 'p.category',
   collection: 'col.slug',
   kind: 'o.kind',
   status: 'o.status',
@@ -61,6 +67,15 @@ export const ORDER_KINDS = Object.freeze([
   'backorder_request',
   'manual',
 ])
+
+// `products.category` and `price_list_items.category` are ONE vocabulary
+// (migration 1786507200000 says so at length), and scripts/lib/price-template.js
+// is its registry — so this is derived, not retyped: a second copy is how "add
+// a category" turns into two decisions. It still plays the boundary-copy role
+// here (an unknown value is a 400 naming the filter, never a report matching
+// nothing), and test/admin-reports.test.js parses the LIVE
+// products_category_check to prove the registry has not drifted from the CHECK.
+export const PRODUCT_CATEGORIES = Object.freeze([...CATEGORIES])
 
 // `status` deliberately reuses the orders module's own frozen list rather than
 // retyping it. It is already what /admin/orders validates against, and
@@ -182,6 +197,7 @@ const PARSERS = Object.freeze({
   brand_code: (value) => parseFreeText('brand_code', value),
   range: (value) => parseFreeText('range', value),
   product_type: (value) => parseEnum('product_type', value, PRODUCT_TYPES),
+  category: (value) => parseEnum('category', value, PRODUCT_CATEGORIES),
   collection: (value) => parseSlug('collection', value),
   kind: (value) => parseEnum('kind', value, ORDER_KINDS),
   status: (value) => parseEnum('status', value, ORDER_STATUSES),
@@ -263,6 +279,7 @@ const CLAUSES = Object.freeze({
   brand_code: (column, index) => `${column} ILIKE $${index} ESCAPE '\\'`,
   range: (column, index) => `${column} ILIKE $${index} ESCAPE '\\'`,
   product_type: (column, index) => `${column} = $${index}`,
+  category: (column, index) => `${column} = $${index}`,
   collection: (column, index) => `${column} = $${index}`,
   kind: (column, index) => `${column} = $${index}`,
   status: (column, index) => `${column} = $${index}`,

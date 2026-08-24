@@ -78,6 +78,13 @@ const LIVE_ORDER_LINES = Object.freeze({
     product_slug: 'p.slug',
     product_name: 'p.name',
     product_type: 'p.product_type',
+    // Rebecca-R1's merchandising axis (fabric / wallpaper / trimming /
+    // accessory). In the scope for the same reason the W21 dimensions below
+    // are: every money report can filter and group on it without a second
+    // join. Nullable — every product predates the column — and a NULL here is
+    // "uncategorised", which the category report keeps as its own row rather
+    // than dropping revenue nobody has filed yet.
+    category: 'p.category',
     // W21's two reporting dimensions. They are in the scope rather than in each
     // report because both are filterable everywhere the scope reaches, and
     // because every report states how much of ITS population carries them

@@ -106,6 +106,13 @@ const createBodySchema = {
           colourway_id: { type: 'integer', minimum: 1 },
           qty_ordered: qtyProp,
           unit_price: unitPriceProp,
+          // C18: a hanger or cutting bought on the same paper as the cloth.
+          // DECLARED here because Ajv's removeAdditional would otherwise strip
+          // both keys silently and every sample line would land as goods. The
+          // barcode is a reference by value into the samples register — the
+          // migration header says why it is not an FK.
+          is_sample: { type: 'boolean' },
+          sample_barcode: nullableShort,
           supplier_code: nullableShort,
           notes: nullableText,
         },
@@ -162,6 +169,11 @@ const patchBodySchema = {
           id: { type: 'integer', minimum: 1 },
           qty_ordered: qtyProp,
           unit_price: unitPriceProp,
+          // Correctable, like the rest of the paper: a goods line keyed without
+          // its sample tick, or a mistyped tag. The module refuses turning a
+          // line that covers sales demand into a sample.
+          is_sample: { type: 'boolean' },
+          sample_barcode: nullableShort,
           supplier_code: nullableShort,
           notes: nullableText,
         },
@@ -350,11 +362,15 @@ export const adminPurchaseOrderRoutes = async (app, { pool }) => {
   // Book goods in. APPEND-ONLY: there is no PATCH and no DELETE here, and there
   // must never be one — a mistake is reversed with a negative `qty`. The whole
   // purchase order comes back so the receipting screen re-renders off one shape.
+  // `sample_register` travels beside it (C18): which register rows the receipt
+  // valued by barcode, and — the actionable half — which barcodes matched no
+  // register row, so the screen can say "register the tag, then key the value
+  // on the sample" instead of the flow failing silently.
   app.post(
     '/admin/purchase-order-lines/:id/receipts',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: receiptBodySchema } },
     async (request, reply) => {
-      const { receipt, purchase_order_id } = await createReceipt(
+      const { receipt, purchase_order_id, sample_register } = await createReceipt(
         pool,
         request.params.id,
         request.body,
@@ -363,6 +379,7 @@ export const adminPurchaseOrderRoutes = async (app, { pool }) => {
       reply.code(201)
       return {
         receipt,
+        sample_register,
         purchase_order: await getPurchaseOrder(pool, purchase_order_id, {
           finance: await financeFor(request),
         }),

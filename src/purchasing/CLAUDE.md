@@ -180,6 +180,36 @@ receipted against and closed. Four tables —
   duplicated): every purchasing route refuses an approved trade session. `unit_price` is what
   Atelier PAYS a maison — the same disclosure `wholesale_rate` is, arrived at by a different route.
 
+### Sample lines (C18)
+
+- **A sample on a purchase order is a LINE (`is_sample`), not a table** —
+  `migrations/1789185600000_purchase-order-sample-lines.js`. A hanger is ordered, priced and
+  receipted on the same paper as the cloth; what makes it different is what it is NOT: **a sample
+  line never allocates sales demand.** `insertAllocation` (the one path that writes an allocation)
+  refuses it, the PATCH refuses flipping a goods line that already covers demand into a sample, and
+  the derivation cannot produce one by construction — the planner's lines come from open demand and
+  a sample is added by hand. All three doors are tested in `test/purchasing-samples.test.js`.
+- **`sample_barcode` is a reference BY VALUE, deliberately not an FK to `samples.barcode`.** The tag
+  is often registered after the hanger arrives, and an FK would refuse the purchase-order line until
+  the office had registered a sample they do not hold. A dangling barcode is an ordinary working
+  state. `CHECK (is_sample OR sample_barcode IS NULL)` is one-directional on purpose: a barcode on a
+  goods line is a keying error the schema can catch; a sample line with no barcode is normal (the
+  value then flows nowhere and the manual field on the sample is the fallback). The 23514 is mapped
+  to a 422 naming the fix.
+- **Receipting a sample line flows its value into the register by barcode**, inside the receipt's
+  own transaction (`receipts.js`): `unit_price` → `samples.unit_cost`, the order's snapshot
+  `currency` → `cost_currency`. The NULL-vs-0 rule travels intact — a priced 0 FLOWS (the zero-cost
+  free hanger is a recorded fact), a NULL price flows NOTHING (no-cost stays NULL, and never
+  overwrites a value the office keyed by hand). **Only an existing register row is updated**; an
+  unmatched barcode comes back in the response's `sample_register.unmatched` so staff register the
+  tag and key the value manually — never minted into a row nobody described. The flow is
+  deliberately NOT finance-gated: the price was keyed by an ungated purchasing write, the receipt
+  carries it across without showing it to anyone, and gating would silently drop a value the office
+  recorded.
+- **No price column was added** — `unit_price` already carries the sample's price with the same
+  NULL-vs-0 semantics as `samples.unit_cost`, which is exactly what lets the receipt copy one into
+  the other without translating anything.
+
 ### `purchase_orders` is not `legacy_purchase_orders`
 
 - **Different tables; neither feeds the other.** The staging mirror is what D365 held; this is what

@@ -243,8 +243,8 @@ migrations.
   references it — `sample_loans.sample_id` points at the row's id — so a correction is safe, and a
   collision is the same 409 the create answers with. Same reasoning as `colourways.sku`.
 - **`barcode` is OPTIONAL on create, and omitting it IS the generate action** (W20-US-002,
-  `migrations/1787371200000_sample-barcode-sequence.js`). `ATL-S-` + six zero-padded digits off
-  `samples_barcode_seq`, which **starts at 1000**: the hand-typed corpus is `ATL-0049-217` (three
+  `migrations/1787371200000_sample-barcode-sequence.js`). `ATL-S-` + at least six digits
+  (zero-padded up to six) off `samples_barcode_seq`, which **starts at 1000**: the hand-typed corpus is `ATL-0049-217` (three
   digits, highest 217), `samples` was empty and `legacy_cuttings` has no barcode column, so a minted
   tag cannot collide with a typed one *by construction* — the middle segment is the literal `S`,
   never digits. A **SEQUENCE, never `max(barcode) + 1`**, which serialises every insert and races
@@ -255,7 +255,12 @@ migrations.
   the whole complaint, and a generated barcode that collides (sequence moved behind the corpus) is
   the same 23505 → 409 a typed one gets. `''` and `null` are 400s at the route, so only an ABSENT
   key generates. A suite creating generated samples must clean up **by `label`** — the barcode is
-  the server's, and `ATL-S-%` is nobody's namespace to delete from.
+  the server's, and `ATL-S-%` is nobody's namespace to delete from. **Six digits is a FLOOR, not a
+  fixed width** (C16): lpad truncates past its target, so a fixed-width pad would fold every value
+  from 1,000,000 back into the spent six-digit space and 409 for ever; the mint pads with
+  `GREATEST(length(n::text), 6)` instead, so values ≤ 999999 read as before and a seventh digit
+  comes through whole. Past a million tags lexical order stops matching chronological order
+  (`ATL-S-1000000` sorts before `ATL-S-9xxxxx`) — cosmetic only, uniqueness is the guarantee.
 - **A 23503 on any of the three FKs is a 422, not a 404.** The id arrived in a BODY as a business
   fact about the sample, exactly like an unknown `brand_id` on a product create, so it is the body
   that is wrong and not the URL. Keyed on the constraint name

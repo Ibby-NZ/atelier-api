@@ -18,9 +18,10 @@
  * trade: a gap in a tag series costs nothing, a duplicate costs a mislabelled
  * physical object.
  *
- * THE FORMAT: `ATL-S-` + six zero-padded digits, e.g. `ATL-S-001000`. It is
- * spelled in src/samples/admin-samples.js (the module that mints it) rather than
- * as a column DEFAULT, so there is one copy of it and not two to drift apart.
+ * THE FORMAT: `ATL-S-` + at least six digits, zero-padded up to six, e.g.
+ * `ATL-S-001000`. It is spelled in src/samples/admin-samples.js (the module
+ * that mints it) rather than as a column DEFAULT, so there is one copy of it
+ * and not two to drift apart.
  * The evidence behind it, all of it gathered from this database and this repo:
  *
  *   - `samples` currently holds ZERO rows. There is no live corpus to collide
@@ -41,9 +42,16 @@
  * `S` and the middle segment of every hand-typed tag is four digits, so the two
  * namespaces are disjoint whatever either side does next. `ATL-` is kept so a
  * printed tag still reads as Atelier's; `S` says "the server chose this one".
- * Six fixed digits mean no re-padding half way through the series, and because
- * the register's default read is `ORDER BY s.barcode ASC`, fixed width also
- * makes lexical order chronological order.
+ * SIX DIGITS IS A FLOOR, NOT A FIXED WIDTH (C16 hardening). The mint pads with
+ * `GREATEST(length(n::text), 6)` because Postgres's lpad TRUNCATES a string
+ * longer than its target: a fixed `lpad(n, 6, '0')` would fold every value
+ * from 1,000,000 upward back into the spent six-digit space and 409 for ever,
+ * capping the register at ~999,000 tags when C16 requires two million. Values
+ * <= 999999 read exactly as before; a millionth-plus tag simply keeps its
+ * seventh digit. The one cost is cosmetic: the register's default read is
+ * `ORDER BY s.barcode ASC`, and a seven-digit tag sorts lexically before
+ * `ATL-S-9xxxxx`, so past a million tags lexical order stops matching
+ * chronological order — uniqueness, the actual guarantee, is unaffected.
  *
  * START AT 1000, NOT 1. Every number in evidence is three digits and the highest
  * is 217. Starting at 1 would run the generated series straight through the
@@ -59,8 +67,8 @@
  * `setval`, a tag typed into the `ATL-S-` space by hand), a minted barcode can
  * still hit `samples_barcode_key`. The correct answer is the SAME 409 a typed
  * duplicate gets — not a retry loop, which would paper over the real fault and
- * spin under contention. test/samples-barcodes.test.js drives that path
- * deliberately.
+ * spin under contention. test/samples-routes.test.js drives that path
+ * deliberately, and drives the past-two-million mint too.
  *
  * @param pgm {import('node-pg-migrate').MigrationBuilder}
  */

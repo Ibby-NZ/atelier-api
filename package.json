@@ -12,6 +12,7 @@
     "migrate:create": "node-pg-migrate --migrations-dir migrations --migration-file-language js create",
     "seed": "node src/seed/run.js",
     "seed:staff": "node src/seed/seed-staff.js",
+    "seed:reserves": "node src/seed/seed-reserves.js",
     "convert:pricing": "node scripts/convert-price-lists.js",
     "import:pricing": "node src/seed/import-price-lists.js",
     "backfill:suppliers": "node src/seed/backfill-suppliers.js",

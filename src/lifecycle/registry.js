@@ -31,6 +31,7 @@
 // reach production — the server refuses to boot instead.
 
 import { DELETABLE_SAMPLE_ORDER_STATUSES } from '../samples/sample-order-states.js'
+import { DELETABLE_RESERVE_LINE_STATUSES } from '../reserves/reserve-line-states.js'
 import { isDeletableOrder, holdsReservation } from '../orders/order-states.js'
 
 // A probe body must be a bare existence select over one relation, taking the
@@ -116,6 +117,50 @@ const sampleOrderGuard = async (client, id) => {
       409,
       `This sample order is "${status}", so it is a record of material a house ` +
         'was asked for. Archive it instead to hide it without losing that.'
+    )
+  }
+  return null
+}
+
+/**
+ * A reserve line stops being deletable the moment the house is involved — same
+ * shape as `sampleOrderGuard`, states from the pure leaf module the CRM
+ * mirrors. Cancelling is the removal that keeps the record; delete exists for
+ * keying mistakes, and neither table has an archive to offer instead.
+ */
+const reserveLineGuard = async (client, id) => {
+  const { rows } = await client.query(`SELECT status FROM reserve_lines WHERE id = $1`, [id])
+  const status = rows[0]?.status
+  if (status && !DELETABLE_RESERVE_LINE_STATUSES.includes(status)) {
+    return refuse(
+      409,
+      `This line is "${status}", so it is a record of what a house was asked to ` +
+        'hold or cut. Cancel it instead to close it without losing that.'
+    )
+  }
+  return null
+}
+
+/**
+ * A docket goes only when every line on it could go alone. Its lines CASCADE —
+ * they are the docket's own body — so the guard is what stands between one
+ * DELETE and a page of supplier history; there is no probe to write because
+ * the FK points the wrong way for one and would raise nothing.
+ */
+const reserveRequestGuard = async (client, id) => {
+  const { rows } = await client.query(
+    `SELECT count(*)::int AS held
+       FROM reserve_lines
+      WHERE request_id = $1
+        AND NOT (status = ANY($2::text[]))`,
+    [id, [...DELETABLE_RESERVE_LINE_STATUSES]]
+  )
+  const held = rows[0]?.held ?? 0
+  if (held > 0) {
+    return refuse(
+      409,
+      `This docket has ${held} line${held === 1 ? '' : 's'} a house is already acting on. ` +
+        'Cancel the lines instead — the docket closes with them.'
     )
   }
   return null
@@ -622,6 +667,30 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     label: 'sample order',
     archivable: true,
     guard: sampleOrderGuard,
+    probes: [],
+  },
+
+  // Neither reserves table has `archived_at` — `cancelled` is the removal that
+  // keeps the record — so both say `archivable: false` and the CRM's blocked
+  // dialog correctly offers Cancel alone. The line's probe-shaped question
+  // ("did a cutting get generated from this?") is deliberately NOT a probe:
+  // `source_line_id` is SET NULL, and a generated cutting outliving its
+  // drafting-mistake parent is the intended outcome, not a blocked one.
+  reserve_line: {
+    table: 'reserve_lines',
+    idColumn: 'id',
+    label: 'reserve line',
+    archivable: false,
+    guard: reserveLineGuard,
+    probes: [],
+  },
+
+  reserve_request: {
+    table: 'reserve_requests',
+    idColumn: 'id',
+    label: 'reserve docket',
+    archivable: false,
+    guard: reserveRequestGuard,
     probes: [],
   },
 

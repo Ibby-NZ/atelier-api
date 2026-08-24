@@ -9,6 +9,10 @@ node_modules
 .env.*
 !.env.example
 incoming/
+# D365 report exports dropped into the repo root while designing against them
+# (e.g. "In Progress Reserves …" for the reserves/cuttings work). They carry
+# client names and contacts — the same PII rule as incoming/.
+/*.xlsx
 # Database dumps staged for a server restore. These are the customer database in
 # plaintext (names, addresses, order history) — the same reason incoming/ is
 # ignored. A dump lands here on its way to a server and must never reach GitHub.

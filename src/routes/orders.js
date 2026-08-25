@@ -67,12 +67,28 @@ const orderRequestBodySchema = {
   },
 }
 
+// Unauthenticated, writes an order row AND sends two emails per call
+// (notifyRequestReceived: acknowledgement to the customer, alert to the back
+// office). That is mail amplification with an attacker-chosen recipient, the
+// same shape of abuse POST /contact is limited for — so it carries the same
+// number.
+const ORDER_REQUEST_RATE_LIMIT = Object.freeze({ max: 10, timeWindow: 15 * 60 * 1000 })
+
+// Unauthenticated lookup on order_number AND email. The pair is the only thing
+// standing between a guessed order number and someone else's order, so it must
+// not be brute-forceable. Roomier than the write limits because a guest
+// legitimately re-checks an order, and a wrong guess is cheap to serve.
+const ORDER_LOOKUP_RATE_LIMIT = Object.freeze({ max: 30, timeWindow: 15 * 60 * 1000 })
+
 export const orderRoutes = async (app, { pool, mailer = null }) => {
   // Public: guests may request an order. When logged in, the request is tied to
   // the user and their email is used when no contact email is supplied.
   app.post(
     '/orders/request',
-    { schema: { body: orderRequestBodySchema } },
+    {
+      schema: { body: orderRequestBodySchema },
+      config: { rateLimit: ORDER_REQUEST_RATE_LIMIT },
+    },
     async (request, reply) => {
       const user = await app.guards.loadOptionalUser(request)
 
@@ -122,7 +138,10 @@ export const orderRoutes = async (app, { pool, mailer = null }) => {
   // 404 when either half is wrong — never reveal an order without both keys.
   app.get(
     '/orders/lookup',
-    { schema: { querystring: orderLookupQuerySchema } },
+    {
+      schema: { querystring: orderLookupQuerySchema },
+      config: { rateLimit: ORDER_LOOKUP_RATE_LIMIT },
+    },
     async (request, reply) => {
       const order = await lookupOrder(pool, {
         orderNumber: request.query.order_number,

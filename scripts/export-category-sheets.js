@@ -41,7 +41,14 @@
 // it goes on the cell, so an unknown category stops being a row error reported
 // after the fact and becomes a value the office cannot type.
 //
+// Options: `--one-sheet` keeps the All tab alone; on `stock`, `--active`,
+// `--in-stock` and `--latest` narrow the rows (Atelier: "we don't really need
+// the inactive ones", "only the most recent reiteration"). What a filter leaves
+// out is printed every run — a count on its own
+// reads as "that is the whole ledger", which is the one thing it is not.
+//
 //   node scripts/export-category-sheets.js [prices|stock] [normalized-dir] [out-file]
+//                                          [--one-sheet] [--active] [--in-stock] [--latest]
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -62,6 +69,103 @@ const suggestCategory = (itemType) =>
 // set, which is not the same statement as 0 and must not be written as one.
 const quantity = (value) => (value == null ? null : Number(value))
 
+const held = (record) =>
+  Number(record.stock_on_hand ?? 0) > 0 || Number(record.stock_available ?? 0) > 0
+
+/**
+ * A D365 stock code's pricing year, or null when it carries none.
+ *
+ * The code is `{supplier's colour code} {YY}{SUPPLIER_TOKEN}` — `F3518-003 23PF`
+ * is colour code F3518-003, priced in 2023, Pierre Frey — and re-pricing a design
+ * mints a NEW code rather than editing the old one, which is what makes an item
+ * code a version and the base a product. 74.6% of the ledger carries one.
+ *
+ * TWO TRAPS, both live in the corpus and both silently DELETE STOCK if missed:
+ *
+ *   The token must be LETTERS. `CUSH**MDC 55X55` is a 55×55 cushion inner with
+ *   40 on hand, not a 2055 anything; `CLASSY ORGANIC Bath towel 76X142` is a
+ *   towel. A `\d{2}\w+` suffix reads both as years and supersedes real stock.
+ *   Every one of the 84 supplier tokens is 1–4 letters; every digit-bearing
+ *   trailing token in the corpus is a size.
+ *
+ *   The year must be in WINDOW. The corpus runs 11–26 and the upper bound is
+ *   "now", not a constant, or the first January of a new year starts discarding
+ *   that year's re-pricings as if they were the future.
+ */
+const CODE_VERSION = /^(.*?)\s+(\d{2})([A-Z]{1,4})$/
+const EARLIEST_YEAR = 11 // 2011, the oldest in the corpus
+export const codeVersion = (itemCode, thisYear = new Date().getFullYear() % 100) => {
+  const match = CODE_VERSION.exec(String(itemCode ?? '').trim())
+  if (!match) return null
+  const year = Number(match[2])
+  if (year < EARLIEST_YEAR || year > thisYear) return null
+  return { base: match[1], year, token: match[3] }
+}
+
+/** A filter that decides row by row. */
+const rowFilter = (slug, describe, keep) => ({
+  slug,
+  describe,
+  keep,
+  select: (records) => records.filter(keep),
+})
+
+/**
+ * Row filters, opted into per run. Atelier asked for these: the ledger is the
+ * whole trading history, so more than half of it is items nobody has stocked for
+ * years, and categorising those is work nothing reads.
+ *
+ * They narrow WHICH ROWS are exported and change nothing else — the columns, the
+ * dropdown and the GUID key are the same, so a filtered sheet reads back exactly
+ * like a full one. What is left out is always REPORTED, never silent.
+ */
+export const FILTERS = Object.freeze({
+  '--active': rowFilter('active', 'status Active', (record) => record.status === 'Active'),
+  '--in-stock': rowFilter(
+    'in-stock',
+    'some quantity on hand or available',
+    // On hand OR available: an item can be committed to an order (available 0,
+    // on hand 5) and is still stock somebody must categorise.
+    held
+  ),
+  '--latest': {
+    slug: 'latest',
+    describe: 'newest pricing year per colour code',
+    /**
+     * The newest version of each product, by the year in its code.
+     *
+     * Grouped on the BASE alone and deliberately NOT on base + supplier token.
+     * The token tracks the house, and a house's token moves under the same
+     * product: `F4685-05` is Albeck 05 Beige as 22CF, 24JC and 26CF (Colefax &
+     * Fowler and Jane Churchill are one supplier), `F3032-001` is EMPREINTE
+     * Havane as 20PF, 23F and 25PF. Grouping by token keeps all of those, which
+     * is precisely the older versions this filter exists to drop. All 17 groups
+     * where the token AND the name move are the same design under a spelling
+     * change ("AYUTHYA COLOUR 01 PAGODA RED" → "AYUTHYA 01 Pagoda Red").
+     *
+     * A row whose code carries no year is KEPT: 1,932 of them, and nothing about
+     * such a code says it is versioned at all.
+     *
+     * A superseded row that STILL HOLDS STOCK is also kept. Zero rows need that
+     * today, but the whole point of the sheet is that somebody categorises what
+     * is on the shelf, and a filter that hides real stock behind an old code is
+     * the one failure here that costs money rather than time.
+     */
+    select: (records) => {
+      const newest = new Map()
+      for (const record of records) {
+        const version = codeVersion(record.item_code)
+        if (!version) continue
+        newest.set(version.base, Math.max(newest.get(version.base) ?? 0, version.year))
+      }
+      return records.filter((record) => {
+        const version = codeVersion(record.item_code)
+        return !version || version.year === newest.get(version.base) || held(record)
+      })
+    },
+  },
+})
+
 /**
  * The two catalogues. Each names its source, its columns and how a row maps —
  * everything else (tabs, dropdown, balance check) is shared, because the two
@@ -77,6 +181,9 @@ export const DATASETS = Object.freeze({
     // 19,327 designs, and two (range, code) pairs repeat outright.
     header: ['GUID', 'Range', 'Code', 'Description', 'Item Type', 'Suggested Category', 'Category'],
     widths: [38, 24, 22, 38, 16, 18, 14],
+    // Every price row is Active and none carries a quantity, so neither filter
+    // means anything here. Refusing them beats silently exporting all 19,327.
+    filters: [],
     house: (record) => record.range_name || NO_HOUSE,
     sort: (a, b) => String(a.code).localeCompare(String(b.code)),
     row: (record) => [
@@ -106,6 +213,7 @@ export const DATASETS = Object.freeze({
       'On Hand', 'Available', 'Status', 'Suggested Category', 'Category',
     ],
     widths: [38, 22, 22, 40, 26, 16, 10, 10, 11, 10, 18, 14],
+    filters: ['--active', '--in-stock', '--latest'],
     house: (record) => record.range_name || NO_HOUSE,
     sort: (a, b) => String(a.item_code).localeCompare(String(b.item_code)),
     row: (record) => [
@@ -175,24 +283,45 @@ export const buildCategorySheets = (dataset, records, { oneSheet = false } = {})
   return [all, ...[...byHouse].map(([house, rows]) => sheet(dataset, house, rows))]
 }
 
+/** `stock-items.xlsx` + ['active'] -> `stock-items-active.xlsx`. The name says
+ *  what is in the file, because two sheets that look identical and hold
+ *  different row sets is exactly how the wrong one gets filled in. */
+const suffixed = (file, slugs) => {
+  if (slugs.length === 0) return file
+  const extension = path.extname(file)
+  return `${file.slice(0, -extension.length)}-${slugs.join('-')}${extension}`
+}
+
 const main = () => {
   const argv = process.argv.slice(2)
-  const oneSheet = argv.includes('--one-sheet')
-  const unknown = argv.filter((arg) => arg.startsWith('--') && arg !== '--one-sheet')
-  if (unknown.length > 0) {
-    throw new Error(`unknown option ${unknown[0]} — the only one is --one-sheet`)
-  }
+  const options = argv.filter((arg) => arg.startsWith('--'))
+  const oneSheet = options.includes('--one-sheet')
   const [name = 'prices', inDir = DEFAULT_IN_DIR, outFile] = argv.filter((arg) => !arg.startsWith('--'))
   const dataset = DATASETS[name]
   if (!dataset) {
     throw new Error(`unknown dataset "${name}" — it is one of: ${Object.keys(DATASETS).join(', ')}`)
   }
-  const target = outFile ?? dataset.out
+  const allowed = ['--one-sheet', ...dataset.filters]
+  const unknown = options.filter((option) => !allowed.includes(option))
+  if (unknown.length > 0) {
+    throw new Error(`${name} does not take ${unknown[0]} — its options are: ${allowed.join(' ')}`)
+  }
+  const filters = dataset.filters.filter((flag) => options.includes(flag)).map((flag) => FILTERS[flag])
+
   const source = path.join(inDir, dataset.source)
-  const records = JSON.parse(readFileSync(source, 'utf8'))
-  if (!Array.isArray(records) || records.length === 0) {
+  const everyRecord = JSON.parse(readFileSync(source, 'utf8'))
+  if (!Array.isArray(everyRecord) || everyRecord.length === 0) {
     throw new Error(`${source} holds no records — run \`npm run convert:legacy\` first.`)
   }
+  // Applied in order, each over what the previous left: `--latest` decides which
+  // version is newest among the rows STILL IN PLAY, so `--active --latest` gives
+  // the newest ACTIVE version rather than dropping a live row because a newer
+  // one was retired. Same reason the filters are listed in a fixed order.
+  const records = filters.reduce((kept, filter) => filter.select(kept), everyRecord)
+  if (records.length === 0) {
+    throw new Error(`no ${dataset.noun} match ${filters.map((f) => f.describe).join(' and ')}`)
+  }
+  const target = outFile ?? suffixed(dataset.out, filters.map((filter) => filter.slug))
 
   const sheets = buildCategorySheets(dataset, records, { oneSheet })
   const [all, ...houses] = sheets
@@ -211,6 +340,15 @@ const main = () => {
 
   const suggestedAt = dataset.header.indexOf('Suggested Category')
   const suggested = all.rows.slice(1).filter((row) => row[suggestedAt] !== '').length
+  // What each filter LEFT OUT is stated, every time, counted where it actually
+  // ran — a filter reports what IT dropped from what reached it, not what it
+  // would have dropped alone, or the numbers do not add up to the total.
+  let reaching = everyRecord
+  for (const filter of filters) {
+    const kept = filter.select(reaching)
+    console.log(`  filter ${filter.describe}: ${reaching.length - kept.length} of ${reaching.length} rows left out`)
+    reaching = kept
+  }
   console.log(`${records.length} ${dataset.noun}, ${houses.length} houses -> ${target}`)
   console.log(
     oneSheet

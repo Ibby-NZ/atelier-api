@@ -30,6 +30,7 @@ const BRAND_COLUMNS = `
   trade_only,
   story,
   website_url,
+  image_url,
   featured_rank
 `
 
@@ -43,6 +44,12 @@ const toBrand = (row) =>
     trade_only: row.trade_only,
     story: row.story,
     website_url: row.website_url,
+    // The house's own photograph, uploaded against the brand in the CRM. It is
+    // the FIRST rung of the storefront's artwork chain (lib/houses.js) — above
+    // the editorial page, a collection hero and a product shot — because it is
+    // the only picture the office chose FOR THE HOUSE. Null for most houses;
+    // consumers fall through the chain rather than borrowing another maison's.
+    image_url: row.image_url,
     featured_rank: row.featured_rank,
   })
 

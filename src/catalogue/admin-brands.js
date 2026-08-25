@@ -118,7 +118,7 @@ export const buildUpdate = (input, columns) => {
 // it is the office's D365 reporting designation, deliberately absent from the
 // public brand read model (test/reporting-codes.test.js scans for the VALUE as
 // well as the key), and readable here because the CRM is where it is typed in.
-const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, featured_rank, supplier_id, brand_code, archived_at, created_at`
+const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, image_url, featured_rank, supplier_id, brand_code, archived_at, created_at`
 
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
@@ -132,6 +132,8 @@ const BRAND_UPDATE_COLUMNS = Object.freeze([
   // overwrites it, so an office change survives every reseed.
   'trade_only',
   'website_url',
+  // The house's image. Same public-`src` gate as a collection's.
+  'image_url',
   // Where this house sits in the storefront's featured order; NULL means not
   // featured. Patchable one house at a time as well as through the whole-list
   // reorder below, because correcting a single rank should not require the
@@ -168,6 +170,7 @@ const toBrand = (row, extra) =>
     is_international: row.is_international,
     trade_only: row.trade_only,
     website_url: row.website_url ?? null,
+    image_url: row.image_url ?? null,
     featured_rank: row.featured_rank ?? null,
     supplier_id: row.supplier_id ?? null,
     brand_code: row.brand_code ?? null,
@@ -320,7 +323,7 @@ export const createBrand = async (pool, input) => {
   const slug = slugFrom(name)
   try {
     const { rows } = await pool.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url, brand_code)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url, image_url)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING ${BRAND_COLUMNS}`,
       [
@@ -335,7 +338,7 @@ export const createBrand = async (pool, input) => {
         // unticked.
         input.trade_only ?? true,
         websiteUrlFrom(input.website_url),
-        reportingLabelFrom(input.brand_code),
+        websiteUrlFrom(input.image_url, 'Image'),
       ]
     )
     return toBrand(rows[0])
@@ -359,8 +362,8 @@ export const updateBrand = async (pool, id, input) => {
   if (Object.hasOwn(patch, 'website_url')) {
     patch = { ...patch, website_url: websiteUrlFrom(patch.website_url) }
   }
-  if (Object.hasOwn(patch, 'brand_code')) {
-    patch = { ...patch, brand_code: reportingLabelFrom(patch.brand_code) }
+  if (Object.hasOwn(patch, 'image_url')) {
+    patch = { ...patch, image_url: websiteUrlFrom(patch.image_url, 'Image') }
   }
   const { sets, params } = buildUpdate(patch, BRAND_UPDATE_COLUMNS)
   try {

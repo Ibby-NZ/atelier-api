@@ -198,22 +198,19 @@ describe('featured_rank migration', () => {
     }
   })
 
-  it('applied its ranks to whatever seeded rows this database holds', async () => {
-    // Migrations run against an empty database in CI, so every one of these is
-    // absent there and the loop asserts nothing. On a seeded database — which is
-    // the case the migration exists for — it proves the ranks actually landed.
-    for (const entry of FEATURED_BRANDS) {
-      const rank = await rankOf(pool, 'brands', entry.slug)
-      if (rank !== undefined) expect(rank).toEqual(entry.rank)
-    }
-    for (const entry of FEATURED_COLLECTIONS) {
-      const { rows } = await pool.query(
-        `SELECT c.featured_rank FROM collections c
-           JOIN brands b ON b.id = c.brand_id
-          WHERE b.slug = $1 AND c.slug = $2`,
-        [entry.brand_slug, entry.slug]
-      )
-      if (rows.length > 0) expect(rows[0].featured_rank).toEqual(entry.rank)
-    }
-  })
+  // REMOVED: "applied its ranks to whatever seeded rows this database holds".
+  //
+  // It asserted that every rank this migration seeded is still the rank in the
+  // database, and that stopped being true in both directions. The CRM's reorder
+  // (`PUT /admin/collections|brands/featured`) clears every rank and re-applies
+  // the office's own list — which is the whole point of the column — and
+  // `1789012800000_larsen-2024-feature` now deliberately prepends a collection
+  // to it. So the assertion could only ever fail for a correct reason, and it
+  // duly did: this dev database has the office's brand order, not the seeded
+  // one.
+  //
+  // Nothing was lost. The eleven cases above run the migration's OWN exported
+  // statements against the file's OWN fixtures, which is what proves they land;
+  // "names collections and houses the catalogue actually holds" is what catches
+  // the typo that would feature nothing.
 })

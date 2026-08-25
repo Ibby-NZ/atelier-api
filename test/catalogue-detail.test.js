@@ -25,10 +25,11 @@ const sessionCookieFrom = (response) => {
 // no inventory row). Also a hidden product to prove the 404 path.
 const seedFixtures = async (pool) => {
   const { rows: brands } = await pool.query(
-    `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story, website_url)
+    `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story, website_url, image_url)
      -- trade_only false: these fixtures model the PUBLIC storefront, and the
      -- column defaults to closed (see catalogue/visibility.js).
-     VALUES ($1, $2, 'New Zealand', 'NZD', false, false, 'A test house.', 'https://det-test-house.example.com')
+     VALUES ($1, $2, 'New Zealand', 'NZD', false, false, 'A test house.', 'https://det-test-house.example.com',
+             'https://det-test-house.example.com/house.jpg')
      RETURNING id`,
     ['Det Test House', `${PREFIX}-house`]
   )
@@ -238,6 +239,19 @@ describe('product detail and brand endpoints', () => {
       const list = await get(app, '/catalogue/brands')
       const listed = list.json().brands.find((b) => b.slug === `${PREFIX}-house`)
       expect(listed.website_url).toBe('https://det-test-house.example.com')
+    })
+
+    // The storefront's house tiles are a photograph with the maison's mark over
+    // it and no caption, so the picture IS the tile — a brand read that dropped
+    // the office's own upload would fall through to a collection or product
+    // shot and quietly show the wrong room.
+    it('exposes the house image URL on the detail and the list', async () => {
+      const response = await get(app, `/catalogue/brands/${PREFIX}-house`)
+      expect(response.json().brand.image_url).toBe('https://det-test-house.example.com/house.jpg')
+
+      const list = await get(app, '/catalogue/brands')
+      const listed = list.json().brands.find((b) => b.slug === `${PREFIX}-house`)
+      expect(listed.image_url).toBe('https://det-test-house.example.com/house.jpg')
     })
 
     it('404s for an unknown brand slug', async () => {

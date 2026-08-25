@@ -268,7 +268,7 @@ export const collections = [
   "name": "Larsen 2024",
   "brand": "Larsen",
   "application": "Mixed",
-  "description": "Decorative collections using African motifs as initial inspiration; handcrafted character and bold, visually captivating patterns with an inherent elegance.",
+  "description": "The latest decorative collections from Larsen have used African motifs as an initial inspiration, paying homage to traditions while infusing a contemporary touch. Each design within the collection reflects a handcrafted character, offering a fresh perspective on time-honoured techniques and fabrics.",
   "img": "1006423_72dpi-1.jpg",
   "src": "https://www.atelier.co.nz/wp-content/uploads/2024/02/1006423_72dpi-1.jpg",
   "more": []

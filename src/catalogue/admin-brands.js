@@ -323,8 +323,8 @@ export const createBrand = async (pool, input) => {
   const slug = slugFrom(name)
   try {
     const { rows } = await pool.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url, image_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url, image_url, brand_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING ${BRAND_COLUMNS}`,
       [
         name,
@@ -339,6 +339,7 @@ export const createBrand = async (pool, input) => {
         input.trade_only ?? true,
         websiteUrlFrom(input.website_url),
         websiteUrlFrom(input.image_url, 'Image'),
+        reportingLabelFrom(input.brand_code),
       ]
     )
     return toBrand(rows[0])
@@ -364,6 +365,9 @@ export const updateBrand = async (pool, id, input) => {
   }
   if (Object.hasOwn(patch, 'image_url')) {
     patch = { ...patch, image_url: websiteUrlFrom(patch.image_url, 'Image') }
+  }
+  if (Object.hasOwn(patch, 'brand_code')) {
+    patch = { ...patch, brand_code: reportingLabelFrom(patch.brand_code) }
   }
   const { sets, params } = buildUpdate(patch, BRAND_UPDATE_COLUMNS)
   try {

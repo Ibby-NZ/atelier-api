@@ -195,13 +195,18 @@ const insertTerms = async (client, brandTerms, idsByName) => {
  */
 export const backfillSuppliers = async (
   pool,
-  { snapshot = SNAPSHOT, aliasSources = SUPPLIER_ALIAS_SOURCES } = {}
+  { snapshot = SNAPSHOT, aliasSources = SUPPLIER_ALIAS_SOURCES, priceListSuppliers } = {}
 ) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     const sources = await readSources(client)
-    const plan = planSupplierBackfill({ ...sources, snapshot, aliasSources })
+    const plan = planSupplierBackfill({
+      ...sources,
+      snapshot,
+      aliasSources,
+      ...(priceListSuppliers !== undefined ? { priceListSuppliers } : {}),
+    })
 
     const { created, enriched, idsByName } = await upsertSuppliers(client, plan.suppliers)
     const aliases = await insertAliases(client, plan.aliases, idsByName)

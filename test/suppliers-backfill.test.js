@@ -396,7 +396,26 @@ describe('supplier backfill (database)', () => {
       )
       .then(({ rows }) => rows[0].id)
 
-  const run = () => backfillSuppliers(pool, { snapshot, aliasSources })
+  const testPriceListSuppliers = () =>
+    pool
+      .query(
+        `SELECT supplier AS name,
+                count(*)::int AS items,
+                array_agg(DISTINCT currency) AS currencies
+           FROM price_list_items
+          WHERE supplier LIKE $1
+          GROUP BY supplier
+          ORDER BY supplier`,
+        [`${PREFIX}%`]
+      )
+      .then(({ rows }) => rows)
+
+  const run = async () =>
+    backfillSuppliers(pool, {
+      snapshot,
+      aliasSources,
+      priceListSuppliers: await testPriceListSuppliers(),
+    })
 
   const supplierRow = (name) =>
     pool

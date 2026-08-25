@@ -516,8 +516,10 @@ describe('xero integration', () => {
       expect(response.statusCode).toBe(200)
       const { pushed, failed } = response.json().result
       expect(pushed).toBeGreaterThanOrEqual(1)
-      const post = fake.calls.find((c) => c.method === 'POST' && c.path === 'Items')
-      expect(post.body.Items.some((i) => i.Code === `${PREFIX}-SKU-1`)).toBe(true)
+      const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === 'Items')
+      expect(
+        posts.some((post) => post.body.Items.some((i) => i.Code === `${PREFIX}-SKU-1`))
+      ).toBe(true)
       expect(Array.isArray(failed)).toBe(true)
     })
   })

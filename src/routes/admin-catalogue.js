@@ -135,6 +135,7 @@ const brandCreateSchema = {
     trade_only: { type: 'boolean', default: true },
     website_url: nullableUrl,
     image_url: nullableUrl,
+    brand_code: reportingLabelProp,
   },
 }
 

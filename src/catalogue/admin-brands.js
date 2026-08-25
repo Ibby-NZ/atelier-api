@@ -27,6 +27,18 @@ const CONFLICT_MESSAGES = Object.freeze({
     'That brand already has a collection with that name.',
   products_slug_key: 'A product with that name already exists for this brand.',
   colourways_sku_key: 'That SKU is already in use.',
+  // Per supplier, not global (migration 1788408000000): a code identifies a
+  // house inside the invoicing entity that bills it, and the index folds through
+  // lower(btrim(...)) — so "cf" against an existing "CF" under the same supplier
+  // lands here too.
+  brands_supplier_brand_code_unique:
+    'That supplier already has a house with that brand code.',
+})
+
+// Friendly 422 text per foreign key. Same degradation rule as above: a rename
+// upstream costs the message, never the status code.
+const REFERENCE_MESSAGES = Object.freeze({
+  brands_supplier_id_fkey: 'That supplier does not exist.',
 })
 
 /**
@@ -42,6 +54,17 @@ export const rethrowConflict = (error) => {
       ? CONFLICT_MESSAGES[error.constraint]
       : 'Duplicate value.'
     throw httpError(409, message)
+  }
+  // A reference to a row that does not exist is the caller's mistake, not this
+  // server's: pointing a house at supplier 9999 is a bad value in a body, and a
+  // 500 tells the office nothing it can act on. Named separately from 23505
+  // because they mean different things — one is "that already exists", the
+  // other is "that does not".
+  if (error?.code === '23503') {
+    const message = Object.hasOwn(REFERENCE_MESSAGES, error.constraint)
+      ? REFERENCE_MESSAGES[error.constraint]
+      : 'That reference does not exist.'
+    throw httpError(422, message)
   }
   throw error
 }
@@ -89,7 +112,13 @@ export const buildUpdate = (input, columns) => {
   return { sets, params }
 }
 
-const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, image_url, featured_rank, archived_at, created_at`
+// `supplier_id` is on the ADMIN projection only. It is a commercial fact — who
+// invoices this house — and belongs nowhere near the public read models in
+// catalogue/brands.js, which serve signed-out visitors. `brand_code` follows it:
+// it is the office's D365 reporting designation, deliberately absent from the
+// public brand read model (test/reporting-codes.test.js scans for the VALUE as
+// well as the key), and readable here because the CRM is where it is typed in.
+const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, image_url, featured_rank, supplier_id, brand_code, archived_at, created_at`
 
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
@@ -111,6 +140,23 @@ const BRAND_UPDATE_COLUMNS = Object.freeze([
   // caller to restate the entire list. Absent from create on purpose — a house
   // is not featured at birth.
   'featured_rank',
+  // Which supplier invoices this house. Writable so the office can onboard a
+  // supplier end to end from the CRM: a brand new supplier has no linked houses,
+  // and without this the commercial terms it is given are attached to nothing a
+  // screen can reach — `getSupplier` attaches terms per house, so they would be
+  // invisible on the supplier it was created for. `npm run backfill:suppliers`
+  // remains the bulk path; this is the correction and the onboarding path.
+  //
+  // NULL is a legitimate value (a house nobody invoices yet), and the FK is
+  // RESTRICT, so pointing at a supplier that does not exist is a 23503 the
+  // route turns into a 422 rather than a silent no-op.
+  'supplier_id',
+  // The W21 reporting dimension. Migration 1788408000000 found no defensible
+  // source for it in any corpus Atelier has delivered, so the column ships
+  // empty and is filled from the CRM one house at a time — which is this
+  // whitelist entry. Uniqueness is per supplier (see CONFLICT_MESSAGES) and a
+  // clash surfaces as a 409, never a pre-check.
+  'brand_code',
 ])
 
 const toBrand = (row, extra) =>
@@ -126,10 +172,31 @@ const toBrand = (row, extra) =>
     website_url: row.website_url ?? null,
     image_url: row.image_url ?? null,
     featured_rank: row.featured_rank ?? null,
+    supplier_id: row.supplier_id ?? null,
+    brand_code: row.brand_code ?? null,
     archived_at: row.archived_at ?? null,
     created_at: row.created_at,
     ...extra,
   })
+
+/**
+ * Normalise a staff-typed reporting label (a brand code, a product range) on
+ * its way to a column whose CHECK refuses a blank: a cleared CRM input arrives
+ * as '' and must store NULL, never '' — a stored blank is a second spelling of
+ * "unset" that every `IS NULL` read misses (the order-header rule, FR-127).
+ * Trimmed rather than passed through, because '   ' is the same statement as ''
+ * and would otherwise reach the CHECK as an opaque 23514.
+ *
+ * @param {unknown} value
+ * @returns {string|null}
+ */
+export const reportingLabelFrom = (value) => {
+  if (value === null || value === undefined) {
+    return null
+  }
+  const trimmed = String(value).trim()
+  return trimmed === '' ? null : trimmed
+}
 
 /**
  * Normalise a URL destined for a public storefront `href`/`src` (brand website,

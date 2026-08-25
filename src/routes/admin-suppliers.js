@@ -25,7 +25,22 @@ import {
   DEFAULT_LIMIT,
   MAX_LIMIT,
 } from '../suppliers/admin-suppliers.js'
+import {
+  pageSupplierBrandTerms,
+  createSupplierBrandTerms,
+  updateSupplierBrandTerms,
+  createSupplierDiscountTier,
+  updateSupplierDiscountTier,
+  getSupplierBrandTerms,
+  findScopedTierId,
+  DEFAULT_LIMIT as TERMS_DEFAULT_LIMIT,
+  MAX_LIMIT as TERMS_MAX_LIMIT,
+} from '../suppliers/supplier-terms.js'
+import { loadReportAccess } from '../reports/access.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
+
+const httpError = (statusCode, message) =>
+  Object.assign(new Error(message), { statusCode })
 
 // Mirrors `suppliers_discount_method_check`. The database owns the vocabulary —
 // this is the boundary copy that turns a typo into a 400 instead of letting a
@@ -108,6 +123,110 @@ const notFound = (reply, id) => {
   return { error: 'Not Found', message: `Supplier ${id} not found.` }
 }
 
+// ---------------------------------------------------------------------------
+// Commercial terms (supplier_brand_terms + supplier_discount_tiers)
+//
+// The boundary copies of the column CHECKs, same posture as DISCOUNT_METHOD_ENUM
+// above: without them a typo reaches the constraint and surfaces as a 500. The
+// database stays the gate — a violation that gets past these is still mapped to
+// a 422 by the module — but the common mistakes are refused here.
+//
+// `discount_chain` is an ARRAY of rates, not a rate, and it is MULTIPLICATIVE:
+// {0.4, 0.4} is x0.36, not -80%. There is no schema keyword that can say that,
+// which is why every write response carries the evaluated `net_multiplier`.
+// ---------------------------------------------------------------------------
+
+// numeric(6,4) CHECK (>= 0 AND < 1) — a fraction off list. 1 is a free metre.
+const rateProp = { type: 'number', minimum: 0, exclusiveMaximum: 1 }
+const nullableRateProp = { type: ['number', 'null'], minimum: 0, exclusiveMaximum: 1 }
+// numeric(6,4) CHECK (> 0) — a multiplier on the landed cost (Fabricut: 2.1-2.5).
+const nullableMarkupProp = { type: ['number', 'null'], exclusiveMinimum: 0 }
+
+const termsBodyProps = {
+  discount: nullableRateProp,
+  // No `null` member: the column is NOT NULL and "no chain" is [], never absent.
+  discount_chain: { type: 'array', items: rateProp, maxItems: 16 },
+  markup: nullableMarkupProp,
+  indicative: { type: 'boolean' },
+  note: { type: ['string', 'null'], maxLength: 2000 },
+}
+
+const createTermsSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['brand_id'],
+  properties: {
+    brand_id: { type: 'integer', minimum: 1 },
+    ...termsBodyProps,
+  },
+}
+
+// `brand_id` is absent: it is the row's identity (one set of terms per house),
+// so moving terms to another maison is a delete and a re-create.
+const patchTermsSchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: termsBodyProps,
+}
+
+// `label` is free text matched case-insensitively against the LINE's category,
+// NOT the products.category enum — the houses quote things the enum has no word
+// for. Nothing here can check whether it will ever match; the response says so
+// per tier (`matches_category`).
+const tierBodyProps = {
+  label: { type: 'string', minLength: 1, maxLength: 200 },
+  pct: rateProp,
+  is_fallback: { type: 'boolean' },
+}
+
+const createTierSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['label', 'pct'],
+  properties: tierBodyProps,
+}
+
+const patchTierSchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: tierBodyProps,
+}
+
+const termsParamsSchema = {
+  type: 'object',
+  required: ['id', 'termsId'],
+  properties: {
+    id: { type: 'integer', minimum: 1 },
+    termsId: { type: 'integer', minimum: 1 },
+  },
+}
+
+const tierParamsSchema = {
+  type: 'object',
+  required: ['id', 'termsId', 'tierId'],
+  properties: {
+    id: { type: 'integer', minimum: 1 },
+    termsId: { type: 'integer', minimum: 1 },
+    tierId: { type: 'integer', minimum: 1 },
+  },
+}
+
+const termsListQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
+    limit: {
+      type: 'integer',
+      minimum: 1,
+      maximum: TERMS_MAX_LIMIT,
+      default: TERMS_DEFAULT_LIMIT,
+    },
+  },
+}
+
 export const adminSupplierRoutes = async (app, { pool }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
@@ -187,5 +306,140 @@ export const adminSupplierRoutes = async (app, { pool }) => {
           user: request.user,
         })
       )
+  )
+
+  // Commercial terms are COST data — what Atelier pays a maison — so the
+  // backoffice role alone is not the gate. `backoffice` covers the showroom as
+  // well as the accounts desk, which is exactly why `users.can_view_finance`
+  // exists as a second, explicit, revocable permission, and a login that may not
+  // SEE a cost figure in a report must not be able to SET one here (the split
+  // src/routes/admin-legacy.js already makes for a commercial column).
+  //
+  // It is read through `loadReportAccess` and NEVER off `request.user`: guards
+  // load the user through PUBLIC_USER_COLUMNS, which does not carry the flag, so
+  // `request.user.can_view_finance` is `undefined` and would answer false to
+  // everyone, for ever, with nothing to show for it.
+  const finance = async (request) => {
+    const access = await loadReportAccess(pool, request.user)
+    if (!access.finance) {
+      throw httpError(
+        403,
+        'A house’s commercial terms are cost data. Your account does not have ' +
+          'finance visibility — ask a director.'
+      )
+    }
+  }
+  const financeStaff = [backoffice, finance]
+
+  // The standalone terms list. Not redundant with GET /admin/suppliers/:id,
+  // which embeds terms per HOUSE and therefore drops any row whose brand is not
+  // linked to this supplier (`brands.supplier_id`, which no route writes yet).
+  // This one keys on supplier_id alone, so nothing is invisible.
+  app.get(
+    '/admin/suppliers/:id/brand-terms',
+    {
+      preHandler: financeStaff,
+      schema: { params: idParamsSchema, querystring: termsListQuerySchema },
+    },
+    async (request) => {
+      const { page, limit } = request.query
+      const { terms, total } = await pageSupplierBrandTerms(pool, request.params.id, {
+        page,
+        limit,
+      })
+      return { terms, meta: { total, page, limit } }
+    }
+  )
+
+  // Every write below answers with the whole terms row in the read model's
+  // shape, so the response carries `net_multiplier` — what the chain the office
+  // just typed actually evaluates to ({0.4, 0.4} -> 0.36). There is no other way
+  // to check it, and a silent typo moves every price under that house.
+  app.post(
+    '/admin/suppliers/:id/brand-terms',
+    { preHandler: financeStaff, schema: { params: idParamsSchema, body: createTermsSchema } },
+    async (request, reply) => {
+      const terms = await createSupplierBrandTerms(pool, request.params.id, request.body)
+      reply.code(201)
+      return { terms }
+    }
+  )
+
+  app.patch(
+    '/admin/suppliers/:id/brand-terms/:termsId',
+    { preHandler: financeStaff, schema: { params: termsParamsSchema, body: patchTermsSchema } },
+    async (request) => ({
+      terms: await updateSupplierBrandTerms(
+        pool,
+        request.params.id,
+        request.params.termsId,
+        request.body
+      ),
+    })
+  )
+
+  // Scoped first, then deleted: deleteOrExplain addresses a row by id alone, so
+  // without this a terms id from another supplier would be reachable through
+  // this supplier's path. 'supplier_brand_term' is a code literal — the entity
+  // name is never taken from the URL.
+  app.delete(
+    '/admin/suppliers/:id/brand-terms/:termsId',
+    { preHandler: financeStaff, schema: { params: termsParamsSchema } },
+    async (request, reply) => {
+      const { id, termsId } = request.params
+      if (!(await getSupplierBrandTerms(pool, id, termsId))) {
+        reply.code(404)
+        return { error: 'Not Found', message: `Supplier ${id} has no terms ${termsId}.` }
+      }
+      return replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'supplier_brand_term', termsId, { user: request.user })
+      )
+    }
+  )
+
+  app.post(
+    '/admin/suppliers/:id/brand-terms/:termsId/tiers',
+    { preHandler: financeStaff, schema: { params: termsParamsSchema, body: createTierSchema } },
+    async (request, reply) => {
+      const terms = await createSupplierDiscountTier(
+        pool,
+        request.params.id,
+        request.params.termsId,
+        request.body
+      )
+      reply.code(201)
+      return { terms }
+    }
+  )
+
+  app.patch(
+    '/admin/suppliers/:id/brand-terms/:termsId/tiers/:tierId',
+    { preHandler: financeStaff, schema: { params: tierParamsSchema, body: patchTierSchema } },
+    async (request) => ({
+      terms: await updateSupplierDiscountTier(
+        pool,
+        request.params.id,
+        request.params.termsId,
+        request.params.tierId,
+        request.body
+      ),
+    })
+  )
+
+  app.delete(
+    '/admin/suppliers/:id/brand-terms/:termsId/tiers/:tierId',
+    { preHandler: financeStaff, schema: { params: tierParamsSchema } },
+    async (request, reply) => {
+      const { id, termsId, tierId } = request.params
+      if (!(await findScopedTierId(pool, id, termsId, tierId))) {
+        reply.code(404)
+        return { error: 'Not Found', message: `Terms ${termsId} have no tier ${tierId}.` }
+      }
+      return replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'supplier_discount_tier', tierId, { user: request.user })
+      )
+    }
   )
 }

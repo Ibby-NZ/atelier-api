@@ -4,6 +4,8 @@ import { createPool } from './db.js'
 import { buildApp } from './app.js'
 import { createMailTransport } from './email/transport.js'
 import { createMailer } from './email/mailer.js'
+import { createXeroHttp } from './xero/xero-http.js'
+import { createXeroService } from './xero/service.js'
 
 const start = async () => {
   let config
@@ -27,10 +29,27 @@ const start = async () => {
     backofficeEmail: config.backofficeEmail,
   })
 
+  // Xero stays disabled (every /admin/xero route → 503) until both
+  // XERO_CLIENT_ID and XERO_CLIENT_SECRET are set.
+  const xero = config.xero
+    ? createXeroService({
+        pool,
+        config: config.xero,
+        http: createXeroHttp({
+          clientId: config.xero.clientId,
+          clientSecret: config.xero.clientSecret,
+        }),
+      })
+    : null
+  if (!xero) {
+    console.warn('XERO_CLIENT_ID unset — Xero integration disabled.')
+  }
+
   const app = buildApp({
     pool,
     cookieSecret: config.cookieSecret,
     stripe,
+    xero,
     stripeWebhookSecret: config.stripeWebhookSecret,
     storeBaseUrl: config.storeBaseUrl,
     crmBaseUrl: config.crmBaseUrl,

@@ -90,9 +90,11 @@ const rethrowLoanWriteError = (error) => {
  * @param {import('pg').Pool} pool
  * @param {number} id
  * @param {(client: import('pg').PoolClient, sample: { id: number, status: string }) => Promise<void>} fn
+ * @param {{ finance?: boolean }} [options] passed to the re-read; cost columns
+ *   are selected only for a caller with finance visibility
  * @returns {Promise<object|null>}
  */
-export const withSampleTxn = async (pool, id, fn) => {
+export const withSampleTxn = async (pool, id, fn, options) => {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -112,7 +114,7 @@ export const withSampleTxn = async (pool, id, fn) => {
   } finally {
     client.release()
   }
-  return getSample(pool, id)
+  return getSample(pool, id, options)
 }
 
 /**
@@ -138,37 +140,43 @@ export const withSampleTxn = async (pool, id, fn) => {
  * @param {number} id
  * @param {{ holder_name: string, trade_account_id?: number, due_back_at?: string,
  *           out_at?: string, notes?: string }} input
+ * @param {{ finance?: boolean }} [options]
  * @returns {Promise<object|null>}
  */
-export const checkOutSample = (pool, id, input) =>
-  withSampleTxn(pool, id, async (client) => {
-    try {
-      await client.query(
-        `INSERT INTO sample_loans
-           (sample_id, trade_account_id, holder_name, out_at, due_back_at, notes)
-         VALUES ($1, $2, $3, COALESCE($4::timestamptz, now()), $5::timestamptz, $6)`,
-        [
-          id,
-          input.trade_account_id ?? null,
-          input.holder_name,
-          input.out_at ?? null,
-          input.due_back_at ?? null,
-          input.notes ?? null,
-        ]
-      )
-    } catch (error) {
-      // Always throws; control never returns here.
-      rethrowLoanWriteError(error)
-    }
+export const checkOutSample = (pool, id, input, options) =>
+  withSampleTxn(
+    pool,
+    id,
+    async (client) => {
+      try {
+        await client.query(
+          `INSERT INTO sample_loans
+             (sample_id, trade_account_id, holder_name, out_at, due_back_at, notes)
+           VALUES ($1, $2, $3, COALESCE($4::timestamptz, now()), $5::timestamptz, $6)`,
+          [
+            id,
+            input.trade_account_id ?? null,
+            input.holder_name,
+            input.out_at ?? null,
+            input.due_back_at ?? null,
+            input.notes ?? null,
+          ]
+        )
+      } catch (error) {
+        // Always throws; control never returns here.
+        rethrowLoanWriteError(error)
+      }
 
-    // The second table. `status` is written here rather than through
-    // `updateSample`, which refuses `out` outright — this transaction is the
-    // only place the assertion "it is out" can be made true.
-    await client.query(
-      `UPDATE samples SET status = 'out', updated_at = now() WHERE id = $1`,
-      [id]
-    )
-  })
+      // The second table. `status` is written here rather than through
+      // `updateSample`, which refuses `out` outright — this transaction is the
+      // only place the assertion "it is out" can be made true.
+      await client.query(
+        `UPDATE samples SET status = 'out', updated_at = now() WHERE id = $1`,
+        [id]
+      )
+    },
+    options
+  )
 
 /**
  * Take a sample back in: close the open loan and move the sample to
@@ -187,31 +195,37 @@ export const checkOutSample = (pool, id, input) =>
  * @param {import('pg').Pool} pool
  * @param {number} id
  * @param {{ returned_at?: string }} [input]
+ * @param {{ finance?: boolean }} [options]
  * @returns {Promise<object|null>}
  */
-export const checkInSample = (pool, id, input = {}) =>
-  withSampleTxn(pool, id, async (client) => {
-    let closed
-    try {
-      closed = await client.query(
-        `UPDATE sample_loans
-            SET returned_at = COALESCE($2::timestamptz, now()), updated_at = now()
-          WHERE sample_id = $1 AND returned_at IS NULL`,
-        [id, input.returned_at ?? null]
+export const checkInSample = (pool, id, input = {}, options) =>
+  withSampleTxn(
+    pool,
+    id,
+    async (client) => {
+      let closed
+      try {
+        closed = await client.query(
+          `UPDATE sample_loans
+              SET returned_at = COALESCE($2::timestamptz, now()), updated_at = now()
+            WHERE sample_id = $1 AND returned_at IS NULL`,
+          [id, input.returned_at ?? null]
+        )
+      } catch (error) {
+        rethrowLoanWriteError(error)
+      }
+
+      // The UPDATE's own answer, not a pre-check: nothing matched means nothing
+      // was out. The transaction holds the sample locked, so no concurrent
+      // check-out can open a loan between the two statements.
+      if (closed.rowCount === 0) {
+        throw httpError(409, `Sample ${id} is not out, so there is nothing to check in.`)
+      }
+
+      await client.query(
+        `UPDATE samples SET status = 'in_library', updated_at = now() WHERE id = $1`,
+        [id]
       )
-    } catch (error) {
-      rethrowLoanWriteError(error)
-    }
-
-    // The UPDATE's own answer, not a pre-check: nothing matched means nothing
-    // was out. The transaction holds the sample locked, so no concurrent
-    // check-out can open a loan between the two statements.
-    if (closed.rowCount === 0) {
-      throw httpError(409, `Sample ${id} is not out, so there is nothing to check in.`)
-    }
-
-    await client.query(
-      `UPDATE samples SET status = 'in_library', updated_at = now() WHERE id = $1`,
-      [id]
-    )
-  })
+    },
+    options
+  )

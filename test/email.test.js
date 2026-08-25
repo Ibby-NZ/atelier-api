@@ -10,6 +10,8 @@ import {
   notifyRequestReceived,
   notifyCheckoutReceipt,
   notifyOrderTransition,
+  notifyOrderCreated,
+  notifyBackofficeNewOrder,
 } from '../src/email/notifications.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
@@ -41,6 +43,9 @@ describe('email templates', () => {
         'backoffice_new_request',
         'checkout_receipt',
         'order_confirmed',
+        // The confirm transition's own message, distinct from the creation
+        // confirmation above (W12 US-005).
+        'order_invoiced',
         'payment_received',
         'shipped',
         'contact_received',
@@ -48,9 +53,16 @@ describe('email templates', () => {
         // The trade portal's invoice-copy request (both halves).
         'backoffice_invoice_copy_request',
         'invoice_copy_requested',
+        // The set letter behind an overdue-sample reminder (W20-US-007). It is
+        // the first template here that a STORED row may override
+        // (src/email/template-store.js) — and the code copy stays, because the
+        // override falls back to it.
+        'sample_loan_reminder',
       ])
     )
-    expect(TEMPLATE_NAMES).toHaveLength(10)
+    // The count is the tripwire: arrayContaining passes on a superset, so
+    // without it a template added and never listed above goes unnoticed.
+    expect(TEMPLATE_NAMES).toHaveLength(12)
   })
 
   it('request_received names the order and promises contact within 24 hours', () => {
@@ -89,6 +101,18 @@ describe('email templates', () => {
     })
     expect(text).toContain('REQ-9')
     expect(text).toContain('INV-0042')
+  })
+
+  // Two events, two messages (FR-121). If these ever render the same body, a
+  // confirmed order sends the client the creation mail a second time.
+  it('order_invoiced is a different message from order_confirmed', () => {
+    const data = { order_number: 'SO-ABCD1234', xero_invoice_ref: 'INV-7' }
+    const created = renderTemplate('order_confirmed', data)
+    const invoiced = renderTemplate('order_invoiced', data)
+    expect(invoiced.subject).not.toBe(created.subject)
+    expect(invoiced.text).not.toBe(created.text)
+    expect(invoiced.text).toContain('SO-ABCD1234')
+    expect(invoiced.text).toContain('INV-7')
   })
 
   it('payment_received and shipped name the order', () => {
@@ -237,6 +261,85 @@ describe('notifications', () => {
     expect(transport.sent).toHaveLength(0)
   })
 
+  // W12 US-005: the client's confirmation is sent when the order is CREATED, and
+  // the back office hears about it in the same call (US-004).
+  it('notifyOrderCreated confirms to the client and alerts the back office', async () => {
+    const { transport, mailer } = buildMailer()
+    const db = { query: async () => ({ rows: [] }) }
+    await notifyOrderCreated(mailer, db, {
+      order_number: 'SO-1234',
+      kind: 'manual',
+      guest_email: 'walkin@test.example',
+      user_id: null,
+    })
+
+    expect(transport.sent).toHaveLength(2)
+    const client = transport.sent.find((m) => m.to === 'walkin@test.example')
+    const staff = transport.sent.find((m) => m.to === BACKOFFICE)
+    expect(client.subject).toContain('SO-1234')
+    // No invoice exists yet at creation; the template says so rather than
+    // naming a reference nobody has.
+    expect(client.text).toContain('An invoice will follow shortly.')
+    expect(staff.text).toContain('SO-1234')
+    expect(staff.text).toContain('walkin@test.example')
+  })
+
+  it('notifyOrderCreated still alerts the back office when the order has no email', async () => {
+    const { transport, mailer } = buildMailer()
+    const db = { query: async () => ({ rows: [] }) }
+    await notifyOrderCreated(mailer, db, {
+      order_number: 'SO-5678',
+      kind: 'manual',
+      guest_email: null,
+      user_id: null,
+    })
+    expect(transport.sent).toHaveLength(1)
+    expect(transport.sent[0].to).toBe(BACKOFFICE)
+  })
+
+  // W12 US-004/FR-119: the alert goes to the ONE configured address. Not a
+  // per-salesperson routing table — the restriction is the requirement.
+  it('notifyBackofficeNewOrder alerts the single configured address only', async () => {
+    const { transport, mailer } = buildMailer()
+    const db = { query: async () => ({ rows: [] }) }
+    await notifyBackofficeNewOrder(mailer, db, {
+      order_number: 'WEB-cs_1',
+      kind: 'checkout',
+      guest_email: 'shopper@test.example',
+      user_id: null,
+    })
+    expect(transport.sent).toHaveLength(1)
+    expect(transport.sent[0].to).toBe(BACKOFFICE)
+    expect(transport.sent[0].subject).toContain('checkout')
+    expect(transport.sent[0].text).toContain('shopper@test.example')
+  })
+
+  // FR-121: confirming must not re-send the mail the client got at creation.
+  it('the confirm transition sends a different message from the creation one', async () => {
+    const db = { query: async () => ({ rows: [] }) }
+    const order = {
+      order_number: 'SO-9',
+      kind: 'manual',
+      guest_email: 'buyer@test.example',
+      user_id: null,
+    }
+
+    const created = buildMailer()
+    await notifyOrderCreated(created.mailer, db, order)
+    const confirmed = buildMailer()
+    await notifyOrderTransition(confirmed.mailer, db, {
+      ...order,
+      status: 'confirmed',
+      xero_invoice_ref: 'INV-1',
+    })
+
+    const creationMail = created.transport.sent.find((m) => m.to === 'buyer@test.example')
+    const confirmMail = confirmed.transport.sent[0]
+    expect(confirmMail.to).toBe('buyer@test.example')
+    expect(confirmMail.subject).not.toBe(creationMail.subject)
+    expect(confirmMail.text).toContain('INV-1')
+  })
+
   it('every helper is a safe no-op when the mailer is null', async () => {
     const db = { query: async () => ({ rows: [] }) }
     await expect(
@@ -251,6 +354,12 @@ describe('notifications', () => {
     await expect(
       notifyOrderTransition(null, db, { order_number: 'x', status: 'paid' })
     ).resolves.toBeUndefined()
+    await expect(
+      notifyOrderCreated(null, db, { order_number: 'x', kind: 'manual' })
+    ).resolves.toBeUndefined()
+    await expect(
+      notifyBackofficeNewOrder(null, db, { order_number: 'x', kind: 'checkout' })
+    ).resolves.toBeUndefined()
   })
 })
 
@@ -259,9 +368,13 @@ describe('notifications', () => {
 describe('order-request trigger wiring', () => {
   const PREFIX = 'email-test'
   const SKU = `${PREFIX}-INSTOCK`
+  const STAFF_EMAIL = 'staff@email-test.example'
   let pool
   let app
   let transport
+  // Registered ONCE: register shares a 10-per-15-min per-IP bucket, so a
+  // per-test registration 429s and yields no cookie.
+  let backofficeCookie
 
   beforeAll(async () => {
     const config = loadConfig()
@@ -282,6 +395,18 @@ describe('order-request trigger wiring', () => {
       logger: false,
     })
     await app.ready()
+
+    await pool.query('DELETE FROM users WHERE email = $1', [STAFF_EMAIL])
+    const staff = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: STAFF_EMAIL, password: 'correct horse battery staple' },
+    })
+    const setCookie = staff.headers['set-cookie']
+    backofficeCookie = (Array.isArray(setCookie) ? setCookie[0] : setCookie).split(';')[0]
+    await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [
+      STAFF_EMAIL,
+    ])
   })
 
   afterAll(async () => {
@@ -293,6 +418,7 @@ describe('order-request trigger wiring', () => {
       [`${PREFIX}-%`]
     )
     await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
+    await pool.query('DELETE FROM users WHERE email = $1', [STAFF_EMAIL])
     await app.close()
     await pool.end()
   })
@@ -348,5 +474,28 @@ describe('order-request trigger wiring', () => {
     const staff = transport.sent.find((m) => m.to === BACKOFFICE)
     expect(customer.subject).toContain(orderNumber)
     expect(staff.text).toContain(orderNumber)
+  })
+
+  // W12 US-004 + US-005: the back-office order path notified nobody at all —
+  // not the client it was keyed for, and not the desk.
+  it('confirms to the client and alerts the back office when staff key an order', async () => {
+    const { rows } = await pool.query('SELECT id FROM colourways WHERE sku = $1', [SKU])
+    const response = await app.inject({
+      method: 'POST',
+      url: '/admin/orders',
+      headers: { cookie: backofficeCookie },
+      payload: {
+        contact: { name: 'Walk In', email: 'walkin@email-test.example' },
+        lines: [{ colourway_id: rows[0].id, qty: 2, unit_price_cents: 9900 }],
+      },
+    })
+    expect(response.statusCode).toBe(201)
+    const orderNumber = response.json().order.order_number
+
+    expect(transport.sent).toHaveLength(2)
+    const client = transport.sent.find((m) => m.to === 'walkin@email-test.example')
+    const staff = transport.sent.find((m) => m.to === BACKOFFICE)
+    expect(client.subject).toContain(orderNumber)
+    expect(staff.subject).toContain(orderNumber)
   })
 })

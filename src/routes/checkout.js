@@ -28,12 +28,19 @@ const checkoutBodySchema = {
   },
 }
 
+// Unauthenticated and it SPENDS: every call creates a Checkout Session at
+// Stripe, so an unmetered loop is third-party cost plus an unbounded pile of
+// abandoned sessions in the dashboard. Looser than /contact's 10 because a
+// shopper legitimately retries a card and a shared office IP may hold several
+// buyers, but bounded, which it was not.
+const CHECKOUT_RATE_LIMIT = Object.freeze({ max: 20, timeWindow: 15 * 60 * 1000 })
+
 export const checkoutRoutes = async (app, { pool, stripe, storeBaseUrl }) => {
   // Public: guests may check out. When logged in, the session is tagged with the
   // user for reconciliation and their email is pre-filled.
   app.post(
     '/checkout/session',
-    { schema: { body: checkoutBodySchema } },
+    { schema: { body: checkoutBodySchema }, config: { rateLimit: CHECKOUT_RATE_LIMIT } },
     async (request) => {
       const user = await app.guards.loadOptionalUser(request)
       const { url, session_id } = await createCheckoutSession(

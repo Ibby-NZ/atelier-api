@@ -4,6 +4,9 @@
 
 import {
   ORDER_STATUSES,
+  DEFAULT_PAGE,
+  DEFAULT_LIMIT,
+  MAX_LIMIT,
   listAdminOrders,
   getAdminOrder,
   createManualOrder,
@@ -14,15 +17,34 @@ import {
   declineOrder,
   setOrderArchived,
 } from '../orders/admin-orders.js'
+import { parseOrderFilters } from '../orders/order-filters.js'
+// The single source of truth for the kind vocabulary — retyping it here is how
+// the CHECK and the filter drift apart on the next kind.
+import { ORDER_KINDS } from '../reports/filters.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
-import { notifyOrderTransition } from '../email/notifications.js'
+import { notifyOrderTransition, notifyOrderCreated } from '../email/notifications.js'
 
+// A shape check, not the whitelist: src/orders/order-filters.js decides which
+// filters exist and what a value may be (an unknown name is ignored, an unusable
+// value is a 400 naming it), because Ajv's `removeAdditional` strips unknown
+// keys rather than rejecting them. `maximum: MAX_LIMIT` is the one thing only
+// the schema can do — it makes an over-large limit a 400 instead of a silent
+// clamp reporting a page size nobody asked for.
 const listQuerySchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
     status: { type: 'string', enum: ORDER_STATUSES },
+    kind: { type: 'string', enum: ORDER_KINDS },
     include_archived: { type: 'boolean', default: false },
+    q: { type: 'string', maxLength: 200 },
+    client: { type: 'string', maxLength: 200 },
+    reference: { type: 'string', maxLength: 200 },
+    po_number: { type: 'string', maxLength: 200 },
+    from: { type: 'string', maxLength: 10 },
+    to: { type: 'string', maxLength: 10 },
+    page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
+    limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
   },
 }
 
@@ -43,6 +65,20 @@ const priceProp = { type: 'integer', minimum: 0 }
 const qtyProp = { type: 'number', exclusiveMinimum: 0 }
 const cutProp = { type: ['string', 'null'], maxLength: 2000 }
 
+// The manual pricing override (Rebecca-R2). The schema pins only the shape a
+// database CHECK also pins (0–100); the POLICY — 0/5/10 for any back-office
+// user, anything else director-only and carrying a reason — lives in
+// src/orders/discounts.js, because only the handler knows the caller's role.
+// Both keys MUST be here as well as in the module: Ajv's `removeAdditional`
+// would otherwise strip them silently and the discount would simply never
+// arrive.
+const discountPctProp = { type: 'number', minimum: 0, maximum: 100 }
+const discountReasonProp = { type: ['string', 'null'], maxLength: 2000 }
+// A reason may not travel alone — it is set (or cleared) WITH the percentage
+// it justifies, so a body carrying only `discount_reason` is a 400 rather
+// than a key `applyDiscount` would silently ignore.
+const discountDependencies = { discount_reason: ['discount_pct'] }
+
 // Editing an order: quantities, prices, cut requirements, lines added or
 // removed, and the contact header. Every key is optional and `anyOf` demands at
 // least one — Ajv runs `removeAdditional`, so an unknown key is stripped rather
@@ -60,7 +96,14 @@ const editBodySchema = {
     { required: ['notes'] },
     { required: ['guest_email'] },
     { required: ['contact_phone'] },
+    { required: ['client_reference'] },
+    { required: ['customer_po_number'] },
+    // Deliberately no `discount_reason` member: a reason alone changes nothing
+    // (see discountDependencies), so it cannot be the key that makes a body
+    // non-empty.
+    { required: ['discount_pct'] },
   ],
+  dependencies: discountDependencies,
   properties: {
     lines: {
       type: 'array',
@@ -105,6 +148,12 @@ const editBodySchema = {
     notes: { type: ['string', 'null'], maxLength: 2000 },
     guest_email: { type: ['string', 'null'], maxLength: 254 },
     contact_phone: { type: ['string', 'null'], maxLength: 50 },
+    // The client's own two numbers (US-006). Both nullable — an explicit null
+    // (or an empty string, which the module folds to null) clears them.
+    client_reference: { type: ['string', 'null'], maxLength: 200 },
+    customer_po_number: { type: ['string', 'null'], maxLength: 200 },
+    discount_pct: discountPctProp,
+    discount_reason: discountReasonProp,
   },
 }
 
@@ -116,6 +165,7 @@ const createBodySchema = {
   type: 'object',
   additionalProperties: false,
   required: ['lines'],
+  dependencies: discountDependencies,
   properties: {
     user_id: { type: 'integer', minimum: 1 },
     contact: {
@@ -144,6 +194,8 @@ const createBodySchema = {
       },
     },
     notes: { type: ['string', 'null'], maxLength: 2000 },
+    discount_pct: discountPctProp,
+    discount_reason: discountReasonProp,
   },
 }
 
@@ -163,11 +215,18 @@ export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
     '/admin/orders',
     { preHandler: backoffice, schema: { querystring: listQuerySchema } },
     async (request) => {
-      const orders = await listAdminOrders(pool, {
+      const { page, limit } = request.query
+      const { orders, total } = await listAdminOrders(pool, {
+        kind: request.query.kind,
         status: request.query.status,
         includeArchived: request.query.include_archived,
+        // Throws a 400 naming the filter when a value is unusable; Fastify
+        // serialises a { statusCode } error, so there is no try/catch here.
+        filters: parseOrderFilters(request.query),
+        page,
+        limit,
       })
-      return { orders }
+      return { orders, meta: { total, page, limit } }
     }
   )
 
@@ -178,7 +237,16 @@ export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
     '/admin/orders',
     { preHandler: backoffice, schema: { body: createBodySchema } },
     async (request, reply) => {
-      const order = await createManualOrder(pool, request.body)
+      // request.user rides along for the discount gate: the route guard admits
+      // all of backoffice (director inherits), so only the handler's view of
+      // the caller's role can hold the director-only line — the admin-users
+      // self-protection posture. It also stamps `discount_applied_by`.
+      const order = await createManualOrder(pool, request.body, request.user)
+      // The client's confirmation goes out at CREATION (US-005) and the back
+      // office is alerted at the same moment (US-004) — this path notified
+      // nobody at all before. Never fails the order: the mailer swallows
+      // delivery errors and is a no-op when null.
+      await notifyOrderCreated(mailer, pool, order)
       reply.code(201)
       return { order }
     }
@@ -205,7 +273,13 @@ export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
       schema: { params: idParamsSchema, body: editBodySchema },
     },
     async (request) => {
-      const order = await editOrderLines(pool, request.params.id, request.body)
+      // The actor, for the same two reasons as the create route above.
+      const order = await editOrderLines(
+        pool,
+        request.params.id,
+        request.body,
+        request.user
+      )
       return { order }
     }
   )

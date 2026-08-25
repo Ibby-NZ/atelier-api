@@ -1,5 +1,8 @@
 import { processStripeEvent } from '../webhooks/stripe-webhook.js'
-import { notifyCheckoutReceipt } from '../email/notifications.js'
+import {
+  notifyCheckoutReceipt,
+  notifyBackofficeNewOrder,
+} from '../email/notifications.js'
 
 // Stripe webhook endpoint. Signature verification needs the exact raw request
 // bytes, so this encapsulated plugin parses application/json as a Buffer (the
@@ -39,8 +42,12 @@ export const webhookRoutes = async (
 
     const result = await processStripeEvent(pool, event)
     // Send the receipt only for a freshly-created paid order (not on replays).
+    // The back office learns about it in the same breath (W12 US-004, FR-119):
+    // a card sale used to reach the desk only when somebody opened the queue.
+    // Both are no-ops when the mailer is null and neither can fail the webhook.
     if (result.order) {
       await notifyCheckoutReceipt(mailer, pool, result.order)
+      await notifyBackofficeNewOrder(mailer, pool, result.order)
     }
     return { received: true, duplicate: result.duplicate }
   })

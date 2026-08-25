@@ -9,15 +9,14 @@ import {
 import { getProductDetail } from '../catalogue/product-detail.js'
 import { listBrands, getBrandBySlug } from '../catalogue/brands.js'
 import { listCollections, getCollection } from '../catalogue/collections.js'
-import { canSeeTradeCatalogue } from '../catalogue/visibility.js'
-import { effectiveRole } from '../auth/guards.js'
+import { canSeeTradeCatalogue, canSeeTradePricing } from '../catalogue/visibility.js'
 
 // Every public route below resolves the optional session ONCE and derives both
 // gates from it. They are not the same gate (see catalogue/visibility.js):
 // `includeTrade` is the price (approved trade only), `includeTradeOnly` is
 // which houses are visible at all (approved trade AND staff).
 const viewerGates = (user) => ({
-  includeTrade: !!user && effectiveRole(user) === 'trade',
+  includeTrade: canSeeTradePricing(user),
   includeTradeOnly: canSeeTradeCatalogue(user),
 })
 

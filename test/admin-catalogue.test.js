@@ -479,6 +479,58 @@ describe('back-office catalogue admin', () => {
   })
 
   describe('PATCH /admin/brands/:id', () => {
+    // Onboarding a supplier from the CRM ends here. getSupplier attaches terms
+    // per house, so terms given to a brand-new supplier are invisible until one
+    // of its houses points at it — which nothing could do before this.
+    it('links a house to a supplier, and clears the link again', async () => {
+      const created = await createBrandFixture('Linkable')
+      // Conflict-proof: a run that fails between the insert and the cleanup
+      // below would otherwise poison every later run.
+      const { rows } = await pool.query(
+        `INSERT INTO suppliers (name, slug) VALUES ($1, $2)
+         ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name
+         RETURNING id`,
+        [`${PREFIX} Supplier`, `${PREFIX}-supplier`]
+      )
+      const supplierId = rows[0].id
+
+      const linked = await inject(
+        'PATCH',
+        `/admin/brands/${created.id}`,
+        backofficeCookie,
+        { supplier_id: supplierId }
+      )
+      expect(linked.statusCode).toBe(200)
+      expect(linked.json().brand.supplier_id).toBe(supplierId)
+
+      // Nobody invoices this house yet is a real state, so null is a value the
+      // office can set, not an absence the whitelist skips.
+      const cleared = await inject(
+        'PATCH',
+        `/admin/brands/${created.id}`,
+        backofficeCookie,
+        { supplier_id: null }
+      )
+      expect(cleared.statusCode).toBe(200)
+      expect(cleared.json().brand.supplier_id).toBeNull()
+
+      await pool.query('DELETE FROM suppliers WHERE id = $1', [supplierId])
+    })
+
+    // A RESTRICT edge answers 23503; without a mapping that reaches the office
+    // as a 500, which tells them nothing they can act on.
+    it('refuses an unknown supplier with 422, not 500', async () => {
+      const created = await createBrandFixture('Unlinkable')
+      const response = await inject(
+        'PATCH',
+        `/admin/brands/${created.id}`,
+        backofficeCookie,
+        { supplier_id: 2147483600 }
+      )
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toMatch(/supplier/i)
+    })
+
     it('updates a subset of fields and leaves the slug untouched', async () => {
       const created = await createBrandFixture('House', { story: 'Old story.' })
       const response = await inject(

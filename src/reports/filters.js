@@ -20,6 +20,7 @@
 // order and catalogue read models already carry.
 
 import { ORDER_STATUSES } from '../orders/admin-orders.js'
+import { CATEGORIES } from '../../scripts/lib/price-template.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -31,11 +32,26 @@ export const FILTER_COLUMNS = Object.freeze({
   from: 'o.created_at',
   to: 'o.created_at',
   brand: 'b.slug',
+  // W21's two reporting dimensions. Both are FREE TEXT the office typed, not
+  // slugs, so neither may go through parseSlug — see FREE_TEXT_FILTERS.
+  brand_code: 'b.brand_code',
+  range: 'p.product_range',
   product_type: 'p.product_type',
+  // Rebecca-R1's merchandising axis (fabric / wallpaper / trimming / accessory)
+  // — NOT product_type, which is the inventory-unit split. An exact-match enum,
+  // never free text: the vocabulary is CHECKed on the column, so a fragment
+  // match would only ever hide a typo.
+  category: 'p.category',
   collection: 'col.slug',
   kind: 'o.kind',
   status: 'o.status',
 })
+
+// The filters matched with an escaped ILIKE rather than an equality. A code is
+// typed by a person into a filter bar and is looked for as a fragment ("CF"
+// finds "CFJC"), which is what a code filter means to the office; a slug filter
+// is an exact identity and stays one.
+export const FREE_TEXT_FILTERS = Object.freeze(['brand_code', 'range'])
 
 export const REPORT_FILTER_NAMES = Object.freeze(Object.keys(FILTER_COLUMNS))
 
@@ -51,6 +67,15 @@ export const ORDER_KINDS = Object.freeze([
   'backorder_request',
   'manual',
 ])
+
+// `products.category` and `price_list_items.category` are ONE vocabulary
+// (migration 1786507200000 says so at length), and scripts/lib/price-template.js
+// is its registry — so this is derived, not retyped: a second copy is how "add
+// a category" turns into two decisions. It still plays the boundary-copy role
+// here (an unknown value is a 400 naming the filter, never a report matching
+// nothing), and test/admin-reports.test.js parses the LIVE
+// products_category_check to prove the registry has not drifted from the CHECK.
+export const PRODUCT_CATEGORIES = Object.freeze([...CATEGORIES])
 
 // `status` deliberately reuses the orders module's own frozen list rather than
 // retyping it. It is already what /admin/orders validates against, and
@@ -117,6 +142,38 @@ const parseSlug = (name, value) => {
   return text
 }
 
+// A brand code is `CF`; a range is `C & C Milano Bedding` or
+// `RAMM, SON & CROCKER`. Neither is [a-z0-9-], so parseSlug is not merely
+// stricter here — it is WRONG, and would 400 every real value the office holds.
+// What is validated instead is that the value is a single line of printable
+// text: a control character in a filter reaches `meta.filters`, which the CSV
+// export writes into its notes block, so a newline there would break the file
+// out of the row the reader is looking at.
+const FREE_TEXT_LIMIT = 100
+const CONTROL_CHARACTER = /\p{C}/u
+
+const parseFreeText = (name, value) => {
+  const text = textOf(name, value)
+  if (text === '') {
+    // Unreachable through parseReportFilters (isBlank drops it first), and kept
+    // because this function is also the shape rule a future caller reads.
+    throw invalid(name, value, 'a non-empty value')
+  }
+  if (text.length > FREE_TEXT_LIMIT) {
+    throw invalid(name, text, `at most ${FREE_TEXT_LIMIT} characters`)
+  }
+  if (CONTROL_CHARACTER.test(text)) {
+    throw invalid(name, text, 'a single line of text')
+  }
+  return text
+}
+
+// `%` and `_` are ILIKE wildcards and `\` is the escape character itself, so a
+// range typed as `100%` must match a literal percent rather than everything.
+// The SQL carries a matching `ESCAPE '\'` — the two are one rule and neither
+// half works alone.
+const escapeLike = (value) => value.replace(/[\\%_]/g, (char) => `\\${char}`)
+
 // `brand` is the one multi-valued filter: the office compares houses against
 // each other, and a report of one house at a time is a different question.
 // Repeated params (brand=a&brand=b) and one comma-separated value are both
@@ -137,11 +194,25 @@ const PARSERS = Object.freeze({
   from: (value) => parseDate('from', value),
   to: (value) => parseDate('to', value),
   brand: (value) => parseSlugList('brand', value),
+  brand_code: (value) => parseFreeText('brand_code', value),
+  range: (value) => parseFreeText('range', value),
   product_type: (value) => parseEnum('product_type', value, PRODUCT_TYPES),
+  category: (value) => parseEnum('category', value, PRODUCT_CATEGORIES),
   collection: (value) => parseSlug('collection', value),
   kind: (value) => parseEnum('kind', value, ORDER_KINDS),
   status: (value) => parseEnum('status', value, ORDER_STATUSES),
 })
+
+// How a parsed value becomes the bound parameter. Identity for everything that
+// is compared, and the escaped `%…%` pattern for the two that are matched.
+//
+// The wrapping happens HERE and not in the parser, because `meta.filters` echoes
+// the parsed value into the payload and into the CSV's notes block: a note
+// reading `Range: %c \& c milano%` tells the office it typed something it did
+// not. The office sees what it typed; the database sees the pattern.
+const BINDINGS = Object.freeze(
+  Object.fromEntries(FREE_TEXT_FILTERS.map((name) => [name, (value) => `%${escapeLike(value)}%`]))
+)
 
 // Every column is a code literal naming an alias and a column, checked here so a
 // typo throws while the module loads rather than reaching SQL — the posture
@@ -153,6 +224,11 @@ for (const [name, column] of Object.entries(FILTER_COLUMNS)) {
   }
   if (!Object.hasOwn(PARSERS, name)) {
     throw new Error(`Report filter "${name}" has no parser`)
+  }
+}
+for (const name of FREE_TEXT_FILTERS) {
+  if (!Object.hasOwn(FILTER_COLUMNS, name)) {
+    throw new Error(`Free-text report filter "${name}" is not in the whitelist`)
   }
 }
 
@@ -197,7 +273,13 @@ const CLAUSES = Object.freeze({
   // the range at that morning's midnight and silently drop the whole day.
   to: (column, index) => `${column} < ($${index}::date + 1)`,
   brand: (column, index) => `${column} = ANY($${index}::text[])`,
+  // ESCAPE '\' is not optional beside an escaped pattern: without it Postgres
+  // uses no escape character at all and the backslashes BINDINGS inserted are
+  // matched literally, so `100%` finds nothing rather than finding too much.
+  brand_code: (column, index) => `${column} ILIKE $${index} ESCAPE '\\'`,
+  range: (column, index) => `${column} ILIKE $${index} ESCAPE '\\'`,
   product_type: (column, index) => `${column} = $${index}`,
+  category: (column, index) => `${column} = $${index}`,
   collection: (column, index) => `${column} = $${index}`,
   kind: (column, index) => `${column} = $${index}`,
   status: (column, index) => `${column} = $${index}`,
@@ -266,7 +348,8 @@ export const buildReportFilters = (filters = {}, { params = [], names } = {}) =>
     if (!allowed.includes(name)) continue
     const value = filters[name]
     if (value === undefined || value === null) continue
-    bound.push(Array.isArray(value) ? [...value] : value)
+    const bind = BINDINGS[name]
+    bound.push(bind ? bind(value) : Array.isArray(value) ? [...value] : value)
     clauses.push(CLAUSES[name](FILTER_COLUMNS[name], bound.length))
   }
 

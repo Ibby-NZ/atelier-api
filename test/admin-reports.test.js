@@ -6,6 +6,7 @@ import { updateUser, getUser } from '../src/users/admin-users.js'
 import { DIRECTOR_BACKFILL_SQL } from '../migrations/1786680000000_reporting-finance-access.js'
 import {
   PRODUCT_TYPES,
+  PRODUCT_CATEGORIES,
   ORDER_KINDS,
   ORDER_STATUSES,
   parseReportFilters,
@@ -15,6 +16,7 @@ import { loadReportAccess } from '../src/reports/access.js'
 import {
   productPerformanceReport,
   PRODUCT_PERFORMANCE_COLUMNS,
+  PRODUCT_PERFORMANCE_CATEGORY_COLUMNS,
   PRODUCT_PERFORMANCE_TITLE,
   COVERAGE_NOTE,
 } from '../src/reports/product-performance.js'
@@ -269,6 +271,16 @@ describe('W5-US-003 — the report filter vocabularies against the schema', () =
   it('accepts exactly the statuses orders_status_check allows', async () => {
     expect(await checkValues(pool, 'orders_status_check')).toEqual([...ORDER_STATUSES].sort())
   })
+
+  // PRODUCT_CATEGORIES is derived from the pipeline registry rather than
+  // retyped, so what this proves is that the REGISTRY still describes the
+  // database — the same drift the other three assertions catch for their
+  // boundary copies.
+  it('accepts exactly the categories products_category_check allows', async () => {
+    expect(await checkValues(pool, 'products_category_check')).toEqual(
+      [...PRODUCT_CATEGORIES].sort()
+    )
+  })
 })
 
 // The order fixture the revenue scope and every report built on it are measured
@@ -298,11 +310,11 @@ const insertFixture = async (db) => {
     )
     return rows[0].id
   }
-  const product = async (brandId, slug, name, collectionId = null) => {
+  const product = async (brandId, slug, name, collectionId = null, category = null) => {
     const { rows } = await db.query(
-      `INSERT INTO products (brand_id, collection_id, name, slug, product_type, currency, show_on_website)
-       VALUES ($1, $2, $3, $4, 'fabric', 'NZD', true) RETURNING id`,
-      [brandId, collectionId, name, slug]
+      `INSERT INTO products (brand_id, collection_id, name, slug, product_type, category, currency, show_on_website)
+       VALUES ($1, $2, $3, $4, 'fabric', $5, 'NZD', true) RETURNING id`,
+      [brandId, collectionId, name, slug, category]
     )
     return rows[0].id
   }
@@ -344,9 +356,25 @@ const insertFixture = async (db) => {
   )
   const collectionId = collectionRows[0].id
 
-  const designId = await product(houseId, `${PREFIX}-design`, `${PREFIX} Design`, collectionId)
+  // Two categories and one uncategorised design (Rebecca-R1): the split truth
+  // test needs revenue in two categories, and `Loose` stays NULL because most of
+  // the live catalogue predates the column — a category report that dropped it
+  // would silently understate every total.
+  const designId = await product(
+    houseId,
+    `${PREFIX}-design`,
+    `${PREFIX} Design`,
+    collectionId,
+    'fabric'
+  )
   const looseId = await product(houseId, `${PREFIX}-loose`, `${PREFIX} Loose`)
-  const otherDesignId = await product(otherId, `${PREFIX}-other-design`, `${PREFIX} Other Design`)
+  const otherDesignId = await product(
+    otherId,
+    `${PREFIX}-other-design`,
+    `${PREFIX} Other Design`,
+    null,
+    'wallpaper'
+  )
 
   const design = await colourway(designId, `${PREFIX}-SKU-1`)
   const loose = await colourway(looseId, `${PREFIX}-SKU-2`)
@@ -658,6 +686,7 @@ describe('W5-US-005 — product performance by house and design', () => {
           brand_name: `${PREFIX} Other`,
           product_name: `${PREFIX} Other Design`,
           product_type: 'fabric',
+          category: 'wallpaper',
           currency: 'NZD',
           orders: 1,
           qty: 4,
@@ -668,6 +697,7 @@ describe('W5-US-005 — product performance by house and design', () => {
           brand_name: `${PREFIX} House`,
           product_name: `${PREFIX} Design`,
           product_type: 'fabric',
+          category: 'fabric',
           currency: 'NZD',
           orders: 1,
           qty: 2,
@@ -678,6 +708,9 @@ describe('W5-US-005 — product performance by house and design', () => {
           brand_name: `${PREFIX} House`,
           product_name: `${PREFIX} Loose`,
           product_type: 'fabric',
+          // Uncategorised, not miscategorised: the office has not filed this
+          // design yet, and the row must say so rather than invent a value.
+          category: null,
           currency: 'NZD',
           orders: 1,
           qty: 3,
@@ -859,6 +892,113 @@ describe('W5-US-005 — product performance by house and design', () => {
     // A silent clamp would report a page size nobody asked for.
     it('refuses a limit past the maximum rather than clamping it', async () => {
       expect((await get(`&limit=${MAX_ROW_LIMIT + 1}`)).statusCode).toBe(400)
+    })
+  })
+
+  // Rebecca-R1 — fabrics, trims and wallpapers reported separately. The fixture
+  // holds revenue in two categories plus one uncategorised design, so both the
+  // filter and the grouped grain have a split to prove.
+  describe('the category dimension', () => {
+    it('carries the category on every by-design row', async () => {
+      const { rows } = (await get()).json()
+
+      expect(designRow(rows, `${PREFIX} Design`).category).toBe('fabric')
+      expect(designRow(rows, `${PREFIX} Other Design`).category).toBe('wallpaper')
+      expect(designRow(rows, `${PREFIX} Loose`).category).toBeNull()
+    })
+
+    it('narrows to one category through the shared filter layer', async () => {
+      const { rows } = (await get('&category=wallpaper')).json()
+
+      expect(rows.map((row) => row.product_name)).toEqual([`${PREFIX} Other Design`])
+    })
+
+    // NULL fails `category = $n`, which is the right answer: an uncategorised
+    // design is not known to be a fabric, and counting it as one would make the
+    // backlog invisible.
+    it('keeps an uncategorised design out of every category filter', async () => {
+      const { rows } = (await get('&category=fabric')).json()
+
+      expect(rows.map((row) => row.product_name)).toEqual([`${PREFIX} Design`])
+    })
+
+    it('refuses a value outside the vocabulary with a 400 naming the filter', async () => {
+      const response = await get('&category=fabrics')
+
+      expect(response.statusCode).toBe(400)
+    })
+
+    describe('grouped by category', () => {
+      // The split truth test: two products in two categories, and the revenue
+      // lands under the right heading — NZ$1,000 of wallpaper, NZ$200 of
+      // fabric, and the unpriced metreage under its own uncategorised row.
+      it('splits the same population by category, value first', async () => {
+        const body = (await get('&group=category')).json()
+
+        expect(body.columns).toEqual([...PRODUCT_PERFORMANCE_CATEGORY_COLUMNS])
+        expect(body.rows).toEqual([
+          {
+            category: 'wallpaper',
+            product_type: 'fabric',
+            currency: 'NZD',
+            orders: 1,
+            qty: 4,
+            value_cents: 100000,
+            unpriced_lines: 0,
+          },
+          {
+            category: 'fabric',
+            product_type: 'fabric',
+            currency: 'NZD',
+            orders: 1,
+            qty: 2,
+            value_cents: 20000,
+            unpriced_lines: 0,
+          },
+          {
+            category: null,
+            product_type: 'fabric',
+            currency: 'NZD',
+            orders: 1,
+            qty: 3,
+            value_cents: 0,
+            unpriced_lines: 1,
+          },
+        ])
+        expect(body.meta.grouped_by).toBe('category')
+        expect(body.meta.rows_total).toBe(3)
+      })
+
+      it('totals the whole population under the grouped grain’s own label', async () => {
+        const { totals } = (await get('&group=category')).json()
+
+        expect(totals).toMatchObject({
+          category: 'All categories',
+          orders: 3,
+          currency: 'NZD',
+          value_cents: 120000,
+          unpriced_lines: 1,
+        })
+        expect(Object.hasOwn(totals, 'qty')).toBe(false)
+      })
+
+      it('still answers the by-design grain when no group is asked for', async () => {
+        const body = (await get()).json()
+
+        expect(body.meta.grouped_by).toBeNull()
+        expect(body.columns).toEqual([...PRODUCT_PERFORMANCE_COLUMNS])
+      })
+
+      it('intersects with a category filter rather than fighting it', async () => {
+        const body = (await get('&group=category&category=fabric')).json()
+
+        expect(body.rows).toHaveLength(1)
+        expect(body.rows[0]).toMatchObject({ category: 'fabric', value_cents: 20000 })
+      })
+
+      it('refuses a grouping nobody declared', async () => {
+        expect((await get('&group=supplier')).statusCode).toBe(400)
+      })
     })
   })
 
@@ -1368,6 +1508,7 @@ describe('W5-US-007 — stock and not-invoiced', () => {
         sku: `${PREFIX}-SKU-1`,
         brand_name: `${PREFIX} House`,
         product_name: `${PREFIX} Design`,
+        category: 'fabric',
         colourway_name: 'Ivory',
         unit: 'metres',
         on_hand: 12.5,
@@ -1441,6 +1582,19 @@ describe('W5-US-007 — stock and not-invoiced', () => {
 
       expect(report.rows.length).toBe(4)
       expect(narrowed.rows.map((row) => row.sku)).toEqual([`${PREFIX}-SKU-3`])
+    })
+
+    // Rebecca-R1 on the shelf: the category rides on every row and narrows the
+    // snapshot, and an uncategorised holding is outside every category filter
+    // rather than counted into one.
+    it('carries the category and honours it as a filter', async () => {
+      const report = await payloadOf(STOCK_PATH)
+      const narrowed = await payloadOf(STOCK_PATH, '&category=wallpaper')
+
+      expect(rowBySku(report, `${PREFIX}-SKU-3`).category).toBe('wallpaper')
+      expect(rowBySku(report, GOODS_SKU).category).toBeNull()
+      expect(narrowed.rows.map((row) => row.sku)).toEqual([`${PREFIX}-SKU-3`])
+      expect(narrowed.meta.ignored_filters).toEqual([])
     })
 
     // The report is a snapshot and has no `orders` in its FROM, so a date range

@@ -504,6 +504,33 @@ export const LEGACY_TABLES = Object.freeze({
       ...AUDIT_COLUMNS,
     }),
   },
+
+  // ---- 12 Aug pull --------------------------------------------------------
+  // The pricing parameter table (Xero Range + Xero Type, one entity, two views).
+  // `clearance` is a percentage and `freight` is dollars per unit, both named as
+  // D365 names them — see migrations/1787284800000_legacy-tracking-options.js.
+  // No read route, like seven of its eleven siblings, so no override capability.
+  tracking_options: {
+    table: 'legacy_tracking_options',
+    columns: Object.freeze({
+      guid: UUID_TYPE,
+      tracking_category: TEXT,
+      name: TEXT,
+      supplier: TEXT,
+      duty_rate_a: NUMERIC,
+      duty_rate_b: NUMERIC,
+      duty_rate_c: NUMERIC,
+      clearance: NUMERIC,
+      freight: NUMERIC,
+      discount: NUMERIC,
+      trade_markup: NUMERIC,
+      min_qty_to_avoid_surcharge: NUMERIC,
+      surcharge_per_unit: NUMERIC,
+      status: TEXT,
+      modified_on: TIMESTAMP,
+      ...AUDIT_COLUMNS,
+    }),
+  },
 })
 
 const invalid = (entity, index, field, detail) =>

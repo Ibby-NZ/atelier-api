@@ -3,6 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { MIN_PASSWORD_LENGTH } from '../src/auth/passwords.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const TEST_DOMAIN = 'auth-test.example.com'
@@ -118,6 +119,21 @@ describe('auth endpoints', () => {
         method: 'POST',
         url: '/auth/register',
         payload: { email: testEmail('shortpw'), password: 'short' },
+      })
+      expect(response.statusCode).toBe(400)
+    })
+
+    it('rejects a password one character under the minimum', async () => {
+      // Pins the floor itself rather than merely that something short fails —
+      // MIN_PASSWORD_LENGTH is imported so this cannot drift away from the rule
+      // it guards, and 'short' above would keep passing at any minimum >= 6.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/auth/register',
+        payload: {
+          email: testEmail('boundarypw'),
+          password: 'a'.repeat(MIN_PASSWORD_LENGTH - 1),
+        },
       })
       expect(response.statusCode).toBe(400)
     })

@@ -13,17 +13,23 @@
 //     by schema and the barcode is one segment further down).
 //   - A duplicate barcode is the database's 23505, mapped to a 409 by the module.
 //     A pre-check races the scanner — a concurrent device — and would still need
-//     the handler, so there is none.
+//     the handler, so there is none. That holds for a SERVER-MINTED barcode too:
+//     a create that omits `barcode` gets one off `samples_barcode_seq`
+//     (W20-US-002), and if the sequence is ever behind the corpus the answer is
+//     the same 409, never a retry.
 //   - DELETE goes through the shared lifecycle module and answers a refusal as a
 //     VALUE, not an exception: Fastify's error serializer drops custom
 //     properties, so a thrown error could not carry `blockers`, which is the
 //     entire point of the 409.
 //
-// The plugin carries BOTH samples lifecycles: the loan register (`/admin/samples`)
-// and showroom stocking (`/admin/sample-orders`, W4-US-007), plus the address
-// book they both point at (`/admin/showrooms`, W4-US-008), each in its own block
-// at the bottom of the file. One registration in src/app.js, one guard, two
-// independent domains that nothing joins.
+// The plugin carries BOTH samples lifecycles: the loan register
+// (`/admin/samples`) and showroom stocking (`/admin/sample-orders`,
+// W4-US-007), plus the address book they both point at (`/admin/showrooms`,
+// W4-US-008), each in its own block. One guard, independent domains nothing
+// joins. The cross-register loan queue and its reminders (W20-US-004/US-007)
+// are the ONE samples surface that lives outside this plugin — see
+// ./admin-sample-loans.js for why: this file had reached the 800-line ceiling,
+// and that surface takes the mailer, which nothing else here needs.
 //
 // Check-out and check-in (W4-US-006) are VERB routes here, not a status PATCH:
 // each writes two tables and must be one transaction, so both go through
@@ -45,6 +51,7 @@ import {
   MAX_LIMIT,
 } from '../samples/admin-samples.js'
 import { checkOutSample, checkInSample } from '../samples/sample-loans.js'
+import { loadReportAccess } from '../reports/access.js'
 import {
   listSampleOrders,
   getSampleOrder,
@@ -69,7 +76,11 @@ import {
 } from '../samples/showrooms.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 
-// Required on create, editable after — a printed tag can be mistyped.
+// Optional on create (W20-US-002) and editable after — a printed tag can be
+// mistyped. `minLength: 1` and the plain `string` type are what make "omitted"
+// the ONLY way to ask for a generated one: `''` and `null` are both 400s here,
+// so a screen with an empty input box cannot silently mint a tag the person
+// filling it in did not ask for.
 const barcodeProp = { type: 'string', minLength: 1, maxLength: 200 }
 
 // Optional columns, all nullable in the schema, so a PATCH clears one with an
@@ -82,6 +93,13 @@ const nullableRef = { type: ['integer', 'null'], minimum: 1 }
 // true. The module refuses it too, because it is also called directly.
 const writableStatusProp = { type: 'string', enum: [...WRITABLE_SAMPLE_STATUSES] }
 
+// What the sample cost (W20-US-008). Nullable, because clearing it back to
+// "nobody recorded a cost" has to stay reachable, and `minimum: 0` rather than
+// exclusive because a free hanger is normal — 0 is a fact, not an omission. The
+// module refuses both keys without finance visibility; this polices the shape.
+const costProp = { type: ['number', 'null'], minimum: 0 }
+const costCurrencyProp = { type: ['string', 'null'], maxLength: 10 }
+
 const sampleProps = {
   label: nullableText,
   colourway_id: nullableRef,
@@ -91,6 +109,8 @@ const sampleProps = {
   location: nullableText,
   status: writableStatusProp,
   notes: { type: ['string', 'null'], maxLength: 5000 },
+  unit_cost: costProp,
+  cost_currency: costCurrencyProp,
 }
 
 // :id is coerced to an integer by Fastify; a non-numeric id is a 400 by schema.
@@ -134,10 +154,15 @@ const listQuerySchema = {
   },
 }
 
+// `barcode` is deliberately NOT required (W20-US-002). Omitting it is the
+// generate action itself — there is no separate mint endpoint, because a tag
+// handed out before the row exists is a number the office has to remember
+// again, which is the problem being solved. Nothing else is required either, so
+// `POST {}` is the CRM's "give me a blank barcoded tag" and the rest is filled
+// in by a PATCH.
 const createSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['barcode'],
   properties: {
     barcode: barcodeProp,
     ...sampleProps,
@@ -346,6 +371,16 @@ const notFound = (reply, what) => {
 export const adminSampleRoutes = async (app, { pool }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
+  // WHAT A SAMPLE COST IS A FINANCE FIGURE, and `backoffice` covers the
+  // showroom and the accounts desk alike — which is why `can_view_finance`
+  // exists beside the role. Resolved through `loadReportAccess`, NEVER by
+  // reading `request.user.can_view_finance`: the guard loads `request.user`
+  // through PUBLIC_USER_COLUMNS, which does not carry the flag, so a direct
+  // read is `undefined` and answers false to everyone, silently and for ever.
+  // The answer is threaded into the read models, which then do not SELECT the
+  // cost columns at all — fail-closed at the SQL rather than at a projection.
+  const financeOf = async (request) => (await loadReportAccess(pool, request.user)).finance
+
   app.get(
     '/admin/samples',
     { preHandler: backoffice, schema: { querystring: listQuerySchema } },
@@ -361,6 +396,7 @@ export const adminSampleRoutes = async (app, { pool }) => {
         includeArchived: include_archived,
         page,
         limit,
+        finance: await financeOf(request),
       })
       return { samples, meta: { total, page, limit } }
     }
@@ -374,7 +410,9 @@ export const adminSampleRoutes = async (app, { pool }) => {
     '/admin/samples/by-barcode/:barcode',
     { preHandler: backoffice, schema: { params: barcodeParamsSchema } },
     async (request, reply) => {
-      const sample = await getSampleByBarcode(pool, request.params.barcode)
+      const sample = await getSampleByBarcode(pool, request.params.barcode, {
+        finance: await financeOf(request),
+      })
       if (!sample) {
         return notFound(reply, `No sample carries the barcode ${request.params.barcode}.`)
       }
@@ -386,7 +424,9 @@ export const adminSampleRoutes = async (app, { pool }) => {
     '/admin/samples/:id',
     { preHandler: backoffice, schema: { params: idParamsSchema } },
     async (request, reply) => {
-      const sample = await getSample(pool, request.params.id)
+      const sample = await getSample(pool, request.params.id, {
+        finance: await financeOf(request),
+      })
       if (!sample) return notFound(reply, `Sample ${request.params.id} not found.`)
       return { sample }
     }
@@ -396,7 +436,9 @@ export const adminSampleRoutes = async (app, { pool }) => {
     '/admin/samples',
     { preHandler: backoffice, schema: { body: createSchema } },
     async (request, reply) => {
-      const sample = await createSample(pool, request.body)
+      const sample = await createSample(pool, request.body, {
+        finance: await financeOf(request),
+      })
       reply.code(201)
       return { sample }
     }
@@ -406,7 +448,9 @@ export const adminSampleRoutes = async (app, { pool }) => {
     '/admin/samples/:id',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: patchSchema } },
     async (request) => ({
-      sample: await updateSample(pool, request.params.id, request.body),
+      sample: await updateSample(pool, request.params.id, request.body, {
+        finance: await financeOf(request),
+      }),
     })
   )
 
@@ -414,7 +458,9 @@ export const adminSampleRoutes = async (app, { pool }) => {
     '/admin/samples/:id/archive',
     { preHandler: backoffice, schema: { params: idParamsSchema } },
     async (request, reply) => {
-      const sample = await setSampleArchived(pool, request.params.id, true)
+      const sample = await setSampleArchived(pool, request.params.id, true, {
+        finance: await financeOf(request),
+      })
       if (!sample) return notFound(reply, `Sample ${request.params.id} not found.`)
       return { sample }
     }
@@ -424,7 +470,9 @@ export const adminSampleRoutes = async (app, { pool }) => {
     '/admin/samples/:id/restore',
     { preHandler: backoffice, schema: { params: idParamsSchema } },
     async (request, reply) => {
-      const sample = await setSampleArchived(pool, request.params.id, false)
+      const sample = await setSampleArchived(pool, request.params.id, false, {
+        finance: await financeOf(request),
+      })
       if (!sample) return notFound(reply, `Sample ${request.params.id} not found.`)
       return { sample }
     }
@@ -438,7 +486,9 @@ export const adminSampleRoutes = async (app, { pool }) => {
     '/admin/samples/:id/check-out',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: checkOutSchema } },
     async (request) => ({
-      sample: await checkOutSample(pool, request.params.id, request.body),
+      sample: await checkOutSample(pool, request.params.id, request.body, {
+        finance: await financeOf(request),
+      }),
     })
   )
 
@@ -446,7 +496,9 @@ export const adminSampleRoutes = async (app, { pool }) => {
     '/admin/samples/:id/check-in',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: checkInSchema } },
     async (request) => ({
-      sample: await checkInSample(pool, request.params.id, request.body ?? {}),
+      sample: await checkInSample(pool, request.params.id, request.body ?? {}, {
+        finance: await financeOf(request),
+      }),
     })
   )
 

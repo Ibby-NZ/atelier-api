@@ -18,9 +18,16 @@ import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminPriceListImportRoutes } from './routes/admin-price-list-import.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
+import { adminFreightRoutes } from './routes/admin-freight.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
 import { adminSampleRoutes } from './routes/admin-samples.js'
+import { adminSampleLoanRoutes } from './routes/admin-sample-loans.js'
+import { adminEmailTemplateRoutes } from './routes/admin-email-templates.js'
+import { adminPurchaseOrderRoutes } from './routes/admin-purchase-orders.js'
+import { adminSupplierInvoiceRoutes } from './routes/admin-supplier-invoices.js'
+import { adminReserveRoutes } from './routes/admin-reserves.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
+import { adminXeroRoutes } from './routes/admin-xero.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
 import { accountRoutes } from './routes/account.js'
@@ -35,6 +42,9 @@ export const buildApp = ({
   storeBaseUrl = 'http://localhost:4321',
   crmBaseUrl = 'http://localhost:5273',
   mailer = null,
+  // The Xero service (src/xero/service.js). null = not configured; the
+  // /admin/xero routes answer 503, same posture as checkout without Stripe.
+  xero = null,
   // Client-facing trade price lists (GET /account/price-lists). Off unless the
   // numbers behind trade_price_cents are real — see src/config.js.
   tradePriceListsEnabled = false,
@@ -149,6 +159,12 @@ export const buildApp = ({
     // /admin/product-sheet/* — the spreadsheet round trip that fills in
     // products.category. Backoffice-only; the export is a CSV download.
     api.register(adminProductSheetRoutes, { pool })
+    // /admin/freight/* — the incumbent's pricing parameters, the freight-letter
+    // recovery report, the append-only rate ledger and the landed-cost preview.
+    // Backoffice throughout; the parameter, recovery and preview routes are
+    // gated a second time on finance visibility, and the preview is the first
+    // payload in the platform where masking actually deletes a column.
+    api.register(adminFreightRoutes, { pool })
     // /admin/reports/* — the report library the CRM's Reporting screen reads.
     // Back-office only, masked server-side before the payload exists, and the
     // only admin routes here that opt into the rate limiter (a report is an
@@ -158,8 +174,36 @@ export const buildApp = ({
     // is out, what is late back) plus the scanner's by-barcode lookup. Back
     // office only, same CORS allowance as every other CRM screen.
     api.register(adminSampleRoutes, { pool })
+    // /admin/sample-loans — the cross-register outstanding read and the
+    // reminders composed off it. Its own plugin because it is the one samples
+    // surface that needs the mailer: a reminder is a staff action off a work
+    // queue, sent on a click, never by a scheduler (there is none).
+    api.register(adminSampleLoanRoutes, { pool, mailer })
+    // /admin/email-templates — the staff-editable "set letter" behind those
+    // reminders. A row overrides the code template; deleting it reverts.
+    api.register(adminEmailTemplateRoutes, { pool })
+    // /admin/purchase-orders + /admin/purchase-order-lines/:id/{allocations,receipts}
+    // — the buying desk: the day's confirmed demand grouped by house, sent,
+    // receipted against and closed. Back office only, and every cost figure on
+    // it is finance-gated on top of that guard.
+    api.register(adminPurchaseOrderRoutes, { pool })
+    // /admin/supplier-invoices — one house's bill across a 2-4 week cycle, and
+    // which purchase orders it covers. Back office only, every money figure on
+    // it finance-gated, and the variance between the bill and what those orders
+    // said they would cost is reported and never written.
+    api.register(adminSupplierInvoiceRoutes, { pool })
+    // /admin/reserves — reserve & cutting dockets (account-first, lines with a
+    // per-line status machine) and the per-supplier report jette closes a
+    // shipment against. Back office only; replaces the D365 fulmar_reserve and
+    // cutting forms. Deliberately does NOT touch inventory.qty_reserved — a
+    // reserve here asks a HOUSE to hold stock at their end.
+    api.register(adminReserveRoutes, { pool })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
+    // /admin/xero/* — connection lifecycle, contact/item sync, invoice push
+    // (C4). The service may be null (unconfigured) — the routes say so with
+    // a 503 rather than the plugin being absent and answering 404.
+    api.register(adminXeroRoutes, { pool, xero, crmBaseUrl })
     api.register(adminLegacyRoutes, { pool })
     // POST /admin/legacy/import/:entity — the only write path into those same
     // tables, director-only. Its own plugin scope: it parses application/gzip

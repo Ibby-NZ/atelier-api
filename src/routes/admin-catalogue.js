@@ -69,11 +69,19 @@ const hexTonesProp = {
 // as well as by the column CHECK, so it is a 400 rather than an opaque 23514.
 const featuredRankProp = { type: ['integer', 'null'], minimum: 1 }
 const slugProp = { type: 'string', minLength: 1, maxLength: 200 }
+// W21's two reporting dimensions. Nullable so a PATCH can clear one; a bare ''
+// also clears (reportingLabelFrom stores NULL — the columns' CHECKs refuse a
+// blank). MUST be declared here as well as in the module whitelists: Ajv's
+// removeAdditional STRIPS an unlisted body key rather than 400ing it, so a
+// column added to a whitelist alone would answer 200 having written nothing.
+const reportingLabelProp = { type: ['string', 'null'], maxLength: 100 }
 
 // Spec + pricing fields shared by product create and patch.
 const productDetailProps = {
   name: nameProp,
   collection_id: { type: ['integer', 'null'], minimum: 1 },
+  // Free text (the office writes `RAMM, SON & CROCKER`), never a slug or an FK.
+  product_range: reportingLabelProp,
   composition: nullableShort,
   width: nullableShort,
   application: nullableShort,
@@ -144,6 +152,12 @@ const brandPatchSchema = {
     website_url: nullableUrl,
     image_url: nullableUrl,
     featured_rank: featuredRankProp,
+    // Nullable on purpose: clearing it is how the office says "nobody invoices
+    // this house yet". An unknown id is a 422 from the FK, not a silent no-op.
+    supplier_id: { type: ['integer', 'null'], minimum: 1 },
+    // A duplicate under the same supplier is a 409 from the partial unique
+    // index, phrased in admin-brands.js's CONFLICT_MESSAGES.
+    brand_code: reportingLabelProp,
   },
 }
 

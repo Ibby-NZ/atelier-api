@@ -32,6 +32,8 @@ migrations.
   deterministic answer, 200 or 404, never a filtered list; a nullable barcode would let the unique
   index tolerate any number of unlabelled samples and turn that lookup into a guess. A duplicate is
   detected by the database (23505 on `samples_barcode_key` → 409), never by a pre-check that races.
+  Still NOT NULL after W20-US-002 — the server supplies one when the caller does not, it never
+  stores a blank.
 - **The three FKs differ on purpose.** `colourway_id` is **RESTRICT and nullable** — restricted
   because a sample is physical evidence the design exists and deleting the catalogue row underneath
   it leaves a labelled object nobody can identify; nullable because plenty of samples predate the
@@ -210,7 +212,10 @@ migrations.
   `requireRole('backoffice')` (director inherits). The register says where a physical object is and
   who has it: staff information, with no viewer below them. The guard test is parameterised over
   the whole surface, so a route added later without one fails. Registered in `src/app.js` as
-  `adminSampleRoutes`; a further samples route belongs inside that existing plugin.
+  `adminSampleRoutes`; a further samples route belongs inside that existing plugin — **with one
+  deliberate exception, `src/routes/admin-sample-loans.js`** (W20-US-004/US-007), which is out on
+  its own because this file had reached the 800-line ceiling AND because it is the only samples
+  surface that takes the `mailer`. Same guard, same domain, one more `api.register` line.
 - **Every payload in a parameterised 401/403 sweep must be VALID.** Fastify validates before it
   runs a preHandler, so a guard test posting a malformed body asserts a 400 and passes even if the
   guard has been deleted.
@@ -237,6 +242,25 @@ migrations.
 - **`barcode` IS editable by PATCH.** It is a printed tag that can be mistyped and nothing
   references it — `sample_loans.sample_id` points at the row's id — so a correction is safe, and a
   collision is the same 409 the create answers with. Same reasoning as `colourways.sku`.
+- **`barcode` is OPTIONAL on create, and omitting it IS the generate action** (W20-US-002,
+  `migrations/1787371200000_sample-barcode-sequence.js`). `ATL-S-` + at least six digits
+  (zero-padded up to six) off `samples_barcode_seq`, which **starts at 1000**: the hand-typed corpus is `ATL-0049-217` (three
+  digits, highest 217), `samples` was empty and `legacy_cuttings` has no barcode column, so a minted
+  tag cannot collide with a typed one *by construction* — the middle segment is the literal `S`,
+  never digits. A **SEQUENCE, never `max(barcode) + 1`**, which serialises every insert and races
+  anyway. It is a `COALESCE` arm inside the existing INSERT, not a preceding SELECT: Postgres skips
+  a COALESCE argument it does not need, so **a supplied barcode wins AND spends no number**, and the
+  mint cannot outlive a failed insert. There is deliberately **no mint endpoint and no retry loop** —
+  a number handed out before the row exists is a number the office has to remember again, which is
+  the whole complaint, and a generated barcode that collides (sequence moved behind the corpus) is
+  the same 23505 → 409 a typed one gets. `''` and `null` are 400s at the route, so only an ABSENT
+  key generates. A suite creating generated samples must clean up **by `label`** — the barcode is
+  the server's, and `ATL-S-%` is nobody's namespace to delete from. **Six digits is a FLOOR, not a
+  fixed width** (C16): lpad truncates past its target, so a fixed-width pad would fold every value
+  from 1,000,000 back into the spent six-digit space and 409 for ever; the mint pads with
+  `GREATEST(length(n::text), 6)` instead, so values ≤ 999999 read as before and a seventh digit
+  comes through whole. Past a million tags lexical order stops matching chronological order
+  (`ATL-S-1000000` sorts before `ATL-S-9xxxxx`) — cosmetic only, uniqueness is the guarantee.
 - **A 23503 on any of the three FKs is a 422, not a 404.** The id arrived in a BODY as a business
   fact about the sample, exactly like an unknown `brand_id` on a product create, so it is the body
   that is wrong and not the URL. Keyed on the constraint name
@@ -406,3 +430,104 @@ migrations.
 - The list query is **alias-free**, because `SHOWROOM_COLUMNS` is unqualified — adding an alias
   later would break the projection, the same rule `BRAND_COLUMNS` carries. `q` searches the name,
   the city and the contact and deliberately not the notes.
+
+### What a sample cost (`samples.unit_cost`, W20-US-001 + US-008)
+
+`migrations/1788148800000_sample-cost.js` adds `unit_cost numeric(12,4)` + `cost_currency text`,
+both nullable, with `CHECK (unit_cost IS NULL OR unit_cost >= 0)`.
+
+- **`>= 0`, deliberately NOT `> 0`** the way `price_list_items.wholesale_rate` is. A zero line rate
+  on a supplier price list is a malformed list; a free hanger is normal ("sometimes we get hangers
+  for free") and is a fact worth recording. Refusing 0 would push the office into typing NULL for
+  it, which means something else entirely.
+- **NULL and 0 are DIFFERENT FACTS and nothing may conflate them.** NULL is "nobody recorded a
+  cost", 0 is "free of charge, and we know it". `Number(null)` is 0, so a bare `Number()` on this
+  column turns every uncosted hanger into a gift the moment anything sums it. One coercion
+  (`value == null ? null : Number(value)`) lives in `costOf` and every read goes through it;
+  `test/samples-value.test.js` asserts the two read back distinguishable end to end, which a status
+  code cannot see.
+- **`cost_currency` has no CHECK**, unlike `price_list_items.currency` (`EUR|USD|GBP`). That is the
+  price-list pipeline's own closed vocabulary; a sample can be bought from anyone in anything, NZD
+  included. Same posture as `sample_type` and `duty_class` being stored raw.
+- **Cost is a FINANCE figure, gated by `loadReportAccess(db, user)` and never by
+  `request.user.can_view_finance`.** `PUBLIC_USER_COLUMNS` does not carry that flag, so a direct
+  read is `undefined` and answers false to everyone, silently and for ever — the exact bug
+  `src/reports/access.js` documents. `backoffice` covers the showroom and the accounts desk alike,
+  which is why the column exists beside the role.
+- **The gate is FAIL-CLOSED AT THE SQL, not a projection on the way out.** `finance` is threaded
+  into `listSamples`/`getSample`/`getSampleByBarcode`/`createSample`/`updateSample`/
+  `setSampleArchived`/`checkOutSample`/`checkInSample` (default `false` everywhere, so a direct
+  module caller that says nothing gets no costs), and the columns are simply not SELECTed. A column
+  that was never selected cannot leak through a projection somebody forgot to apply, and the claim
+  is provable over the STATEMENTS rather than over one response body — which is how the test asserts
+  it. `costOf` keys off `Object.hasOwn(row, 'unit_cost')`, so payload presence follows the SELECT
+  and there is one decision, not two to drift apart.
+- **Reading and writing are ONE permission.** `assertCostWritable` 403s a write from a login without
+  finance — Ajv's `removeAdditional` does not strip a *declared* key, so without it the value would
+  land. It lives in the module, so it holds for the CRM, the AdminJS panel and any later caller.
+- `SAMPLE_FINANCE_KEYS` is the one declaration of what counts as a cost here; a later cost column
+  joins it. `test/price-list-exposure.test.js` carries the samples surface now — cost never reaches
+  a client-facing response (FR-264), and the register also says who has what, which is staff
+  information either way.
+
+### The outstanding register (`src/samples/sample-loan-queue.js`, W20-US-004)
+
+- **`GET /admin/sample-loans` reads ACROSS the whole register**, which is the gap FR-250 names:
+  `listSampleLoans` answered "what happened to THIS hanger" and nothing answered "what is out". It
+  is the outstanding report and the reminder work queue at once, because those two screens ask one
+  question. Filters: `trade_account_id`, tri-state `overdue`, `due_before`, `q`, paginated on the
+  same `DEFAULT_PAGE`/`DEFAULT_LIMIT`/`MAX_LIMIT` constants the register spends.
+- **`returned_at IS NULL` is not a filter and is not overridable.** A returned sample is not
+  outstanding; a flag to include one would be answering a different question. ARCHIVED samples DO
+  appear — archiving is a decision about a CRM list, and an object somebody still has is still out.
+- **`overdueExpression(alias)` is imported from `admin-samples.js`, never re-spelled.** That is why
+  it is a function of its alias: a queue and a sample card computing "late" separately would
+  eventually disagree and the badge would be the one nobody believed. `days_overdue` is derived the
+  same way and is **NULL rather than 0** for a loan that is not late — 0 reads as "due today".
+- **`due_before` deliberately does not match a loan with no agreed date** (the comparison yields
+  NULL): "no date agreed" is not "due by Friday", the same reason `due_back_at` is nullable at all.
+- **`suggested_email` is a SUGGESTION, from the trade account's linked login.** `sample_loans` has
+  no email column and must not grow one by reflex: plenty of borrowers are not trade clients (an
+  architect, a stylist, Atelier's own staff). Null means "we have no address", which the screen has
+  to be able to say out loud, and the staffer confirms or replaces it at send.
+- `reminder_count`/`last_reminded_at` are correlated scalar subqueries, the `loan_count` posture:
+  an aggregate join would need a GROUP BY over every selected column and would drag the counts into
+  the COUNT query, where they are dead weight.
+
+### Reminders (`src/samples/sample-reminders.js`, `src/routes/admin-sample-loans.js`, W20-US-007)
+
+- **NO SCHEDULER IS INTRODUCED, and that is the design.** "Editable before send" and "sent
+  automatically at 2am" cannot both be true of one message, and the client asked for the first, so
+  a reminder is a **staff action off a work queue**: the queue is a read, the send is a click, the
+  letter is editable in between. The platform keeps its property of having no cron, no worker and no
+  queue — nothing to monitor, no dead-letter state, nothing failing silently at 2am. If a runner
+  ever arrives it brings its own ADR, and the first thing it must not do is take over sending a
+  message a human was promised the chance to edit. `test/samples-reminders.test.js` asserts
+  `sample_loan_reminders` carries no `scheduled_for`/`attempts`/`due_at` column.
+- **The draft and the send are TWO routes on purpose.** `POST /admin/sample-loans/reminders/preview`
+  renders one draft per loan and sends NOTHING (asserted over the capture transport, not a status
+  code); `POST /admin/sample-loans/reminders` takes finished `subject`/`body`/`to` and sends them
+  **verbatim** via `mailer.send({ subject, text })`. A single "send from a template" call would
+  render the letter after the staffer stopped looking at it — two renders of a template an editor
+  may have changed in between.
+- **A loan the preview will not draft comes back in `missing`**, never silently dropped: a draft
+  list quietly shorter than the selection reads as a rendering bug.
+- **A send is RECORDED ONLY ONCE THE MAILER SAYS IT WENT.** `mailer.send` never throws — it reports
+  — so the failure path is this module's decision: a failed send is a 502 with nothing written, and
+  a null mailer is a 503. Recording either would tell the office a client had been chased, and
+  "already chased" is precisely what stops somebody chasing. (Every other mail trigger in this API
+  is a no-op without a mailer because it is a side effect of a request that must succeed anyway;
+  this request IS the send.)
+- **`sample_loan_reminders` stores the LETTER, not a template reference** (`migrations/1788321600000`).
+  "Which shape was used" is not the question the office asks when a client rings back, and the whole
+  point of the story is that a staffer may rewrite it. It also means editing the stored template
+  later cannot rewrite history. `loan_id` is RESTRICT (history about a movement is not an owned
+  child), `sent_by` is SET NULL, `sent_to` is a snapshot exactly like `holder_name`.
+- **A TABLE, not `sample_loans.last_reminded_at`.** A column answers only "when was the most recent
+  chase"; the count and the previous date are what tell a staffer whether to send a politer letter
+  or pick up the phone. A second reminder must read as the second one.
+- **Sending to a loan that is already back is a 409**, an unknown loan a 404 — told apart by one
+  read, so the answer names the actual problem rather than "not found" for both.
+- Fixture cleanup gains a step at the front: `sample_loan_reminders` → `sample_loans` → `samples`
+  → `brands` → `suppliers` → `showrooms`. `loan_id` is RESTRICT, so a surviving reminder 23503s the
+  loan delete inside the next `beforeEach`.

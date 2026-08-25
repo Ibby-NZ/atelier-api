@@ -204,7 +204,7 @@ describe('featured_rank migration', () => {
   // database, and that stopped being true in both directions. The CRM's reorder
   // (`PUT /admin/collections|brands/featured`) clears every rank and re-applies
   // the office's own list — which is the whole point of the column — and
-  // `1789012800000_larsen-2024-feature` now deliberately prepends a collection
+  // `1789564800000_larsen-2024-feature` now deliberately prepends a collection
   // to it. So the assertion could only ever fail for a correct reason, and it
   // duly did: this dev database has the office's brand order, not the seeded
   // one.

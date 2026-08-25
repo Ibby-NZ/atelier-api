@@ -1,4 +1,4 @@
-// The one-row home of the Xero connection (migration 1789012800000).
+// The one-row home of the Xero connection (migration 1789412800000).
 //
 // Everything here targets id = 1 — the CHECK in the migration makes a second
 // row impossible, so "the connection" is a read of one row, not a query with

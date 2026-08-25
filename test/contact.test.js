@@ -28,6 +28,18 @@ const captureTransport = () => {
 const cleanEnquiries = (pool) =>
   pool.query('DELETE FROM contact_enquiries WHERE email LIKE $1', [`%@${DOMAIN}`])
 
+// The inbox lists EVERY enquiry in the database, not just this suite's, and the
+// cleanup above is deliberately scoped to the test domain: a developer's
+// atelier_dev carries real enquiries left by manual testing of the contact
+// form, and a suite that deleted them would destroy someone's work. So the
+// assertions below are scoped the SAME way rather than counting the whole
+// table. Counting the table passes only against a database no one has ever
+// used the contact form on — CI starts empty and never noticed, while every
+// dev machine that exercised the form once failed three tests for a reason
+// nothing in the output pointed at.
+const ours = (enquiries) =>
+  enquiries.filter((enquiry) => enquiry.email.endsWith(`@${DOMAIN}`))
+
 describe('contact form + enquiries inbox', () => {
   let pool
   let app
@@ -178,14 +190,14 @@ describe('contact form + enquiries inbox', () => {
       const response = await inject('GET', '/admin/contact-enquiries', backofficeCookie)
       expect(response.statusCode).toBe(200)
       const { enquiries } = response.json()
-      expect(enquiries).toHaveLength(2)
-      expect(enquiries[0].subject).toBe('second')
+      expect(ours(enquiries)).toHaveLength(2)
+      expect(ours(enquiries)[0].subject).toBe('second')
     })
 
     it('archives then restores an enquiry, hiding it from the default list', async () => {
       await seedOne('to archive')
       const list = (await inject('GET', '/admin/contact-enquiries', backofficeCookie)).json()
-      const id = list.enquiries[0].id
+      const id = ours(list.enquiries)[0].id
 
       const archived = await inject(
         'POST',
@@ -197,7 +209,7 @@ describe('contact form + enquiries inbox', () => {
 
       // Gone from the default list...
       const after = (await inject('GET', '/admin/contact-enquiries', backofficeCookie)).json()
-      expect(after.enquiries).toHaveLength(0)
+      expect(ours(after.enquiries)).toHaveLength(0)
       // ...but visible with include_archived.
       const withArchived = (
         await inject(
@@ -206,7 +218,7 @@ describe('contact form + enquiries inbox', () => {
           backofficeCookie
         )
       ).json()
-      expect(withArchived.enquiries).toHaveLength(1)
+      expect(ours(withArchived.enquiries)).toHaveLength(1)
 
       // Restore brings it back.
       const restored = await inject(
@@ -217,7 +229,7 @@ describe('contact form + enquiries inbox', () => {
       expect(restored.statusCode).toBe(200)
       expect(restored.json().enquiry.archived_at).toBeNull()
       const back = (await inject('GET', '/admin/contact-enquiries', backofficeCookie)).json()
-      expect(back.enquiries).toHaveLength(1)
+      expect(ours(back.enquiries)).toHaveLength(1)
     })
 
     it('returns 404 archiving an unknown enquiry', async () => {
@@ -267,7 +279,7 @@ describe('contact form + enquiries inbox', () => {
       const withArchived = (
         await inject('GET', '/admin/contact-enquiries?include_archived=true', backofficeCookie)
       ).json()
-      expect(withArchived.enquiries).toHaveLength(0)
+      expect(ours(withArchived.enquiries)).toHaveLength(0)
     })
 
     it('deletes an archived enquiry too', async () => {

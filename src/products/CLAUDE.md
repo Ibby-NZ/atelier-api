@@ -66,6 +66,50 @@ from are in the D365 staging mirror, and `scripts/export-category-sheets.js` wri
 - **`--one-sheet` keeps the All tab alone** (`npm run sheet:stock -- --one-sheet`). The house tabs are a
   view, so it removes a convenience and never a row — same rows, same count, same balance check. It is a
   flag rather than a second dataset because the two outputs differ in nothing else.
+- **`--active` and `--in-stock` narrow the STOCK rows** (Atelier: "we don't really need the inactive
+  ones"): 7,611 → 4,156 Active → 381 holding any quantity. `--in-stock` is on hand **OR** available,
+  because an item committed to an order (available 0, on hand 5) is still stock somebody must
+  categorise. The output file is renamed after the filters it ran (`stock-items-active.xlsx`) — two
+  workbooks that look identical and hold different row sets is exactly how the wrong one gets filled in
+  — and **what a filter left out is printed every run**, because a count on its own reads as "that is
+  the whole ledger". `prices` declares no filters and refuses both: every price row is Active and none
+  carries a quantity, so accepting them would silently export all 19,327.
+- **`--latest` keeps the newest version of each product.** A D365 stock code is
+  `{supplier's colour code} {YY}{SUPPLIER_TOKEN}` (`F3518-003 23PF`) and RE-PRICING MINTS A NEW CODE
+  rather than editing the old one — so the base is the product, the year is the version, and 888 of the
+  7,611 rows are superseded (406 of them still `Active`, which is why "active" does not imply "current").
+  Two traps, both live in the corpus and both silently DROP REAL STOCK if missed:
+  - **The token must be LETTERS.** `CUSH**MDC 55X55` is a 55×55 cushion inner with 40 on hand, and
+    `CLASSY ORGANIC Bath towel 76X142` is a towel; a `\d{2}\w+` suffix reads both as years. All 84
+    supplier tokens are 1–4 letters, and every digit-bearing trailing token in the corpus is a size.
+  - **The year window ends at THIS year**, computed, not a constant — a hard-coded `26` starts
+    discarding the new year's re-pricings every January.
+- **`--latest` groups on the BASE alone, never base + token.** The token is the house and it moves under
+  the same product: `F4685-05` is Albeck 05 Beige as 22CF, 24JC and 26CF (Colefax & Fowler and Jane
+  Churchill are one supplier — the token set doubles as the supplier roll-up), `F3032-001` is EMPREINTE
+  Havane as 20PF, 23F and 25PF. Grouping by token keeps all of those, which is exactly the older
+  versions the filter exists to drop. All 17 groups where the token AND the name move are one design
+  under a spelling change ("AYUTHYA COLOUR 01 PAGODA RED" → "AYUTHYA 01 Pagoda Red").
+- **A superseded row that still HOLDS STOCK is kept anyway, and a code with no year is always kept**
+  (1,932 rows — nothing about such a code says it is versioned). Zero rows need the stock guard today;
+  it is there because hiding stock on the shelf behind an old code is the one failure here that costs
+  money rather than time.
+- **Filters compose in the order the dataset lists them, each over what the last left.**
+  `--active --latest` is the newest ACTIVE version, not "the newest version, if it happens to be
+  active" — a live row must not disappear because a retired row is newer. Each filter reports what IT
+  dropped from what reached it, so the numbers add up to the total.
+- **The stock sheet is mostly redundant with the item type, and the numbers say by how much.** The
+  suggestion resolves 6,653 of 7,611 rows; the leftovers are 958 across the whole ledger, 617 Active,
+  and **106** Active-and-in-stock. Those leftovers are not typos — they are types the four-value
+  vocabulary has no word for (Towels, Throws/Blankets, Bed Linen, Cushions, Candles, Bedding, Leather,
+  Rug/Carpet, Furniture), so the real question they raise is whether `CATEGORIES` should grow, not what
+  the office should type.
+- **A stock item CANNOT inherit its category from the price list, however the code was created.** D365
+  composes a stock code from a price row, but the export carries `product_price_list` as the price row's
+  DESCRIPTION: exactly one price row matches for 3,971 of 7,611 items, 796 are ambiguous, 1,780 match
+  nothing and 1,064 are unset. Measured directly: of the 958 stock rows with no suggestion, the price
+  list resolves **7**. Fixing this needs a related **code** column added to the D365 view before
+  re-export (`src/legacy/CLAUDE.md` says the same about Reserves/Cuttings, which do carry one).
 - **The house tabs are a VIEW, not a partition**: every design appears on `All Products` AND on its
   house's tab, so a re-import must be idempotent per GUID and must tolerate the same GUID twice in one
   file (the CSV sheet's `repeats` rule, arriving by a second door).

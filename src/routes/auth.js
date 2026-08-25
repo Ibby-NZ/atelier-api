@@ -1,4 +1,9 @@
-import { hashPassword, verifyPassword, getDummyHash } from '../auth/passwords.js'
+import {
+  hashPassword,
+  verifyPassword,
+  getDummyHash,
+  MIN_PASSWORD_LENGTH,
+} from '../auth/passwords.js'
 import {
   setSessionCookie,
   clearSessionCookie,
@@ -29,7 +34,6 @@ const AUTH_RATE_LIMIT = Object.freeze({
 
 // Fastify's bundled Ajv has no email format, so a pattern stands in.
 const EMAIL_PATTERN = '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$'
-const MIN_PASSWORD_LENGTH = 8
 
 const registerBodySchema = {
   type: 'object',

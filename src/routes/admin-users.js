@@ -21,6 +21,7 @@ import {
   USER_SEGMENTS,
 } from '../users/admin-users.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
+import { MIN_PASSWORD_LENGTH } from '../auth/passwords.js'
 
 // The valid stored roles (matches the users_role_check constraint). Shared by the
 // list filter and the patch/create body so an unknown role is a 400 by schema.
@@ -41,7 +42,7 @@ const createBodySchema = {
     email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
     name: { type: ['string', 'null'], maxLength: 200 },
     role: { type: 'string', enum: USER_ROLES },
-    password: { type: 'string', minLength: 8, maxLength: 200 },
+    password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
   },
 }
 

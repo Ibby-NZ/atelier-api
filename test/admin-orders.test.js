@@ -3,6 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { createOrderRequest } from '../src/orders/order-request.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'admin-ord-test'
@@ -100,16 +101,24 @@ describe('back-office order management', () => {
     app.inject({ method, url, headers: cookie ? { cookie } : {}, payload })
 
   // Place a fresh in-stock order-request (status=requested, reservation held).
+  //
+  // Calls the service DIRECTLY rather than POSTing to /orders/request, which is
+  // the same reason the enquiry-delete block in test/contact.test.js INSERTs its
+  // fixtures: this file needs ~30 orders and that route is rate-limited (10 per
+  // 15 min per IP), so going through HTTP would spend the bucket and the rest of
+  // the file would receive 429s instead of orders. app.inject always presents
+  // the same address, so every call lands in one bucket.
+  //
+  // Nothing is lost by the shortcut. These orders are FIXTURES for the
+  // /admin/orders tests below, not the subject of them; the route's own
+  // behaviour — validation, the 422s, the mail — is covered in
+  // test/orders.test.js, and this app is built with no mailer anyway.
   const placeRequest = async (qty = 10) => {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/orders/request',
-      payload: {
-        lines: [{ sku: SKU.inStock, qty_metres: qty }],
-        contact: { email: 'buyer@example.com' },
-      },
+    const { order } = await createOrderRequest(pool, {
+      lines: [{ sku: SKU.inStock, qty_metres: qty }],
+      contact: { email: 'buyer@example.com' },
     })
-    return response.json().order
+    return order
   }
 
   beforeAll(async () => {

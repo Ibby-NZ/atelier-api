@@ -54,15 +54,15 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { buildWorkbook, columnLetter } from './lib/xlsx-write.js'
-import { CATEGORIES, CATEGORY_BY_ITEM_TYPE } from './lib/price-template.js'
+import { CATEGORIES, categoryForItemType } from './lib/price-template.js'
 
 const DEFAULT_IN_DIR = 'incoming/data-exports/normalized'
 
 /** D365 leaves a stock item unassigned; the tab still has to be called something. */
 const NO_HOUSE = '(No house)'
 
-const suggestCategory = (itemType) =>
-  CATEGORY_BY_ITEM_TYPE.get(String(itemType ?? '').trim().toLowerCase()) ?? ''
+// A cell, so the blank is '' rather than the lookup's null.
+const suggestCategory = (itemType) => categoryForItemType(itemType) ?? ''
 
 // A quantity is passed as a NUMBER so the sheet can sort and total it; a code is
 // passed as a STRING so "81634" stays a code. `null` for a figure D365 has not

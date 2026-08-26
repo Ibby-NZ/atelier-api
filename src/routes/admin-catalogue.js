@@ -18,6 +18,7 @@
 //     `order_lines.colourway_id` — is a backstop, not the defence.
 
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
+import { CATEGORIES } from '../../scripts/lib/price-template.js'
 import {
   listAdminBrands,
   getAdminBrand,
@@ -75,6 +76,10 @@ const slugProp = { type: 'string', minLength: 1, maxLength: 200 }
 // removeAdditional STRIPS an unlisted body key rather than 400ing it, so a
 // column added to a whitelist alone would answer 200 having written nothing.
 const reportingLabelProp = { type: ['string', 'null'], maxLength: 100 }
+// `enum` must carry null as well as the nine words: Ajv checks the enum against
+// the value, so a `type` that admits null and an enum that does not is a schema
+// that rejects every clear.
+const categoryProp = { type: ['string', 'null'], enum: [...CATEGORIES, null] }
 
 // Spec + pricing fields shared by product create and patch.
 const productDetailProps = {
@@ -82,6 +87,12 @@ const productDetailProps = {
   collection_id: { type: ['integer', 'null'], minimum: 1 },
   // Free text (the office writes `RAMM, SON & CROCKER`), never a slug or an FK.
   product_range: reportingLabelProp,
+  // The merchandising axis, enumerated from the stored vocabulary rather than
+  // retyped (the posture src/routes/admin-price-lists.js takes). Nullable so a
+  // PATCH can put a design back to uncategorised — which is a real state, not a
+  // gap: NULL means nobody has looked at the row, and `misc` means somebody did
+  // and the vocabulary had no word for it.
+  category: categoryProp,
   composition: nullableShort,
   width: nullableShort,
   application: nullableShort,

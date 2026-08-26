@@ -4,6 +4,7 @@
 // suite run in CI at all.
 import { describe, expect, it } from 'vitest'
 import { buildCategorySheets, codeVersion, DATASETS, FILTERS } from '../scripts/export-category-sheets.js'
+import { CATEGORIES } from '../scripts/lib/price-template.js'
 
 const stockRow = (over = {}) => ({
   guid: 'g-1',
@@ -132,7 +133,9 @@ describe('buildCategorySheets', () => {
   const records = [
     stockRow({ guid: 'g-1', range_name: 'ZEBRA', item_code: 'B', item_type: 'W/P' }),
     stockRow({ guid: 'g-2', range_name: 'ALPAKA', item_code: 'A', stock_on_hand: 4 }),
-    stockRow({ guid: 'g-3', range_name: undefined, item_code: 'C', item_type: 'Towels' }),
+    // 'Leather' is one of the types the vocabulary still has no word for —
+    // Towels stopped being one when CATEGORIES grew to nine.
+    stockRow({ guid: 'g-3', range_name: undefined, item_code: 'C', item_type: 'Leather' }),
   ]
 
   it('puts every row on the All tab and again on its house tab', () => {
@@ -157,7 +160,7 @@ describe('buildCategorySheets', () => {
 
   it('suggests nothing for an item type the vocabulary has no word for', () => {
     const [all] = buildCategorySheets(DATASETS.stock, [records[2]])
-    expect(all.rows[1][10]).toBe('') // Towels
+    expect(all.rows[1][10]).toBe('') // Leather
   })
 
   it('leaves a missing quantity null rather than 0', () => {
@@ -174,7 +177,10 @@ describe('buildCategorySheets', () => {
   it('puts the dropdown on the Category column, spanning the data rows only', () => {
     const [all] = buildCategorySheets(DATASETS.stock, records)
     expect(all.validations[0].ref).toBe('L2:L4')
-    expect(all.validations[0].values).toEqual(['fabric', 'wallpaper', 'trimming', 'accessory'])
+    // The stored vocabulary, not a copy of it: the dropdown's whole job is to
+    // make an unstorable category a value the office cannot type, which a
+    // hand-maintained list stops doing the day the vocabulary grows.
+    expect(all.validations[0].values).toEqual([...CATEGORIES])
   })
 
   it('gives an empty sheet no dropdown, because L2:L1 is not a range', () => {

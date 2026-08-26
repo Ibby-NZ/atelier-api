@@ -48,6 +48,7 @@ import {
   CATEGORY_TOTALS_LABELS,
 } from '../src/reports/product-performance.js'
 import { DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT, clampLimit } from '../src/reports/limits.js'
+import { CATEGORIES } from '../scripts/lib/price-template.js'
 import {
   STOCK,
   STOCK_COLUMNS,
@@ -262,7 +263,10 @@ describe('report filters', () => {
       // vocabulary — the office's most likely crossover typo is a 400 naming
       // the filter, never a report matching nothing.
       it('keeps category and product_type as two vocabularies, each refusing the other', () => {
-        expect([...PRODUCT_CATEGORIES]).toEqual(['fabric', 'wallpaper', 'trimming', 'accessory'])
+        // The stored vocabulary, read from its one definition — the point of
+        // the assertion is that the report filter uses the SAME set the column
+        // does, which a copy of the words here would stop proving.
+        expect([...PRODUCT_CATEGORIES]).toEqual([...CATEGORIES])
 
         const error = statusOf(() => parseReportFilters({ category: 'finished_good' }))
         expect(error.statusCode).toBe(400)

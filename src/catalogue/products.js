@@ -34,6 +34,15 @@ const FILTER_COLUMNS = Object.freeze({
   price_band: 'p.price_band',
   lead_time: 'p.lead_time',
   product_type: 'p.product_type',
+  // The merchandising axis (products.category), nine values wide since
+  // migrations/1789651200000_category-vocabulary.js. It is NOT product_type:
+  // a cushion and a throw are both `finished_good` and a shopper browsing for
+  // one has no interest in the other. Most of the catalogue is uncategorised
+  // (the column is nullable on purpose — see that column's migration), so this
+  // filter matches nothing until the office fills it in, which is why the
+  // storefront derives its facet from the products it actually received rather
+  // than from the vocabulary.
+  category: 'p.category',
   // A collection slug is unique per brand, not globally, so `collection` alone
   // matches every house that happens to use that slug. Pair it with `brand` for
   // a real collection page — that pair is the storefront's collection URL.
@@ -59,6 +68,7 @@ const PRODUCT_COLUMNS = `
   p.slug,
   p.name,
   p.product_type,
+  p.category,
   p.composition,
   p.width,
   p.application,
@@ -133,6 +143,10 @@ const toPublicProduct = (row, includeTrade) => {
     slug: row.slug,
     name: row.name,
     product_type: row.product_type,
+    // Always present, null included: a card can branch on the value instead of
+    // on whether the key came back, and "not categorised yet" is a real state
+    // across most of the catalogue.
+    category: row.category ?? null,
     composition: row.composition,
     width: row.width,
     application: row.application,

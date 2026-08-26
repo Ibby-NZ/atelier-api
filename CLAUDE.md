@@ -47,6 +47,7 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - `npm run seed` — idempotent catalogue + shipping-rate import (needs migrations applied)
 - `npm run push:legacy -- --api <url> --email <director>` — pushes the normalised D365 exports to a REMOTE API over HTTPS (`ATELIER_API_PASSWORD` in the environment). For servers with no shell; the local equivalent is `npm run import:legacy`.
 - `npm run sheet:prices` / `npm run sheet:stock` — the category workbooks for the two D365 catalogues: 19,327 price rows (`product-prices.xlsx`) and 7,611 stock items (`stock-items.xlsx`), both into `incoming/product-sheets/`. Needs `npm run convert:legacy` first; main checkout only, like every `incoming/` step.
+- `npm run import:item-types -- [workbook] [--dry-run] [--email <staff>]` — reads a CORRECTED stock workbook back onto the ledger, writing each changed `Item Type` as a `d365_overrides` patch (never onto the staging row — the import re-runs and would overwrite it). Defaults to the office's first correction, `incoming/product-sheets/Copy of stock-items-in-stock-latest-Jenette edit.xlsx`. Idempotent: it diffs against the MERGED value, so a second run reports nothing to do. Main checkout only.
 - `npm run lint` — ESLint 9 flat config (`eslint.config.js`)
 - `npm test` — vitest; tests hit real local Postgres (`atelier_dev`), need `.env` present
 
@@ -85,6 +86,7 @@ The deep per-domain docs live in nested CLAUDE.md files that load automatically 
 
 The ones that bite from outside their home directory:
 
+- **`category` is ONE vocabulary of nine values across three tables and one module.** `products.category`, `price_list_items.category` and `supplier_freight_rates.category` carry identical CHECKs and `CATEGORIES` in `scripts/lib/price-template.js` is the same list a fourth time; `test/suppliers-product-category.test.js` compares the three CHECK definitions **to each other**, because a value added to one and not the others does not fail anywhere — it silently stops matching. Widening it is one migration touching all three plus that one line (`migrations/1789651200000_category-vocabulary.js` is the worked example). Never retype the list: every schema enum, dropdown and error message derives it from `CATEGORIES`. It is NOT `products.product_type` (`fabric | finished_good`, which decides the colourway's inventory unit) — a cushion and a throw are both finished goods.
 - pg returns `numeric` columns as strings — coerce with `Number()` before arithmetic. `Number(null)` is 0, so nullable numerics need `value == null ? null : Number(value)`.
 - Fastify's bundled Ajv runs `removeAdditional: true`: unknown body/query keys are silently STRIPPED, never rejected. In-code column whitelists are the real gate, and `additionalProperties: false` proves nothing.
 - Register/login share a 10-per-15-min per-IP rate-limit bucket: test suites register users once in `beforeAll`, never per test; the limiter store is per `buildApp()` instance.

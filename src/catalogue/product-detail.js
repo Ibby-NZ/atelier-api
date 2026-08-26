@@ -18,6 +18,7 @@ const PRODUCT_COLUMNS = `
   p.slug,
   p.name,
   p.product_type,
+  p.category,
   p.composition,
   p.width,
   p.application,
@@ -73,6 +74,8 @@ const toProductDetail = (row, colourways, includeTrade) => {
     slug: row.slug,
     name: row.name,
     product_type: row.product_type,
+    // Same shape as the list endpoint's card: present, null when uncategorised.
+    category: row.category ?? null,
     composition: row.composition,
     width: row.width,
     application: row.application,

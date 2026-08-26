@@ -61,7 +61,38 @@ const V1_HEADER = Object.freeze([
 
 // Stored vocabularies — each mirrors a CHECK on price_list_items
 // (migrations/1785110400000_price-list-items.js).
-export const CATEGORIES = new Set(['fabric', 'wallpaper', 'trimming', 'accessory'])
+//
+// CATEGORIES carries NINE values, and the last five arrived together in
+// migrations/1789651200000_category-vocabulary.js. The first four are the
+// supplier rate sheet's vocabulary and describe what Atelier BUYS; Towels, Bed
+// Linen, Throws/Blankets and Cushions are what Atelier SELLS and every one of
+// them used to collapse to `accessory`. The five come from a curated sheet, not
+// a guess — the 381 active, in-stock, current-version D365 stock items with
+// their Item Type corrected by hand at Atelier — so this set is now the whole
+// of what is on the shelf.
+//
+// THE SET IS STORED IN THREE TABLES (products.category, price_list_items.category
+// and supplier_freight_rates.category) AND IN THIS FILE. Widening it is one
+// migration touching all three CHECKs plus this line; the three definitions are
+// compared to each other by test/suppliers-product-category.test.js, because a
+// value added to one and not the others does not fail anywhere — it silently
+// stops matching.
+//
+// `misc` is NOT a synonym for absent. NULL still means "nobody has looked at
+// this row", which is the distinction the spreadsheet round trip is built on
+// (src/products/product-sheet.js); `misc` means somebody looked and the
+// vocabulary had no word for it.
+export const CATEGORIES = new Set([
+  'fabric',
+  'wallpaper',
+  'trimming',
+  'accessory',
+  'bed-linen',
+  'towel',
+  'cushion',
+  'throw',
+  'misc',
+])
 export const UNITS = new Set(['metre', 'yard', 'roll', 'piece', 'hide', 'panel'])
 // Adding a currency is FOUR edits in lockstep, each failing at a different layer
 // when missed: (1) the DB CHECK on price_list_items.currency, in a migration;
@@ -93,7 +124,39 @@ export const CATEGORY_BY_ITEM_TYPE = new Map([
   ['trimming', 'trimming'],
   ['accessories', 'accessory'],
   ['accessory', 'accessory'],
+  // The five D365 sells under and the rate sheet never named. Every spelling
+  // here is one Atelier's own corrected sheet uses, plus the singular/plural
+  // pair the entries above already establish.
+  ['towels', 'towel'],
+  ['towel', 'towel'],
+  ['bed linen', 'bed-linen'],
+  ['bed-linen', 'bed-linen'],
+  ['throws/blankets', 'throw'],
+  ['throws', 'throw'],
+  ['throw', 'throw'],
+  ['blankets', 'throw'],
+  ['cushions', 'cushion'],
+  ['cushion', 'cushion'],
+  ['miscellaneous', 'misc'],
+  ['misc', 'misc'],
 ])
+
+// DELIBERATELY UNMAPPED, and each for a reason rather than an oversight:
+//
+//   Bedding — the corpus's own evidence says it is ambiguous, not a synonym.
+//     Atelier's corrected sheet moved three `Bedding` rows and split them: two
+//     to Towels, one to Bed Linen. A map entry would assert the wrong one for
+//     roughly two rows in three.
+//   Leather, Rug/Carpet, Candles, Furniture, Samples and Displays,
+//     "No Group Selected" — 296 rows across the whole 7,611-row ledger and NONE
+//     of them active-and-in-stock, so nobody has yet said what they should be
+//     called. They come through the workbooks blank, which is the correct
+//     statement: a suggestion is a suggestion, and an unevidenced one is worse
+//     than none because the office confirms it by doing nothing.
+//
+// Add one here only with a corrected sheet behind it — and note that a new
+// TARGET value is also a migration, because assertStorable below refuses a map
+// that reaches outside CATEGORIES.
 // p/hide and p/panel have no template rows yet, but both units have been in the
 // column CHECK since the table was created (platform decision 7), so accepting
 // them stores nothing new — it only stops a hide or panel drop failing a run.
@@ -130,6 +193,28 @@ export const assertStorable = (map, stored, what) => {
   }
   return map
 }
+
+/**
+ * The category a D365 item type means, or null where the vocabulary has no word
+ * for it.
+ *
+ * One spelling of this lookup, shared by everything that derives a category
+ * from an item type: the two category workbooks
+ * (scripts/export-category-sheets.js), the supplier price-list template, and
+ * the merged D365 read (src/legacy/legacy-read.js) that puts the category on
+ * the CRM's stock rows. It was written out three times before; the whole reason
+ * CATEGORY_BY_ITEM_TYPE lives in this module is that the pipelines must not
+ * drift on what `W/P` means, and three copies of the lookup is the same drift
+ * arriving one level up.
+ *
+ * NULL, not '', for "no word for it" — a caller writing a spreadsheet cell
+ * spells its own blank.
+ *
+ * @param {unknown} itemType  the D365 `item_type` cell, in any case, or null
+ * @returns {string|null} a member of CATEGORIES, or null
+ */
+export const categoryForItemType = (itemType) =>
+  CATEGORY_BY_ITEM_TYPE.get(String(itemType ?? '').trim().toLowerCase()) ?? null
 
 assertStorable(CATEGORY_BY_ITEM_TYPE, CATEGORIES, 'item type')
 assertStorable(UNIT_BY_PACK, UNITS, 'pack type')

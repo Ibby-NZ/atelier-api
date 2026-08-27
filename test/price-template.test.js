@@ -65,7 +65,13 @@ const contextOf = (overrides = {}) => ({
 
 describe('shared vocabularies', () => {
   it('stores exactly the values the column CHECKs accept', () => {
-    expect([...CATEGORIES]).toEqual(['fabric', 'wallpaper', 'trimming', 'accessory'])
+    // Nine since migrations/1789651200000_category-vocabulary.js. The first four
+    // are what the supplier rate sheet buys on; the last five are what Atelier
+    // sells, taken from the office's own corrected in-stock workbook.
+    expect([...CATEGORIES]).toEqual([
+      'fabric', 'wallpaper', 'trimming', 'accessory',
+      'bed-linen', 'towel', 'cushion', 'throw', 'misc',
+    ])
     expect([...UNITS]).toEqual(['metre', 'yard', 'roll', 'piece', 'hide', 'panel'])
     expect([...CURRENCIES]).toEqual(['EUR', 'USD', 'GBP'])
   })

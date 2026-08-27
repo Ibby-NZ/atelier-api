@@ -15,6 +15,7 @@ import { buildApp } from '../src/app.js'
 import { buildWorkbook } from '../scripts/lib/xlsx-write.js'
 import { computeWaterfall, pricingInputs, canonical } from '../src/seed/data/pricing.js'
 import { nzdMultiplier } from '../src/seed/data/fx.js'
+import { CATEGORIES } from '../scripts/lib/price-template.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'W18IMPORT-'
@@ -373,7 +374,9 @@ describe('self-service price-list import', () => {
       v3Row({ code: 'AAA' }),
       v3Row({ code: 'LEA', itemType: 'Leather' }),
       v3Row({ code: 'SAM', itemType: 'Samples and Displays' }),
-      v3Row({ code: 'THR', itemType: 'Throws/Blankets' }),
+      // Still unmappable after CATEGORIES grew to nine. `Throws/Blankets` used
+      // to sit here and no longer belongs: it maps to `throw` now.
+      v3Row({ code: 'RUG', itemType: 'Rug/Carpet' }),
     ]), { filename: file })
 
     expect(response.statusCode).toBe(422)
@@ -382,12 +385,14 @@ describe('self-service price-list import', () => {
     expect(body.unmappable_categories).toEqual([
       { row: 3, value: 'Leather' },
       { row: 4, value: 'Samples and Displays' },
-      { row: 5, value: 'Throws/Blankets' },
+      { row: 5, value: 'Rug/Carpet' },
     ])
     // Never dropped: each one is a row error too, so the file cannot be applied.
     expect(body.error_count).toBe(3)
     expect(body.errors[0].message).toContain(`${file}:3:`)
-    expect(body.errors[0].message).toMatch(/fabric, wallpaper, trimming, accessory/)
+    // The legal values are listed from the stored vocabulary, so this asserts
+    // the message quotes THAT rather than a list somebody kept in step by hand.
+    expect(body.errors[0].message).toContain([...CATEGORIES].join(', '))
   })
 
   it('never absorbs a stated-but-unknown category into the fallback', async () => {

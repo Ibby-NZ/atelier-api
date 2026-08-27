@@ -2,11 +2,14 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
+// The stored vocabulary itself, never a hand-typed copy. This suite exists to
+// prove the three CHECKs agree; a fourth copy of the list here would be one more
+// thing that can drift from them, and the day it did the failure would read as
+// a schema bug rather than as a stale test.
+import { CATEGORIES } from '../scripts/lib/price-template.js'
 
 // Fixtures are prefix-namespaced and cleaned up by prefix, like every other suite here.
 const PREFIX = 'w3-category-test'
-
-const CATEGORIES = ['fabric', 'wallpaper', 'trimming', 'accessory']
 
 const runMigrations = (databaseUrl) =>
   runner({

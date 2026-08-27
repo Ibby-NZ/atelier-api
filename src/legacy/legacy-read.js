@@ -33,6 +33,7 @@ import {
   entityConfig,
 } from './read-entities.js'
 import { SYNTHETIC_COLUMNS, baseSnapshotSql, mergedProjection } from './override-schema.js'
+import { categoryForItemType } from '../../scripts/lib/price-template.js'
 
 export { LEGACY_ENTITIES, ENTITIES, entityConfig }
 
@@ -61,6 +62,26 @@ const mapRow = (row, config) => {
   // to be defaulted here or a key appears and disappears depending on whether
   // anyone has ever corrected this entity.
   if (!Object.hasOwn(out, 'custom_fields')) out.custom_fields = {}
+  // The merchandising category the row's D365 item type means — `stock` and
+  // `prices`, the two entities that carry one. DERIVED, never stored: there is
+  // no `category` column on any legacy_* table and there must not be one, since
+  // the import upserts every mapped column and would overwrite it.
+  //
+  // It is computed HERE rather than in SQL, and that is the one place in this
+  // module where that is the right answer. The rule above (the merge is in SQL
+  // because q, the filters and the ORDER BY must all see the corrected value)
+  // is about the OVERRIDE MERGE; this reads `out.item_type`, which the merge
+  // has already resolved, so a corrected item type yields a corrected category
+  // for free. Nothing filters, searches or orders on it — the `item_type`
+  // filter already in ENTITIES.stock is the selective one and it is indexed —
+  // so no clause needs it in SQL, and putting it there would cost the CASE
+  // expression a page of the merged read cannot use an index for anyway.
+  //
+  // Only ever ADDED: no legacy_* projection carries a `category`, and the
+  // guard is what keeps that true if one ever does.
+  if (Object.hasOwn(out, 'item_type') && !Object.hasOwn(out, 'category')) {
+    out.category = categoryForItemType(out.item_type)
+  }
   return out
 }
 

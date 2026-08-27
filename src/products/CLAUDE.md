@@ -98,12 +98,17 @@ from are in the D365 staging mirror, and `scripts/export-category-sheets.js` wri
   `--active --latest` is the newest ACTIVE version, not "the newest version, if it happens to be
   active" — a live row must not disappear because a retired row is newer. Each filter reports what IT
   dropped from what reached it, so the numbers add up to the total.
-- **The stock sheet is mostly redundant with the item type, and the numbers say by how much.** The
-  suggestion resolves 6,653 of 7,611 rows; the leftovers are 958 across the whole ledger, 617 Active,
-  and **106** Active-and-in-stock. Those leftovers are not typos — they are types the four-value
-  vocabulary has no word for (Towels, Throws/Blankets, Bed Linen, Cushions, Candles, Bedding, Leather,
-  Rug/Carpet, Furniture), so the real question they raise is whether `CATEGORIES` should grow, not what
-  the office should type.
+- **The leftovers asked whether `CATEGORIES` should grow, and the answer came back yes.** Against the
+  four-value vocabulary the suggestion resolved 6,653 of 7,611 rows; the 958 leftovers were not typos
+  but types it had no word for (Towels, Throws/Blankets, Bed Linen, Cushions, Candles, Bedding,
+  Leather, Rug/Carpet, Furniture). `migrations/1789651200000_category-vocabulary.js` widened it to
+  **nine** — `bed-linen`, `towel`, `cushion`, `throw` and `misc` beside the original four — from the
+  office's own corrected sheet rather than from a guess. Every one of the 381 active, in-stock,
+  current-version rows now carries a suggestion; the types still unmapped (Leather, Rug/Carpet,
+  Candles, Furniture, Samples and Displays, "No Group Selected" — 296 rows, none of them in stock)
+  come through blank on purpose, and `Bedding` is deliberately among them because the corrected sheet
+  SPLIT its rows two ways. `misc` is not a synonym for blank: blank is "nobody looked", `misc` is
+  "somebody looked and there was no word for it".
 - **A stock item CANNOT inherit its category from the price list, however the code was created.** D365
   composes a stock code from a price row, but the export carries `product_price_list` as the price row's
   DESCRIPTION: exactly one price row matches for 3,971 of 7,611 items, 796 are ambiguous, 1,780 match
@@ -133,9 +138,33 @@ from are in the D365 staging mirror, and `scripts/export-category-sheets.js` wri
   (`dimension` → `sheetViews` → `cols` → `sheetData` → `autoFilter` → `dataValidations`; out of order is
   a repair) and the relationship/content-type graph. The round trip through this repo's own reader is the
   other half.
-- **Nothing reads a filled workbook back yet.** A category typed against a D365 price row belongs in
-  `d365_overrides.extras` (the custom-field lane — `src/legacy/CLAUDE.md`), never in `patch`, which is
-  keyed on D365 column names.
+- **`npm run import:item-types` reads a filled STOCK workbook back** (`src/seed/import-stock-item-types.js`),
+  and it reads the **Item Type** column rather than `Category` — which is what the office actually
+  filled in, and the more useful of the two anyway: a category is DERIVED from an item type through
+  `CATEGORY_BY_ITEM_TYPE`, so correcting the type fixes the category on the CRM's stock rows, in both
+  workbooks and in anything later derived from either, where a category typed into its own column
+  fixes exactly one screen.
+  - It writes through `setLegacyOverrides` into `d365_overrides.patch`, because `item_type` is a
+    declared, overridable column of the `stock` entity. **Never onto `legacy_stock_items`**: the import
+    upserts every mapped column on the guid and re-runs until cutover, so an UPDATE there survives
+    until the next `npm run import:legacy` and then vanishes with no error. Going through
+    `setLegacyOverrides` rather than its own SQL is what earns it the per-key `base` snapshot (so
+    `stale_fields` reports it if D365 moves the type underneath), the cast probe and the merge that
+    cannot lose a correction somebody is making at the same moment.
+  - **It diffs against the MERGED value, not the staged one**, which is the whole of why a second run
+    is a no-op. The staging row goes on saying `Accessories` for ever — the override is what says
+    `Towels` — so a script comparing the sheet to `legacy_stock_items` alone would rewrite every
+    correction on every run, re-snapshot `base` against a value that has not moved, and report work it
+    did not do.
+  - **A sheet that agrees with D365 on a corrected row REVERTS that correction.** Otherwise the
+    workbook is a one-way ratchet: the office could introduce a correction through it and never
+    withdraw one, and the file would go on saying something different from the screen.
+  - Columns are matched **by name**, only `GUID` and `Item Type` are required, and only the FIRST
+    worksheet is read — that is the `All …` tab, which carries every row; the house tabs after it are
+    a view of the same rows and reading them too would count each correction twice.
+- **A category typed against a D365 PRICE row still belongs in `d365_overrides.extras`** (the
+  custom-field lane — `src/legacy/CLAUDE.md`), never in `patch`, which is keyed on D365 column names.
+  Nothing reads the price workbook back yet.
 
 ### The sheet (`GET /admin/product-sheet/export.csv`)
 

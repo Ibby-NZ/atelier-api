@@ -68,6 +68,7 @@ const PRODUCT_COLUMNS = `p.id,
         p.slug,
         p.product_type,
         p.product_range,
+        p.category,
         p.composition,
         p.width,
         p.application,
@@ -99,6 +100,13 @@ const PRODUCT_UPDATE_COLUMNS = Object.freeze([
   // that is re-imported wholesale. A cleared input stores NULL, never '' (the
   // CHECK refuses a blank), via reportingLabelFrom below.
   'product_range',
+  // The merchandising axis. Editable rather than create-only, unlike
+  // product_type beside it: product_type decides the colourway's inventory unit
+  // and changing it would strand stock, where a category is a label the office
+  // corrects. The spreadsheet round trip (src/products/product-sheet.js) writes
+  // the same column in bulk; this is the single-design door onto it, and until
+  // now the CRM had none — a category could only be set by uploading a CSV.
+  'category',
   'composition',
   'width',
   'application',
@@ -131,6 +139,7 @@ const toProduct = (row, extra) =>
     slug: row.slug,
     product_type: row.product_type,
     product_range: row.product_range ?? null,
+    category: row.category ?? null,
     composition: row.composition,
     width: row.width,
     application: row.application,
@@ -427,11 +436,11 @@ export const createProduct = async (pool, input) => {
     const { rows } = await pool.query(
       `INSERT INTO products (
          brand_id, collection_id, name, slug, product_type, product_range,
-         composition, width, application, rubs, price_band, lead_time,
+         category, composition, width, application, rubs, price_band, lead_time,
          retail_price_cents, trade_price_cents, currency, show_on_website,
          hi_res_asset_url
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
        RETURNING id`,
       [
         brand.id,
@@ -440,6 +449,7 @@ export const createProduct = async (pool, input) => {
         slug,
         input.product_type,
         reportingLabelFrom(input.product_range),
+        input.category ?? null,
         input.composition ?? null,
         input.width ?? null,
         input.application ?? null,

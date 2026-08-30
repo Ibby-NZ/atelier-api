@@ -45,18 +45,19 @@ describe('seed:staff', () => {
     expect(results.every((r) => r.password_hash === undefined)).toBe(true)
 
     const byEmail = Object.fromEntries(results.map((r) => [r.email, r]))
-    expect(byEmail['liz@ateliertextiles.co.nz'].role).toBe('director')
-    expect(byEmail['jenette@ateliertextiles.co.nz'].role).toBe('director')
-    expect(byEmail['charlotte@ateliertextiles.co.nz'].role).toBe('backoffice')
-    expect(byEmail['rebecca@ateliertextiles.co.nz'].role).toBe('backoffice')
+    expect(byEmail['elizabethd@atelier.co.nz'].role).toBe('director')
+    expect(byEmail['jenettec@atelier.co.nz'].role).toBe('director')
+    expect(byEmail['charlottes@atelier.co.nz'].role).toBe('backoffice')
+    expect(byEmail['rebeccaf@atelier.co.nz'].role).toBe('backoffice')
     expect(byEmail['showroom@ateliertextiles.co.nz'].role).toBe('backoffice')
+    expect(byEmail['sales@atelier.co.nz'].role).toBe('backoffice')
   })
 
   it('lets a seeded director log in with the temp password', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/auth/login',
-      payload: { email: 'liz@ateliertextiles.co.nz', password: TEMP_PASSWORD },
+      payload: { email: 'elizabethd@atelier.co.nz', password: TEMP_PASSWORD },
     })
     expect(response.statusCode).toBe(200)
     const body = response.json()
@@ -69,7 +70,7 @@ describe('seed:staff', () => {
     const changedHash = 'argon2-placeholder-changed-after-first-login'
     await pool.query(
       "UPDATE users SET password_hash = $1, role = 'customer' WHERE email = $2",
-      [changedHash, 'charlotte@ateliertextiles.co.nz']
+      [changedHash, 'charlottes@atelier.co.nz']
     )
 
     const results = await seedStaff(pool)
@@ -77,7 +78,7 @@ describe('seed:staff', () => {
 
     const { rows } = await pool.query(
       'SELECT password_hash, role FROM users WHERE email = $1',
-      ['charlotte@ateliertextiles.co.nz']
+      ['charlottes@atelier.co.nz']
     )
     // Role is re-asserted by the upsert; the changed password survives.
     expect(rows[0].role).toBe('backoffice')

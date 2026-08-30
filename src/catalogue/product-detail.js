@@ -19,6 +19,8 @@ const PRODUCT_COLUMNS = `
   p.name,
   p.product_type,
   p.category,
+  p.size,
+  p.description,
   p.composition,
   p.width,
   p.application,
@@ -76,6 +78,10 @@ const toProductDetail = (row, colourways, includeTrade) => {
     product_type: row.product_type,
     // Same shape as the list endpoint's card: present, null when uncategorised.
     category: row.category ?? null,
+    size: row.size ?? null,
+    // The one field the listing does not carry: prose belongs on the page that
+    // has room for it.
+    description: row.description ?? null,
     composition: row.composition,
     width: row.width,
     application: row.application,

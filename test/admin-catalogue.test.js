@@ -884,6 +884,34 @@ describe('back-office catalogue admin', () => {
       expect(product.retail_price_cents).toBe(8900)
     })
 
+    // One product per size is the model, so the size is a column on THIS row
+    // rather than a variant beneath it — a bath sheet and a face cloth carry
+    // different prices, and price lives on the product.
+    it('carries a size and a description, and both round-trip through a patch', async () => {
+      const brand = await createBrandFixture('House')
+      const product = await createProductFixture(brand.id, {
+        name: brandName('Bath Towel'),
+        product_type: 'finished_good',
+        size: '70 x 140 cm',
+        description: 'Woven in Turkey, long-staple cotton, pre-washed.',
+        retail_price_cents: 8900,
+      })
+      expect(product.size).toBe('70 x 140 cm')
+      expect(product.description).toBe('Woven in Turkey, long-staple cotton, pre-washed.')
+
+      const patched = await inject(
+        'PATCH',
+        `/admin/products/${product.id}`,
+        backofficeCookie,
+        { size: '100 x 150 cm', description: null }
+      )
+      expect(patched.statusCode).toBe(200)
+      expect(patched.json().product.size).toBe('100 x 150 cm')
+      // An explicit null clears it — the field is nullable, and "no description"
+      // is a real state rather than an untouched one.
+      expect(patched.json().product.description).toBe(null)
+    })
+
     it('rejects an unknown brand_id with 422', async () => {
       const response = await inject('POST', '/admin/products', backofficeCookie, {
         brand_id: 99999999,

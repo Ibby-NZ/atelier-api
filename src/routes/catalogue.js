@@ -41,6 +41,7 @@ const listQuerySchema = {
     width: { type: 'string', maxLength: 200 },
     price_band: { type: 'string', maxLength: 200 },
     lead_time: { type: 'string', maxLength: 200 },
+    size: { type: 'string', maxLength: 200 },
     product_type: { type: 'string', enum: ['fabric', 'finished_good'] },
     // Derived from the stored vocabulary, never retyped — the same posture
     // src/routes/admin-price-lists.js takes with CURRENCY_ENUM. A value the

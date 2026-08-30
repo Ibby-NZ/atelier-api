@@ -45,12 +45,13 @@ const seedFixtures = async (pool) => {
     `INSERT INTO products
        (brand_id, name, slug, product_type, application, width, composition,
         price_band, retail_price_cents, trade_price_cents, currency,
-        show_on_website, hi_res_asset_url)
+        show_on_website, hi_res_asset_url, size, description)
      VALUES
        ($1, 'Det Fabric', $2, 'fabric', 'Drapery', '140cm', '100% Linen',
-        'NZ$120 / m', NULL, 18776, 'NZD', true, 'https://cdn.example/hi.jpg'),
+        'NZ$120 / m', NULL, 18776, 'NZD', true, 'https://cdn.example/hi.jpg',
+        '70 x 140 cm', 'Pre-washed, long-staple cotton.'),
        ($1, 'Det Hidden', $3, 'fabric', 'Drapery', '140cm', '100% Linen',
-        'NZ$120 / m', NULL, 18776, 'NZD', false, NULL)
+        'NZ$120 / m', NULL, 18776, 'NZD', false, NULL, NULL, NULL)
      RETURNING id, slug`,
     [brandId, `${PREFIX}-fabric`, `${PREFIX}-hidden`]
   )
@@ -162,6 +163,10 @@ describe('product detail and brand endpoints', () => {
       expect(product.hi_res_asset_url).toBe('https://cdn.example/hi.jpg')
       expect(product.brand.slug).toBe(`${PREFIX}-house`)
       expect(product.colourways).toHaveLength(3)
+      // The size is what tells a bath sheet from a face cloth, and the detail
+      // read is the only one that carries the prose — a card has no room for it.
+      expect(product.size).toBe('70 x 140 cm')
+      expect(product.description).toBe('Pre-washed, long-staple cotton.')
     })
 
     it('computes in_stock as qty_available minus qty_reserved > 0', async () => {

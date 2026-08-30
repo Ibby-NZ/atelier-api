@@ -93,6 +93,14 @@ const productDetailProps = {
   // gap: NULL means nobody has looked at the row, and `misc` means somebody did
   // and the vocabulary had no word for it.
   category: categoryProp,
+  // Free text, not an enum: the size vocabulary is per category and open-ended
+  // (single/double/queen/king for bed linen, face/hand/bath/bath sheet for
+  // towels), so an enum would need a migration every time the office stocked a
+  // new one. Same posture as product_range above.
+  size: nullableShort,
+  // Sales prose — `nullableText` like collections.description, not one of the
+  // short spec fields beside it.
+  description: nullableText,
   composition: nullableShort,
   width: nullableShort,
   application: nullableShort,

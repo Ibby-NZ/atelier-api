@@ -25,7 +25,7 @@ export const suppliers = [
   },
   {
     id: 'manuel-canovas', name: 'Manuel Canovas', country: 'France', city: 'Paris',
-    currency: 'EUR', agent: 'Mainfreight Air', incoterm: 'FCA',
+    currency: 'GBP', agent: 'Mainfreight Air', incoterm: 'FCA',
     poEmail: 'orders@manuelcanovas.fr', indicativeDefaults: true, freightDollar: 30,
     terms: { method: 'averaged', discountIncluded: false, list: 0.0, net: 0.04 },
     brands: [{ name: 'Manuel Canovas' }],

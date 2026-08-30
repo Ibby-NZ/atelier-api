@@ -101,19 +101,33 @@ describe('supplier backfill plan (real sources)', () => {
     }
   })
 
-  it('takes the currency from the rate ledger, not the snapshot, and reports the disagreement', () => {
+  it('takes the currency from the rate ledger, and the two sources now agree', () => {
     const { suppliers, reports } = plan()
     const byName = new Map(suppliers.map((row) => [row.name, row]))
-    // Manuel Canovas: the snapshot says EUR, every rate on file was quoted GBP.
+    // Manuel Canovas was the one live disagreement — the snapshot said EUR while
+    // every rate on file was quoted GBP. The office settled it in the ledger's
+    // favour, so the snapshot now says GBP too and nothing is left to report.
     expect(byName.get('Manuel Canovas').currency).toBe('GBP')
-    expect(reports.currencyConflicts).toContainEqual({
-      supplier: 'Manuel Canovas',
-      price_list: 'GBP',
-      snapshot: 'EUR',
-    })
+    expect(reports.currencyConflicts).toEqual([])
     // Jim Thompson is the invoicing-currency rule itself: Thailand, USD.
     expect(byName.get('Jim Thompson').currency).toBe('USD')
     expect(byName.get('Jim Thompson').country).toBe('Thailand')
+  })
+
+  // No real source disagrees any more, so the reporting path needs an injected
+  // one — losing this would let a future snapshot edit go by unreported.
+  it('still reports a disagreement when the two sources do differ', () => {
+    const { suppliers, reports } = planSupplierBackfill({
+      snapshot: [{ name: 'Larsen', country: 'United Kingdom', currency: 'EUR' }],
+      priceListSuppliers: [{ name: 'Larsen', items: 12, currencies: ['GBP'] }],
+      brands: [],
+      existingSuppliers: [],
+      existingAliases: [],
+    })
+    expect(suppliers[0].currency).toBe('GBP')
+    expect(reports.currencyConflicts).toEqual([
+      { supplier: 'Larsen', price_list: 'GBP', snapshot: 'EUR' },
+    ])
   })
 
   it('carries the snapshot metadata onto the houses it does match', () => {

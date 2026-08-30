@@ -6,6 +6,11 @@
 // Idempotent: upsert on email, updating name/role but NEVER the password — so a
 // re-run can't clobber a password a staff member has already changed.
 //
+// The conflict target is EMAIL, so changing an address here creates a second
+// account rather than renaming the first: rename the live row before re-running
+// (`UPDATE users SET email = ... WHERE email = ...`), or the old login keeps
+// working alongside the new one.
+//
 // Roles map the demo's director/finance/user onto the API's backoffice/director:
 // the two principals are directors; the rest are backoffice (director inherits
 // backoffice, so directors keep full access). Trade/customer accounts are for the
@@ -22,11 +27,12 @@ import { PUBLIC_USER_COLUMNS } from '../auth/user-columns.js'
 export const TEMP_PASSWORD = process.env.STAFF_TEMP_PASSWORD ?? 'AtelierTemp2026!'
 
 export const STAFF = [
-  { email: 'liz@ateliertextiles.co.nz', name: 'Liz', role: 'director' },
-  { email: 'jenette@ateliertextiles.co.nz', name: 'Jenette', role: 'director' },
-  { email: 'charlotte@ateliertextiles.co.nz', name: 'Charlotte', role: 'backoffice' },
-  { email: 'rebecca@ateliertextiles.co.nz', name: 'Rebecca', role: 'backoffice' },
+  { email: 'elizabethd@atelier.co.nz', name: 'Liz', role: 'director' },
+  { email: 'jenettec@atelier.co.nz', name: 'Jenette', role: 'director' },
+  { email: 'charlottes@atelier.co.nz', name: 'Charlotte', role: 'backoffice' },
+  { email: 'rebeccaf@atelier.co.nz', name: 'Rebecca', role: 'backoffice' },
   { email: 'showroom@ateliertextiles.co.nz', name: 'Showroom', role: 'backoffice' },
+  { email: 'sales@atelier.co.nz', name: 'Sales', role: 'backoffice' },
 ]
 
 export const seedStaff = async (pool) => {

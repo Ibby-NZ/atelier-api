@@ -33,6 +33,9 @@ const FILTER_COLUMNS = Object.freeze({
   width: 'p.width',
   price_band: 'p.price_band',
   lead_time: 'p.lead_time',
+  // One product per size, so this narrows to a shape of the thing — the bath
+  // towels, the queen duvet covers — across every house that makes one.
+  size: 'p.size',
   product_type: 'p.product_type',
   // The merchandising axis (products.category), nine values wide since
   // migrations/1789651200000_category-vocabulary.js. It is NOT product_type:
@@ -69,6 +72,7 @@ const PRODUCT_COLUMNS = `
   p.name,
   p.product_type,
   p.category,
+  p.size,
   p.composition,
   p.width,
   p.application,
@@ -147,6 +151,11 @@ const toPublicProduct = (row, includeTrade) => {
     // on whether the key came back, and "not categorised yet" is a real state
     // across most of the catalogue.
     category: row.category ?? null,
+    // Present, null included, exactly as `category` is: a fabric has no size,
+    // and that is a real answer rather than a missing key. `description` is
+    // deliberately NOT on the card — it is prose for the product page, and
+    // carrying it would inflate a 60-row list for something nothing renders.
+    size: row.size ?? null,
     composition: row.composition,
     width: row.width,
     application: row.application,

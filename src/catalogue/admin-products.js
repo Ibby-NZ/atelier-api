@@ -69,6 +69,8 @@ const PRODUCT_COLUMNS = `p.id,
         p.product_type,
         p.product_range,
         p.category,
+        p.size,
+        p.description,
         p.composition,
         p.width,
         p.application,
@@ -107,6 +109,15 @@ const PRODUCT_UPDATE_COLUMNS = Object.freeze([
   // the same column in bulk; this is the single-design door onto it, and until
   // now the CRM had none — a category could only be set by uploading a CSV.
   'category',
+  // The size is a PRODUCT column because price is: retail/trade cents live on
+  // this row, and a bath sheet and a face cloth are different prices, so they
+  // are two products rather than two variants of one. Free text — the
+  // vocabulary is per category and open-ended (queen/king, hand/bath) — with
+  // the CRM offering the sizes already in use as suggestions.
+  'size',
+  // Sales prose for the storefront's product page. `nullableText` in the route
+  // schema, matching collections.description rather than the short spec fields.
+  'description',
   'composition',
   'width',
   'application',
@@ -140,6 +151,8 @@ const toProduct = (row, extra) =>
     product_type: row.product_type,
     product_range: row.product_range ?? null,
     category: row.category ?? null,
+    size: row.size ?? null,
+    description: row.description ?? null,
     composition: row.composition,
     width: row.width,
     application: row.application,
@@ -438,9 +451,10 @@ export const createProduct = async (pool, input) => {
          brand_id, collection_id, name, slug, product_type, product_range,
          category, composition, width, application, rubs, price_band, lead_time,
          retail_price_cents, trade_price_cents, currency, show_on_website,
-         hi_res_asset_url
+         hi_res_asset_url, size, description
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+               $19, $20)
        RETURNING id`,
       [
         brand.id,
@@ -461,6 +475,8 @@ export const createProduct = async (pool, input) => {
         input.currency,
         input.show_on_website ?? false,
         input.hi_res_asset_url ?? null,
+        input.size ?? null,
+        input.description ?? null,
       ]
     )
     return getAdminProduct(pool, rows[0].id)

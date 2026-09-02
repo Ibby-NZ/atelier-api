@@ -18,6 +18,7 @@ const GUID = {
   alpha: '11111111-1111-1111-1111-111111111111',
   beta: '22222222-2222-2222-2222-222222222222',
   order: '33333333-3333-3333-3333-333333333333',
+  price: '55555555-5555-5555-5555-555555555555',
 }
 
 const sessionCookieFrom = (response) => {
@@ -38,11 +39,20 @@ const seed = async (pool) => {
      VALUES ($1, 'SO-ZZTEST', $2, 'Order Confirmation', 146.30, 'test.xlsx', '{}'::jsonb)`,
     [GUID.order, `${PREFIX} Alpha`]
   )
+  await pool.query(
+    `INSERT INTO legacy_product_prices
+        (guid, code, description, contents, width, repeat, vertical_repeat,
+         exchange_rate, price_exchange_rate, wholesale_rate, source_file, raw)
+     VALUES ($1, $2, $3, '54% linen, 46% cotton', '137 cm', '64 cm', '32 cm',
+             1.851200, 1.900000, 42.5000, 'test.xlsx', '{}'::jsonb)`,
+    [GUID.price, `${PREFIX}-PL-1`, `${PREFIX} Cloth`]
+  )
 }
 
 const cleanup = async (pool) => {
   await pool.query(`DELETE FROM legacy_accounts WHERE name LIKE $1`, [`${PREFIX}%`])
   await pool.query(`DELETE FROM legacy_sales_orders WHERE number = 'SO-ZZTEST'`)
+  await pool.query(`DELETE FROM legacy_product_prices WHERE code LIKE $1`, [`${PREFIX}%`])
 }
 
 describe('GET /admin/legacy/:entity (read-only D365 window)', () => {
@@ -148,5 +158,21 @@ describe('GET /admin/legacy/:entity (read-only D365 window)', () => {
     expect(body.items).toHaveLength(1)
     expect(body.items[0].number).toBe('SO-ZZTEST')
     expect(body.items[0].total_incl_gst).toBe(146.3) // coerced to Number
+  })
+
+  it('projects the cloth attributes and both exchange rates on prices', async () => {
+    const res = await inject(
+      `/admin/legacy/prices?q=${encodeURIComponent(`${PREFIX}-PL-1`)}`,
+      backofficeCookie
+    )
+    expect(res.statusCode).toBe(200)
+    const [row] = res.json().items
+    expect(row.contents).toBe('54% linen, 46% cotton')
+    expect(row.width).toBe('137 cm')
+    expect(row.repeat).toBe('64 cm')
+    expect(row.vertical_repeat).toBe('32 cm')
+    // numeric(18,6), so it arrives from pg as a string unless it is declared numeric
+    expect(row.exchange_rate).toBe(1.8512)
+    expect(row.price_exchange_rate).toBe(1.9)
   })
 })

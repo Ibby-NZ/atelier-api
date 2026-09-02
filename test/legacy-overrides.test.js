@@ -72,8 +72,11 @@ const seed = async (pool) => {
     [GUID.stock, `${PREFIX}-SKU-1`, `${PREFIX} Bolt`]
   )
   await pool.query(
-    `INSERT INTO legacy_product_prices (guid, code, description, wholesale_rate, source_file, raw)
-     VALUES ($1, $2, $3, 42.5000, 'ovr.xlsx', '{}'::jsonb)`,
+    `INSERT INTO legacy_product_prices
+        (guid, code, description, contents, repeat, vertical_repeat,
+         exchange_rate, price_exchange_rate, wholesale_rate, source_file, raw)
+     VALUES ($1, $2, $3, '100% linen', '64 cm', '32 cm', 1.851200, 1.900000,
+             42.5000, 'ovr.xlsx', '{}'::jsonb)`,
     [GUID.price, `${PREFIX}-PL-1`, `${PREFIX} Price Row`]
   )
 }
@@ -1031,6 +1034,32 @@ describe('D365 override layer', () => {
       })
       expect(res.statusCode).toBe(200)
       expect(res.json().record.credit_limit).toBe(999999)
+    })
+
+    it('gates both price exchange rates on finance access', async () => {
+      // Every price on a prices row is derived through them, so correcting one
+      // moves the money exactly as correcting a price does.
+      for (const column of ['exchange_rate', 'price_exchange_rate']) {
+        const refused = await call('PATCH', `/admin/legacy/prices/${GUID.price}`, bossCookie, {
+          set: { [column]: 2.05 },
+        })
+        expect(refused.statusCode).toBe(403)
+        const allowed = await call('PATCH', `/admin/legacy/prices/${GUID.price}`, moneyCookie, {
+          set: { [column]: 2.05 },
+        })
+        expect(allowed.statusCode).toBe(200)
+        expect(allowed.json().record[column]).toBe(2.05)
+      }
+    })
+
+    it('leaves the cloth attributes clerical', async () => {
+      const res = await call('PATCH', `/admin/legacy/prices/${GUID.price}`, bossCookie, {
+        set: { contents: '54% linen, 46% cotton', repeat: '68 cm', vertical_repeat: '34 cm' },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().record.contents).toBe('54% linen, 46% cotton')
+      expect(res.json().record.repeat).toBe('68 cm')
+      expect(res.json().record.vertical_repeat).toBe('34 cm')
     })
   })
 })

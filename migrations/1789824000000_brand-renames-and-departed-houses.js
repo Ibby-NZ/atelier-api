@@ -61,9 +61,18 @@ const KIEFFER_PRODUCT_SLUG_MOVES = [
   ],
 ]
 
+// The NOT EXISTS is what keeps a deploy alive when someone runs the seed BEFORE
+// the migration: the reseed has already inserted the destination slug, so an
+// unguarded UPDATE hits products_slug_key and stops the deploy half-seeded.
+// Skipping the move leaves the duplicate the wrong run order created — which is
+// what `migrate && seed` exists to avoid — but the deploy finishes.
 const moveProductSlugs = async (pgm, moves) => {
   for (const [from, to] of moves) {
-    await pgm.db.query(`UPDATE products SET slug = $2 WHERE slug = $1`, [from, to])
+    await pgm.db.query(
+      `UPDATE products SET slug = $2
+        WHERE slug = $1 AND NOT EXISTS (SELECT 1 FROM products WHERE slug = $2)`,
+      [from, to]
+    )
   }
 }
 

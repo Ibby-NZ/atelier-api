@@ -16,8 +16,10 @@
 //    tracking token that expires and is meaningless outside that click.
 //  - Trailing slash added to Jane Churchill, to match every other root URL here.
 //
-// Two entries are NOT on the client's roster and are kept: `sahco` (a stocked
-// house they did not mention) and `atelier-textiles-nz` (Atelier's own site).
+// Five houses have since left the roster and their links have gone with them:
+// Sahco, Le Crin, Timney Fowler, The Vale London and Brochier (Userback
+// 8287607, 2 Sep 2026). `atelier-textiles-nz` (Atelier's own site) is still the
+// one entry the client's roster never listed.
 //
 // Absent slug = no link on file = the storefront renders no button. Never
 // guess here.
@@ -33,7 +35,6 @@ export const BRAND_WEBSITES = Object.freeze({
   'armani-casa': 'https://www.armani.com/en-nz/armani-casa/experience/textiles/',
   boussac: 'https://www.pierrefrey.com/en/brands/boussac',
   braquenie: 'https://www.pierrefrey.com/en/collections?brand=braquenie',
-  brochier: 'https://brochier.it/',
   'cc-milano': 'https://www.cec-milano.com/',
   'clarence-house': 'https://clarencehouse.com/',
   'colefax-fowler': 'https://www.colefax.com/',
@@ -51,8 +52,6 @@ export const BRAND_WEBSITES = Object.freeze({
   'jim-thompson': 'https://www.jimthompsonfabrics.com/',
   kieffer: 'https://www.kieffertextiles.com/',
   larsen: 'https://www.larsenfabrics.com/',
-  // Métaphores group house, no domain of its own.
-  'le-crin': 'https://www.metaphores.com/en',
   'liberty-london': 'https://www.libertyfabric.com/product-category/fabrics/',
   'loro-piana': 'https://www.loropiana.com/interiors/?lang=en',
   madeaux: 'https://www.madeaux.com/',
@@ -67,16 +66,12 @@ export const BRAND_WEBSITES = Object.freeze({
   's-harris': 'https://fabricut.com/sharris/',
   sette: 'https://sette7.es/',
   stroheim: 'https://fabricut.com/stroheim/',
-  'the-vale-london': 'https://thevalelondon.com/',
-  'timney-fowler': 'https://timneyfowler.com/',
   trend: 'https://fabricut.com/trend/',
   // Métaphores group house, no domain of its own.
   'verel-de-belval': 'https://www.metaphores.com/en/verel-de-belval',
   vervain: 'https://fabricut.com/vervain/',
 
   // --- Not on the client's roster, kept ---
-  // Stocked house the roster does not mention; previously verified.
-  sahco: 'https://www.sahco.com/',
   // Atelier's own site.
   'atelier-textiles-nz': 'https://www.atelier.co.nz/',
 })

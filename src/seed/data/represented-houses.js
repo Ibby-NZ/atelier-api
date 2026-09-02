@@ -4,9 +4,16 @@
 //
 // realCatalogue.js only knows houses that have products or designs behind them,
 // so a house we represent but hold nothing from could never reach the brands
-// table. The client's roster (4 Aug 2026) names fourteen of them, and the
+// table. The client's roster (4 Aug 2026) named fourteen of them, and the
 // storefront needs them for the same reason the client asked: /brands is the
 // list of houses we represent, not the list of houses currently in stock.
+//
+// Le Crin, The Vale London and Timney Fowler have since been dropped from the
+// list (Userback 8287607, 2 Sep 2026). Removing them here stops a FRESH seed
+// creating them; a database that already holds them is caught up by
+// migrations/1789824000000_brand-renames-and-departed-houses.js, which archives
+// rather than deletes — the roster migration below them created these rows and
+// a hard delete would cascade anything staff have since hung off one.
 //
 // Each renders a complete brand page with no collections section — that gate is
 // house-level in the storefront (lib/collections.js: no products under the
@@ -59,8 +66,6 @@ export const REPRESENTED_HOUSES = Object.freeze([
     country: 'England',
     currency: 'GBP',
   }),
-  // Métaphores group house (horsehair), sold off the Métaphores site.
-  Object.freeze({ name: 'Le Crin', slug: 'le-crin', country: 'France', currency: 'EUR' }),
   Object.freeze({ name: 'Madeaux', slug: 'madeaux', country: 'England', currency: 'GBP' }),
   // Outdoor cloth — "filatori, tessitori, editori di tessuti per esterni".
   Object.freeze({
@@ -70,18 +75,6 @@ export const REPRESENTED_HOUSES = Object.freeze([
     currency: 'EUR',
   }),
   Object.freeze({ name: 'Sette', slug: 'sette', country: 'Spain', currency: 'EUR' }),
-  Object.freeze({
-    name: 'The Vale London',
-    slug: 'the-vale-london',
-    country: 'England',
-    currency: 'GBP',
-  }),
-  Object.freeze({
-    name: 'Timney Fowler',
-    slug: 'timney-fowler',
-    country: 'England',
-    currency: 'GBP',
-  }),
   // Métaphores group house (Lyon silks), sold off the Métaphores site.
   Object.freeze({
     name: 'Verel de Belval',

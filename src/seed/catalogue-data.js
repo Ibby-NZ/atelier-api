@@ -20,12 +20,13 @@ import { BRAND_WEBSITES } from './data/brand-websites.js'
 import { REPRESENTED_HOUSES } from './data/represented-houses.js'
 import { slugify } from './slugify.js'
 
-const HOUSE_BRAND = 'Atelier Textiles NZ'
+// Renamed from "Atelier Textiles NZ" at the client's request (Userback 8287607).
+// The slug below is the brands upsert key and stays as it was.
+const HOUSE_BRAND = 'Atelier Brand'
 
 // Brands referenced by products/designs but absent from realCatalogue.brands.
 // Currency still resolves from suppliers.js first (Vervain/Trend are Fabricut house brands).
 const EXTRA_BRAND_META = Object.freeze({
-  Brochier: Object.freeze({ slug: 'brochier', country: 'Italy', currency: 'EUR' }),
   Vervain: Object.freeze({ slug: 'vervain', country: 'USA', currency: 'USD' }),
   Trend: Object.freeze({ slug: 'trend', country: 'USA', currency: 'USD' }),
   [HOUSE_BRAND]: Object.freeze({

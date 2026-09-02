@@ -1,5 +1,9 @@
 // AUTO-GENERATED from atelier-real-data.json — real Atelier catalogue. Do not edit by hand.
 // Each image-bearing item has { img: localFilename, src: remoteUrl } — components prefer local, fall back to remote, then gradient.
+// EDITED BY HAND, 2 Sep 2026 (Userback 8287655, 8287611, 8287607): atelier-real-data.json is
+// not in this repo, so the client's house renames (Rubelli, Kieffer, Atelier Brand) and the
+// removal of Sahco and Brochier had to be applied here. A `brand` value is the seed's join
+// key onto `brands.name`, so every reference moves with the house; the `slug` never does.
 export const brands = [
  {
   "name": "Pierre Frey",
@@ -16,7 +20,7 @@ export const brands = [
   "currency": "EUR"
  },
  {
-  "name": "Rubelli Venezia",
+  "name": "Rubelli",
   "slug": "rubelli-venezia",
   "story": "Founded 1858, the legendary Venetian house producing hand-made fabrics by traditional techniques alongside cutting-edge textiles, found in the world's most exclusive homes, hotels and yachts.",
   "country": "Italy",
@@ -93,7 +97,7 @@ export const brands = [
   "currency": "EUR"
  },
  {
-  "name": "Dominique Kieffer by Rubelli",
+  "name": "Kieffer",
   "slug": "kieffer",
   "story": "Natural, understated linens and weaves with a quiet luxury sensibility, edited under the Rubelli house.",
   "country": "Italy",
@@ -132,13 +136,6 @@ export const brands = [
   "slug": "boussac",
   "story": "French editor of contemporary upholstery and decorative weaves.",
   "country": "France",
-  "currency": "EUR"
- },
- {
-  "name": "Sahco",
-  "slug": "sahco",
-  "story": "German-rooted house of sophisticated, design-led furnishing fabrics.",
-  "country": "Germany",
   "currency": "EUR"
  },
  {
@@ -288,7 +285,7 @@ export const collections = [
  },
  {
   "name": "Rubelli Return to Arcadia",
-  "brand": "Rubelli Venezia",
+  "brand": "Rubelli",
   "application": "Mixed",
   "description": "Classical imagery transformed into a refined, glamorous, playful world; jacquards and prints by Luke Edward Hall mixing stripes, florals and geometrics.",
   "img": "return_to_arcadia_collection.jpg",
@@ -301,7 +298,7 @@ export const collections = [
  },
  {
   "name": "Rubelli Love Affair 2022",
-  "brand": "Rubelli Venezia",
+  "brand": "Rubelli",
   "application": "Outdoor",
   "description": "An Ode to nature for those who want to live with or within nature - patterns, textures, outdoors and extra-wide fabrics with nature at the centre.",
   "img": "Lady_Bloom_01.jpg",
@@ -577,7 +574,7 @@ export const products = [
  },
  {
   "name": "Rubelli Nirvana",
-  "brand": "Rubelli Venezia",
+  "brand": "Rubelli",
   "design": "Nirvana",
   "type": "Cushion cover",
   "composition": "100% PL Trevira CS",
@@ -587,7 +584,7 @@ export const products = [
  },
  {
   "name": "Rubelli Ingrid Cushion",
-  "brand": "Rubelli Venezia",
+  "brand": "Rubelli",
   "design": "Ingrid",
   "type": "Cushion cover",
   "composition": "54% Wool 46% Cotton",
@@ -597,7 +594,7 @@ export const products = [
  },
  {
   "name": "Rubelli Cortez Cushion",
-  "brand": "Rubelli Venezia",
+  "brand": "Rubelli",
   "design": "Cortez",
   "type": "Cushion cover",
   "composition": "100% PL Trevira CS",
@@ -676,8 +673,8 @@ export const products = [
   "sku": "JAN-1020"
  },
  {
-  "name": "Dominique Kieffer by Rubelli Rigatto Cushion Cover - Blanc",
-  "brand": "Dominique Kieffer by Rubelli",
+  "name": "Kieffer Rigatto Cushion Cover - Blanc",
+  "brand": "Kieffer",
   "design": "Rigatto",
   "type": "Cushion cover",
   "composition": "54% Viscose 34% Polyester 12% Linen",
@@ -686,8 +683,8 @@ export const products = [
   "sku": "DOM-1021"
  },
  {
-  "name": "Dominique Kieffer by Rubelli Rigatto Cushion Cover - Mahogany",
-  "brand": "Dominique Kieffer by Rubelli",
+  "name": "Kieffer Rigatto Cushion Cover - Mahogany",
+  "brand": "Kieffer",
   "design": "Rigatto",
   "type": "Cushion cover",
   "composition": "54% Viscose 34% Polyester 12% Linen",
@@ -714,16 +711,6 @@ export const products = [
   "img": "DSC_1210.jpg",
   "src": "https://www.atelier.co.nz/wp-content/uploads/2021/12/DSC_1210.jpg",
   "sku": "SHA-1024"
- },
- {
-  "name": "Brochier Margarita Cushion",
-  "brand": "Brochier",
-  "design": "Margarita",
-  "type": "Cushion cover",
-  "composition": "100% polypropylene",
-  "img": "DSC_0998_b61c972c-8aa3-4fd3-8d7a-cc31330a9007.jpg",
-  "src": "https://www.atelier.co.nz/wp-content/uploads/2021/12/DSC_0998_b61c972c-8aa3-4fd3-8d7a-cc31330a9007.jpg",
-  "sku": "BRO-1025"
  },
  {
   "name": "Boussac Cube Cushion",
@@ -776,16 +763,6 @@ export const products = [
   "sku": "MTA-1030"
  },
  {
-  "name": "Sahco Coco Cushion Cover",
-  "brand": "Sahco",
-  "design": "Coco",
-  "type": "Cushion cover",
-  "composition": "38% Polyacryclic 32% Polyamide 30% Mohair",
-  "img": "DSC_1298.jpg",
-  "src": "https://www.atelier.co.nz/wp-content/uploads/2021/12/DSC_1298.jpg",
-  "sku": "SAH-1031"
- },
- {
   "name": "Plaid Classic Throw",
   "brand": null,
   "design": "Plaid Classic",
@@ -817,7 +794,7 @@ export const products = [
  },
  {
   "name": "Galata Organic Towels",
-  "brand": "Atelier Textiles NZ",
+  "brand": "Atelier Brand",
   "design": "Galata",
   "type": "Towel",
   "composition": "100% organic cotton",

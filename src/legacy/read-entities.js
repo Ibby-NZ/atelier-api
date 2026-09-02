@@ -84,20 +84,23 @@ export const ENTITIES = Object.freeze({
     importEntity: 'product_prices',
     columns: [
       'guid', 'code', 'description', 'range_name', 'item_type', 'pack_type',
-      'width', 'currency', 'wholesale_rate', 'landed_cost_nz',
+      'contents', 'width', 'repeat', 'vertical_repeat', 'currency',
+      'exchange_rate', 'price_exchange_rate', 'wholesale_rate', 'landed_cost_nz',
       'retail_sell_price_nz', 'trade_sell_price_nz', 'trade_sell_price_under_5m_nz',
       'set_prices_manually', 'status', 'status_reason',
     ],
     search: ['code', 'description', 'range_name'],
     numeric: [
-      'wholesale_rate', 'landed_cost_nz', 'retail_sell_price_nz',
-      'trade_sell_price_nz', 'trade_sell_price_under_5m_nz',
+      'exchange_rate', 'price_exchange_rate', 'wholesale_rate', 'landed_cost_nz',
+      'retail_sell_price_nz', 'trade_sell_price_nz', 'trade_sell_price_under_5m_nz',
     ],
-    // Every price on the row plus the manual-pricing flag that decides whether
-    // D365 recomputes them.
+    // Every price on the row, the two FX rates every one of them is derived
+    // through, and the manual-pricing flag that decides whether D365 recomputes
+    // them.
     commercial: [
-      'wholesale_rate', 'landed_cost_nz', 'retail_sell_price_nz',
-      'trade_sell_price_nz', 'trade_sell_price_under_5m_nz', 'set_prices_manually',
+      'exchange_rate', 'price_exchange_rate', 'wholesale_rate', 'landed_cost_nz',
+      'retail_sell_price_nz', 'trade_sell_price_nz', 'trade_sell_price_under_5m_nz',
+      'set_prices_manually',
     ],
     filters: { range_name: 'text', item_type: 'text' },
     order: 'code ASC NULLS LAST',

@@ -24,8 +24,17 @@
 //
 // Filtering is src/reports/filters.js's job; this module only says which
 // filters each source can honour and where the population starts.
+//
+// The line-grain read at the bottom is also served over HTTP as the
+// `revenue-lines` report — the orders behind every other report's figures — so
+// the file holds the scope, its two readers and the one report that is nothing
+// but a reader. Everything above the readers is the population and is shared;
+// a report edit must not reach it.
 
+import { defineColumns } from './access.js'
+import { dimensionCoverage } from './coverage.js'
 import { FILTER_COLUMNS, REPORT_FILTER_NAMES, buildReportFilters } from './filters.js'
+import { clampLimit, DEFAULT_ROW_LIMIT } from './limits.js'
 
 // The default revenue population, overridable by a `status` filter.
 //
@@ -234,13 +243,19 @@ const toRevenueLine = (row) =>
     line_value_cents: Number(row.line_value_cents),
   })
 
-// A report aggregates in SQL, so this line-grain read exists for the tests and
-// for a future line-level export. It is bounded for that reason: nothing here
-// should ever stream the whole ledger into memory by accident.
+// A report aggregates in SQL, so this line-grain read is the one that does not.
+// It is bounded for that reason: nothing here should ever stream the whole
+// ledger into memory by accident, and the `revenue-lines` report below inherits
+// the bound rather than being the exception to it.
 export const REVENUE_LINE_LIMIT = 1000
 
 /**
  * The scope's own rows, newest order first.
+ *
+ * `client` is a COALESCE and not a second join tree — the scope carries
+ * `user_id` and `guest_email` for exactly this, because an order is placed by an
+ * account or by a guest and never by both (the same read src/reports/not-invoiced.js
+ * makes of the same two columns).
  *
  * @param {import('pg').Pool} db
  * @param {object} [filters]
@@ -255,8 +270,10 @@ export const listRevenueLines = async (db, filters = {}, { limit } = {}) => {
 
   const { rows } = await db.query(
     `WITH ${cte}
-     SELECT * FROM ${SCOPE_NAME}
-      ORDER BY created_at DESC, order_id DESC, line_id
+     SELECT s.*, COALESCE(u.name, u.email, s.guest_email) AS client
+       FROM ${SCOPE_NAME} s
+       LEFT JOIN users u ON u.id = s.user_id
+      ORDER BY s.created_at DESC, s.order_id DESC, s.line_id
       LIMIT $${params.length + 1}`,
     [...params, capped]
   )
@@ -291,5 +308,202 @@ export const summariseRevenue = async (db, filters = {}) => {
     qty: Number(row.qty),
     value_cents: Number(row.value_cents),
     unpriced_lines: row.unpriced_lines,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// The report: the orders behind every other report's figures.
+//
+// Every other report in the library answers with an aggregate, and the office's
+// next question is always the same one — which orders is that made of. So this
+// one is the population itself, one row per line, selecting out of the same
+// scope so it cannot disagree with the totals it explains.
+//
+// Two things it does differently from its neighbours, both forced:
+//
+//   - IT IS CAPPED AT REVENUE_LINE_LIMIT, THE EXPORT INCLUDED. `limit: null` is
+//     the every-row contract everywhere else here, and this is the one report
+//     that must not honour it: an unbounded line-grain read of the ledger is
+//     precisely what that constant exists to prevent. `meta.truncated` and
+//     `meta.rows_total` say when the cap bit, and the coverage note says it in
+//     the file — a truncated CSV read as a complete one is the failure.
+//
+//   - IT NAMES THE CLIENT, which no aggregate report can. That is a COALESCE
+//     over the scope's own `user_id`/`guest_email` (see listRevenueLines), not a
+//     second join tree.
+//
+// `value_cents` is NOT a finance column, matching product performance: a sell
+// value is money and is not a cost, which is the distinction access.js draws and
+// the one the CRM's own policy already applies.
+
+export const REVENUE_LINES = 'revenue-lines'
+export const REVENUE_LINES_TITLE = 'Orders placed, line by line'
+
+export const REVENUE_LINES_COLUMNS = defineColumns([
+  { key: 'order_number', label: 'Order' },
+  { key: 'placed_at', label: 'Placed', kind: 'date' },
+  { key: 'status', label: 'Status' },
+  { key: 'kind', label: 'Kind' },
+  { key: 'client', label: 'Client' },
+  { key: 'brand_name', label: 'House' },
+  { key: 'product_name', label: 'Design' },
+  { key: 'sku', label: 'SKU' },
+  // A quantity needs its unit and a value needs its currency, the two rules
+  // every money report here lives by — so both ride on the row rather than being
+  // implied by the heading.
+  { key: 'product_type', label: 'Type' },
+  { key: 'currency', label: 'Currency' },
+  { key: 'qty', label: 'Quantity', kind: 'number' },
+  { key: 'value_cents', label: 'Value', kind: 'money' },
+])
+
+export const REVENUE_LINES_COVERAGE_NOTE =
+  'The order lines behind the revenue figures, newest first — live platform orders only. ' +
+  'Atelier’s historic Dynamics 365 sales are staged header-only, so no order placed before the ' +
+  'platform opened appears here at any grain. A request line is created with no price and the ' +
+  'invoice amount is typed into Xero by hand, so it contributes its quantity at nil value and ' +
+  `is counted under “unpriced lines”. This report is line-grain and is capped at ` +
+  `${REVENUE_LINE_LIMIT} rows, the export included: narrow the window or the house rather than ` +
+  'reading a truncated file as a complete one.'
+
+export const REVENUE_LINES_TOTALS_LABELS = Object.freeze({
+  order_number: 'All orders',
+  product_name: 'All lines',
+})
+
+// Over the whole population, never over the page that survived the cap — a
+// total that added up only the visible rows agrees with everything on screen and
+// is wrong.
+const summarySql = (cte) => `WITH ${cte}
+   SELECT COUNT(*)::int AS lines,
+          COUNT(*) FILTER (WHERE brand_code IS NOT NULL)::int AS with_brand_code,
+          COUNT(*) FILTER (WHERE product_range IS NOT NULL)::int AS with_range,
+          COUNT(DISTINCT order_id)::int AS orders,
+          COALESCE(SUM(qty), 0) AS qty,
+          -- Rounded at the aggregate, never per line: qty is numeric(12,2), so a
+          -- line can be worth 4997.5 cents and rounding each one multiplies the
+          -- error by the row count.
+          COALESCE(ROUND(SUM(line_value_cents)), 0) AS value_cents,
+          COUNT(*) FILTER (WHERE unpriced)::int AS unpriced_lines,
+          COALESCE(
+            array_agg(DISTINCT product_type) FILTER (WHERE product_type IS NOT NULL),
+            '{}'
+          ) AS product_types,
+          COALESCE(
+            array_agg(DISTINCT currency) FILTER (WHERE currency IS NOT NULL),
+            '{}'
+          ) AS currencies,
+          MIN(created_at) AS first_order_at,
+          MAX(created_at) AS last_order_at
+     FROM ${SCOPE_NAME}`
+
+// The scope's column names are the population's; the report's are the table's.
+// qty and line_value_cents arrive already coerced by toRevenueLine.
+const toRow = (line) =>
+  Object.freeze({
+    order_number: line.order_number,
+    placed_at: line.created_at,
+    status: line.status,
+    kind: line.kind,
+    client: line.client,
+    brand_name: line.brand_name,
+    product_name: line.product_name,
+    sku: line.sku,
+    product_type: line.product_type,
+    currency: line.currency,
+    qty: line.qty,
+    value_cents: line.line_value_cents,
+  })
+
+const isoOr = (value) => (value ? new Date(value).toISOString() : null)
+
+/**
+ * The totals row. The quantity is absent while the population holds both metres
+ * and units, and the value while it quotes more than one currency — the same two
+ * rules product performance applies, for the same reason: a projected row simply
+ * has no such key, which renders as a dash and exports as an empty cell.
+ */
+const totalsFrom = (summary) => {
+  const totals = { ...REVENUE_LINES_TOTALS_LABELS }
+  if (summary.product_types.length === 1) {
+    totals.product_type = summary.product_types[0]
+    totals.qty = Number(summary.qty)
+  }
+  if (summary.currencies.length <= 1) {
+    totals.currency = summary.currencies[0] ?? null
+    totals.value_cents = Number(summary.value_cents)
+  }
+  return Object.freeze(totals)
+}
+
+/**
+ * Build the revenue-lines report. One builder, so the export runs the same query
+ * as the table and the two cannot answer differently.
+ *
+ * @param {import('pg').Pool} db
+ * @param {object} [filters] output of parseReportFilters
+ * @param {{ limit?: number|null }} [options]
+ */
+export const revenueLinesReport = async (db, filters = {}, { limit } = {}) => {
+  // `limit: null` is the export's every-row contract, and this is the one report
+  // that answers it with the bound instead. clampLimit's own ceiling is the same
+  // number today; listRevenueLines re-applies REVENUE_LINE_LIMIT either way, so
+  // the cap holds even if the two constants ever part company.
+  const capped =
+    limit === null
+      ? REVENUE_LINE_LIMIT
+      : clampLimit(limit === undefined ? DEFAULT_ROW_LIMIT : limit)
+  const { cte, params } = buildRevenueScope(filters)
+
+  const [lines, summaryResult] = await Promise.all([
+    listRevenueLines(db, filters, { limit: capped }),
+    db.query(summarySql(cte), params),
+  ])
+
+  const summary = summaryResult.rows[0]
+  const rows = lines.map(toRow)
+
+  return Object.freeze({
+    report: REVENUE_LINES,
+    title: REVENUE_LINES_TITLE,
+    columns: REVENUE_LINES_COLUMNS,
+    rows,
+    totals: totalsFrom(summary),
+    meta: Object.freeze({
+      filters,
+      orders: summary.orders,
+      lines: summary.lines,
+      unpriced_lines: summary.unpriced_lines,
+      rows_total: summary.lines,
+      row_limit: capped,
+      // Said rather than implied: this report cannot answer with every row, so
+      // the flag is the difference between a page and the population.
+      truncated: rows.length < summary.lines,
+      currencies: Object.freeze([...summary.currencies]),
+      mixed_currency: summary.currencies.length > 1,
+      product_types: Object.freeze([...summary.product_types]),
+      mixed_units: summary.product_types.length > 1,
+      // Which lifecycle window the rows are of. A `status` filter replaces the
+      // default population rather than narrowing it, so an empty answer can be
+      // told from one outside the default.
+      statuses: filters.status ? Object.freeze([filters.status]) : REVENUE_STATUSES,
+      coverage: Object.freeze({
+        source: 'live platform order lines',
+        // The window the rows actually came from, not the one that was asked
+        // for — an empty population has neither.
+        from: isoOr(summary.first_order_at),
+        to: isoOr(summary.last_order_at),
+        requested_from: filters.from ?? null,
+        requested_to: filters.to ?? null,
+        historic_sales: 'header-only, not included',
+        row_cap: REVENUE_LINE_LIMIT,
+        dimensions: dimensionCoverage({
+          rows: summary.lines,
+          with_brand_code: summary.with_brand_code,
+          with_range: summary.with_range,
+        }),
+        note: REVENUE_LINES_COVERAGE_NOTE,
+      }),
+    }),
   })
 }

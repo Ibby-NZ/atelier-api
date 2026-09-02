@@ -146,13 +146,75 @@ describe('catalogue seed import', () => {
               (SELECT count(*)::int FROM collections c WHERE c.brand_id = b.id) AS collections
          FROM brands b
         WHERE b.slug = ANY($1)`,
-      [['alpaka', 'armani-casa', 'hamam', 'le-crin', 'the-vale-london']]
+      [['alpaka', 'armani-casa', 'fine', 'hamam', 'sette']]
     )
     expect(rows).toHaveLength(5)
     for (const row of rows) {
       expect(row.products).toBe(0)
       expect(row.collections).toBe(0)
     }
+  })
+
+  // Userback 8287655 / 8287611 / 8287607. The name is what the client asked to
+  // change; the slug is the brands upsert key and every storefront URL, so it
+  // deliberately still spells the house the old way.
+  it('renames the three houses the client asked for, without moving a slug', async () => {
+    const { rows } = await pool.query(
+      `SELECT slug, name FROM brands WHERE slug = ANY($1) ORDER BY slug`,
+      [['atelier-textiles-nz', 'kieffer', 'rubelli-venezia']]
+    )
+    expect(rows).toEqual([
+      { slug: 'atelier-textiles-nz', name: 'Atelier Brand' },
+      { slug: 'kieffer', name: 'Kieffer' },
+      { slug: 'rubelli-venezia', name: 'Rubelli' },
+    ])
+  })
+
+  // Userback 8287607 again: the house name had to leave the PRODUCT titles too.
+  // A finished good's slug is slugify(its own name) and that name spells the
+  // house out, so renaming the two cushions moves their slugs — which the
+  // migration moves ahead of this reseed. Asserted through the SKU (the
+  // colourway upsert key, which never moves) so it cannot pass by finding a
+  // duplicate the reseed inserted; the stale-slug check is the other half,
+  // because a missed move leaves the old product behind with no colourways.
+  it('renames the Kieffer cushions onto their moved slugs', async () => {
+    const { rows } = await pool.query(
+      `SELECT c.sku, p.slug, p.name
+         FROM products p JOIN colourways c ON c.product_id = p.id
+        WHERE c.sku = ANY($1)
+        ORDER BY c.sku`,
+      [['DOM-1021', 'DOM-1022']]
+    )
+    expect(rows).toEqual([
+      {
+        sku: 'DOM-1021',
+        slug: 'kieffer-rigatto-cushion-cover-blanc',
+        name: 'Kieffer Rigatto Cushion Cover - Blanc',
+      },
+      {
+        sku: 'DOM-1022',
+        slug: 'kieffer-rigatto-cushion-cover-mahogany',
+        name: 'Kieffer Rigatto Cushion Cover - Mahogany',
+      },
+    ])
+
+    const { rows: stale } = await pool.query(
+      `SELECT slug FROM products WHERE slug LIKE 'dominique-kieffer-%'`
+    )
+    expect(stale).toEqual([])
+  })
+
+  // Userback 8287607. Asserted as "not live" rather than "absent" because the
+  // two halves land differently: a fresh database never seeds these houses (the
+  // roster migration still creates three of them, which the archive migration
+  // then archives), while an already-seeded one keeps its rows archived. Either
+  // way none of the five may reach the public catalogue.
+  it('leaves no departed house live in the catalogue', async () => {
+    const { rows } = await pool.query(
+      `SELECT slug FROM brands WHERE slug = ANY($1) AND archived_at IS NULL`,
+      [['sahco', 'le-crin', 'timney-fowler', 'the-vale-london', 'brochier']]
+    )
+    expect(rows).toEqual([])
   })
 
   it('gives non-Atelier finished goods no retail price, house goods an indicative one', async () => {

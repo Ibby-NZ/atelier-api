@@ -116,7 +116,7 @@ export const designs = [
     ],
   },
   {
-    brand: 'Dominique Kieffer by Rubelli', supplier: 'Rubelli Venezia', design: 'Rigatto', currency: 'EUR',
+    brand: 'Kieffer', supplier: 'Rubelli Venezia', design: 'Rigatto', currency: 'EUR',
     composition: '54% Viscose / 34% Polyester / 12% Linen', width: '138cm', application: 'Upholstery', rubs: '30,000',
     priceBand: 'NZ$455 / m', status: 'In stock', statusTone: 'sage', ...pimg('Rigatto Cushion Cover - Blanc'),
     duty: null, retailMarkup: '×2.4', inHouse: false,
@@ -443,7 +443,7 @@ export const reporting = {
     { brand: 'Pierre Frey', fy: 'NZ$391,600', prev: 'NZ$332,900', yoy: '+17.6%', up: true },
     { brand: 'Manuel Canovas', fy: 'NZ$284,050', prev: 'NZ$261,400', yoy: '+8.7%', up: true },
     { brand: 'de Le Cuona', fy: 'NZ$201,880', prev: 'NZ$188,200', yoy: '+7.3%', up: true },
-    { brand: 'Rubelli Venezia', fy: 'NZ$182,340', prev: 'NZ$190,600', yoy: '−4.3%', up: false },
+    { brand: 'Rubelli', fy: 'NZ$182,340', prev: 'NZ$190,600', yoy: '−4.3%', up: false },
     { brand: 'Larsen', fy: 'NZ$156,720', prev: 'NZ$142,050', yoy: '+10.3%', up: true },
     { brand: 'Colefax & Fowler', fy: 'NZ$131,410', prev: 'NZ$124,800', yoy: '+5.3%', up: true },
     { brand: 'Jim Thompson', fy: 'NZ$98,600', prev: 'NZ$108,900', yoy: '−9.5%', up: false },
@@ -525,7 +525,7 @@ export const projectFolder = {
 // ---- price lists (My Account) ----------------------------------------------
 export const priceLists = [
   { brand: 'Pierre Frey' }, { brand: 'Manuel Canovas' }, { brand: 'Larsen' },
-  { brand: 'Rubelli Venezia' }, { brand: 'de Le Cuona' },
+  { brand: 'Rubelli' }, { brand: 'de Le Cuona' },
 ]
 
 // ---- recent trade orders (My Account) --------------------------------------

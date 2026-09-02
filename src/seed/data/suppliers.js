@@ -42,7 +42,7 @@ export const suppliers = [
     currency: 'EUR', agent: 'Mainfreight Air', incoterm: 'FCA',
     poEmail: 'export@rubelli.com', indicativeDefaults: true, freightDollar: 30,
     terms: { method: 'averaged', discountIncluded: false, list: 0.0, net: 0.05 },
-    brands: [{ name: 'Rubelli Venezia' }, { name: 'Dominique Kieffer by Rubelli' }],
+    brands: [{ name: 'Rubelli' }, { name: 'Kieffer' }],
   },
   {
     id: 'colefax-fowler', name: 'Colefax & Fowler', country: 'United Kingdom', city: 'London',

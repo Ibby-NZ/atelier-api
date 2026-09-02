@@ -209,7 +209,7 @@ describe('supplier backfill plan (real sources)', () => {
     const brands = [
       { id: 11, name: 'Fabricut', supplier_id: null },
       { id: 12, name: 'S. Harris', supplier_id: null },
-      { id: 13, name: 'Dominique Kieffer by Rubelli', supplier_id: null },
+      { id: 13, name: 'Kieffer', supplier_id: null },
     ]
     const { brandLinks, reports } = planSupplierBackfill({
       snapshot: SNAPSHOT,

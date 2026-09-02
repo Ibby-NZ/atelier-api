@@ -673,7 +673,7 @@ export const products = [
   "sku": "JAN-1020"
  },
  {
-  "name": "Dominique Kieffer by Rubelli Rigatto Cushion Cover - Blanc",
+  "name": "Kieffer Rigatto Cushion Cover - Blanc",
   "brand": "Kieffer",
   "design": "Rigatto",
   "type": "Cushion cover",
@@ -683,7 +683,7 @@ export const products = [
   "sku": "DOM-1021"
  },
  {
-  "name": "Dominique Kieffer by Rubelli Rigatto Cushion Cover - Mahogany",
+  "name": "Kieffer Rigatto Cushion Cover - Mahogany",
   "brand": "Kieffer",
   "design": "Rigatto",
   "type": "Cushion cover",

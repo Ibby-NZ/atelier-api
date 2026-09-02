@@ -11,6 +11,7 @@ import { getShippingQuote } from '../shipping/rates.js'
 import {
   canSeeTradeCatalogue,
   canSeeTradePricing,
+  LISTED_SKU_CONDITION,
   TRADE_CURRENCY,
 } from '../catalogue/visibility.js'
 
@@ -47,7 +48,11 @@ const CARD_PAYMENT_UNAVAILABLE =
 // — the cart takes a bare SKU, so anyone who ever saw one (or guessed it) could
 // transact on a represented house while signed out. It is answered with the
 // SAME 422 as an unknown SKU deliberately: a checkout error is not the place to
-// confirm which designs exist.
+// confirm which designs exist — nor that a house has left.
+//
+// `LISTED_SKU_CONDITION` is the published-and-unarchived gate the public read
+// models apply. Archiving a house does NOT unpublish its products, so without it
+// a departed maison's finished goods 404 on the storefront and still take money.
 export const validateCheckoutLines = async (
   pool,
   lines,
@@ -63,7 +68,6 @@ export const validateCheckoutLines = async (
               p.retail_price_cents,
               p.trade_price_cents,
               p.currency,
-              p.show_on_website,
               b.trade_only,
               i.qty_available,
               i.qty_reserved
@@ -71,11 +75,11 @@ export const validateCheckoutLines = async (
          JOIN products p ON p.id = c.product_id
          JOIN brands b ON b.id = p.brand_id
          LEFT JOIN inventory i ON i.colourway_id = c.id
-        WHERE c.sku = $1`,
+        WHERE c.sku = $1 AND ${LISTED_SKU_CONDITION}`,
       [sku]
     )
     const row = rows[0]
-    if (!row || !row.show_on_website || (row.trade_only && !includeTradeOnly)) {
+    if (!row || (row.trade_only && !includeTradeOnly)) {
       throw httpError(422, `No purchasable product for SKU "${sku}".`)
     }
     if (row.product_type === 'fabric') {

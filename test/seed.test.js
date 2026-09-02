@@ -170,6 +170,40 @@ describe('catalogue seed import', () => {
     ])
   })
 
+  // Userback 8287607 again: the house name had to leave the PRODUCT titles too.
+  // A finished good's slug is slugify(its own name) and that name spells the
+  // house out, so renaming the two cushions moves their slugs — which the
+  // migration moves ahead of this reseed. Asserted through the SKU (the
+  // colourway upsert key, which never moves) so it cannot pass by finding a
+  // duplicate the reseed inserted; the stale-slug check is the other half,
+  // because a missed move leaves the old product behind with no colourways.
+  it('renames the Kieffer cushions onto their moved slugs', async () => {
+    const { rows } = await pool.query(
+      `SELECT c.sku, p.slug, p.name
+         FROM products p JOIN colourways c ON c.product_id = p.id
+        WHERE c.sku = ANY($1)
+        ORDER BY c.sku`,
+      [['DOM-1021', 'DOM-1022']]
+    )
+    expect(rows).toEqual([
+      {
+        sku: 'DOM-1021',
+        slug: 'kieffer-rigatto-cushion-cover-blanc',
+        name: 'Kieffer Rigatto Cushion Cover - Blanc',
+      },
+      {
+        sku: 'DOM-1022',
+        slug: 'kieffer-rigatto-cushion-cover-mahogany',
+        name: 'Kieffer Rigatto Cushion Cover - Mahogany',
+      },
+    ])
+
+    const { rows: stale } = await pool.query(
+      `SELECT slug FROM products WHERE slug LIKE 'dominique-kieffer-%'`
+    )
+    expect(stale).toEqual([])
+  })
+
   // Userback 8287607. Asserted as "not live" rather than "absent" because the
   // two halves land differently: a fresh database never seeds these houses (the
   // roster migration still creates three of them, which the archive migration

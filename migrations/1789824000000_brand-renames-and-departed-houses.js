@@ -17,15 +17,17 @@
  *    public storefront: `listBrands` filters `archived_at IS NULL` and
  *    `src/catalogue/products.js` hides every product under an archived house.
  *
- * 2. One product slug moves. "Dominique Kieffer by Rubelli" is renamed to
- *    "Kieffer" in the seed data, and a fabric's slug is `slugify(brand name +
- *    design)` (`src/seed/catalogue-data.js`), so the next reseed would INSERT
- *    `kieffer-rigatto` beside the existing `dominique-kieffer-by-rubelli-rigatto`
- *    and move its two colourways onto the new row — leaving a live, website-
- *    visible design with no SKUs behind it. Moving the slug first makes the
- *    reseed land on the row that is already there. The brand renames themselves
- *    need no statement here: `upsertBrands` writes `name = EXCLUDED.name`, so
- *    `npm run seed` carries all three.
+ * 2. Three product slugs move, all of them Kieffer's. "Dominique Kieffer by
+ *    Rubelli" is renamed to "Kieffer" in the seed data, and a product's slug is
+ *    derived from that name — `slugify(brand name + design)` for a fabric,
+ *    `slugify(product name)` for a finished good, whose title carries the house
+ *    (`src/seed/catalogue-data.js`). So the next reseed would INSERT each new
+ *    slug beside the old row and move its colourways onto it, leaving a live,
+ *    website-visible product with no SKUs behind it. Moving the slugs first
+ *    makes the reseed land on the rows that are already there, renaming them.
+ *    The brand renames themselves need no statement here: `upsertBrands` writes
+ *    `name = EXCLUDED.name`, so `npm run seed` carries all three — and the
+ *    products' own names ride the same `DO UPDATE` once the slug matches.
  *
  * Run order is therefore `npm run migrate && npm run seed`, as ever.
  *
@@ -45,11 +47,25 @@ const DEPARTED_HOUSE_SLUGS = [
   'brochier',
 ]
 
-const OLD_KIEFFER_PRODUCT_SLUG = 'dominique-kieffer-by-rubelli-rigatto'
-const NEW_KIEFFER_PRODUCT_SLUG = 'kieffer-rigatto'
+// [from, to] — the fabric design, then the two cushion covers whose titles spell
+// the house out in full.
+const KIEFFER_PRODUCT_SLUG_MOVES = [
+  ['dominique-kieffer-by-rubelli-rigatto', 'kieffer-rigatto'],
+  [
+    'dominique-kieffer-by-rubelli-rigatto-cushion-cover-blanc',
+    'kieffer-rigatto-cushion-cover-blanc',
+  ],
+  [
+    'dominique-kieffer-by-rubelli-rigatto-cushion-cover-mahogany',
+    'kieffer-rigatto-cushion-cover-mahogany',
+  ],
+]
 
-const moveProductSlug = (pgm, from, to) =>
-  pgm.db.query(`UPDATE products SET slug = $2 WHERE slug = $1`, [from, to])
+const moveProductSlugs = async (pgm, moves) => {
+  for (const [from, to] of moves) {
+    await pgm.db.query(`UPDATE products SET slug = $2 WHERE slug = $1`, [from, to])
+  }
+}
 
 /**
  * @param pgm {import('node-pg-migrate').MigrationBuilder}
@@ -60,12 +76,12 @@ export const up = async (pgm) => {
       WHERE slug = ANY($1) AND archived_at IS NULL`,
     [DEPARTED_HOUSE_SLUGS]
   )
-  await moveProductSlug(pgm, OLD_KIEFFER_PRODUCT_SLUG, NEW_KIEFFER_PRODUCT_SLUG)
+  await moveProductSlugs(pgm, KIEFFER_PRODUCT_SLUG_MOVES)
 }
 
 /**
- * Puts the five houses back on the public storefront and the design back under
- * its old slug.
+ * Puts the five houses back on the public storefront and the three designs back
+ * under their old slugs.
  *
  * A house someone archived in the CRM for a reason of their own is un-archived
  * along with them — the column records no reason, so the five slugs are all
@@ -74,7 +90,10 @@ export const up = async (pgm) => {
  * @param pgm {import('node-pg-migrate').MigrationBuilder}
  */
 export const down = async (pgm) => {
-  await moveProductSlug(pgm, NEW_KIEFFER_PRODUCT_SLUG, OLD_KIEFFER_PRODUCT_SLUG)
+  await moveProductSlugs(
+    pgm,
+    KIEFFER_PRODUCT_SLUG_MOVES.map(([from, to]) => [to, from])
+  )
   await pgm.db.query(
     `UPDATE brands SET archived_at = NULL
       WHERE slug = ANY($1) AND archived_at IS NOT NULL`,

@@ -440,6 +440,144 @@ describe('trade-gated catalogue (brands.trade_only)', () => {
     })
   })
 
+  // Userback 8287607 archived five departed houses, and archiving a BRAND does
+  // not cascade `show_on_website = false` onto its products: the storefront 404s
+  // the design while both transactional paths still resolved its SKU, reserved
+  // the stock, and (for a priced finished good) would have taken the money.
+  describe('an archived row closes the transactional paths too', () => {
+    // Its own app instance: the rate-limit store is per instance, and
+    // `POST /orders/request` allows 10 per 15 min per IP — the block above has
+    // already spent three of the shared app's.
+    let storeApp
+
+    const archiveOpenHouse = (archived) =>
+      pool.query(
+        `UPDATE brands SET archived_at = ${archived ? 'now()' : 'NULL'} WHERE slug = $1`,
+        [OPEN_SLUG]
+      )
+
+    const archiveOpenColourway = (archived) =>
+      pool.query(
+        `UPDATE colourways SET archived_at = ${archived ? 'now()' : 'NULL'} WHERE sku = $1`,
+        [OPEN_SKU]
+      )
+
+    const reservedFor = async (sku) => {
+      const { rows } = await pool.query(
+        `SELECT i.qty_reserved
+           FROM inventory i JOIN colourways c ON c.id = i.colourway_id
+          WHERE c.sku = $1`,
+        [sku]
+      )
+      return Number(rows[0].qty_reserved)
+    }
+
+    const requestOpenSku = (cookie) =>
+      post(
+        storeApp,
+        '/orders/request',
+        {
+          lines: [{ sku: OPEN_SKU, qty_metres: 2 }],
+          ...(cookie ? {} : { contact: { email: testEmail('guest') } }),
+        },
+        cookie
+      )
+
+    beforeAll(async () => {
+      storeApp = buildApp({
+        pool,
+        cookieSecret: TEST_COOKIE_SECRET,
+        logger: false,
+        stripe: {
+          checkout: {
+            sessions: {
+              create: async () => ({
+                id: 'cs_archived',
+                url: 'https://stripe.test/archived',
+              }),
+            },
+          },
+        },
+        storeBaseUrl: 'https://store.test',
+      })
+      await storeApp.ready()
+    })
+
+    afterAll(async () => {
+      await storeApp.close()
+    })
+
+    it('refuses an order request under an archived house, reserving nothing', async () => {
+      const before = await reservedFor(OPEN_SKU)
+      await archiveOpenHouse(true)
+      try {
+        // The contradiction this closes: the storefront already 404s the design.
+        expect((await get(app, `/catalogue/products/${OPEN_PRODUCT}`)).statusCode).toBe(404)
+
+        const response = await requestOpenSku(undefined)
+        expect(response.statusCode).toBe(422)
+        // Same wording as an unknown SKU — the refusal must not tell a customer
+        // the house has left.
+        expect(response.json().message).toBe(`No product available for SKU "${OPEN_SKU}".`)
+        expect(JSON.stringify(response.json())).not.toMatch(/archiv|Gate Open House/i)
+      } finally {
+        await archiveOpenHouse(false)
+      }
+      expect(await reservedFor(OPEN_SKU)).toBe(before)
+    })
+
+    it('refuses approved trade and back office as well — this is not the trade gate', async () => {
+      await archiveOpenHouse(true)
+      try {
+        for (const who of ['trader', 'staff']) {
+          const response = await requestOpenSku(cookies[who])
+          expect(response.statusCode, who).toBe(422)
+        }
+      } finally {
+        await archiveOpenHouse(false)
+      }
+    })
+
+    it('refuses card checkout for a priced good under an archived house', async () => {
+      await archiveOpenHouse(true)
+      try {
+        const response = await post(storeApp, '/checkout/session', {
+          lines: [{ sku: OPEN_GOOD_SKU, qty: 1 }],
+          zone: 'gate-zone',
+        })
+        expect(response.statusCode).toBe(422)
+        expect(response.json().message).toBe(
+          `No purchasable product for SKU "${OPEN_GOOD_SKU}".`
+        )
+      } finally {
+        await archiveOpenHouse(false)
+      }
+
+      const allowed = await post(storeApp, '/checkout/session', {
+        lines: [{ sku: OPEN_GOOD_SKU, qty: 1 }],
+        zone: 'gate-zone',
+      })
+      expect(allowed.statusCode).toBe(200)
+    })
+
+    it('refuses a SKU whose colourway alone was archived', async () => {
+      // Archiving a colourway takes the SKU off the detail page and out of the
+      // swatch strip; the cart and the order request still resolved it.
+      await archiveOpenColourway(true)
+      try {
+        const response = await requestOpenSku(undefined)
+        expect(response.statusCode).toBe(422)
+      } finally {
+        await archiveOpenColourway(false)
+      }
+    })
+
+    it('still accepts the same SKU once nothing is archived', async () => {
+      const response = await requestOpenSku(undefined)
+      expect(response.statusCode).toBe(201)
+    })
+  })
+
   describe('the flag is administrable', () => {
     it('opens a house from the back office and the public grid follows', async () => {
       const { rows } = await pool.query('SELECT id FROM brands WHERE slug = $1', [

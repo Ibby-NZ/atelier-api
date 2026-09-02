@@ -59,3 +59,15 @@ export const TRADE_CURRENCY = 'NZD'
 // SKU-resolving transactional paths (checkout, order request). `b` is the
 // brands alias every one of those queries already uses.
 export const PUBLIC_BRAND_CONDITION = 'b.trade_only = false'
+
+// SQL predicate for "a SKU still on the storefront", mirroring what the public
+// read models filter on (`products.js`, `product-detail.js`). The two
+// SKU-resolving transactional paths must apply it as well or they sell what the
+// storefront 404s: archiving a BRAND does not cascade `show_on_website = false`
+// onto its products, so a departed house's designs stay flagged visible and
+// only `b.archived_at` closes them — and the same holds for a colourway
+// archived on its own, whose SKU vanishes from the detail page and the swatch
+// strip while still resolving here. `c`/`p`/`b` are the colourways/products/
+// brands aliases both of those queries already use.
+export const LISTED_SKU_CONDITION =
+  'p.show_on_website = true AND p.archived_at IS NULL AND b.archived_at IS NULL AND c.archived_at IS NULL'

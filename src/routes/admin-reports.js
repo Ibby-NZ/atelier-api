@@ -48,6 +48,7 @@ import {
 } from '../reports/product-performance.js'
 import { stockReport } from '../reports/stock.js'
 import { notInvoicedReport } from '../reports/not-invoiced.js'
+import { revenueLinesReport } from '../reports/revenue-lines.js'
 import { DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT } from '../reports/limits.js'
 
 // Generous for a screen that re-reads on every filter change, tight enough that
@@ -211,4 +212,8 @@ export const adminReportRoutes = async (app, { pool }) => {
   })
   registerReport('/admin/reports/stock', stockReport)
   registerReport('/admin/reports/not-invoiced', notInvoicedReport)
+  // The orders behind the other three. It is the one report whose export is
+  // still capped (REVENUE_LINE_LIMIT) — see src/reports/revenue-lines.js — and
+  // it needs no other special case here.
+  registerReport('/admin/reports/revenue-lines', revenueLinesReport)
 }

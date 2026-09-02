@@ -11,7 +11,14 @@ import {
   ORDER_STATUSES,
   parseReportFilters,
 } from '../src/reports/filters.js'
-import { listRevenueLines, summariseRevenue } from '../src/reports/revenue-lines.js'
+import {
+  listRevenueLines,
+  summariseRevenue,
+  revenueLinesReport,
+  REVENUE_LINES_COLUMNS,
+  REVENUE_LINES_TITLE,
+  REVENUE_LINE_LIMIT,
+} from '../src/reports/revenue-lines.js'
 import { loadReportAccess } from '../src/reports/access.js'
 import {
   productPerformanceReport,
@@ -1967,6 +1974,372 @@ describe('W5-US-008 — report_access on /auth/me', () => {
         reports: true,
         finance: false,
       })
+    })
+  })
+})
+
+// Userback 8287873 — "for the reports, we should be able to click and see what
+// orders were placed". The aggregate reports answer "how much"; this one is the
+// population itself, so the office can read the orders behind a figure.
+//
+// It is registered through the same registerReport helper as the other three, so
+// what needs proving here is what that helper cannot give it: the row shape, the
+// filters reaching the shared scope, the REVENUE_LINE_LIMIT bound surviving the
+// export's every-row contract, and masking still running over a report that
+// declares no finance column.
+//
+// The CSV is fetched ONCE in beforeAll: the export bucket is 10/min, so a
+// per-test download would spend it and surface as a 429 somewhere unrelated.
+describe('Userback 8287873 — the orders behind the numbers', () => {
+  let pool
+  let app
+  let backofficeCookie
+  let customerCookie
+  let csv
+
+  const PATH = '/admin/reports/revenue-lines'
+  const SCOPE_QUERY = HOUSES.map((slug) => `brand=${slug}`).join('&')
+
+  const CLIENT_NAME = `${PREFIX} Drill Co`
+  const CLIENT_EMAIL = `${PREFIX}-lines-client@example.test`
+  const BOSS_EMAIL = `${PREFIX}-lines-boss@example.test`
+  const SHOPPER_EMAIL = `${PREFIX}-lines-shopper@example.test`
+  const GOODS_SKU = `${PREFIX}-SKU-CUSH`
+
+  const request = (query = '', cookie = backofficeCookie) =>
+    app.inject({
+      method: 'GET',
+      url: `${PATH}?${SCOPE_QUERY}${query}`,
+      headers: cookie ? { cookie } : {},
+    })
+
+  const payloadOf = async (query = '') => JSON.parse((await request(query)).body)
+
+  const sessionCookieFrom = (response) => {
+    const setCookie = response.headers['set-cookie']
+    const header = Array.isArray(setCookie) ? setCookie[0] : setCookie
+    return header.split(';')[0]
+  }
+
+  const orderNumbersOf = (report) => report.rows.map((row) => row.order_number)
+  const rowFor = (report, suffix) =>
+    report.rows.find((row) => row.order_number === `${ORDER_PREFIX}-${suffix}`)
+
+  // created_at is timestamptz and the fixture writes wall-clock times, so what an
+  // instant reads as depends on the session's timezone. Only the row the database
+  // actually holds survives a machine set to something other than this one.
+  const placedAtOf = (suffix) =>
+    pool
+      .query('SELECT created_at FROM orders WHERE order_number = $1', [
+        `${ORDER_PREFIX}-${suffix}`,
+      ])
+      .then(({ rows }) => new Date(rows[0].created_at).toISOString())
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    await runMigrations(config.databaseUrl)
+    pool = createPool(config.databaseUrl)
+    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+    await app.ready()
+
+    await cleanReports(pool)
+    await cleanup(pool)
+
+    const boss = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: BOSS_EMAIL, password: PASSWORD, name: 'Boss' },
+    })
+    backofficeCookie = sessionCookieFrom(boss)
+    await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [BOSS_EMAIL])
+
+    const shopper = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: SHOPPER_EMAIL, password: PASSWORD },
+    })
+    customerCookie = sessionCookieFrom(shopper)
+
+    const fixture = await insertFixture(pool)
+
+    // A finished good sold to an ACCOUNT: the population then holds two units
+    // (so the totals row has to decline to add them) and one line whose client
+    // is a user record rather than a guest email.
+    const { rows: clientRows } = await pool.query(
+      `INSERT INTO users (email, password_hash, name, role)
+       VALUES ($1, 'not-a-real-hash', $2, 'trade') RETURNING id`,
+      [CLIENT_EMAIL, CLIENT_NAME]
+    )
+    const { rows: goodsRows } = await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website)
+       VALUES ($1, $2, $3, 'finished_good', 'NZD', true) RETURNING id`,
+      [fixture.houseId, `${PREFIX} Drill Cushion`, `${PREFIX}-drill-cushion`]
+    )
+    const { rows: goodsColourway } = await pool.query(
+      `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Ivory', $2) RETURNING id`,
+      [goodsRows[0].id, GOODS_SKU]
+    )
+    const { rows: accountOrder } = await pool.query(
+      `INSERT INTO orders (order_number, kind, status, user_id, created_at)
+       VALUES ($1, 'checkout', 'paid', $2, '2026-03-18 09:00:00'::timestamptz)
+       RETURNING id`,
+      [`${ORDER_PREFIX}-ACCT`, clientRows[0].id]
+    )
+    await pool.query(
+      `INSERT INTO order_lines (order_id, colourway_id, qty, unit_price_cents)
+       VALUES ($1, $2, '1.00', 5000)`,
+      [accountOrder[0].id, goodsColourway[0].id]
+    )
+
+    csv = await app.inject({
+      method: 'GET',
+      url: `${PATH}/export.csv?${SCOPE_QUERY}`,
+      headers: { cookie: backofficeCookie },
+    })
+  })
+
+  afterAll(async () => {
+    await cleanReports(pool)
+    await cleanup(pool)
+    await app.close()
+    await pool.end()
+  })
+
+  describe('access', () => {
+    it('refuses an anonymous caller with 401 and a customer with 403', async () => {
+      expect((await request('', null)).statusCode).toBe(401)
+      expect((await request('', customerCookie)).statusCode).toBe(403)
+    })
+
+    // A line-grain read of the order ledger, so it meters like its neighbours.
+    it('meters the table, and its export more tightly', async () => {
+      const table = await request()
+
+      expect(table.headers['x-ratelimit-limit']).toBeDefined()
+      expect(Number(csv.headers['x-ratelimit-limit'])).toBeLessThan(
+        Number(table.headers['x-ratelimit-limit'])
+      )
+    })
+  })
+
+  describe('the table', () => {
+    it('lists the population one line at a time, newest order first', async () => {
+      const report = await payloadOf()
+
+      expect(report.report).toBe('revenue-lines')
+      expect(report.title).toBe(REVENUE_LINES_TITLE)
+      expect(report.columns).toEqual(REVENUE_LINES_COLUMNS.map((column) => ({ ...column })))
+      // CHK and OTH share an instant, so the tie falls to order_id DESC — the
+      // second order placed that minute comes first.
+      expect(orderNumbersOf(report)).toEqual([
+        `${ORDER_PREFIX}-ACCT`,
+        `${ORDER_PREFIX}-SHP`,
+        `${ORDER_PREFIX}-OTH`,
+        `${ORDER_PREFIX}-CHK`,
+      ])
+    })
+
+    it('carries the order, the design and what the line was worth', async () => {
+      const report = await payloadOf()
+
+      expect(rowFor(report, 'CHK')).toEqual({
+        order_number: `${ORDER_PREFIX}-CHK`,
+        placed_at: await placedAtOf('CHK'),
+        status: 'paid',
+        kind: 'checkout',
+        client: `${PREFIX}@example.test`,
+        brand_name: `${PREFIX} House`,
+        product_name: `${PREFIX} Design`,
+        sku: `${PREFIX}-SKU-1`,
+        product_type: 'fabric',
+        currency: 'NZD',
+        qty: 2,
+        value_cents: 20000,
+      })
+    })
+
+    // The one thing an aggregate report cannot say. It is a COALESCE over the
+    // scope's own two columns: an order is placed by an account or by a guest.
+    it('names the account that placed the order, and the guest email otherwise', async () => {
+      const report = await payloadOf()
+
+      expect(rowFor(report, 'ACCT').client).toBe(CLIENT_NAME)
+      expect(rowFor(report, 'SHP').client).toBe(`${PREFIX}@example.test`)
+    })
+
+    // A request line is in the population at nil value: dropped it would
+    // understate the metreage cut, counted as money it would understate the
+    // average price.
+    it('shows a request line at its quantity and no value, and counts it', async () => {
+      const report = await payloadOf()
+
+      expect(rowFor(report, 'SHP')).toMatchObject({
+        kind: 'order_request',
+        status: 'shipped',
+        qty: 3,
+        value_cents: 0,
+      })
+      expect(report.meta.unpriced_lines).toBe(1)
+      expect(report.meta.lines).toBe(4)
+      expect(report.meta.orders).toBe(4)
+    })
+
+    it('leaves out the archived order and everything outside the default population', async () => {
+      const report = await payloadOf()
+
+      for (const suffix of ['ARC', 'REQ', 'DEC']) {
+        expect(orderNumbersOf(report)).not.toContain(`${ORDER_PREFIX}-${suffix}`)
+      }
+      expect(report.meta.statuses).toEqual(['paid', 'shipped'])
+    })
+  })
+
+  // The filters are the shared layer's, and the route's own FILTER_PROPERTIES is
+  // what lets them through — Ajv's removeAdditional strips a property that object
+  // does not name, so a filter missing from it would answer 200 having filtered
+  // nothing. These assert through the ROUTE for that reason.
+  describe('the filters', () => {
+    it('narrows to one house', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `${PATH}?brand=${PREFIX}-other`,
+        headers: { cookie: backofficeCookie },
+      })
+
+      expect(orderNumbersOf(JSON.parse(response.body))).toEqual([`${ORDER_PREFIX}-OTH`])
+    })
+
+    it('narrows to a product type, a kind and a collection', async () => {
+      const fabric = await payloadOf('&product_type=fabric')
+      const requests = await payloadOf('&kind=order_request')
+      const collected = await payloadOf(`&collection=${PREFIX}-season`)
+
+      expect(fabric.meta.lines).toBe(3)
+      expect(orderNumbersOf(requests)).toEqual([`${ORDER_PREFIX}-SHP`])
+      expect(orderNumbersOf(collected)).toEqual([`${ORDER_PREFIX}-CHK`])
+    })
+
+    // A status filter REPLACES the default population rather than narrowing it,
+    // so asking for requested orders answers with the one that was requested.
+    it('replaces the default population with a status filter', async () => {
+      const report = await payloadOf('&status=requested')
+
+      expect(orderNumbersOf(report)).toEqual([`${ORDER_PREFIX}-REQ`])
+      expect(report.meta.statuses).toEqual(['requested'])
+    })
+
+    it('honours the date range, last day included', async () => {
+      const report = await payloadOf('&from=2026-03-15&to=2026-03-16')
+
+      expect(orderNumbersOf(report)).toEqual([
+        `${ORDER_PREFIX}-SHP`,
+        `${ORDER_PREFIX}-OTH`,
+        `${ORDER_PREFIX}-CHK`,
+      ])
+      expect(report.meta.coverage.requested_to).toBe('2026-03-16')
+    })
+
+    it('400s a filter value it cannot use rather than reporting nothing', async () => {
+      expect((await request('&brand=Pierre%20Frey')).statusCode).toBe(400)
+    })
+  })
+
+  // The bound is the reason this read was never routed before. It has to survive
+  // the export's every-row contract, or the one report that reads the ledger line
+  // by line is the one with no ceiling.
+  describe('the row bound', () => {
+    it('pages the table and still totals the whole population', async () => {
+      const report = await payloadOf('&limit=1')
+
+      expect(report.rows).toHaveLength(1)
+      expect(report.meta.truncated).toBe(true)
+      expect(report.meta.rows_total).toBe(4)
+      expect(report.meta.row_limit).toBe(1)
+      expect(report.totals.value_cents).toBe(125000)
+    })
+
+    it('answers the export’s every-row contract with the cap, never with no cap', async () => {
+      const report = await revenueLinesReport(pool, scoped(), { limit: null })
+
+      expect(report.meta.row_limit).toBe(REVENUE_LINE_LIMIT)
+      expect(report.meta.truncated).toBe(false)
+      expect(report.rows).toHaveLength(4)
+    })
+
+    it('still refuses an over-large limit at the schema rather than clamping it', async () => {
+      expect((await request(`&limit=${MAX_ROW_LIMIT + 1}`)).statusCode).toBe(400)
+    })
+  })
+
+  describe('the totals row', () => {
+    // Metres and units do not add, the same rule every other report here applies.
+    it('omits the quantity while the population holds two units', async () => {
+      const report = await payloadOf()
+
+      expect(report.meta.mixed_units).toBe(true)
+      expect(report.meta.mixed_currency).toBe(false)
+      expect(report.totals).toEqual({
+        order_number: 'All orders',
+        product_name: 'All lines',
+        currency: 'NZD',
+        value_cents: 125000,
+      })
+    })
+
+    it('adds it once a filter leaves one unit in the population', async () => {
+      const report = await payloadOf('&product_type=fabric')
+
+      expect(report.totals).toMatchObject({ product_type: 'fabric', qty: 9, value_cents: 120000 })
+    })
+  })
+
+  // Masking runs over every report on these routes, including one that declares
+  // no finance column — it is what puts meta.masked_columns on the payload, and a
+  // route that skipped it would be the one shipping a finance column silently the
+  // day this report declares one.
+  it('is served whole to a back-office login with no finance grant', async () => {
+    const report = await payloadOf()
+
+    expect(report.meta.masked_columns).toEqual([])
+    expect(report.columns).toHaveLength(REVENUE_LINES_COLUMNS.length)
+    expect(Object.keys(report.rows[0])).toEqual(REVENUE_LINES_COLUMNS.map((column) => column.key))
+  })
+
+  describe('the export', () => {
+    it('serves a CSV attachment named after the report', () => {
+      expect(csv.statusCode).toBe(200)
+      expect(csv.headers['content-disposition']).toBe(
+        'attachment; filename="atelier-revenue-lines.csv"'
+      )
+    })
+
+    it('takes its header from the report’s own columns', () => {
+      expect(csv.body.split('\r\n')[0]).toBe(
+        REVENUE_LINES_COLUMNS.map((column) => column.label).join(',')
+      )
+    })
+
+    it('carries every row rather than the table’s page', async () => {
+      const page = await payloadOf('&limit=1')
+      const lines = csv.body.split('\r\n')
+
+      expect(page.rows).toHaveLength(1)
+      // Header, four lines, the totals row, then the notes block.
+      expect(lines.slice(1, lines.indexOf('') - 1)).toHaveLength(4)
+    })
+
+    // A money column is written in UNITS: 20000 under a heading of "Value" is a
+    // wrong figure to every human who opens it.
+    it('writes the money in units and the totals beside them', () => {
+      expect(csv.body).toContain(',200.00')
+      expect(csv.body).toContain(',1250.00')
+    })
+
+    // The file is the copy that leaves the building, and this is the one report
+    // whose file can be short of the population.
+    it('states its coverage and its own ceiling in the file', () => {
+      expect(csv.body).toContain('Coverage')
+      expect(csv.body).toContain(`capped at ${REVENUE_LINE_LIMIT} rows`)
     })
   })
 })

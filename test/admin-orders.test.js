@@ -1062,6 +1062,80 @@ describe('back-office order management', () => {
     })
   })
 
+  describe('sales rep attribution (A6 groundwork)', () => {
+    // The rep is an ANNOTATION: staff-asserted, movable at any status —
+    // back-filling a shipped order is exactly the ask — and never derived from
+    // the legacy owner column (72% shared logins).
+    let repId
+
+    beforeAll(async () => {
+      const { rows } = await pool.query(
+        `INSERT INTO users (email, password_hash, name, role)
+         VALUES ($1, 'x', 'Rebecca Rep', 'backoffice')
+         ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name
+         RETURNING id`,
+        [testEmail('rep')]
+      )
+      repId = rows[0].id
+    })
+
+    it('sets, serves and clears the rep on a requested order', async () => {
+      const order = await placeRequest()
+      const patched = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+        sales_rep_user_id: repId,
+      })
+      expect(patched.statusCode).toBe(200)
+      expect(patched.json().order.sales_rep_user_id).toBe(repId)
+      expect(patched.json().order.sales_rep_name).toBe('Rebecca Rep')
+
+      const cleared = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+        sales_rep_user_id: null,
+      })
+      expect(cleared.json().order.sales_rep_user_id).toBeNull()
+      expect(cleared.json().order.sales_rep_name).toBeNull()
+    })
+
+    it('is assignable on a SHIPPED order — the annotation posture', async () => {
+      const order = await placeRequest()
+      await pool.query(`UPDATE orders SET status = 'shipped' WHERE id = $1`, [order.id])
+      const patched = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+        sales_rep_user_id: repId,
+      })
+      expect(patched.statusCode).toBe(200)
+      expect(patched.json().order.sales_rep_user_id).toBe(repId)
+    })
+
+    it('refuses a non-staff id and an unknown one as a 422, not an FK 500', async () => {
+      const order = await placeRequest()
+      const { rows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [
+        testEmail('shopper'),
+      ])
+      const customer = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+        sales_rep_user_id: rows[0].id,
+      })
+      expect(customer.statusCode).toBe(422)
+
+      const unknown = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+        sales_rep_user_id: 99999999,
+      })
+      expect(unknown.statusCode).toBe(422)
+    })
+
+    it('travels on a manual order create; a storefront request stays unassigned', async () => {
+      const created = await inject('POST', '/admin/orders', backofficeCookie, {
+        contact: { name: 'Walk-in' },
+        lines: [{ colourway_id: colourwayId.get(SKU.inStock), qty: 2, unit_price_cents: 5000 }],
+        sales_rep_user_id: repId,
+      })
+      expect(created.statusCode).toBe(201)
+      expect(created.json().order.sales_rep_user_id).toBe(repId)
+
+      const request = await placeRequest()
+      const read = await inject('GET', `/admin/orders/${request.id}`, backofficeCookie)
+      expect(read.json().order.sales_rep_user_id).toBeNull()
+    })
+  })
+
   describe('not found', () => {
     it('returns 404 for an unknown order id', async () => {
       const response = await inject('GET', '/admin/orders/99999999', backofficeCookie)

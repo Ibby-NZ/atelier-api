@@ -166,9 +166,33 @@ export const getTradeAccount = async (pool, id) => {
   if (!row) {
     return null
   }
-  const usersByAccount = await loadUsersByAccountId(pool, [row.id])
+  const [usersByAccount, { rows: contactRows }, { rows: peopleRows }] = await Promise.all([
+    loadUsersByAccountId(pool, [row.id]),
+    pool.query(
+      `SELECT id, name, role, email, phone, note, created_at, updated_at
+         FROM trade_account_contacts
+        WHERE trade_account_id = $1
+        ORDER BY name ASC, id ASC`,
+      [row.id]
+    ),
+    // The Dynamics people behind this company, READ-ONLY, matched the same way
+    // the coverage counts are (the exports carry the company as a display name,
+    // not a key — so a shared name unions same-named companies; staff-facing,
+    // and the ambiguity flag already warns about exactly that). The projection
+    // is a WHITELIST: names and reachability only — never the credit /
+    // do-not-contact / GDPR columns the staged row also carries.
+    pool.query(
+      `SELECT c.full_name, c.job_title, c.email, c.mobile_phone, c.business_phone
+         FROM legacy_contacts c
+        WHERE lower(btrim(c.company_name)) = lower(btrim($1))
+        ORDER BY c.full_name ASC`,
+      [row.legacy_customer_name]
+    ),
+  ])
   return {
     ...toTradeAccount(row, usersByAccount.get(row.id) ?? []),
+    contacts: contactRows.map((contact) => Object.freeze({ ...contact })),
+    d365_people: peopleRows.map((person) => Object.freeze({ ...person })),
     coverage: {
       invoices: Number(row.invoice_count),
       samples: Number(row.sample_count),
@@ -177,20 +201,24 @@ export const getTradeAccount = async (pool, id) => {
 }
 
 /**
- * Grant a login access to a D365 customer's history.
+ * Grant a login access to a D365 customer's history — or, with no `userId`,
+ * create the company row BARE so its contact book can exist before any login
+ * does. The GUID is unique, so a later real link upserts onto the same row and
+ * contacts survive it; a bare row grants nobody portal access, because the
+ * viewer CTE keys off the grant and fails closed.
  *
  * One transaction: resolve the account (422 if the GUID is not a staged D365
  * account), work out whether its name is shared, upsert the trade_accounts row,
- * then insert the grant. Re-linking the same pair is a no-op rather than a 409 —
- * the operation is "this person belongs to this company", which is either true
- * or it is not.
+ * then insert the grant (skipped entirely when bare). Re-linking the same pair
+ * is a no-op rather than a 409 — the operation is "this person belongs to this
+ * company", which is either true or it is not.
  *
  * @param {import('pg').Pool} pool
- * @param {{ legacyAccountGuid: string, userId: number, linkedByUserId?: number|null }} input
+ * @param {{ legacyAccountGuid: string, userId?: number|null, linkedByUserId?: number|null }} input
  */
 export const linkTradeAccount = async (
   pool,
-  { legacyAccountGuid, userId, linkedByUserId = null }
+  { legacyAccountGuid, userId = null, linkedByUserId = null }
 ) => {
   const tradeAccountId = await withLinkTxn(pool, { legacyAccountGuid, userId, linkedByUserId })
   // Read back on the pool, outside the transaction: getTradeAccount runs the
@@ -223,19 +251,23 @@ const withLinkTxn = async (pool, { legacyAccountGuid, userId, linkedByUserId }) 
       throw httpError(422, 'That Dynamics account has no name, so its history cannot be matched.')
     }
 
-    const { rows: userRows } = await client.query(
-      `SELECT id, role FROM users WHERE id = $1`,
-      [userId]
-    )
-    const user = userRows[0]
-    if (!user) {
-      throw httpError(422, 'No user with that id.')
-    }
-    if (user.role !== 'trade') {
-      // A customer or staff login has no portal to see this in, and granting one
-      // would put a client's financial history behind an account that was never
-      // reviewed as a trade application.
-      throw httpError(422, 'Only a trade account can be linked to a Dynamics customer.')
+    // A bare create carries no user at all — the company row exists for its
+    // contact book, and the grant half simply does not happen.
+    if (userId !== null) {
+      const { rows: userRows } = await client.query(
+        `SELECT id, role FROM users WHERE id = $1`,
+        [userId]
+      )
+      const user = userRows[0]
+      if (!user) {
+        throw httpError(422, 'No user with that id.')
+      }
+      if (user.role !== 'trade') {
+        // A customer or staff login has no portal to see this in, and granting
+        // one would put a client's financial history behind an account that was
+        // never reviewed as a trade application.
+        throw httpError(422, 'Only a trade account can be linked to a Dynamics customer.')
+      }
     }
 
     const { rows: accountUpsert } = await client.query(
@@ -254,21 +286,23 @@ const withLinkTxn = async (pool, { legacyAccountGuid, userId, linkedByUserId }) 
     // UNIQUE (user_id) means a login already attached to ANOTHER company raises
     // 23505 on a constraint that is not the composite PK — that is a real
     // conflict a human has to resolve, not something to swallow.
-    try {
-      await client.query(
-        `INSERT INTO trade_account_users (trade_account_id, user_id)
-         VALUES ($1, $2)
-         ON CONFLICT (trade_account_id, user_id) DO NOTHING`,
-        [tradeAccountId, userId]
-      )
-    } catch (error) {
-      if (error?.code === '23505') {
-        throw httpError(
-          409,
-          'That login is already linked to a different Dynamics customer. Unlink it first.'
+    if (userId !== null) {
+      try {
+        await client.query(
+          `INSERT INTO trade_account_users (trade_account_id, user_id)
+           VALUES ($1, $2)
+           ON CONFLICT (trade_account_id, user_id) DO NOTHING`,
+          [tradeAccountId, userId]
         )
+      } catch (error) {
+        if (error?.code === '23505') {
+          throw httpError(
+            409,
+            'That login is already linked to a different Dynamics customer. Unlink it first.'
+          )
+        }
+        throw error
       }
-      throw error
     }
 
     await client.query('COMMIT')
@@ -279,6 +313,122 @@ const withLinkTxn = async (pool, { legacyAccountGuid, userId, linkedByUserId }) 
   } finally {
     client.release()
   }
+}
+
+/**
+ * The trade account behind a mirror GUID — the bridge the CRM's ClientAccount
+ * screen (keyed by D365 GUID) crosses to reach the contact book. Null when no
+ * company row exists yet; the route's 404 is the screen's "enable contacts"
+ * branch.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {string} guid
+ */
+export const getTradeAccountByGuid = async (pool, guid) => {
+  const { rows } = await pool.query(
+    `SELECT id FROM trade_accounts WHERE legacy_account_guid = $1`,
+    [guid]
+  )
+  return rows[0] ? getTradeAccount(pool, rows[0].id) : null
+}
+
+// ---------------------------------------------------------------------------
+// The contact book (trade_account_contacts). Staff-kept people at the client
+// company — NOT logins, and never served to clients (viewer.js and
+// client-legacy.js write their own SQL and know nothing of this table).
+//
+// Every write folds '' to null (the applyOrderHeader rule: a stored '' is an
+// absence every IS NULL read misses), scopes child rows in the WRITING
+// statement, and answers with the fresh account via getTradeAccount — the
+// unlinkTradeAccountUser pattern, so the CRM redraws off one shape.
+// ---------------------------------------------------------------------------
+
+const CONTACT_COLUMNS = Object.freeze(['name', 'role', 'email', 'phone', 'note'])
+
+const foldBlank = (value) => {
+  if (value == null) return null
+  const trimmed = String(value).trim()
+  return trimmed === '' ? null : trimmed
+}
+
+/**
+ * @param {import('pg').Pool} pool
+ * @param {number} accountId
+ * @param {{ name: string, role?: string|null, email?: string|null,
+ *           phone?: string|null, note?: string|null }} input
+ * @returns {Promise<object|null>} the fresh account, or null for an unknown one
+ */
+export const createTradeAccountContact = async (pool, accountId, input) => {
+  const name = foldBlank(input.name)
+  if (!name) {
+    throw httpError(400, 'A contact needs a name.')
+  }
+  try {
+    await pool.query(
+      `INSERT INTO trade_account_contacts (trade_account_id, name, role, email, phone, note)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        accountId,
+        name,
+        foldBlank(input.role),
+        foldBlank(input.email),
+        foldBlank(input.phone),
+        foldBlank(input.note),
+      ]
+    )
+  } catch (error) {
+    // The unknown company is the FK's 23503 — the id came from the URL, so it
+    // is a 404, and a pre-read would race.
+    if (error?.code === '23503') return null
+    throw error
+  }
+  return getTradeAccount(pool, accountId)
+}
+
+/**
+ * @param {import('pg').Pool} pool
+ * @param {number} accountId
+ * @param {number} contactId
+ * @param {object} input
+ * @returns {Promise<object|null>} the fresh account, or null when the contact
+ *   is missing or belongs to another company (the scoped WHERE decides)
+ */
+export const updateTradeAccountContact = async (pool, accountId, contactId, input) => {
+  const sets = []
+  const params = []
+  for (const column of CONTACT_COLUMNS) {
+    if (Object.hasOwn(input, column)) {
+      params.push(foldBlank(input[column]))
+      sets.push(`${column} = $${params.length}`)
+    }
+  }
+  if (sets.length === 0) {
+    throw httpError(400, 'No updatable fields provided.')
+  }
+  if (Object.hasOwn(input, 'name') && foldBlank(input.name) == null) {
+    throw httpError(400, 'A contact needs a name.')
+  }
+  const { rowCount } = await pool.query(
+    `UPDATE trade_account_contacts
+        SET ${sets.join(', ')}, updated_at = now()
+      WHERE id = $${params.length + 1} AND trade_account_id = $${params.length + 2}`,
+    [...params, contactId, accountId]
+  )
+  return rowCount === 0 ? null : getTradeAccount(pool, accountId)
+}
+
+/**
+ * @param {import('pg').Pool} pool
+ * @param {number} accountId
+ * @param {number} contactId
+ * @returns {Promise<object|null>}
+ */
+export const deleteTradeAccountContact = async (pool, accountId, contactId) => {
+  const { rowCount } = await pool.query(
+    `DELETE FROM trade_account_contacts WHERE id = $1 AND trade_account_id = $2`,
+    [contactId, accountId]
+  )
+  return rowCount === 0 ? null : getTradeAccount(pool, accountId)
 }
 
 /**

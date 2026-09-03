@@ -41,3 +41,4 @@ Extracted from the root CLAUDE.md (root conventions still apply). Loaded automat
 
 - **Test gotcha**: register shares a rate-limit bucket (10 / 15 min / IP). Register staff/customer **once** in `beforeAll` and keep them; per-test `beforeEach` cleans only orders + brand fixtures, never users (re-registering each test 429s and yields no cookie). pg `numeric` qty comes back like `'10.00'` — compare with `Number()`, not string equality.
 
+- **`GET /admin/orders` `status` takes one value OR a set** (repeated params → array via the schema's anyOf, bound `= ANY(...)`): the dashboard's Open tile means `HELD_STATUSES` at once. Single-status callers are unchanged.

@@ -193,6 +193,12 @@ describe('back-office supplier routes', () => {
       ['POST', '/admin/suppliers/1/brand-terms/1/tiers', { label: 'Guarded', pct: 0.4 }],
       ['PATCH', '/admin/suppliers/1/brand-terms/1/tiers/1', { pct: 0.4 }],
       ['DELETE', '/admin/suppliers/1/brand-terms/1/tiers/1', undefined],
+      ['GET', '/admin/suppliers/1/contacts', undefined],
+      ['POST', '/admin/suppliers/1/contacts', { name: 'Guarded' }],
+      ['PATCH', '/admin/suppliers/1/contacts/1', { name: 'Guarded' }],
+      ['DELETE', '/admin/suppliers/1/contacts/1', undefined],
+      ['GET', '/admin/suppliers/1/contact-log', undefined],
+      ['POST', '/admin/suppliers/1/contact-log', { method: 'call' }],
     ]
 
     it.each(ROUTES)('%s %s is 401 for an anonymous caller', async (method, url, payload) => {

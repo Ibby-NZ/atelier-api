@@ -58,7 +58,8 @@ const rethrowConflict = (error) => {
 // Full row projection. Unqualified, so it is only valid while the statement has
 // no table alias — every query here uses the bare table name for that reason.
 const SUPPLIER_COLUMNS = `id, name, slug, short_code, d365_token, country, currency,
-  agent, incoterm, po_email, discount_method, created_at, updated_at, archived_at`
+  agent, incoterm, po_email, discount_method, phone, address, website_url, notes,
+  created_at, updated_at, archived_at`
 
 // Columns a PATCH may ever write. Frozen and in-code, as buildUpdate requires —
 // column names are never user input. `slug` is absent (server-derived and
@@ -73,6 +74,10 @@ export const SUPPLIER_UPDATE_COLUMNS = Object.freeze([
   'incoterm',
   'po_email',
   'discount_method',
+  'phone',
+  'address',
+  'website_url',
+  'notes',
 ])
 
 const toSupplier = (row) =>
@@ -88,6 +93,10 @@ const toSupplier = (row) =>
     incoterm: row.incoterm,
     po_email: row.po_email,
     discount_method: row.discount_method,
+    phone: row.phone,
+    address: row.address,
+    website_url: row.website_url,
+    notes: row.notes,
     created_at: row.created_at,
     updated_at: row.updated_at,
     archived_at: row.archived_at,
@@ -158,15 +167,47 @@ export const listSuppliers = async (
     params
   )
 
+  // The LATERAL probe rides the page query only (the count needs no joins) and
+  // costs one supplier_contact_log_recent_idx lookup per returned row. Its
+  // ORDER BY is the SAME spelling listContactLog uses, so "the newest entry" is
+  // one definition. `suppliers` stays unaliased — SUPPLIER_COLUMNS is
+  // unqualified, and the lateral projects only disjoint last_* names.
   const { rows } = await pool.query(
-    `SELECT ${SUPPLIER_COLUMNS} FROM suppliers
+    `SELECT ${SUPPLIER_COLUMNS}, last_contact.*
+     FROM suppliers
+     LEFT JOIN LATERAL (
+       SELECT contacted_on::text AS last_contacted_on,
+              method AS last_contact_method,
+              staff_name AS last_contact_staff,
+              follow_up_on::text AS last_contact_follow_up_on
+         FROM supplier_contact_log
+        WHERE supplier_contact_log.supplier_id = suppliers.id
+        ORDER BY contacted_on DESC, id DESC
+        LIMIT 1
+     ) last_contact ON true
      ${where}
      ORDER BY name ASC, id ASC
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, safeLimit, offset]
   )
 
-  return { suppliers: rows.map(toSupplier), total: countResult.rows[0].total }
+  const suppliers = rows.map((row) =>
+    Object.freeze({
+      ...toSupplier(row),
+      // Null means never contacted — the "gone quiet" glance the list exists for.
+      last_contact:
+        row.last_contacted_on == null
+          ? null
+          : Object.freeze({
+              contacted_on: row.last_contacted_on,
+              method: row.last_contact_method,
+              staff_name: row.last_contact_staff,
+              follow_up_on: row.last_contact_follow_up_on,
+            }),
+    })
+  )
+
+  return { suppliers, total: countResult.rows[0].total }
 }
 
 /**
@@ -239,8 +280,8 @@ export const createSupplier = async (pool, input) => {
     const { rows } = await pool.query(
       `INSERT INTO suppliers
          (name, slug, short_code, d365_token, country, currency, agent, incoterm,
-          po_email, discount_method)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          po_email, discount_method, phone, address, website_url, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING ${SUPPLIER_COLUMNS}`,
       [
         input.name,
@@ -254,6 +295,10 @@ export const createSupplier = async (pool, input) => {
         input.incoterm ?? null,
         input.po_email ?? null,
         input.discount_method ?? null,
+        input.phone ?? null,
+        input.address ?? null,
+        input.website_url ?? null,
+        input.notes ?? null,
       ]
     )
     return toSupplier(rows[0])

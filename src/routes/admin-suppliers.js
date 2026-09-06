@@ -36,6 +36,18 @@ import {
   DEFAULT_LIMIT as TERMS_DEFAULT_LIMIT,
   MAX_LIMIT as TERMS_MAX_LIMIT,
 } from '../suppliers/supplier-terms.js'
+import {
+  CONTACT_METHODS,
+  listSupplierContacts,
+  createSupplierContact,
+  updateSupplierContact,
+  deleteSupplierContact,
+  listContactLog,
+  createContactLogEntry,
+  DEFAULT_PAGE as LOG_DEFAULT_PAGE,
+  DEFAULT_LIMIT as LOG_DEFAULT_LIMIT,
+  MAX_LIMIT as LOG_MAX_LIMIT,
+} from '../suppliers/supplier-contacts.js'
 import { loadReportAccess } from '../reports/access.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 
@@ -64,6 +76,10 @@ const discountMethodProp = {
   enum: [...DISCOUNT_METHOD_ENUM, null],
 }
 
+// Long-form free text (a street address, an internal note) gets the same cap
+// the terms `note` carries.
+const nullableLong = { type: ['string', 'null'], maxLength: 2000 }
+
 const supplierProps = {
   short_code: nullableToken,
   d365_token: nullableToken,
@@ -73,6 +89,10 @@ const supplierProps = {
   incoterm: nullableShort,
   po_email: nullableEmail,
   discount_method: discountMethodProp,
+  phone: nullableShort,
+  address: nullableLong,
+  website_url: nullableShort,
+  notes: nullableLong,
 }
 
 // :id is coerced to an integer by Fastify; a non-numeric id is a 400 by schema.
@@ -121,6 +141,77 @@ const patchSchema = {
 const notFound = (reply, id) => {
   reply.code(404)
   return { error: 'Not Found', message: `Supplier ${id} not found.` }
+}
+
+// ---------------------------------------------------------------------------
+// Contact people (supplier_contacts) + the contact log (supplier_contact_log)
+//
+// Staff address-book data, not cost data — the backoffice guard alone is the
+// gate, no finance check. The log is APPEND-ONLY: no PATCH or DELETE routes
+// exist for it on purpose (see src/suppliers/supplier-contacts.js).
+// ---------------------------------------------------------------------------
+
+const contactBodyProps = {
+  name: { type: 'string', minLength: 1, maxLength: 200 },
+  role: nullableShort,
+  email: nullableEmail,
+  phone: nullableShort,
+  note: nullableLong,
+}
+
+const createContactSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['name'],
+  properties: contactBodyProps,
+}
+
+const patchContactSchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: contactBodyProps,
+}
+
+const contactParamsSchema = {
+  type: 'object',
+  required: ['id', 'contactId'],
+  properties: {
+    id: { type: 'integer', minimum: 1 },
+    contactId: { type: 'integer', minimum: 1 },
+  },
+}
+
+// The shape check only — '2026-02-31' passes and is the database's 22008,
+// mapped to a 422 by the module. Never a 500.
+const isoDayProp = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' }
+
+const createLogEntrySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['method'],
+  properties: {
+    method: { type: 'string', enum: [...CONTACT_METHODS] },
+    // Omitted = the column's CURRENT_DATE default; not nullable, because a log
+    // entry without a day is not a record of anything.
+    contacted_on: isoDayProp,
+    note: nullableLong,
+    follow_up_on: { ...isoDayProp, type: ['string', 'null'] },
+  },
+}
+
+const logListQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    page: { type: 'integer', minimum: 1, default: LOG_DEFAULT_PAGE },
+    limit: {
+      type: 'integer',
+      minimum: 1,
+      maximum: LOG_MAX_LIMIT,
+      default: LOG_DEFAULT_LIMIT,
+    },
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +399,80 @@ export const adminSupplierRoutes = async (app, { pool }) => {
       )
   )
 
+  // ---- contact people -----------------------------------------------------
+
+  app.get(
+    '/admin/suppliers/:id/contacts',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request) => ({
+      contacts: await listSupplierContacts(pool, request.params.id),
+    })
+  )
+
+  app.post(
+    '/admin/suppliers/:id/contacts',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: createContactSchema } },
+    async (request, reply) => {
+      const contact = await createSupplierContact(pool, request.params.id, request.body)
+      reply.code(201)
+      return { contact }
+    }
+  )
+
+  app.patch(
+    '/admin/suppliers/:id/contacts/:contactId',
+    { preHandler: backoffice, schema: { params: contactParamsSchema, body: patchContactSchema } },
+    async (request) => ({
+      contact: await updateSupplierContact(
+        pool,
+        request.params.id,
+        request.params.contactId,
+        request.body
+      ),
+    })
+  )
+
+  app.delete(
+    '/admin/suppliers/:id/contacts/:contactId',
+    { preHandler: backoffice, schema: { params: contactParamsSchema } },
+    async (request, reply) => {
+      const { id, contactId } = request.params
+      if (!(await deleteSupplierContact(pool, id, contactId))) {
+        reply.code(404)
+        return { error: 'Not Found', message: `Supplier ${id} has no contact ${contactId}.` }
+      }
+      reply.code(204)
+    }
+  )
+
+  // ---- contact log ----------------------------------------------------------
+
+  app.get(
+    '/admin/suppliers/:id/contact-log',
+    { preHandler: backoffice, schema: { params: idParamsSchema, querystring: logListQuerySchema } },
+    async (request) => {
+      const { page, limit } = request.query
+      const { entries, total } = await listContactLog(pool, request.params.id, { page, limit })
+      return { entries, meta: { total, page, limit } }
+    }
+  )
+
+  app.post(
+    '/admin/suppliers/:id/contact-log',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: createLogEntrySchema } },
+    async (request, reply) => {
+      const entry = await createContactLogEntry(
+        pool,
+        request.params.id,
+        request.body,
+        // The signed-in staff member IS the "who" — never taken from the body.
+        request.user
+      )
+      reply.code(201)
+      return { entry }
+    }
+  )
+
   // Commercial terms are COST data — what Atelier pays a maison — so the
   // backoffice role alone is not the gate. `backoffice` covers the showroom as
   // well as the accounts desk, which is exactly why `users.can_view_finance`
@@ -333,8 +498,8 @@ export const adminSupplierRoutes = async (app, { pool }) => {
 
   // The standalone terms list. Not redundant with GET /admin/suppliers/:id,
   // which embeds terms per HOUSE and therefore drops any row whose brand is not
-  // linked to this supplier (`brands.supplier_id`, which no route writes yet).
-  // This one keys on supplier_id alone, so nothing is invisible.
+  // linked to this supplier. This one keys on supplier_id alone, so nothing is
+  // invisible even for houses nobody has linked yet.
   app.get(
     '/admin/suppliers/:id/brand-terms',
     {

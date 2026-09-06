@@ -238,9 +238,12 @@ export const listAdminOrders = async (
 
   const params = []
   const clauses = []
-  if (status) {
-    params.push(status)
-    clauses.push(`o.status = $${params.length}`)
+  // One status or a set of them — the route schema admits both shapes, and a
+  // set binds as ANY so "the open book" (three statuses) is one query.
+  const statuses = Array.isArray(status) ? status : status ? [status] : []
+  if (statuses.length > 0) {
+    params.push(statuses)
+    clauses.push(`o.status = ANY($${params.length}::text[])`)
   }
   // The channel an order arrived through — `checkout` is the website, `manual`
   // is one the office keyed. An enum, so it sits beside `status` rather than

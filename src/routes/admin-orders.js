@@ -34,7 +34,21 @@ const listQuerySchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    status: { type: 'string', enum: ORDER_STATUSES },
+    // A single status, or a SET of them (repeated params — the dashboard's
+    // Open tile means requested+confirmed+paid at once). Same anyOf posture as
+    // `brand` in admin-reports.js: declaring only `string` would 400 the array
+    // form before the handler ever saw it.
+    status: {
+      anyOf: [
+        { type: 'string', enum: ORDER_STATUSES },
+        {
+          type: 'array',
+          minItems: 1,
+          maxItems: ORDER_STATUSES.length,
+          items: { type: 'string', enum: ORDER_STATUSES },
+        },
+      ],
+    },
     kind: { type: 'string', enum: ORDER_KINDS },
     include_archived: { type: 'boolean', default: false },
     q: { type: 'string', maxLength: 200 },

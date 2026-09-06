@@ -20,6 +20,7 @@ import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminFreightRoutes } from './routes/admin-freight.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
+import { adminDashboardRoutes } from './routes/admin-dashboard.js'
 import { adminSampleRoutes } from './routes/admin-samples.js'
 import { adminSampleLoanRoutes } from './routes/admin-sample-loans.js'
 import { adminEmailTemplateRoutes } from './routes/admin-email-templates.js'
@@ -170,6 +171,11 @@ export const buildApp = ({
     // only admin routes here that opt into the rate limiter (a report is an
     // unbounded aggregate over the order ledger).
     api.register(adminReportRoutes, { pool })
+    // /admin/dashboard — the CRM's landing tiles (sales MTD out of the revenue
+    // scope, the open order book, inbound POs, the newest orders), one round
+    // trip. Shares the reports' rate-limit posture: the MTD figure is an
+    // aggregate over the same ledger.
+    api.register(adminDashboardRoutes, { pool })
     // /admin/samples — the physical sample register (what is on the shelf, what
     // is out, what is late back) plus the scanner's by-barcode lookup. Back
     // office only, same CORS allowance as every other CRM screen.

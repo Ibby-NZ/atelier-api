@@ -1062,6 +1062,47 @@ describe('back-office order management', () => {
     })
   })
 
+  describe('a status filter that is a set', () => {
+    // The dashboard's Open-orders tile means three statuses at once
+    // (HELD_STATUSES), so `status` accepts a repeated param as well as a single
+    // value. Fastify's default querystring parser turns repeats into an array,
+    // which the schema's anyOf admits and the module binds as `= ANY(...)`.
+    it('returns exactly the named statuses, with a total that agrees', async () => {
+      const first = await placeRequest()
+      const second = await placeRequest()
+      const third = await placeRequest()
+      await pool.query(`UPDATE orders SET status = 'paid' WHERE id = $1`, [first.id])
+      await pool.query(`UPDATE orders SET status = 'shipped' WHERE id = $1`, [second.id])
+      await pool.query(`UPDATE orders SET status = 'declined' WHERE id = $1`, [third.id])
+
+      const response = await inject(
+        'GET',
+        '/admin/orders?status=paid&status=shipped',
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      const body = response.json()
+      expect(body.orders.map((order) => order.status).sort()).toEqual(['paid', 'shipped'])
+      expect(body.meta.total).toBe(2)
+    })
+
+    it('still takes a single status as before', async () => {
+      const order = await placeRequest()
+      await pool.query(`UPDATE orders SET status = 'confirmed' WHERE id = $1`, [order.id])
+      const response = await inject('GET', '/admin/orders?status=confirmed', backofficeCookie)
+      expect(response.json().orders.map((row) => row.status)).toEqual(['confirmed'])
+    })
+
+    it('refuses an unknown member of the set', async () => {
+      const response = await inject(
+        'GET',
+        '/admin/orders?status=paid&status=pending',
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(400)
+    })
+  })
+
   describe('not found', () => {
     it('returns 404 for an unknown order id', async () => {
       const response = await inject('GET', '/admin/orders/99999999', backofficeCookie)

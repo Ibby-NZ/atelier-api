@@ -45,6 +45,9 @@ export const FILTER_COLUMNS = Object.freeze({
   collection: 'col.slug',
   kind: 'o.kind',
   status: 'o.status',
+  // W-feedback: sales attribution (A6 groundwork). An id, not a name — the
+  // column is an integer FK and a name filter would be the free-text trap.
+  rep: 'o.sales_rep_user_id',
 })
 
 // The filters matched with an escaped ILIKE rather than an equality. A code is
@@ -190,6 +193,16 @@ const parseSlugList = (name, value) => {
   return Object.freeze([...new Set(slugs)])
 }
 
+// A positive integer id, arriving as the route schema's integer or as a
+// hand-typed querystring string. Anything else is a 400 naming the filter.
+const parseId = (name, value) => {
+  const id = typeof value === 'number' ? value : Number(textOf(name, value))
+  if (!Number.isInteger(id) || id < 1) {
+    throw invalid(name, value, 'a positive integer id')
+  }
+  return id
+}
+
 const PARSERS = Object.freeze({
   from: (value) => parseDate('from', value),
   to: (value) => parseDate('to', value),
@@ -201,6 +214,7 @@ const PARSERS = Object.freeze({
   collection: (value) => parseSlug('collection', value),
   kind: (value) => parseEnum('kind', value, ORDER_KINDS),
   status: (value) => parseEnum('status', value, ORDER_STATUSES),
+  rep: (value) => parseId('rep', value),
 })
 
 // How a parsed value becomes the bound parameter. Identity for everything that
@@ -283,6 +297,7 @@ const CLAUSES = Object.freeze({
   collection: (column, index) => `${column} = $${index}`,
   kind: (column, index) => `${column} = $${index}`,
   status: (column, index) => `${column} = $${index}`,
+  rep: (column, index) => `${column} = $${index}`,
 })
 
 /**

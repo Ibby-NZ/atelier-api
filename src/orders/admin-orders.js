@@ -17,6 +17,8 @@
 import { randomUUID } from 'node:crypto'
 
 import { setArchived } from '../lifecycle/archive.js'
+// The staff segment is the rep vocabulary — one frozen list, never retyped.
+import { USER_SEGMENTS } from '../users/admin-users.js'
 // Which kinds hold a reservation lives in a leaf module: src/lifecycle/registry.js
 // needs the same predicate for the delete guard and cannot import this file
 // (archive.js -> registry.js -> here would be a cycle).
@@ -77,7 +79,8 @@ const requireStatus = (order, allowed, action) => {
 // nothing to render but "Account #4". LEFT JOIN because a guest order has no
 // account, and `orders.user_id` is SET NULL when one is deleted.
 const ORDER_FROM = `orders o
-       LEFT JOIN users u ON u.id = o.user_id`
+       LEFT JOIN users u ON u.id = o.user_id
+       LEFT JOIN users rep ON rep.id = o.sales_rep_user_id`
 
 const ORDER_COLUMNS = `o.id,
         o.user_id,
@@ -100,6 +103,8 @@ const ORDER_COLUMNS = `o.id,
         o.contact_phone,
         o.client_reference,
         o.customer_po_number,
+        o.sales_rep_user_id,
+        rep.name AS sales_rep_name,
         o.notes,
         o.archived_at,
         o.created_at`
@@ -187,6 +192,10 @@ const toOrder = (row, lineRows) => {
     // orders have none until the back office adds them.
     shipping_address: row.shipping_address ?? null,
     contact_phone: row.contact_phone ?? null,
+    // Staff-asserted attribution (A6 groundwork). The name rides the join, not
+    // a CRM-side lookup, so a rep who later leaves still displays.
+    sales_rep_user_id: row.sales_rep_user_id ?? null,
+    sales_rep_name: row.sales_rep_name ?? null,
     // The client's OWN two numbers (FR-115). `customer_po_number` is the PO the
     // CLIENT issued to us — never one of our purchase orders (W13).
     client_reference: row.client_reference ?? null,
@@ -440,6 +449,7 @@ const ORDER_HEADER_COLUMNS = Object.freeze([
   'contact_phone',
   'client_reference',
   'customer_po_number',
+  'sales_rep_user_id',
 ])
 
 // The two columns that are ANNOTATIONS rather than commercial terms. Neither
@@ -449,12 +459,31 @@ const ORDER_HEADER_COLUMNS = Object.freeze([
 // to record. Everything else in ORDER_HEADER_COLUMNS stays behind the status
 // guard, because changing where an order ships after it shipped is a different
 // question that nobody has asked for.
-const ANNOTATION_COLUMNS = Object.freeze(['client_reference', 'customer_po_number'])
+// `sales_rep_user_id` joins them for the same reason: attribution moves no
+// money, stock or reservation, and back-filling WHO sold a shipped order is
+// exactly what the office wants to record after the fact.
+const ANNOTATION_COLUMNS = Object.freeze([
+  'client_reference',
+  'customer_po_number',
+  'sales_rep_user_id',
+])
 
 /** True when a patch touches nothing but those annotations. */
 const isAnnotationOnly = (patch) => {
   const keys = Object.keys(patch)
   return keys.length > 0 && keys.every((key) => ANNOTATION_COLUMNS.includes(key))
+}
+
+// A rep must be a STAFF login (USER_SEGMENTS.staff) or null. Checked here —
+// once, for both write paths — so a bad id is a 422 naming the problem rather
+// than an FK 23503 surfacing as a 500, and a customer can never appear as the
+// seller of record.
+const assertSalesRep = async (client, userId) => {
+  if (userId == null) return
+  const { rows } = await client.query(`SELECT role FROM users WHERE id = $1`, [userId])
+  if (!rows[0] || !USER_SEGMENTS.staff.includes(rows[0].role)) {
+    throw httpError(422, 'A sales rep must be a staff login (back office or director).')
+  }
 }
 
 const applyOrderHeader = async (client, id, patch) => {
@@ -592,6 +621,11 @@ export const editOrderLines = (pool, id, patch, actor) =>
       }
     }
 
+    // Validate the rep before the header write, inside the same transaction —
+    // both write paths (here and createManualOrder) route through this check.
+    if (Object.hasOwn(patch, 'sales_rep_user_id')) {
+      await assertSalesRep(client, patch.sales_rep_user_id)
+    }
     await applyOrderHeader(client, id, patch)
     // The discount before the recompute, so the total the transaction commits
     // already reflects it. A discount is a commercial term, not an annotation:
@@ -666,6 +700,8 @@ export const createManualOrder = async (pool, input, actor) => {
       }
     }
 
+    await assertSalesRep(client, input.sales_rep_user_id ?? null)
+
     // Resolve every line before writing anything, so an unknown colourway
     // refuses the whole order rather than leaving half of one behind.
     const resolved = []
@@ -686,8 +722,9 @@ export const createManualOrder = async (pool, input, actor) => {
 
     const { rows } = await client.query(
       `INSERT INTO orders (user_id, guest_email, order_number, kind, status, notes,
-                           discount_pct, discount_reason, discount_applied_by)
-       VALUES ($1, $2, $3, 'manual', 'requested', $4, $5, $6, $7)
+                           discount_pct, discount_reason, discount_applied_by,
+                           sales_rep_user_id)
+       VALUES ($1, $2, $3, 'manual', 'requested', $4, $5, $6, $7, $8)
        RETURNING id`,
       [
         userId,
@@ -701,6 +738,7 @@ export const createManualOrder = async (pool, input, actor) => {
         // From the session, never the body — who authorised a discount is the
         // one fact the caller must not be able to state.
         hasDiscount ? (actor?.id ?? null) : null,
+        input.sales_rep_user_id ?? null,
       ]
     )
     orderId = rows[0].id

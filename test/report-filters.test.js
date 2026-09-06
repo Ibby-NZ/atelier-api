@@ -87,7 +87,7 @@ describe('report filters', () => {
       expect(Object.isFrozen(REPORT_FILTER_NAMES)).toBe(true)
     })
 
-    it('names exactly the ten filters the reports accept', () => {
+    it('names exactly the eleven filters the reports accept', () => {
       expect([...REPORT_FILTER_NAMES]).toEqual([
         'from',
         'to',
@@ -99,6 +99,7 @@ describe('report filters', () => {
         'collection',
         'kind',
         'status',
+        'rep',
       ])
     })
 
@@ -123,6 +124,17 @@ describe('report filters', () => {
 
     it('freezes what it returns', () => {
       expect(Object.isFrozen(parseReportFilters({ status: 'paid' }))).toBe(true)
+    })
+
+    // W-feedback: sales attribution. An id, not text — a name would be the
+    // free-text trap parseSlug/parseFreeText exist to avoid, and the column is
+    // an integer FK.
+    it('parses a rep id and refuses anything that is not a positive integer', () => {
+      expect(parseReportFilters({ rep: '7' })).toEqual({ rep: 7 })
+      expect(parseReportFilters({ rep: 7 })).toEqual({ rep: 7 })
+      expect(() => parseReportFilters({ rep: 'rebecca' })).toThrow(/rep/)
+      expect(() => parseReportFilters({ rep: '0' })).toThrow(/rep/)
+      expect(() => parseReportFilters({ rep: '-3' })).toThrow(/rep/)
     })
 
     // Same posture as the public catalogue listing: the whitelist controls which

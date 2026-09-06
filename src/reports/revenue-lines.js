@@ -110,6 +110,11 @@ const LIVE_ORDER_LINES = Object.freeze({
     brand_name: 'b.name',
     brand_code: 'b.brand_code',
     collection_slug: 'col.slug',
+    // Staff-asserted sales attribution (A6 groundwork). Both ride the scope so
+    // sales-by-rep groups and every report filters (`rep`) without a second
+    // join tree; the name comes off the join, so a departed rep still displays.
+    sales_rep_user_id: 'o.sales_rep_user_id',
+    sales_rep: 'rep.name',
     qty: 'ol.qty',
     unit_price_cents: 'ol.unit_price_cents',
     // numeric, because qty is numeric(12,2) — 2.5 m at NZ$19.99 is 4997.5
@@ -127,7 +132,8 @@ const LIVE_ORDER_LINES = Object.freeze({
              JOIN colourways c ON c.id = ol.colourway_id
              JOIN products p ON p.id = c.product_id
              JOIN brands b ON b.id = p.brand_id
-             LEFT JOIN collections col ON col.id = p.collection_id`,
+             LEFT JOIN collections col ON col.id = p.collection_id
+             LEFT JOIN users rep ON rep.id = o.sales_rep_user_id`,
   // An archived order is one the back office has taken out of its own lists and
   // must not keep contributing to revenue. Archived PRODUCTS and BRANDS are the
   // opposite case and are deliberately NOT excluded: the sale happened, and a

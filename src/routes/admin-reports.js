@@ -49,6 +49,7 @@ import {
 import { stockReport } from '../reports/stock.js'
 import { notInvoicedReport } from '../reports/not-invoiced.js'
 import { revenueLinesReport } from '../reports/revenue-lines.js'
+import { salesByRepReport } from '../reports/sales-by-rep.js'
 import { DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT } from '../reports/limits.js'
 
 // Generous for a screen that re-reads on every filter change, tight enough that
@@ -93,6 +94,9 @@ const FILTER_PROPERTIES = {
   collection: { type: 'string', maxLength: 200 },
   kind: { type: 'string', enum: [...ORDER_KINDS] },
   status: { type: 'string', enum: [...ORDER_STATUSES] },
+  // A staff id (A6 groundwork). Integer at the boundary; the filter module
+  // still owns the shape rule, as with every other name here.
+  rep: { type: 'integer', minimum: 1 },
 }
 
 const reportQuerySchema = {
@@ -216,4 +220,7 @@ export const adminReportRoutes = async (app, { pool }) => {
   // still capped (REVENUE_LINE_LIMIT) — see src/reports/revenue-lines.js — and
   // it needs no other special case here.
   registerReport('/admin/reports/revenue-lines', revenueLinesReport)
+  // Order-grain attribution over the same scope. NULL reps are an explicit
+  // 'Unassigned' row — see the module header for the A6 caveats it states.
+  registerReport('/admin/reports/sales-by-rep', salesByRepReport)
 }

@@ -116,6 +116,7 @@ const editBodySchema = {
     // (see discountDependencies), so it cannot be the key that makes a body
     // non-empty.
     { required: ['discount_pct'] },
+    { required: ['sales_rep_user_id'] },
   ],
   dependencies: discountDependencies,
   properties: {
@@ -168,6 +169,10 @@ const editBodySchema = {
     customer_po_number: { type: ['string', 'null'], maxLength: 200 },
     discount_pct: discountPctProp,
     discount_reason: discountReasonProp,
+    // Staff-asserted attribution (A6 groundwork): null clears it. Must be
+    // declared here as well as in the module — Ajv's removeAdditional would
+    // otherwise strip it silently and the rep would simply never arrive.
+    sales_rep_user_id: { type: ['integer', 'null'], minimum: 1 },
   },
 }
 
@@ -210,6 +215,7 @@ const createBodySchema = {
     notes: { type: ['string', 'null'], maxLength: 2000 },
     discount_pct: discountPctProp,
     discount_reason: discountReasonProp,
+    sales_rep_user_id: { type: 'integer', minimum: 1 },
   },
 }
 

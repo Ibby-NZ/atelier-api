@@ -12,10 +12,14 @@
 import {
   listTradeAccounts,
   getTradeAccount,
+  getTradeAccountByGuid,
   linkTradeAccount,
   unlinkTradeAccountUser,
   updateTradeAccount,
   suggestTradeAccounts,
+  createTradeAccountContact,
+  updateTradeAccountContact,
+  deleteTradeAccountContact,
   DEFAULT_PAGE,
   DEFAULT_LIMIT,
   MAX_LIMIT,
@@ -57,14 +61,56 @@ const suggestQuerySchema = {
 
 const UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
+// `user_id` is OPTIONAL: without it the company row is created BARE, so its
+// contact book can exist before any login does. A later real link upserts onto
+// the same row (the GUID is unique) and the contacts survive it.
 const createBodySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['legacy_account_guid', 'user_id'],
+  required: ['legacy_account_guid'],
   properties: {
     legacy_account_guid: { type: 'string', pattern: UUID_PATTERN },
     user_id: { type: 'integer', minimum: 1 },
   },
+}
+
+const guidParamsSchema = {
+  type: 'object',
+  required: ['guid'],
+  properties: {
+    guid: { type: 'string', pattern: UUID_PATTERN },
+  },
+}
+
+const contactParamsSchema = {
+  type: 'object',
+  required: ['id', 'contactId'],
+  properties: {
+    id: { type: 'integer', minimum: 1 },
+    contactId: { type: 'integer', minimum: 1 },
+  },
+}
+
+const contactBodyProps = {
+  name: { type: 'string', minLength: 1, maxLength: 200 },
+  role: { type: ['string', 'null'], maxLength: 200 },
+  email: { type: ['string', 'null'], maxLength: 254 },
+  phone: { type: ['string', 'null'], maxLength: 50 },
+  note: { type: ['string', 'null'], maxLength: 2000 },
+}
+
+const createContactSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['name'],
+  properties: contactBodyProps,
+}
+
+const patchContactSchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: contactBodyProps,
 }
 
 // Only the account-manager block is patchable. The identity of the link
@@ -113,6 +159,21 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
       })
   )
 
+  // The bridge from the CRM's mirror screens: /clients/:id is keyed by the D365
+  // GUID, and this resolves it to the company row (static segment, so Fastify
+  // prefers it over :id — the `suggestions` precedent).
+  app.get(
+    '/admin/trade-accounts/by-guid/:guid',
+    { preHandler: backoffice, schema: { params: guidParamsSchema } },
+    async (request, reply) => {
+      const tradeAccount = await getTradeAccountByGuid(pool, request.params.guid)
+      if (!tradeAccount) {
+        return notFound(reply, `No trade account exists for that Dynamics customer yet.`)
+      }
+      return { trade_account: tradeAccount }
+    }
+  )
+
   app.get(
     '/admin/trade-accounts/:id',
     { preHandler: backoffice, schema: { params: idParamsSchema } },
@@ -146,6 +207,66 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
       const tradeAccount = await updateTradeAccount(pool, request.params.id, request.body)
       if (!tradeAccount) {
         return notFound(reply, `Trade account ${request.params.id} not found.`)
+      }
+      return { trade_account: tradeAccount }
+    }
+  )
+
+  // ---- the contact book -----------------------------------------------------
+  // Staff-kept people at the client company — NOT logins. Every write answers
+  // with the fresh account, so the CRM redraws off one shape.
+
+  app.post(
+    '/admin/trade-accounts/:id/contacts',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: createContactSchema } },
+    async (request, reply) => {
+      const tradeAccount = await createTradeAccountContact(
+        pool,
+        request.params.id,
+        request.body
+      )
+      if (!tradeAccount) {
+        return notFound(reply, `Trade account ${request.params.id} not found.`)
+      }
+      reply.code(201)
+      return { trade_account: tradeAccount }
+    }
+  )
+
+  app.patch(
+    '/admin/trade-accounts/:id/contacts/:contactId',
+    { preHandler: backoffice, schema: { params: contactParamsSchema, body: patchContactSchema } },
+    async (request, reply) => {
+      const tradeAccount = await updateTradeAccountContact(
+        pool,
+        request.params.id,
+        request.params.contactId,
+        request.body
+      )
+      if (!tradeAccount) {
+        return notFound(
+          reply,
+          `Trade account ${request.params.id} has no contact ${request.params.contactId}.`
+        )
+      }
+      return { trade_account: tradeAccount }
+    }
+  )
+
+  app.delete(
+    '/admin/trade-accounts/:id/contacts/:contactId',
+    { preHandler: backoffice, schema: { params: contactParamsSchema } },
+    async (request, reply) => {
+      const tradeAccount = await deleteTradeAccountContact(
+        pool,
+        request.params.id,
+        request.params.contactId
+      )
+      if (!tradeAccount) {
+        return notFound(
+          reply,
+          `Trade account ${request.params.id} has no contact ${request.params.contactId}.`
+        )
       }
       return { trade_account: tradeAccount }
     }

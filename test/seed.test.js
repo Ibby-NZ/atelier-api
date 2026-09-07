@@ -3,6 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { runSeed } from '../src/seed/seed.js'
+import { buildProductRows } from '../src/seed/catalogue-data.js'
 
 const SEEDED_TABLES = [
   'brands',
@@ -231,6 +232,34 @@ describe('catalogue seed import', () => {
     expect(house[0].retail_price_cents).toBe(38900)
     expect(house[0].currency).toBe('NZD')
     expect(house[0].product_type).toBe('finished_good')
+  })
+
+  it('categorises every seeded product: finished goods from their item type, fabrics as fabric', async () => {
+    const { rows } = await pool.query(
+      `SELECT slug, category FROM products
+        WHERE slug IN ('pierre-frey-atlas-cushion-cover', 'plaid-classic-throw',
+                       'heritage-duvet-cover', 'galata-organic-towels')`
+    )
+    expect(Object.fromEntries(rows.map((row) => [row.slug, row.category]))).toEqual({
+      'pierre-frey-atlas-cushion-cover': 'cushion',
+      'plaid-classic-throw': 'throw',
+      'heritage-duvet-cover': 'bed-linen',
+      'galata-organic-towels': 'towel',
+    })
+    // Every seeded slug, not every product: other suites leave fixtures behind.
+    const { rows: [blank] } = await pool.query(
+      `SELECT count(*)::int AS n FROM products WHERE slug = ANY($1::text[]) AND category IS NULL`,
+      [buildProductRows().map((row) => row.slug)]
+    )
+    expect(blank.n).toBe(0)
+  })
+
+  it('seed fills a blank category but never overwrites one the office set', async () => {
+    await pool.query(`UPDATE products SET category = 'misc' WHERE slug = 'wolf-throw-xl'`)
+    await runSeed(pool)
+    const { rows } = await pool.query(`SELECT category FROM products WHERE slug = 'wolf-throw-xl'`)
+    expect(rows[0].category).toBe('misc')
+    await pool.query(`UPDATE products SET category = 'throw' WHERE slug = 'wolf-throw-xl'`)
   })
 
   it('imports fabric designs with specs, price band, and colourway hex tones', async () => {

@@ -137,6 +137,9 @@ export const CATEGORY_BY_ITEM_TYPE = new Map([
   ['blankets', 'throw'],
   ['cushions', 'cushion'],
   ['cushion', 'cushion'],
+  // The seeded catalogue's own spelling (src/seed/data/realCatalogue.js `type`).
+  ['cushion cover', 'cushion'],
+  ['cushion covers', 'cushion'],
   ['miscellaneous', 'misc'],
   ['misc', 'misc'],
 ])

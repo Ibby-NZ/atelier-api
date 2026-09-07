@@ -19,6 +19,7 @@ import { BRAND_STORIES } from './data/brand-stories.js'
 import { BRAND_WEBSITES } from './data/brand-websites.js'
 import { REPRESENTED_HOUSES } from './data/represented-houses.js'
 import { slugify } from './slugify.js'
+import { categoryForItemType } from '../../scripts/lib/price-template.js'
 
 // Renamed from "Atelier Textiles NZ" at the client's request (Userback 8287607).
 // The slug below is the brands upsert key and stays as it was.
@@ -158,6 +159,18 @@ export const buildCollectionRows = () =>
     })
   )
 
+// realCatalogue's `type` ("Cushion cover", "Throw", "Bed linen", "Towel") is an
+// item type in the D365 sense, so the map that reads the D365 workbooks reads it
+// too. Loud, not null: the seed is repo data, so a type with no word for it is a
+// bug here and never a row for the office to look at.
+const categoryFor = (product) => {
+  const category = categoryForItemType(product.type)
+  if (!category) {
+    throw new Error(`realCatalogue product "${product.name}" has an item type with no category: "${product.type}"`)
+  }
+  return category
+}
+
 const finishedGoodRows = () =>
   realProducts.map((product) => {
     const brandName = product.brand ?? HOUSE_BRAND
@@ -166,6 +179,7 @@ const finishedGoodRows = () =>
       name: product.name,
       slug: slugify(product.name),
       product_type: 'finished_good',
+      category: categoryFor(product),
       composition: product.composition ?? null,
       width: null,
       application: null,
@@ -197,6 +211,7 @@ const fabricRows = () =>
       name: design.design,
       slug: slugify(`${design.brand} ${design.design}`),
       product_type: 'fabric',
+      category: 'fabric',
       composition: design.composition ?? null,
       width: design.width ?? null,
       application: design.application ?? null,

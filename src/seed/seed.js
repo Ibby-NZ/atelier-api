@@ -110,15 +110,18 @@ const upsertProducts = async (client, rows, brandIds) => {
     const brandId = requireBrandId(brandIds, row.brand_name, `product "${row.name}"`)
     const { rows: result } = await client.query(
       `INSERT INTO products (
-         brand_id, name, slug, product_type, composition, width, application, rubs,
+         brand_id, name, slug, product_type, category, composition, width, application, rubs,
          price_band, lead_time, retail_price_cents, trade_price_cents, currency,
          show_on_website, hi_res_asset_url
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        ON CONFLICT (slug) DO UPDATE SET
          brand_id = EXCLUDED.brand_id,
          name = EXCLUDED.name,
          product_type = EXCLUDED.product_type,
+         -- Fills a blank only, like website_url: NULL means nobody has looked,
+         -- and a category the office set in the CRM is an answer a reseed keeps.
+         category = COALESCE(products.category, EXCLUDED.category),
          composition = EXCLUDED.composition,
          width = EXCLUDED.width,
          application = EXCLUDED.application,
@@ -136,6 +139,7 @@ const upsertProducts = async (client, rows, brandIds) => {
         row.name,
         row.slug,
         row.product_type,
+        row.category,
         row.composition,
         row.width,
         row.application,

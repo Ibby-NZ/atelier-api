@@ -31,6 +31,7 @@ const BRAND_COLUMNS = `
   story,
   website_url,
   image_url,
+  logo_url,
   featured_rank
 `
 
@@ -50,6 +51,9 @@ const toBrand = (row) =>
     // the only picture the office chose FOR THE HOUSE. Null for most houses;
     // consumers fall through the chain rather than borrowing another maison's.
     image_url: row.image_url,
+    // The maison's own mark, centred over the tile in place of the typeset
+    // name. Null for most houses, and the tile falls back to the name.
+    logo_url: row.logo_url,
     featured_rank: row.featured_rank,
   })
 

@@ -603,6 +603,24 @@ describe('back-office catalogue admin', () => {
       expect(bad.statusCode).toBe(422)
     })
 
+    // The logo lands in the same public `<img src>` as the house image.
+    it('sets, clears and validates the logo URL', async () => {
+      const created = await createBrandFixture('House', {
+        logo_url: 'https://www.atelier.co.nz/img/house-logo.png',
+      })
+      expect(created.logo_url).toBe('https://www.atelier.co.nz/img/house-logo.png')
+
+      const clear = await inject('PATCH', `/admin/brands/${created.id}`, backofficeCookie, {
+        logo_url: null,
+      })
+      expect(clear.json().brand.logo_url).toBeNull()
+
+      const bad = await inject('PATCH', `/admin/brands/${created.id}`, backofficeCookie, {
+        logo_url: 'javascript:alert(1)',
+      })
+      expect(bad.statusCode).toBe(422)
+    })
+
     it('sets, clears and validates the website URL', async () => {
       const created = await createBrandFixture('House')
 

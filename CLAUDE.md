@@ -57,7 +57,7 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - Postgres 14 via Homebrew, database `atelier_dev` already exists.
 - Tests fail without a running Postgres — that is expected, not a mock gap.
 - `CRM_BASE_URL` (default `http://localhost:5273`) is CORS-only but production-critical: wrong or unset behind a real domain and every CRM screen is blocked by the browser, sign-in included. `STORE_BASE_URL` does double duty as the Stripe redirect target and the storefront's CORS origin.
-- Three apps, three ports, all three needed for a full local loop: api `3001`, storefront `4321`, CRM `5273`. `npm run seed:staff` creates the back-office logins the CRM signs in with (`STAFF_TEMP_PASSWORD`, default `AtelierTemp2026!`).
+- Three apps, three ports, all three needed for a full local loop: api `3001`, storefront `4321`, CRM `5273`. `npm run seed:staff` creates the back-office logins the CRM signs in with (`STAFF_TEMP_PASSWORD`, default `AtelierTemp2026!`). A roster entry that changes address keeps the old one as `previously`, and the seed RENAMES the live row (same id, same password, orders untouched) before its upsert — never leave a rename as a manual UPDATE, that is how the atelier.co.nz move shipped with every live login still on the old domain.
 
 ## Domain guides
 

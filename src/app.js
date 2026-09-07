@@ -120,7 +120,7 @@ export const buildApp = ({
   })
 
   app.register(async (api) => {
-    api.register(authRoutes, { pool })
+    api.register(authRoutes, { pool, mailer, storeBaseUrl, crmBaseUrl })
     api.register(catalogueRoutes, { pool })
     api.register(shippingRoutes, { pool })
     api.register(checkoutRoutes, { pool, stripe, storeBaseUrl })
@@ -138,7 +138,7 @@ export const buildApp = ({
     // /admin/users — client/user management; /admin/inventory — stock edits;
     // /admin/price-list-items — supplier pricing. All storefront admin islands,
     // same CORS + backoffice guard.
-    api.register(adminUsersRoutes, { pool })
+    api.register(adminUsersRoutes, { pool, mailer, storeBaseUrl, crmBaseUrl })
     // /admin/trade-applications — read-only review of submitted trade forms
     // (the CRM's Users -> Applicants tab). Approval stays on /admin/users/:id.
     api.register(adminTradeApplicationRoutes, { pool })

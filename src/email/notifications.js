@@ -187,3 +187,22 @@ export const notifyContactReceived = async (mailer, enquiry) => {
     },
   })
 }
+
+/**
+ * The password reset letter. No-op when mailer is null; never throws. The
+ * caller decides where the link points (src/auth/password-reset.js resetUrlFor)
+ * because that depends on the account's role, not on the mail.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ user: { email: string, name?: string|null }, resetUrl: string, expiresMinutes: number }} reset
+ */
+export const notifyPasswordReset = async (mailer, { user, resetUrl, expiresMinutes }) => {
+  if (!mailer) {
+    return
+  }
+  await mailer.send({
+    template: 'password_reset',
+    to: user.email,
+    data: { name: user.name, reset_url: resetUrl, expires_minutes: expiresMinutes },
+  })
+}

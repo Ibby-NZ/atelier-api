@@ -23,6 +23,8 @@ import {
 } from '../users/admin-users.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { MIN_PASSWORD_LENGTH } from '../auth/passwords.js'
+import { issueResetTokenFor, resetUrlFor, RESET_TOKEN_TTL_MINUTES } from '../auth/password-reset.js'
+import { notifyPasswordReset } from '../email/notifications.js'
 
 // The valid stored roles (matches the users_role_check constraint). Shared by the
 // list filter and the patch/create body so an unknown role is a 400 by schema.
@@ -47,8 +49,9 @@ const createBodySchema = {
   },
 }
 
-// Optional body: without `password` the account lands on DEFAULT_TEMP_PASSWORD,
-// exactly like a freshly created one.
+// Optional body: without `password` the account holder is EMAILED a reset link
+// and chooses their own; with it, the office sets the password directly (for
+// the person on the phone who has no email to hand).
 const resetPasswordBodySchema = {
   type: 'object',
   additionalProperties: false,
@@ -101,7 +104,10 @@ const notFound = (reply, id) => {
   return { error: 'Not Found', message: `User ${id} not found.` }
 }
 
-export const adminUsersRoutes = async (app, { pool }) => {
+export const adminUsersRoutes = async (
+  app,
+  { pool, mailer = null, storeBaseUrl = 'http://localhost:4321', crmBaseUrl = 'http://localhost:5273' }
+) => {
   const backoffice = app.guards.requireRole('backoffice')
 
   app.get(
@@ -195,14 +201,16 @@ export const adminUsersRoutes = async (app, { pool }) => {
     }
   )
 
-  // Sets a known password on an account — the office's answer to "I can't sign
-  // in", because no self-service password change exists (`/auth/*` is register,
-  // login, logout, me). Without `password` the account lands on the shared temp
-  // password and the response echoes it, as create does. A non-director may not
-  // reset a director: the temp password is shown on screen, so a reset is the
-  // power to sign in AS that person, and that is not a back-office power over a
-  // principal. Sessions are stateless signed cookies, so a live session of the
-  // account survives the reset — only the password changes.
+  // Reset a password. The office's answer to "I can't sign in" (there is also
+  // self-service: POST /auth/forgot-password). Without `password` the account
+  // holder is emailed a single-use link and chooses their own — the office
+  // never sees a credential, which is what makes it a reset rather than a
+  // hand-over. With `password` the office sets it directly, for the person on
+  // the phone. A non-director may not reset a director: with a supplied
+  // password that is the power to sign in AS a principal, and the emailed form
+  // keeps the same rule so the two paths cannot be played against each other.
+  // Sessions are stateless signed cookies, so a live session of the account
+  // survives the reset — only the password changes.
   app.post(
     '/admin/users/:id/reset-password',
     {
@@ -219,8 +227,33 @@ export const adminUsersRoutes = async (app, { pool }) => {
         return { error: 'Forbidden', message: "Only a director can reset a director's password." }
       }
       const supplied = request.body?.password
-      const user = await resetUserPassword(pool, request.params.id, supplied ?? DEFAULT_TEMP_PASSWORD)
-      return { user, temp_password: supplied ? undefined : DEFAULT_TEMP_PASSWORD }
+      if (supplied) {
+        const user = await resetUserPassword(pool, request.params.id, supplied)
+        return { user }
+      }
+      // The consume query refuses an archived account, so a link sent to one
+      // would only fail later, in the person's hands. Refuse it here instead.
+      if (target.archived_at) {
+        reply.code(422)
+        return {
+          error: 'Unprocessable Entity',
+          message: 'This account is archived. Restore it before resetting its password.',
+        }
+      }
+      if (!mailer) {
+        reply.code(503)
+        return {
+          error: 'Service Unavailable',
+          message: 'Email is not configured on this server, so a reset link cannot be sent.',
+        }
+      }
+      const token = await issueResetTokenFor(pool, target.id)
+      await notifyPasswordReset(mailer, {
+        user: target,
+        resetUrl: resetUrlFor({ role: target.role, token, storeBaseUrl, crmBaseUrl }),
+        expiresMinutes: RESET_TOKEN_TTL_MINUTES,
+      })
+      return { user: target, reset_email_sent: true }
     }
   )
 

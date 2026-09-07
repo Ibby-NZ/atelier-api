@@ -157,6 +157,27 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
+  // The reset link, for a forgotten password or a back-office reset on the
+  // account holder's behalf. The URL is the whole message: the token in it is
+  // the only copy anywhere, and the expiry is stated so the reader acts on it.
+  password_reset: ({ name, reset_url, expires_minutes }) => ({
+    subject: `${BRAND}: reset your password`,
+    text: [
+      `Hello${name ? ` ${name}` : ''},`,
+      '',
+      'A password reset was requested for your Atelier Textiles account. Choose',
+      'a new password here:',
+      '',
+      reset_url,
+      '',
+      `The link works once and expires in ${expires_minutes} minutes. If you did`,
+      'not ask for this, you can ignore this email — your password has not',
+      'changed.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
   // Alert to the back office that a new enquiry has landed, with the details
   // inline so staff can triage without opening the inbox.
   backoffice_new_contact: ({ name, email, phone, subject, message }) => ({

@@ -58,11 +58,13 @@ describe('email templates', () => {
         // (src/email/template-store.js) — and the code copy stays, because the
         // override falls back to it.
         'sample_loan_reminder',
+        // The emailed reset link (forgot password, and the back office's reset).
+        'password_reset',
       ])
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(12)
+    expect(TEMPLATE_NAMES).toHaveLength(13)
   })
 
   it('request_received names the order and promises contact within 24 hours', () => {

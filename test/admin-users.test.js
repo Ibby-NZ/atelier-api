@@ -3,6 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { createMailer } from '../src/email/mailer.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 
@@ -140,6 +141,15 @@ const cleanupFixtureUsers = (pool) =>
 const deletePersistentUsers = (pool) =>
   pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${DOMAIN}`])
 
+// A transport that records every message instead of sending it: the reset
+// route emails a link, and the test reads the token out of the letter.
+const captureTransport = () => {
+  const sent = []
+  return { sent, sendMail: async (message) => sent.push(message) }
+}
+const CRM_BASE_URL = 'https://crm.test'
+const STORE_BASE_URL = 'https://store.test'
+
 describe('back-office users admin', () => {
   let pool
   let app
@@ -147,6 +157,7 @@ describe('back-office users admin', () => {
   let directorCookie
   let customerCookie
   let bossId
+  let transport
 
   const inject = (method, url, cookie, payload) =>
     app.inject({ method, url, headers: cookie ? { cookie } : {}, payload })
@@ -161,7 +172,16 @@ describe('back-office users admin', () => {
       migrationsTable: 'pgmigrations',
       log: () => {},
     })
-    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+    transport = captureTransport()
+    const mailer = createMailer({ transport, from: 'studio@atelier.test', backofficeEmail: 'office@atelier.test' })
+    app = buildApp({
+      pool,
+      cookieSecret: TEST_COOKIE_SECRET,
+      mailer,
+      storeBaseUrl: STORE_BASE_URL,
+      crmBaseUrl: CRM_BASE_URL,
+      logger: false,
+    })
     await app.ready()
 
     await cleanupFixtureRecords(pool)
@@ -456,30 +476,58 @@ describe('back-office users admin', () => {
   })
 
   describe('POST /admin/users/:id/reset-password', () => {
-    const TEMP = 'AtelierTemp2026!'
+    const tokenFrom = (message) => new URL(message.text.match(/https?:\S+/)[0]).searchParams.get('token')
 
-    it('lands the account on the temp password by default, and it signs in with it', async () => {
+    beforeEach(() => {
+      transport.sent.length = 0
+    })
+
+    it('emails the account holder a reset link by default, and never a temp password', async () => {
       const id = await insertUser(pool, { local: 'forgot', name: 'Forgot Client' })
       const response = await inject('POST', `/admin/users/${id}/reset-password`, backofficeCookie, {})
       expect(response.statusCode).toBe(200)
-      expect(response.json().temp_password).toBe(TEMP)
-      expect(response.json().user.id).toBe(id)
+      expect(response.json()).toMatchObject({ reset_email_sent: true, user: { id } })
+      expect(response.json().temp_password).toBeUndefined()
       expect(response.json().user.password_hash).toBeUndefined()
 
+      // Nothing changed yet: the password moves only when the link is spent.
+      const { rows } = await pool.query('SELECT password_hash FROM users WHERE id = $1', [id])
+      expect(rows[0].password_hash).toBe(DUMMY_HASH)
+
+      expect(transport.sent).toHaveLength(1)
+      const [message] = transport.sent
+      expect(message.to).toBe(fixtureEmail('forgot'))
+      // A client lands in the storefront, not the CRM.
+      expect(message.text).toContain(`${STORE_BASE_URL}/reset-password?token=`)
+
+      const reset = await inject('POST', '/auth/reset-password', null, {
+        token: tokenFrom(message),
+        password: 'a password of their own',
+      })
+      expect(reset.statusCode).toBe(200)
       const login = await inject('POST', '/auth/login', null, {
         email: fixtureEmail('forgot'),
-        password: TEMP,
+        password: 'a password of their own',
       })
       expect(login.statusCode).toBe(200)
     })
 
-    it('honours a supplied password and then names no temp one', async () => {
+    it('sends a staff account to the CRM to reset', async () => {
+      const id = await insertUser(pool, { local: 'clerk', role: 'backoffice' })
+      const response = await inject('POST', `/admin/users/${id}/reset-password`, backofficeCookie, {})
+      expect(response.statusCode).toBe(200)
+      expect(transport.sent[0].text).toContain(`${CRM_BASE_URL}/#/reset-password?token=`)
+    })
+
+    it('honours a supplied password directly, and sends no mail', async () => {
       const id = await insertUser(pool, { local: 'chosen' })
       const response = await inject('POST', `/admin/users/${id}/reset-password`, backofficeCookie, {
         password: 'a password of their own',
       })
       expect(response.statusCode).toBe(200)
       expect(response.json().temp_password).toBeUndefined()
+      expect(response.json().reset_email_sent).toBeUndefined()
+      expect(transport.sent).toHaveLength(0)
 
       const login = await inject('POST', '/auth/login', null, {
         email: fixtureEmail('chosen'),
@@ -496,16 +544,23 @@ describe('back-office users admin', () => {
       expect(response.statusCode).toBe(400)
     })
 
+    it('refuses to email a link to an archived account', async () => {
+      const id = await insertUser(pool, { local: 'gone' })
+      await pool.query('UPDATE users SET archived_at = now() WHERE id = $1', [id])
+      const response = await inject('POST', `/admin/users/${id}/reset-password`, backofficeCookie, {})
+      expect(response.statusCode).toBe(422)
+      expect(transport.sent).toHaveLength(0)
+    })
+
     it('lets only a director reset a director', async () => {
       const id = await insertUser(pool, { local: 'principal', role: 'director' })
       const denied = await inject('POST', `/admin/users/${id}/reset-password`, backofficeCookie, {})
       expect(denied.statusCode).toBe(403)
-      const { rows } = await pool.query('SELECT password_hash FROM users WHERE id = $1', [id])
-      expect(rows[0].password_hash).toBe(DUMMY_HASH)
+      expect(transport.sent).toHaveLength(0)
 
       const allowed = await inject('POST', `/admin/users/${id}/reset-password`, directorCookie, {})
       expect(allowed.statusCode).toBe(200)
-      expect(allowed.json().temp_password).toBe(TEMP)
+      expect(transport.sent).toHaveLength(1)
     })
 
     it('returns 404 for an unknown id', async () => {

@@ -17,6 +17,13 @@ import {
 } from '../auth/user-columns.js'
 import { reportAccess } from '../reports/access.js'
 import {
+  issueResetToken,
+  consumeResetToken,
+  resetUrlFor,
+  RESET_TOKEN_TTL_MINUTES,
+} from '../auth/password-reset.js'
+import { notifyPasswordReset } from '../email/notifications.js'
+import {
   validateTradeApplication,
   submitTradeApplication,
 } from '../users/trade-applications.js'
@@ -110,6 +117,32 @@ const loginBodySchema = {
 
 const INVALID_CREDENTIALS = 'Invalid email or password.'
 
+const forgotPasswordBodySchema = {
+  type: 'object',
+  required: ['email'],
+  additionalProperties: false,
+  properties: {
+    email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
+  },
+}
+
+const resetPasswordBodySchema = {
+  type: 'object',
+  required: ['token', 'password'],
+  additionalProperties: false,
+  properties: {
+    token: { type: 'string', minLength: 1, maxLength: 200 },
+    password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
+  },
+}
+
+// One sentence for every forgot-password call, known address or not: the reply
+// must not say whether an account exists, the same rule INVALID_CREDENTIALS
+// keeps at login.
+const RESET_REQUESTED =
+  'If an account exists for that address, a password reset link has been emailed to it.'
+const RESET_LINK_INVALID = 'This reset link is invalid or has expired. Please request a new one.'
+
 // Shared by register (role=customer) and trade-application (role=trade,
 // trade_approved defaults false in the schema). Sets the session cookie so
 // the new account is immediately logged in.
@@ -137,7 +170,10 @@ const createAccount = async ({ pool, reply, body, role }) => {
   }
 }
 
-export const authRoutes = async (app, { pool }) => {
+export const authRoutes = async (
+  app,
+  { pool, mailer = null, storeBaseUrl = 'http://localhost:4321', crmBaseUrl = 'http://localhost:5273' }
+) => {
   app.post(
     '/auth/register',
     {
@@ -235,6 +271,50 @@ export const authRoutes = async (app, { pool }) => {
         trade_approved: row.trade_approved,
       }
       setSessionCookie(reply, user.id)
+      return { user }
+    }
+  )
+
+  // Forgot password. Always 202 with the same sentence: an unknown or archived
+  // address gets no token and no mail, and nothing in the reply says which.
+  // Rate limited like login — it sends mail to a caller-supplied address, and
+  // each call replaces the account's live link, so an open loop could keep a
+  // real user's link perpetually stale.
+  app.post(
+    '/auth/forgot-password',
+    {
+      schema: { body: forgotPasswordBodySchema },
+      config: { rateLimit: AUTH_RATE_LIMIT },
+    },
+    async (request, reply) => {
+      const issued = await issueResetToken(pool, request.body.email)
+      if (issued) {
+        await notifyPasswordReset(mailer, {
+          user: issued.user,
+          resetUrl: resetUrlFor({ role: issued.user.role, token: issued.token, storeBaseUrl, crmBaseUrl }),
+          expiresMinutes: RESET_TOKEN_TTL_MINUTES,
+        })
+      }
+      reply.code(202)
+      return { message: RESET_REQUESTED }
+    }
+  )
+
+  // Spend the link. No session cookie is set: the person signs in with the
+  // password they just chose, which also proves the reset took. Rate limited
+  // because each attempt costs an argon2 hash, exactly like register.
+  app.post(
+    '/auth/reset-password',
+    {
+      schema: { body: resetPasswordBodySchema },
+      config: { rateLimit: AUTH_RATE_LIMIT },
+    },
+    async (request, reply) => {
+      const user = await consumeResetToken(pool, request.body.token, request.body.password)
+      if (!user) {
+        reply.code(400)
+        return { error: RESET_LINK_INVALID }
+      }
       return { user }
     }
   )

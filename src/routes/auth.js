@@ -142,6 +142,8 @@ const resetPasswordBodySchema = {
 const RESET_REQUESTED =
   'If an account exists for that address, a password reset link has been emailed to it.'
 const RESET_LINK_INVALID = 'This reset link is invalid or has expired. Please request a new one.'
+const MAIL_NOT_CONFIGURED =
+  'This server cannot send email yet, so a reset link cannot be sent. Please contact the office.'
 
 // Shared by register (role=customer) and trade-application (role=trade,
 // trade_approved defaults false in the schema). Sets the session cookie so
@@ -287,6 +289,14 @@ export const authRoutes = async (
       config: { rateLimit: AUTH_RATE_LIMIT },
     },
     async (request, reply) => {
+      // A server that cannot send mail cannot do this at all. Said plainly —
+      // it reveals nothing about any account — rather than answering the
+      // sentence below with no letter behind it.
+      if (!mailer?.delivers) {
+        request.log.warn('password reset requested but SMTP is not configured')
+        reply.code(503)
+        return { error: MAIL_NOT_CONFIGURED }
+      }
       const issued = await issueResetToken(pool, request.body.email)
       if (issued) {
         await notifyPasswordReset(mailer, {

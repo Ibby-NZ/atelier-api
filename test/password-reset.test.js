@@ -48,8 +48,9 @@ describe('password reset by emailed link', () => {
     app.inject({ method: 'POST', url: '/auth/forgot-password', payload: { email } })
   const reset = (token, password = NEW_PASSWORD) =>
     app.inject({ method: 'POST', url: '/auth/reset-password', payload: { token, password } })
-  const login = (email, password) =>
-    app.inject({ method: 'POST', url: '/auth/login', payload: { email, password } })
+  const login_ = (target, email, password) =>
+    target.inject({ method: 'POST', url: '/auth/login', payload: { email, password } })
+  const login = (email, password) => login_(app, email, password)
 
   beforeAll(async () => {
     const config = loadConfig()
@@ -157,6 +158,62 @@ describe('password reset by emailed link', () => {
     it('rejects a malformed address with 400', async () => {
       const response = await forgot('not-an-email')
       expect(response.statusCode).toBe(400)
+    })
+  })
+
+  describe('without SMTP (a transport that captures but does not deliver)', () => {
+    let quietApp
+    beforeAll(async () => {
+      const transport = { delivers: false, sent: [], sendMail: async (m) => transport.sent.push(m) }
+      const mailer = createMailer({ transport, from: 'studio@atelier.test', backofficeEmail: 'office@atelier.test' })
+      quietApp = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, mailer, logger: false })
+      await quietApp.ready()
+    })
+    afterAll(async () => {
+      await quietApp.close()
+    })
+
+    it('forgot-password says so with 503 instead of promising a letter', async () => {
+      await insertUser(pool, 'unmailed')
+      const response = await quietApp.inject({
+        method: 'POST',
+        url: '/auth/forgot-password',
+        payload: { email: testEmail('unmailed') },
+      })
+      expect(response.statusCode).toBe(503)
+      expect(response.json().error).toMatch(/cannot send email/)
+    })
+
+    it('the back-office reset says so too, while a supplied password still works', async () => {
+      const staffId = await insertUser(pool, 'quiet-staff', { role: 'backoffice' })
+      const clientId = await insertUser(pool, 'quiet-client')
+      const login = await quietApp.inject({
+        method: 'POST',
+        url: '/auth/login',
+        payload: { email: testEmail('quiet-staff'), password: OLD_PASSWORD },
+      })
+      expect(login.statusCode).toBe(200)
+      const header = login.headers['set-cookie']
+      const cookie = (Array.isArray(header) ? header[0] : header).split(';')[0]
+
+      const emailed = await quietApp.inject({
+        method: 'POST',
+        url: `/admin/users/${clientId}/reset-password`,
+        headers: { cookie },
+        payload: {},
+      })
+      expect(emailed.statusCode).toBe(503)
+      expect(emailed.json().message).toMatch(/SMTP_HOST is unset/)
+
+      const direct = await quietApp.inject({
+        method: 'POST',
+        url: `/admin/users/${clientId}/reset-password`,
+        headers: { cookie },
+        payload: { password: NEW_PASSWORD },
+      })
+      expect(direct.statusCode).toBe(200)
+      expect((await login_(quietApp, testEmail('quiet-client'), NEW_PASSWORD)).statusCode).toBe(200)
+      expect(staffId).toBeGreaterThan(0)
     })
   })
 

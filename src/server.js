@@ -22,11 +22,14 @@ const start = async () => {
   if (!stripe) {
     console.warn('STRIPE_SECRET_KEY unset — card checkout disabled.')
   }
-  // Email: real SMTP when SMTP_HOST is set, otherwise a capturing jsonTransport.
+  // Email: real SMTP when SMTP_HOST is set, otherwise a capture transport that
+  // prints each letter to this console and delivers nothing (mailer.delivers
+  // false; the password reset routes answer 503).
   const mailer = createMailer({
     transport: createMailTransport(config),
     from: config.emailFrom,
     backofficeEmail: config.backofficeEmail,
+    log: { info: () => {}, error: (details, message) => console.error(message, details) },
   })
 
   // Xero stays disabled (every /admin/xero route → 503) until both

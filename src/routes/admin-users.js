@@ -18,6 +18,7 @@ import {
   createUser,
   updateUser,
   setUserArchived,
+  resetUserPassword,
   USER_SEGMENTS,
 } from '../users/admin-users.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
@@ -42,6 +43,16 @@ const createBodySchema = {
     email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
     name: { type: ['string', 'null'], maxLength: 200 },
     role: { type: 'string', enum: USER_ROLES },
+    password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
+  },
+}
+
+// Optional body: without `password` the account lands on DEFAULT_TEMP_PASSWORD,
+// exactly like a freshly created one.
+const resetPasswordBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
     password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
   },
 }
@@ -181,6 +192,35 @@ export const adminUsersRoutes = async (app, { pool }) => {
         return notFound(reply, request.params.id)
       }
       return { user }
+    }
+  )
+
+  // Sets a known password on an account — the office's answer to "I can't sign
+  // in", because no self-service password change exists (`/auth/*` is register,
+  // login, logout, me). Without `password` the account lands on the shared temp
+  // password and the response echoes it, as create does. A non-director may not
+  // reset a director: the temp password is shown on screen, so a reset is the
+  // power to sign in AS that person, and that is not a back-office power over a
+  // principal. Sessions are stateless signed cookies, so a live session of the
+  // account survives the reset — only the password changes.
+  app.post(
+    '/admin/users/:id/reset-password',
+    {
+      preHandler: backoffice,
+      schema: { params: idParamsSchema, body: resetPasswordBodySchema },
+    },
+    async (request, reply) => {
+      const target = await getUser(pool, request.params.id)
+      if (!target) {
+        return notFound(reply, request.params.id)
+      }
+      if (target.role === 'director' && request.user.role !== 'director') {
+        reply.code(403)
+        return { error: 'Forbidden', message: "Only a director can reset a director's password." }
+      }
+      const supplied = request.body?.password
+      const user = await resetUserPassword(pool, request.params.id, supplied ?? DEFAULT_TEMP_PASSWORD)
+      return { user, temp_password: supplied ? undefined : DEFAULT_TEMP_PASSWORD }
     }
   )
 

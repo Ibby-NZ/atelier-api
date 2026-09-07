@@ -168,6 +168,24 @@ export const createUser = async (pool, { email, name, role, password }) => {
 }
 
 /**
+ * Replaces an account's password. Returns the account, or null when it doesn't
+ * exist. Hashing happens here so every caller stores the same argon2id shape.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {string} password
+ * @returns {Promise<object|null>}
+ */
+export const resetUserPassword = async (pool, id, password) => {
+  const passwordHash = await hashPassword(password)
+  const { rows } = await pool.query(
+    `UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING ${USER_READ_COLUMNS}`,
+    [passwordHash, id]
+  )
+  return rows[0] ? toUser(rows[0]) : null
+}
+
+/**
  * A single account by id, or null when it doesn't exist.
  *
  * @param {import('pg').Pool} pool

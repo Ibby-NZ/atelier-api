@@ -144,6 +144,7 @@ describe('back-office users admin', () => {
   let pool
   let app
   let backofficeCookie
+  let directorCookie
   let customerCookie
   let bossId
 
@@ -180,6 +181,17 @@ describe('back-office users admin', () => {
       testEmail('boss'),
     ])
     bossId = rows[0].id
+
+    // A director, for the one rule that tells the two staff roles apart.
+    const chief = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      payload: { email: testEmail('chief'), password: PASSWORD, name: 'Chief' },
+    })
+    directorCookie = sessionCookieFrom(chief)
+    await pool.query(`UPDATE users SET role = 'director' WHERE email = $1`, [
+      testEmail('chief'),
+    ])
 
     const shopper = await app.inject({
       method: 'POST',
@@ -440,6 +452,71 @@ describe('back-office users admin', () => {
     it('returns 404 archiving an unknown id', async () => {
       const response = await inject('POST', '/admin/users/99999999/archive', backofficeCookie)
       expect(response.statusCode).toBe(404)
+    })
+  })
+
+  describe('POST /admin/users/:id/reset-password', () => {
+    const TEMP = 'AtelierTemp2026!'
+
+    it('lands the account on the temp password by default, and it signs in with it', async () => {
+      const id = await insertUser(pool, { local: 'forgot', name: 'Forgot Client' })
+      const response = await inject('POST', `/admin/users/${id}/reset-password`, backofficeCookie, {})
+      expect(response.statusCode).toBe(200)
+      expect(response.json().temp_password).toBe(TEMP)
+      expect(response.json().user.id).toBe(id)
+      expect(response.json().user.password_hash).toBeUndefined()
+
+      const login = await inject('POST', '/auth/login', null, {
+        email: fixtureEmail('forgot'),
+        password: TEMP,
+      })
+      expect(login.statusCode).toBe(200)
+    })
+
+    it('honours a supplied password and then names no temp one', async () => {
+      const id = await insertUser(pool, { local: 'chosen' })
+      const response = await inject('POST', `/admin/users/${id}/reset-password`, backofficeCookie, {
+        password: 'a password of their own',
+      })
+      expect(response.statusCode).toBe(200)
+      expect(response.json().temp_password).toBeUndefined()
+
+      const login = await inject('POST', '/auth/login', null, {
+        email: fixtureEmail('chosen'),
+        password: 'a password of their own',
+      })
+      expect(login.statusCode).toBe(200)
+    })
+
+    it('rejects a password under the minimum length with 400', async () => {
+      const id = await insertUser(pool, { local: 'short' })
+      const response = await inject('POST', `/admin/users/${id}/reset-password`, backofficeCookie, {
+        password: 'short',
+      })
+      expect(response.statusCode).toBe(400)
+    })
+
+    it('lets only a director reset a director', async () => {
+      const id = await insertUser(pool, { local: 'principal', role: 'director' })
+      const denied = await inject('POST', `/admin/users/${id}/reset-password`, backofficeCookie, {})
+      expect(denied.statusCode).toBe(403)
+      const { rows } = await pool.query('SELECT password_hash FROM users WHERE id = $1', [id])
+      expect(rows[0].password_hash).toBe(DUMMY_HASH)
+
+      const allowed = await inject('POST', `/admin/users/${id}/reset-password`, directorCookie, {})
+      expect(allowed.statusCode).toBe(200)
+      expect(allowed.json().temp_password).toBe(TEMP)
+    })
+
+    it('returns 404 for an unknown id', async () => {
+      const response = await inject('POST', '/admin/users/99999999/reset-password', backofficeCookie, {})
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('rejects a non-backoffice caller with 403', async () => {
+      const id = await insertUser(pool, { local: 'victim' })
+      const response = await inject('POST', `/admin/users/${id}/reset-password`, customerCookie, {})
+      expect(response.statusCode).toBe(403)
     })
   })
 

@@ -29,7 +29,10 @@ const start = async () => {
     transport: createMailTransport(config),
     from: config.emailFrom,
     backofficeEmail: config.backofficeEmail,
-    log: { info: () => {}, error: (details, message) => console.error(message, details) },
+    log: {
+      info: ({ template, to }, message) => console.log(`${message}: ${template ?? 'letter'} -> ${to}`),
+      error: ({ err, template, to }, message) => console.error(`${message}: ${template ?? 'letter'} -> ${to}: ${err?.message}`),
+    },
   })
 
   // Xero stays disabled (every /admin/xero route → 503) until both

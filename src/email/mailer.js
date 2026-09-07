@@ -55,5 +55,8 @@ export const createMailer = ({ transport, from, backofficeEmail, log = noopLog }
     }
   }
 
-  return Object.freeze({ send, backofficeEmail })
+  // `delivers` is the transport's word on whether a letter reaches an inbox.
+  // A transport that does not say (the tests' capture objects) is taken to
+  // deliver: only the SMTP-less capture transport declares otherwise.
+  return Object.freeze({ send, backofficeEmail, delivers: transport.delivers !== false })
 }

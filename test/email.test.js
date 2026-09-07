@@ -5,6 +5,7 @@ import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
 import { renderTemplate, TEMPLATE_NAMES } from '../src/email/templates.js'
 import { createMailer } from '../src/email/mailer.js'
+import { createMailTransport } from '../src/email/transport.js'
 import { resolveOrderRecipient } from '../src/email/recipients.js'
 import {
   notifyRequestReceived,
@@ -126,6 +127,38 @@ describe('email templates', () => {
 
   it('throws on an unknown template name', () => {
     expect(() => renderTemplate('nope', {})).toThrow(/Unknown email template/)
+  })
+})
+
+describe('createMailTransport', () => {
+  it('without SMTP_HOST captures the letter, prints it, and says it does not deliver', async () => {
+    const warnings = []
+    const transport = createMailTransport({ smtpHost: null }, { warn: (line) => warnings.push(line) })
+    expect(transport.delivers).toBe(false)
+    expect(warnings[0]).toMatch(/SMTP_HOST unset/)
+
+    const mailer = createMailer({ transport, from: FROM, backofficeEmail: BACKOFFICE })
+    expect(mailer.delivers).toBe(false)
+    const result = await mailer.send({
+      subject: 'Reset your password',
+      to: 'someone@test.example',
+      text: 'Choose a new password here: https://store.test/reset-password?token=abc',
+    })
+    expect(result.ok).toBe(true)
+    // The letter is in the log, link included — the only place it goes.
+    expect(warnings[1]).toContain('To: someone@test.example')
+    expect(warnings[1]).toContain('https://store.test/reset-password?token=abc')
+  })
+
+  it('with SMTP_HOST set builds a delivering transport', () => {
+    const transport = createMailTransport({ smtpHost: 'smtp.test', smtpPort: 587 }, { warn: () => {} })
+    expect(transport.delivers).toBe(true)
+    expect(typeof transport.sendMail).toBe('function')
+  })
+
+  it("a transport that does not say counts as delivering", () => {
+    const { mailer } = buildMailer()
+    expect(mailer.delivers).toBe(true)
   })
 })
 

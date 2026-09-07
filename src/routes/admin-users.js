@@ -240,11 +240,14 @@ export const adminUsersRoutes = async (
           message: 'This account is archived. Restore it before resetting its password.',
         }
       }
-      if (!mailer) {
+      // No mailer, or one that only captures (SMTP_HOST unset): say so. The
+      // supplied-password path above still works, which is the fallback.
+      if (!mailer?.delivers) {
         reply.code(503)
         return {
           error: 'Service Unavailable',
-          message: 'Email is not configured on this server, so a reset link cannot be sent.',
+          message:
+            'Email is not configured on this server (SMTP_HOST is unset), so a reset link cannot be sent. Set a password for them directly instead.',
         }
       }
       const token = await issueResetTokenFor(pool, target.id)

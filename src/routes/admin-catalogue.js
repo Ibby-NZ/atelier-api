@@ -154,6 +154,7 @@ const brandCreateSchema = {
     trade_only: { type: 'boolean', default: true },
     website_url: nullableUrl,
     image_url: nullableUrl,
+    logo_url: nullableUrl,
     brand_code: reportingLabelProp,
   },
 }
@@ -171,6 +172,7 @@ const brandPatchSchema = {
     trade_only: { type: 'boolean' },
     website_url: nullableUrl,
     image_url: nullableUrl,
+    logo_url: nullableUrl,
     featured_rank: featuredRankProp,
     // Nullable on purpose: clearing it is how the office says "nobody invoices
     // this house yet". An unknown id is a 422 from the FK, not a silent no-op.

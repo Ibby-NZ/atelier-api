@@ -5,6 +5,7 @@
 // — so triggering a notification can never fail the request that caused it.
 
 import { resolveOrderRecipient } from './recipients.js'
+import { renderStoredTemplate } from './template-store.js'
 
 // Admin status -> the template announcing that transition (US-014). A status not
 // in this map (e.g. 'declined') sends nothing.
@@ -205,4 +206,39 @@ export const notifyPasswordReset = async (mailer, { user, resetUrl, expiresMinut
     to: user.email,
     data: { name: user.name, reset_url: resetUrl, expires_minutes: expiresMinutes },
   })
+}
+
+// The store-backed acceptance letter; the CRM Letters screen edits it by name.
+export const TRADE_APPROVED_TEMPLATE = 'trade_application_approved'
+
+/**
+ * The acceptance letter, sent when a trade application is approved. The caller
+ * (PATCH /admin/users/:id) decides WHEN — only on the false -> true flip, so a
+ * re-saved approval never re-sends it. Greets by the login's name, else by the
+ * signatory on the application (`name` is optional on the form; "Dear ," is
+ * not a letter). No-op when mailer is null; never throws.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ query: Function }} db
+ * @param {{ id: number, email: string, name?: string|null }} user
+ */
+export const notifyTradeApproved = async (mailer, db, user) => {
+  if (!mailer) {
+    return
+  }
+  let name = user.name
+  if (!name) {
+    // The approval is already committed by now, so a failed lookup degrades
+    // the greeting rather than 500ing the PATCH.
+    const { rows } = await db
+      .query(
+        `SELECT signatory_name FROM trade_applications
+          WHERE user_id = $1 ORDER BY id DESC LIMIT 1`,
+        [user.id]
+      )
+      .catch(() => ({ rows: [] }))
+    name = rows[0]?.signatory_name || 'Customer'
+  }
+  const { subject, text } = await renderStoredTemplate(db, TRADE_APPROVED_TEMPLATE, { name })
+  await mailer.send({ to: user.email, subject, text })
 }

@@ -144,6 +144,52 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
+  // The acceptance letter (the office's "New account application acceptance
+  // letter 2026"), sent ONCE, automatically, when a trade application is
+  // approved — `PATCH /admin/users/:id { trade_approved: true }` flipping the
+  // flag from false (src/routes/admin-users.js -> notifyTradeApproved). Store-
+  // backed like sample_loan_reminder, so showroom hours change in the CRM
+  // Letters screen rather than in a deploy. `name` arrives already resolved by
+  // the caller (the login's name, else the form's signatory).
+  trade_application_approved: ({ name }) => ({
+    subject: `${BRAND}: your trade account has been approved`,
+    text: [
+      `Dear ${name},`,
+      '',
+      'Welcome to Atelier Textiles! We are delighted to confirm your application for a',
+      'trading account with us has been approved on a cash account basis, and we look',
+      'forward to working with you.',
+      '',
+      'We warmly welcome you into all of our showrooms;',
+      '',
+      'Atelier Textiles Auckland Showroom',
+      '16 Yorks Street, Parnell, Auckland 1052',
+      '+6493733866',
+      'Opening hours 830am-5pm',
+      '',
+      'Atelier Textiles Wellington Showroom',
+      'Wellington Design Library',
+      '282 Thorndon Quay, Pipitea, Wellington 6011',
+      '+6444712800',
+      'Opening hours 9am-5pm',
+      '',
+      'Atelier Textiles Christchurch Showroom',
+      '323 Madras Street, Christchurch Central 8013',
+      '+6433791561',
+      'Opening hours 830am – 5pm',
+      '',
+      "Samples are available on request, so please do get in touch and we'll always be",
+      'happy to help.',
+      '',
+      "Should you have any questions about our brands or products, please don't hesitate",
+      'to call us on 0800 ATELIER or email sales@atelier.co.nz',
+      '',
+      'We look forward to supporting your design journey.',
+      '',
+      'The Atelier Team',
+    ].join('\n'),
+  }),
+
   // Acknowledgement to whoever submitted the storefront contact form.
   contact_received: ({ name }) => ({
     subject: `${BRAND}: thank you for your enquiry`,

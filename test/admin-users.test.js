@@ -830,4 +830,86 @@ describe('back-office users admin', () => {
       expect(await stillExists(id)).toBe(true)
     })
   })
+
+  // The acceptance letter: sent automatically, once, when trade_approved flips
+  // false -> true. A second app instance carries the capture mailer; the boss's
+  // cookie is a stateless signed cookie, so it is valid there too.
+  describe('approval letter', () => {
+    const TEMPLATE = 'trade_application_approved'
+    let mailApp
+    let transport
+    const mailInject = (method, url, payload) =>
+      mailApp.inject({ method, url, headers: { cookie: backofficeCookie }, payload })
+
+    beforeAll(async () => {
+      const sent = []
+      transport = { sent, sendMail: async (message) => sent.push(message) }
+      const mailer = createMailer({
+        transport,
+        from: 'atelier@example.test',
+        backofficeEmail: 'office@example.test',
+      })
+      mailApp = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false, mailer })
+      await mailApp.ready()
+    })
+
+    afterAll(async () => {
+      await pool.query('DELETE FROM email_templates WHERE name = $1', [TEMPLATE])
+      await mailApp.close()
+    })
+
+    beforeEach(() => {
+      transport.sent.length = 0
+    })
+
+    it('sends the letter on the false -> true flip and on nothing else', async () => {
+      const id = await insertUser(pool, { local: 'applicant', name: 'Ada Applicant', role: 'trade' })
+
+      expect((await mailInject('PATCH', `/admin/users/${id}`, { name: 'Ada A.' })).statusCode).toBe(200)
+      expect(transport.sent).toHaveLength(0)
+
+      expect((await mailInject('PATCH', `/admin/users/${id}`, { trade_approved: true })).statusCode).toBe(200)
+      expect(transport.sent).toHaveLength(1)
+      const [letter] = transport.sent
+      expect(letter.to).toBe(fixtureEmail('applicant'))
+      expect(letter.subject).toContain('approved')
+      expect(letter.text).toContain('Dear Ada A.,')
+      expect(letter.text).toContain('Atelier Textiles Auckland Showroom')
+      expect(letter.text).toContain('323 Madras Street, Christchurch Central 8013')
+
+      // Re-saving an approved account is not a second approval.
+      expect((await mailInject('PATCH', `/admin/users/${id}`, { trade_approved: true })).statusCode).toBe(200)
+      expect(transport.sent).toHaveLength(1)
+    })
+
+    it('greets by the application signatory when the login has no name, from the stored letter', async () => {
+      const id = await insertUser(pool, { local: 'nameless', role: 'trade' })
+      await insertTradeApplication(pool, id) // signatory_name: 'Ada Applicant'
+      const put = await mailInject('PUT', `/admin/email-templates/${TEMPLATE}`, {
+        subject: 'Hello {{ name }}',
+        body: 'Welcome aboard, {{ name }}.',
+      })
+      expect(put.statusCode).toBe(200)
+
+      expect((await mailInject('PATCH', `/admin/users/${id}`, { trade_approved: true })).statusCode).toBe(200)
+      expect(transport.sent).toEqual([
+        expect.objectContaining({
+          to: fixtureEmail('nameless'),
+          subject: 'Hello Ada Applicant',
+          text: 'Welcome aboard, Ada Applicant.',
+        }),
+      ])
+    })
+
+    it('sends nothing when the approval rides on a role change off trade', async () => {
+      const id = await insertUser(pool, { local: 'demoted', role: 'trade' })
+      const response = await mailInject('PATCH', `/admin/users/${id}`, {
+        role: 'customer',
+        trade_approved: true,
+      })
+      expect(response.statusCode).toBe(200)
+      expect(response.json().user.trade_approved).toBe(false)
+      expect(transport.sent).toHaveLength(0)
+    })
+  })
 })

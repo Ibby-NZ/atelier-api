@@ -45,5 +45,10 @@ Extracted from the root CLAUDE.md (root conventions still apply). Loaded automat
   (`src/routes/admin-email-templates.js`, backoffice-only — a letter that goes out over Atelier's
   name is not something a client edits). PUT is an upsert, so saving twice is one row and never a
   409 a staffer has to interpret.
-- The one template using the store today is `sample_loan_reminder`; the sending path, and why there
-  is deliberately no scheduler behind it, live in `src/samples/CLAUDE.md`.
+- Two templates read the store today: `sample_loan_reminder` (sending path, and why there is
+  deliberately no scheduler behind it, in `src/samples/CLAUDE.md`) and `trade_application_approved`,
+  the office's acceptance letter. `notifyTradeApproved(mailer, db, user)` renders it through
+  `renderStoredTemplate` and sends verbatim; `PATCH /admin/users/:id` calls it only when
+  `trade_approved` flips false → true on a trade row, so it goes out exactly once per approval.
+  The order-lifecycle templates still render from code only — an edit to them in the CRM Letters
+  screen is stored but not read.

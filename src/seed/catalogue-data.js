@@ -25,6 +25,11 @@ import { categoryForItemType } from '../../scripts/lib/price-template.js'
 // The slug below is the brands upsert key and stays as it was.
 const HOUSE_BRAND = 'Atelier Brand'
 
+// The houses whose ateliers take made-to-measure commissions (the client's
+// brief of 10 Aug 2026). Applied on INSERT only, like trade_only: the CRM's
+// Houses screen owns the flag afterwards.
+const BESPOKE_HOUSES = new Set(['pierre-frey', 'cc-milano', 'loro-piana', 'maria-flora', 'de-le-cuona'])
+
 // Brands referenced by products/designs but absent from realCatalogue.brands.
 // Currency still resolves from suppliers.js first (Vervain/Trend are Fabricut house brands).
 const EXTRA_BRAND_META = Object.freeze({
@@ -87,6 +92,7 @@ const toBrandRow = (name) => {
     // leaves an existing value alone, so opening or closing a house in the CRM
     // survives every reseed.
     trade_only: name !== HOUSE_BRAND,
+    bespoke: BESPOKE_HOUSES.has(meta.slug),
     website_url: BRAND_WEBSITES[meta.slug] ?? null,
   })
 }
@@ -105,6 +111,7 @@ const toRepresentedHouseRow = (house) =>
     currency: house.currency,
     is_international: true,
     trade_only: true,
+    bespoke: BESPOKE_HOUSES.has(house.slug),
     website_url: BRAND_WEBSITES[house.slug] ?? null,
   })
 

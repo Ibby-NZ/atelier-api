@@ -28,6 +28,7 @@ const BRAND_COLUMNS = `
   currency,
   is_international,
   trade_only,
+  bespoke,
   story,
   website_url,
   image_url,
@@ -43,6 +44,9 @@ const toBrand = (row) =>
     currency: row.currency,
     is_international: row.is_international,
     trade_only: row.trade_only,
+    // Takes made-to-measure commissions (set in the CRM). The storefront lists
+    // the house on /bespoke and puts the quote enquiry form on its page.
+    bespoke: row.bespoke,
     story: row.story,
     website_url: row.website_url,
     // The house's own photograph, uploaded against the brand in the CRM. It is

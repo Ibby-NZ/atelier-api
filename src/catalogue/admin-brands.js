@@ -118,7 +118,7 @@ export const buildUpdate = (input, columns) => {
 // it is the office's D365 reporting designation, deliberately absent from the
 // public brand read model (test/reporting-codes.test.js scans for the VALUE as
 // well as the key), and readable here because the CRM is where it is typed in.
-const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, website_url, image_url, logo_url, featured_rank, supplier_id, brand_code, archived_at, created_at`
+const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, bespoke, website_url, image_url, logo_url, featured_rank, supplier_id, brand_code, archived_at, created_at`
 
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
@@ -131,6 +131,9 @@ const BRAND_UPDATE_COLUMNS = Object.freeze([
   // per house, not a property of the vendored catalogue — and the seed never
   // overwrites it, so an office change survives every reseed.
   'trade_only',
+  // Takes made-to-measure commissions: lists the house on the storefront's
+  // /bespoke page and puts the quote enquiry form on its own page.
+  'bespoke',
   'website_url',
   // The house's image. Same public-`src` gate as a collection's.
   'image_url',
@@ -171,6 +174,7 @@ const toBrand = (row, extra) =>
     currency: row.currency,
     is_international: row.is_international,
     trade_only: row.trade_only,
+    bespoke: row.bespoke,
     website_url: row.website_url ?? null,
     image_url: row.image_url ?? null,
     logo_url: row.logo_url ?? null,
@@ -326,8 +330,8 @@ export const createBrand = async (pool, input) => {
   const slug = slugFrom(name)
   try {
     const { rows } = await pool.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url, image_url, logo_url, brand_code)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, bespoke, website_url, image_url, logo_url, brand_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING ${BRAND_COLUMNS}`,
       [
         name,
@@ -340,6 +344,7 @@ export const createBrand = async (pool, input) => {
         // must not appear on the public storefront because someone left a box
         // unticked.
         input.trade_only ?? true,
+        input.bespoke ?? false,
         websiteUrlFrom(input.website_url),
         websiteUrlFrom(input.image_url, 'Image'),
         websiteUrlFrom(input.logo_url, 'Logo'),

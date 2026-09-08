@@ -554,6 +554,24 @@ describe('back-office catalogue admin', () => {
       expect(response.statusCode).toBe(404)
     })
 
+    // The CRM toggle behind the storefront's /bespoke page and the enquiry form
+    // on a house page: off at birth, and the public read model carries it.
+    it('bespoke defaults to false, is patchable, and reaches the public brand', async () => {
+      const created = await createBrandFixture('Commissions')
+      expect(created.bespoke).toBe(false)
+      const response = await inject(
+        'PATCH',
+        `/admin/brands/${created.id}`,
+        backofficeCookie,
+        { bespoke: true }
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().brand.bespoke).toBe(true)
+      const pub = await inject('GET', `/catalogue/brands/${created.slug}`)
+      expect(pub.statusCode).toBe(200)
+      expect(pub.json().brand.bespoke).toBe(true)
+    })
+
     // The slug is stripped as an unknown property, leaving an empty patch that
     // minProperties rejects — so a rename attempt cannot slip through.
     it('rejects a slug change with 400', async () => {

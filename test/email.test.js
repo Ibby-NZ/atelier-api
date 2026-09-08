@@ -61,11 +61,25 @@ describe('email templates', () => {
         'sample_loan_reminder',
         // The emailed reset link (forgot password, and the back office's reset).
         'password_reset',
+        // The acceptance letter, store-backed too, sent on trade approval.
+        'trade_application_approved',
       ])
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(13)
+    expect(TEMPLATE_NAMES).toHaveLength(14)
+  })
+
+  it('trade_application_approved is the office acceptance letter, addressed by name', () => {
+    const { subject, text } = renderTemplate('trade_application_approved', { name: 'Alex Designer' })
+    expect(subject).toContain('approved')
+    expect(text).toContain('Dear Alex Designer,')
+    expect(text).toContain('approved on a cash account basis')
+    expect(text).toContain('16 Yorks Street, Parnell, Auckland 1052')
+    expect(text).toContain('282 Thorndon Quay, Pipitea, Wellington 6011')
+    expect(text).toContain('323 Madras Street, Christchurch Central 8013')
+    expect(text).toContain('sales@atelier.co.nz')
+    expect(text.trim().endsWith('The Atelier Team')).toBe(true)
   })
 
   it('request_received names the order and promises contact within 24 hours', () => {

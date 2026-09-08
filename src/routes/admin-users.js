@@ -24,7 +24,7 @@ import {
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { MIN_PASSWORD_LENGTH } from '../auth/passwords.js'
 import { issueResetTokenFor, resetUrlFor, RESET_TOKEN_TTL_MINUTES } from '../auth/password-reset.js'
-import { notifyPasswordReset } from '../email/notifications.js'
+import { notifyPasswordReset, notifyTradeApproved } from '../email/notifications.js'
 
 // The valid stored roles (matches the users_role_check constraint). Shared by the
 // list filter and the patch/create body so an unknown role is a 400 by schema.
@@ -164,7 +164,15 @@ export const adminUsersRoutes = async (
           message: 'You cannot change your own role.',
         }
       }
+      // The acceptance letter goes out on the false -> true flip of
+      // trade_approved and on nothing else: re-saving an approved account, or
+      // approving alongside a role change off trade (which clears the flag),
+      // sends nothing. `before` null falls through to updateUser's own 404.
+      const before = await getUser(pool, request.params.id)
       const user = await updateUser(pool, request.params.id, request.body)
+      if (before && !before.trade_approved && user.trade_approved && user.role === 'trade') {
+        await notifyTradeApproved(mailer, pool, user)
+      }
       return { user }
     }
   )

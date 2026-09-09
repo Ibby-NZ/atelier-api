@@ -106,7 +106,8 @@ describe('supplier backfill plan (real sources)', () => {
     const byName = new Map(suppliers.map((row) => [row.name, row]))
     // Manuel Canovas was the one live disagreement — the snapshot said EUR while
     // every rate on file was quoted GBP. The office settled it in the ledger's
-    // favour, so the snapshot now says GBP too and nothing is left to report.
+    // favour; since Sept 2026 the snapshot lists Manuel Canovas as a HOUSE under
+    // Colefax & Fowler rather than a supplier, so only the ledger speaks for it.
     expect(byName.get('Manuel Canovas').currency).toBe('GBP')
     expect(reports.currencyConflicts).toEqual([])
     // Jim Thompson is the invoicing-currency rule itself: Thailand, USD.
@@ -225,6 +226,38 @@ describe('supplier backfill plan (real sources)', () => {
     expect(unmatched).toContain('JV Fabrics')
     expect(unmatched).toContain('Altagamma')
     expect(unmatched).not.toContain('Fabricut')
+  })
+
+  it("links the Colefax & Fowler and Pierre Frey houses as the office's Sept 2026 roster states", () => {
+    // Guards the vendored snapshot against a re-copy from the demo, which once
+    // listed Larsen and Manuel Canovas as suppliers of their own.
+    const names = [
+      'Colefax & Fowler', 'Jane Churchill', 'Larsen', 'Manuel Canovas',
+      'Pierre Frey', 'Boussac', 'Braquenié', 'Fadini Borghi',
+    ]
+    const brands = names.map((name, index) => ({ id: 100 + index, name, supplier_id: null }))
+    const { brandLinks, reports } = planSupplierBackfill({
+      snapshot: SNAPSHOT,
+      priceListSuppliers,
+      brands,
+      existingSuppliers: [],
+      existingAliases: [],
+    })
+    const linked = Object.fromEntries(
+      brandLinks.map((link) => [brands.find((b) => b.id === link.brand_id).name, link.supplier_name])
+    )
+    expect(linked).toMatchObject({
+      'Jane Churchill': 'Colefax & Fowler',
+      Larsen: 'Colefax & Fowler',
+      'Manuel Canovas': 'Colefax & Fowler',
+      Boussac: 'Pierre Frey',
+      Braquenié: 'Pierre Frey',
+      'Fadini Borghi': 'Pierre Frey',
+    })
+    // Stated by the office, not yet catalogued: reported, never created.
+    const unmatched = reports.unmatchedBrands.map((row) => row.brand)
+    expect(unmatched).toContain('Le Manach')
+    expect(unmatched).toContain('Thorp of London')
   })
 
   it('leaves a house that is already linked alone, and reports it', () => {
@@ -400,10 +433,9 @@ describe('supplier backfill (database)', () => {
 
   // The client's own roll-up as the parameter export states it: one house under
   // the Dynamics spelling of Alpha (resolved by the alias above, on the same
-  // run), one the snapshot already links, one under an entity nobody holds.
+  // run), one under an entity nobody holds.
   const rangeParameters = [
     { name: `${PREFIX} House Three`, supplier: `${PREFIX} Alpha S.p.A.` },
-    { name: `${PREFIX} HOUSE TWO`, supplier: `${PREFIX} Alpha S.p.A.` },
     { name: `${PREFIX} House Nine`, supplier: `${PREFIX} Nobody Ltd` },
   ]
 
@@ -481,7 +513,7 @@ describe('supplier backfill (database)', () => {
     expect(summary.priceListItems).toBe(3)
     expect(summary.brands).toBe(2)
     // The roll-up: two entities in the export, one resolved (by the alias this
-    // same run inserted), one house linked by it — House Two was already Alpha's.
+    // same run inserted), one house linked by it.
     expect(summary.rollup).toMatchObject({ suppliers: 2, suppliers_matched: 1, brands_linked: 1 })
     expect(summary.reports.rollupUnmatchedSuppliers).toContainEqual(
       expect.objectContaining({ supplier: `${PREFIX} Nobody Ltd`, ranges: [`${PREFIX} House Nine`] })

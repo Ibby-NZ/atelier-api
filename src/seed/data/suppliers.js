@@ -11,6 +11,10 @@
 //  · discountIncluded: true — supplied prices are already net (Loro Piana): waterfall SKIPS P2.
 //
 // brands[]: { name, discount? | discountTiers? | discountChain? | markup?, indicative?, note? }
+//
+// House rosters (which brands a supplier invoices) follow the office's own statement of
+// September 2026 for Colefax & Fowler and Pierre Frey, which agrees with the Dynamics roll-up
+// (legacy_tracking_options.supplier). A re-copy of this file must keep those two rosters.
 
 export const suppliers = [
   {
@@ -21,21 +25,17 @@ export const suppliers = [
       method: 'averaged', discountIncluded: false, list: 0.0, net: 0.05,
       averagedFrom: [{ label: 'Fabrics', pct: 0.05 }, { label: 'Wallpapers', pct: 0.05 }],
     },
-    brands: [{ name: 'Pierre Frey' }],
-  },
-  {
-    id: 'manuel-canovas', name: 'Manuel Canovas', country: 'France', city: 'Paris',
-    currency: 'GBP', agent: 'Mainfreight Air', incoterm: 'FCA',
-    poEmail: 'orders@manuelcanovas.fr', indicativeDefaults: true, freightDollar: 30,
-    terms: { method: 'averaged', discountIncluded: false, list: 0.0, net: 0.04 },
-    brands: [{ name: 'Manuel Canovas' }],
-  },
-  {
-    id: 'larsen', name: 'Larsen', country: 'United Kingdom', city: 'London',
-    currency: 'GBP', agent: 'DHL Global Forwarding', incoterm: 'FCA',
-    poEmail: 'orders@larsenfabrics.com', indicativeDefaults: true, freightDollar: 20,
-    terms: { method: 'averaged', discountIncluded: false, list: 0.0, net: 0.06 },
-    brands: [{ name: 'Larsen' }],
+    // The Pierre Frey house as the office stated it (Sept 2026): Pierre Frey Paris invoices
+    // all six. Le Manach and Thorp of London are not catalogued yet — the backfill reports
+    // them and links nothing until they are.
+    brands: [
+      { name: 'Pierre Frey' },
+      { name: 'Boussac' },
+      { name: 'Braquenié' },
+      { name: 'Le Manach' },
+      { name: 'Fadini Borghi' },
+      { name: 'Thorp of London' },
+    ],
   },
   {
     id: 'rubelli-venezia', name: 'Rubelli Venezia', country: 'Italy', city: 'Venice',
@@ -49,7 +49,14 @@ export const suppliers = [
     currency: 'GBP', agent: 'DHL Global Forwarding', incoterm: 'FCA',
     poEmail: 'trade@colefax.co.uk', indicativeDefaults: true, freightDollar: 20,
     terms: { method: 'averaged', discountIncluded: false, list: 0.0, net: 0.05 },
-    brands: [{ name: 'Colefax & Fowler' }],
+    // The Colefax & Fowler house as the office stated it (Sept 2026) and as D365 rolls it up.
+    // Larsen and Manuel Canovas used to be rows of their own here; that was the demo's guess.
+    brands: [
+      { name: 'Colefax & Fowler' },
+      { name: 'Jane Churchill' },
+      { name: 'Larsen' },
+      { name: 'Manuel Canovas' },
+    ],
   },
   {
     id: 'jim-thompson', name: 'Jim Thompson', country: 'Thailand', city: 'Bangkok',

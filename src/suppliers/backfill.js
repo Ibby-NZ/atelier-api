@@ -198,10 +198,14 @@ const insertTerms = async (client, brandTerms, idsByName) => {
  */
 // --- The Dynamics roll-up ----------------------------------------------------
 // `legacy_tracking_options.supplier` is the client's own supplier -> house
-// roll-up (src/suppliers/supplier-rollup.js). It runs LAST, inside the same
-// transaction and after the aliases are inserted, so an alias this run adds
-// already resolves its entity: `Pierre Frey Paris` lands its four houses on the
-// run that adds the alias. `rangeParameters` is injectable for the reason
+// roll-up (src/suppliers/supplier-rollup.js). It runs inside the same
+// transaction, AFTER the aliases are inserted — so an alias this run adds
+// already resolves its entity, and `Pierre Frey Paris` lands its houses on the
+// run that adds the alias — and BEFORE the snapshot's own brand links, because
+// the client's live system outranks the vendored office snapshot: where the two
+// disagreed (the snapshot once had Larsen and Manuel Canovas as suppliers of
+// their own), the snapshot used to win by running first and the roll-up could
+// only report it. `rangeParameters` is injectable for the reason
 // `priceListSuppliers` is — the shared test database holds the real parameter
 // export, and a test must not link the real houses.
 
@@ -265,9 +269,9 @@ export const backfillSuppliers = async (
     const { created, enriched, idsByName } = await upsertSuppliers(client, plan.suppliers)
     const aliases = await insertAliases(client, plan.aliases, idsByName)
     const priceListItems = await linkPriceListItems(client, plan.matches, idsByName)
+    const rollup = await applyRollup(client, rangeParameters)
     const brands = await linkBrands(client, plan.brandLinks, idsByName)
     const { terms, tiers } = await insertTerms(client, plan.brandTerms, idsByName)
-    const rollup = await applyRollup(client, rangeParameters)
 
     await client.query('COMMIT')
     return Object.freeze({

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Atelier platform API — Fastify + Postgres backend for the storefront and back office.",
+  "description": "Atelier platform API \u2014 Fastify + Postgres backend for the storefront and back office.",
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
@@ -25,7 +25,8 @@
     "import:item-types": "node src/seed/import-stock-item-types.js",
     "push:legacy": "node src/seed/push-legacy.js",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "backfill:pricing-parameters": "node src/seed/backfill-pricing-parameters.js"
   },
   "dependencies": {
     "@adminjs/fastify": "^4.2.0",

@@ -391,7 +391,21 @@ describe('supplier backfill (database)', () => {
 
   // 'W3BA-RAW' is the raw filename prefix; the rates are filed under the
   // canonical spelling, exactly as SUPPLIER_OVERRIDES arranges for JV.
-  const aliasSources = [{ alias: 'W3BA-RAW', supplier: `${PREFIX} Alpha` }]
+  const aliasSources = [
+    { alias: 'W3BA-RAW', supplier: `${PREFIX} Alpha` },
+    // The legal-entity spelling Dynamics uses for the same house — the shape
+    // D365_SUPPLIER_ALIASES carries for `Pierre Frey Paris`.
+    { alias: `${PREFIX} Alpha S.p.A.`, supplier: `${PREFIX} Alpha` },
+  ]
+
+  // The client's own roll-up as the parameter export states it: one house under
+  // the Dynamics spelling of Alpha (resolved by the alias above, on the same
+  // run), one the snapshot already links, one under an entity nobody holds.
+  const rangeParameters = [
+    { name: `${PREFIX} House Three`, supplier: `${PREFIX} Alpha S.p.A.` },
+    { name: `${PREFIX} HOUSE TWO`, supplier: `${PREFIX} Alpha S.p.A.` },
+    { name: `${PREFIX} House Nine`, supplier: `${PREFIX} Nobody Ltd` },
+  ]
 
   const insertRate = (supplier, code, currency = 'EUR') =>
     pool.query(
@@ -429,6 +443,7 @@ describe('supplier backfill (database)', () => {
       snapshot,
       aliasSources,
       priceListSuppliers: await testPriceListSuppliers(),
+      rangeParameters,
     })
 
   const supplierRow = (name) =>
@@ -444,6 +459,8 @@ describe('supplier backfill (database)', () => {
 
     await insertBrand(`${PREFIX} House One`)
     await insertBrand(`${PREFIX} House Two`)
+    // Reached by no price list and no snapshot — only the Dynamics roll-up.
+    await insertBrand(`${PREFIX} House Three`)
     await insertRate(`${PREFIX} Alpha`, 'A-1')
     await insertRate(`${PREFIX} Alpha`, 'A-2')
     // A rate ledger name with no office record: it still becomes a supplier,
@@ -460,9 +477,18 @@ describe('supplier backfill (database)', () => {
     const summary = await run()
 
     expect(summary.suppliers.created).toBe(3)
-    expect(summary.aliases).toBe(1)
+    expect(summary.aliases).toBe(2)
     expect(summary.priceListItems).toBe(3)
     expect(summary.brands).toBe(2)
+    // The roll-up: two entities in the export, one resolved (by the alias this
+    // same run inserted), one house linked by it — House Two was already Alpha's.
+    expect(summary.rollup).toMatchObject({ suppliers: 2, suppliers_matched: 1, brands_linked: 1 })
+    expect(summary.reports.rollupUnmatchedSuppliers).toContainEqual(
+      expect.objectContaining({ supplier: `${PREFIX} Nobody Ltd`, ranges: [`${PREFIX} House Nine`] })
+    )
+    expect(summary.reports.rollupRangesWithoutBrand).toContainEqual(
+      expect.objectContaining({ range: `${PREFIX} House Nine` })
+    )
     expect(summary.terms).toBe(2)
     expect(summary.tiers).toBe(2)
 
@@ -496,7 +522,15 @@ describe('supplier backfill (database)', () => {
       `SELECT alias, supplier_id FROM supplier_aliases WHERE supplier_id = $1`,
       [alpha.id]
     )
-    expect(aliasRows).toEqual([{ alias: 'W3BA-RAW', supplier_id: alpha.id }])
+    expect(new Set(aliasRows.map((row) => row.alias))).toEqual(
+      new Set(['W3BA-RAW', `${PREFIX} Alpha S.p.A.`])
+    )
+    expect(aliasRows.every((row) => row.supplier_id === alpha.id)).toBe(true)
+
+    const { rows: three } = await pool.query(`SELECT supplier_id FROM brands WHERE name = $1`, [
+      `${PREFIX} House Three`,
+    ])
+    expect(three[0].supplier_id).toBe(alpha.id)
   })
 
   it('stores the chain as a sequence and the tiers with exactly one fallback', async () => {
@@ -552,6 +586,7 @@ describe('supplier backfill (database)', () => {
     expect(summary.brands).toBe(0)
     expect(summary.terms).toBe(0)
     expect(summary.tiers).toBe(0)
+    expect(summary.rollup.brands_linked).toBe(0)
 
     const after = await pool.query(
       `SELECT id, name, currency, updated_at FROM suppliers
@@ -567,7 +602,7 @@ describe('supplier backfill (database)', () => {
                 JOIN brands b ON b.id = t.brand_id WHERE b.slug LIKE $1) AS terms`,
       [`${PREFIX}-%`]
     )
-    expect(counts.rows[0]).toEqual({ aliases: 1, terms: 2 })
+    expect(counts.rows[0]).toEqual({ aliases: 2, terms: 2 })
   })
 
   it('fills a NULL column left by an earlier run without touching a staff edit', async () => {

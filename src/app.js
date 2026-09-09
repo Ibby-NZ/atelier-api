@@ -19,6 +19,7 @@ import { adminPriceListImportRoutes } from './routes/admin-price-list-import.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminFreightRoutes } from './routes/admin-freight.js'
+import { adminPricingRoutes } from './routes/admin-pricing.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
 import { adminDashboardRoutes } from './routes/admin-dashboard.js'
 import { adminSampleRoutes } from './routes/admin-samples.js'
@@ -166,6 +167,10 @@ export const buildApp = ({
     // gated a second time on finance visibility, and the preview is the first
     // payload in the platform where masking actually deletes a column.
     api.register(adminFreightRoutes, { pool })
+    // /admin/pricing/* — the platform's OWN waterfall and the parameters behind
+    // it (per supplier, per house, FX by currency). Finance-gated throughout,
+    // reads included: every figure is a cost input.
+    api.register(adminPricingRoutes, { pool })
     // /admin/reports/* — the report library the CRM's Reporting screen reads.
     // Back-office only, masked server-side before the payload exists, and the
     // only admin routes here that opt into the rate limiter (a report is an

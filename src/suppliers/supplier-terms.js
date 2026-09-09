@@ -269,6 +269,32 @@ export const listSupplierBrandTerms = (db, supplierId) =>
   loadTerms(db, { where: 'supplier_brand_terms.supplier_id = $1', params: [supplierId] })
 
 /**
+ * One house's terms with its tiers, or null. Keyed on the house alone (UNIQUE
+ * brand_id) — what the pricing resolver asks, since a house is what it prices.
+ *
+ * @param {{ query: Function }} db
+ * @param {number} brandId
+ * @returns {Promise<object|null>}
+ */
+export const getBrandTerms = async (db, brandId) => {
+  const rows = await loadTerms(db, { where: 'supplier_brand_terms.brand_id = $1', params: [brandId] })
+  return rows[0] ?? null
+}
+
+/**
+ * Every house that has terms on file. The pricing backfill plans a flat
+ * discount only for the houses that do not, and asks here rather than naming
+ * the table itself.
+ *
+ * @param {{ query: Function }} db
+ * @returns {Promise<number[]>}
+ */
+export const listBrandIdsWithTerms = async (db) => {
+  const { rows } = await db.query(`SELECT brand_id FROM supplier_brand_terms`)
+  return rows.map((row) => row.brand_id)
+}
+
+/**
  * The same rows, paginated, for the standalone terms list. Returns
  * { terms, total } — the route builds the meta envelope, as the other admin
  * lists do.

@@ -24,9 +24,11 @@ const upsertBrands = async (client, rows) => {
     //     operational decision the office makes in the CRM (like inventory and
     //     shipping rates), and a reseed re-closing a house Atelier had opened
     //     would silently take products off the public site.
+    //   bespoke — same rule as trade_only: which houses take commissions is
+    //     set in the CRM, and a reseed must not undo it.
     const { rows: result } = await client.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, website_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, bespoke, website_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (slug) DO UPDATE SET
          name = EXCLUDED.name,
          story = EXCLUDED.story,
@@ -43,6 +45,7 @@ const upsertBrands = async (client, rows) => {
         row.currency,
         row.is_international,
         row.trade_only,
+        row.bespoke ?? false,
         row.website_url ?? null,
       ]
     )

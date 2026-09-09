@@ -45,6 +45,24 @@ export const SUPPLIER_ALIAS_SOURCES = Object.freeze([
   Object.freeze({ alias: 'C&C MILANO', supplier: 'C&C Milano' }),
 ])
 
+// The invoicing entities as Dynamics 365 spells them
+// (`legacy_tracking_options.supplier`), aliased to the house the office already
+// holds a supplier row for. Exact display names copied from the client's own
+// parameter export, not a rule: each is the legal-entity form of ONE live
+// supplier and nothing else (`Pierre Frey Paris` invoices Pierre Frey,
+// Braquenié, Le Manach and Fadini Borghi), and resolving it is what lets the
+// roll-up in `src/suppliers/supplier-rollup.js` link those houses. A target with
+// no supplier row is reported (`unmatchedAliasTargets`), never created. Kept
+// apart from SUPPLIER_ALIAS_SOURCES, which is a boundary copy of the converter's
+// filename prefixes and is asserted equal to it.
+export const D365_SUPPLIER_ALIASES = Object.freeze([
+  Object.freeze({ alias: 'Pierre Frey Paris', supplier: 'Pierre Frey' }),
+  Object.freeze({ alias: 'Rubelli / Dominique Kieffer', supplier: 'Rubelli' }),
+  Object.freeze({ alias: 'Fabricut Inc', supplier: 'Fabricut' }),
+  Object.freeze({ alias: 'Jim Thompson / The Thai Silk Co. Ltd.', supplier: 'Jim Thompson' }),
+  Object.freeze({ alias: 'Liberty London', supplier: 'Liberty' }),
+])
+
 // The snapshot marks its catch-all tier by label; `is_fallback` is the column
 // that carries it, because two tiers claiming the unmatched case — which is the
 // common case — would resolve at random. Translating the label into the flag is

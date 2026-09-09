@@ -25,6 +25,10 @@ const REPORT_LINES = [
   ['tierSetsWithoutFallback', 'tier sets with no catch-all', (r) => `${r.supplier} → ${r.brand}`],
   ['invalidTerms', 'terms the schema would refuse', (r) => `${r.supplier} → ${r.brand}: ${r.reason}`],
   ['priceListSuppliersWithoutSnapshot', 'price-list names with no office record', (r) => r],
+  ['rollupUnmatchedSuppliers', 'Dynamics invoicing entities with no live supplier (add the alias in the CRM, re-run)', (r) => `${r.supplier} — ranges: ${r.ranges.join(', ')}`],
+  ['rollupRangesWithoutBrand', 'Dynamics ranges with no live house', (r) => `${r.range} (${r.supplier})`],
+  ['rollupBrandsLinkedElsewhere', 'houses the Dynamics roll-up would link elsewhere (existing link stands)', (r) => `${r.brand}: linked to ${r.linked_to}, Dynamics says ${r.parameters_say}`],
+  ['rollupBrandsClaimedBySeveralSuppliers', 'houses claimed by several invoicing entities', (r) => `${r.brand}: ${r.suppliers.join(' / ')}`],
 ]
 
 const printReports = (reports) => {
@@ -52,7 +56,9 @@ const main = async () => {
       `Supplier backfill complete — suppliers: ${summary.suppliers.created} created, ` +
         `${summary.suppliers.enriched} enriched (${summary.suppliers.planned} planned); ` +
         `aliases: ${summary.aliases}; price-list items linked: ${summary.priceListItems}; ` +
-        `houses linked: ${summary.brands}; brand terms: ${summary.terms} (${summary.tiers} tiers)`
+        `houses linked: ${summary.brands}; brand terms: ${summary.terms} (${summary.tiers} tiers); ` +
+        `Dynamics roll-up: ${summary.rollup.brands_linked} houses linked, ` +
+        `${summary.rollup.suppliers_matched} of ${summary.rollup.suppliers} invoicing entities matched`
     )
     printReports(summary.reports)
   } catch (error) {

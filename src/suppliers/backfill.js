@@ -27,8 +27,11 @@ import { suppliers as SNAPSHOT } from '../seed/data/suppliers.js'
 import {
   SUPPLIER_ALIAS_SOURCES,
   SUPPLIER_FILL_COLUMNS,
+  D365_SUPPLIER_ALIASES,
   planSupplierBackfill,
 } from './backfill-plan.js'
+import { planSupplierRollup } from './supplier-rollup.js'
+import { listRangeParameters, MAX_LIMIT } from '../pricing/tracking-parameters.js'
 
 // Column names are code literals, values always $n placeholders — the house
 // rule buildUpdate exists for, applied to a generated statement.
@@ -193,9 +196,64 @@ const insertTerms = async (client, brandTerms, idsByName) => {
  * @param {{ snapshot?: object[], aliasSources?: object[] }} [options]
  * @returns {Promise<object>}
  */
+// --- The Dynamics roll-up ----------------------------------------------------
+// `legacy_tracking_options.supplier` is the client's own supplier -> house
+// roll-up (src/suppliers/supplier-rollup.js). It runs inside the same
+// transaction, AFTER the aliases are inserted — so an alias this run adds
+// already resolves its entity, and `Pierre Frey Paris` lands its houses on the
+// run that adds the alias — and BEFORE the snapshot's own brand links, because
+// the client's live system outranks the vendored office snapshot: where the two
+// disagreed (the snapshot once had Larsen and Manuel Canovas as suppliers of
+// their own), the snapshot used to win by running first and the roll-up could
+// only report it. `rangeParameters` is injectable for the reason
+// `priceListSuppliers` is — the shared test database holds the real parameter
+// export, and a test must not link the real houses.
+
+const readRangeParameters = async (client) =>
+  (await listRangeParameters(client, { limit: MAX_LIMIT })).parameters
+
+// Sequential on purpose: queueing several queries on one checked-out client is
+// deprecated in pg and goes away in pg@9.
+const readRollupSources = async (client) => {
+  const { rows: suppliers } = await client.query(`SELECT id, name, slug FROM suppliers ORDER BY id`)
+  const { rows: aliases } = await client.query(`SELECT alias, supplier_id FROM supplier_aliases`)
+  const { rows: brands } = await client.query(
+    `SELECT id, name, slug, supplier_id FROM brands WHERE archived_at IS NULL ORDER BY id`
+  )
+  return { suppliers, aliases, brands }
+}
+
+// The plan carries supplier ids already, so there is no name lookup here. Only
+// where NULL, as linkBrands: an existing link is a commercial decision.
+const linkBrandsFromRollup = async (client, brandLinks) => {
+  if (brandLinks.length === 0) return 0
+  const { rowCount } = await client.query(
+    `UPDATE brands
+        SET supplier_id = resolved.supplier_id
+       FROM unnest($1::int[], $2::int[]) AS resolved(brand_id, supplier_id)
+      WHERE brands.id = resolved.brand_id
+        AND brands.supplier_id IS NULL`,
+    [brandLinks.map((row) => row.brand_id), brandLinks.map((row) => row.supplier_id)]
+  )
+  return rowCount
+}
+
+const applyRollup = async (client, rangeParameters) => {
+  const parameters =
+    rangeParameters !== undefined ? rangeParameters : await readRangeParameters(client)
+  const plan = planSupplierRollup({ parameters, ...(await readRollupSources(client)) })
+  const linked = await linkBrandsFromRollup(client, plan.brandLinks)
+  return { plan, linked }
+}
+
 export const backfillSuppliers = async (
   pool,
-  { snapshot = SNAPSHOT, aliasSources = SUPPLIER_ALIAS_SOURCES, priceListSuppliers } = {}
+  {
+    snapshot = SNAPSHOT,
+    aliasSources = [...SUPPLIER_ALIAS_SOURCES, ...D365_SUPPLIER_ALIASES],
+    priceListSuppliers,
+    rangeParameters,
+  } = {}
 ) => {
   const client = await pool.connect()
   try {
@@ -211,6 +269,7 @@ export const backfillSuppliers = async (
     const { created, enriched, idsByName } = await upsertSuppliers(client, plan.suppliers)
     const aliases = await insertAliases(client, plan.aliases, idsByName)
     const priceListItems = await linkPriceListItems(client, plan.matches, idsByName)
+    const rollup = await applyRollup(client, rangeParameters)
     const brands = await linkBrands(client, plan.brandLinks, idsByName)
     const { terms, tiers } = await insertTerms(client, plan.brandTerms, idsByName)
 
@@ -222,7 +281,14 @@ export const backfillSuppliers = async (
       brands,
       terms,
       tiers,
-      reports: plan.reports,
+      rollup: Object.freeze({ ...rollup.plan.summary, brands_linked: rollup.linked }),
+      reports: Object.freeze({
+        ...plan.reports,
+        rollupUnmatchedSuppliers: rollup.plan.reports.unmatchedSuppliers,
+        rollupRangesWithoutBrand: rollup.plan.reports.rangesWithoutBrand,
+        rollupBrandsLinkedElsewhere: rollup.plan.reports.brandsLinkedElsewhere,
+        rollupBrandsClaimedBySeveralSuppliers: rollup.plan.reports.brandsClaimedBySeveralSuppliers,
+      }),
     })
   } catch (error) {
     try {

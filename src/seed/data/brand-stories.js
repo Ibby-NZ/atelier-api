@@ -5,8 +5,8 @@
 //
 // FILLS BLANKS ONLY. `toBrandRow()` reads `realCatalogue.js`'s own story first
 // and falls back here, so a house the snapshot describes is never overridden by
-// this file — these are the seventeen that had no description at all (the
-// fourteen represented-only houses, plus Trend, Vervain and Atelier's own
+// this file — these are the nineteen that had no description at all (the
+// sixteen represented-only houses, plus Trend, Vervain and Atelier's own
 // entry, none of which the snapshot covers).
 //
 // Written from each house's own website, 4 Aug 2026. Register follows the
@@ -23,9 +23,16 @@
 // design degrades to.
 //
 // Sahco, Le Crin, Timney Fowler, The Vale London and Brochier left the roster
-// on 2 Sep 2026 (Userback 8287607) and their copy went with them.
+// on 2 Sep 2026 (Userback 8287607) and their copy went with them. Le Manach and
+// Thorp of London joined it on 10 Sep 2026 (the office's Pierre Frey roster);
+// neither states a founding year because neither could be confirmed from a page
+// the group's site would serve.
 
 export const BRAND_STORIES = Object.freeze({
+  'le-manach':
+    'Historic French weaver of silks, damasks and printed cottons, whose Tours archive is reissued today by the Pierre Frey group.',
+  'thorp-of-london':
+    'London house of woven and embroidered fabrics and wallpapers, grown out of an interior design studio and now part of the Pierre Frey group.',
   alpaka:
     'Estonian house of alpaca wool and silk home accessories — throws, cushions and rugs — cut to a Nordic minimalism and made to last a lifetime.',
   'armani-casa':

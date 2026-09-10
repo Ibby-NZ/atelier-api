@@ -254,7 +254,8 @@ describe('supplier backfill plan (real sources)', () => {
       Braquenié: 'Pierre Frey',
       'Fadini Borghi': 'Pierre Frey',
     })
-    // Stated by the office, not yet catalogued: reported, never created.
+    // Not in this fixture's catalogue: reported, never created (they ARE
+    // catalogued in the seed since 10 Sep 2026, as represented-only houses).
     const unmatched = reports.unmatchedBrands.map((row) => row.brand)
     expect(unmatched).toContain('Le Manach')
     expect(unmatched).toContain('Thorp of London')

@@ -22,6 +22,7 @@
 import { requireFinance } from '../reports/access.js'
 import {
   NUMERIC_PARAMETERS,
+  OVERRIDABLE_INPUTS,
   deleteBrandParameters,
   deleteSupplierParameters,
   getBrandParameters,
@@ -79,18 +80,28 @@ export const adminPricingRoutes = async (app, { pool }) => {
             category: { type: 'string', maxLength: 40 },
             duty_class: { type: 'string', pattern: '^[A-Za-z]$' },
             on: { type: 'string', pattern: ISO_DAY },
+            // What-if values for this preview only (the screen's Manual mode).
+            // They stand in for the resolved input, source `manual`, and
+            // nothing is written.
+            ...Object.fromEntries(
+              OVERRIDABLE_INPUTS.map((key) => [key, { type: 'number', minimum: 0 }])
+            ),
           },
         },
       },
     },
     async (request) => {
-      const { brand_id, wholesale_rate, category, duty_class, on } = request.query
+      const { brand_id, wholesale_rate, category, duty_class, on, ...rest } = request.query
+      const overrides = Object.fromEntries(
+        OVERRIDABLE_INPUTS.filter((key) => rest[key] !== undefined).map((key) => [key, rest[key]])
+      )
       return previewWaterfall(pool, {
         brandId: brand_id,
         wholesaleRate: wholesale_rate,
         category: category ?? null,
         dutyClass: duty_class ?? null,
         on: on ?? null,
+        overrides,
       })
     }
   )

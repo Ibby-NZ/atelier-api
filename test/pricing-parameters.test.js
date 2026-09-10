@@ -301,6 +301,25 @@ describe('pricing parameters — the module and the resolver', () => {
     expect(preview.wholesale_rate).toBe(100)
   })
 
+  it('a what-if override stands in for one preview, says what it replaced, and writes nothing', async () => {
+    await upsertSupplierParameters(pool, supplierId, { trade_markup_percent: 80, clearance_percent: 10 })
+    const preview = await previewWaterfall(pool, {
+      brandId: houseId,
+      wholesaleRate: 100,
+      overrides: { trade_markup_percent: 95, freight: 12, handling: '', clearance_percent: -1 },
+    })
+    expect(preview.inputs.trade_markup_percent).toMatchObject({
+      value: 95,
+      source: 'manual',
+      detail: { replaced: { value: 80, source: 'supplier' } },
+    })
+    expect(preview.inputs.freight).toMatchObject({ value: 12, source: 'manual', detail: { basis: 'dollar' } })
+    // Blank and negative what-ifs are ignored, not applied as zero.
+    expect(preview.inputs.handling).toMatchObject({ value: null, source: 'missing' })
+    expect(preview.inputs.clearance_percent).toMatchObject({ value: 10, source: 'supplier' })
+    expect((await getSupplierParameters(pool, supplierId)).trade_markup_percent).toBe(80)
+  })
+
   it('deleting the override falls back to the supplier default on the next read', async () => {
     await upsertSupplierParameters(pool, supplierId, { handling: 2 })
     await upsertBrandParameters(pool, houseId, { handling: 9 })
@@ -423,6 +442,14 @@ describe('/admin/pricing routes', () => {
     expect(body.inputs.freight).toMatchObject({ source: 'missing' })
     expect(body.waterfall.steps.map((s) => s.step)).toContain('landed')
     expect(body.waterfall.missing).toContain('freight')
+
+    const whatIf = await inject('GET', `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100&trade_markup_percent=95&freight=12`)
+    expect(whatIf.statusCode).toBe(200)
+    expect(whatIf.json().inputs.trade_markup_percent).toMatchObject({ value: 95, source: 'manual' })
+    expect(whatIf.json().inputs.freight).toMatchObject({ value: 12, source: 'manual' })
+    expect((await inject('GET', `/admin/pricing/parameters/brands/${houseId}`)).json().parameters.trade_markup_percent).toBe(89)
+    const badWhatIf = await inject('GET', `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100&freight=-1`)
+    expect(badWhatIf.statusCode).toBe(400)
 
     const gone = await inject('GET', `/admin/pricing/waterfall?brand_id=999999999&wholesale_rate=100`)
     expect(gone.statusCode).toBe(404)

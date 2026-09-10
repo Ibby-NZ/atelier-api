@@ -54,6 +54,20 @@ export const INPUT_SOURCES = Object.freeze([
   'fx', // fx_rates
   'none', // a fact about the line, not a parameter (no duty class => no duty)
   'missing', // nobody has set it
+  'manual', // a what-if value the caller supplied for this preview only
+])
+
+/** The inputs a preview may override for itself. Nothing here persists. */
+export const OVERRIDABLE_INPUTS = Object.freeze([
+  'discount_percent',
+  'fx_rate',
+  'fx_margin_percent',
+  'duty_percent',
+  'freight',
+  'clearance_percent',
+  'handling',
+  'trade_markup_percent',
+  'retail_markup',
 ])
 
 const DUTY_COLUMN_BY_CLASS = Object.freeze({
@@ -318,16 +332,37 @@ export const resolveWaterfallInputs = async (db, { brandId, category = null, dut
   })
 }
 
+// A what-if value stands in for the resolved input, remembering what it
+// replaced. A freight override is dollars per unit (the ledger's default
+// basis); a percentage rate can only come from the ledger itself.
+const applyOverrides = (inputs, overrides = {}) => {
+  const next = { ...inputs }
+  for (const key of OVERRIDABLE_INPUTS) {
+    const value = overrides[key]
+    if (value === undefined || value === null || value === '') continue
+    const number = Number(value)
+    if (!Number.isFinite(number) || number < 0) continue
+    const was = inputs[key]
+    next[key] = input(number, 'manual', {
+      ...(key === 'freight' ? { basis: 'dollar', unit: was?.detail?.unit ?? null } : {}),
+      replaced: { value: was?.value ?? null, source: was?.source ?? 'missing' },
+    })
+  }
+  return Object.freeze(next)
+}
+
 /**
  * The waterfall for one house at one wholesale rate, with every input's source.
+ * `overrides` are what-if values for this preview only — the screen's Manual
+ * mode — and never touch a row.
  *
  * @param {{ query: Function }} db
  * @param {{ brandId: number, wholesaleRate: number, category?: string|null,
- *           dutyClass?: string|null, on?: string|null }} query
+ *           dutyClass?: string|null, on?: string|null, overrides?: object }} query
  */
-export const previewWaterfall = async (db, { brandId, wholesaleRate, category = null, dutyClass = null, on = null }) => {
+export const previewWaterfall = async (db, { brandId, wholesaleRate, category = null, dutyClass = null, on = null, overrides = {} }) => {
   const resolved = await resolveWaterfallInputs(db, { brandId, category, dutyClass, on })
-  const { inputs } = resolved
+  const inputs = applyOverrides(resolved.inputs, overrides)
   const waterfall = computeWaterfall({
     wholesale_rate: wholesaleRate,
     currency: resolved.currency,
@@ -343,5 +378,5 @@ export const previewWaterfall = async (db, { brandId, wholesaleRate, category = 
     trade_markup_percent: inputs.trade_markup_percent.value,
     retail_markup: inputs.retail_markup.value,
   })
-  return Object.freeze({ ...resolved, wholesale_rate: wholesaleRate, waterfall })
+  return Object.freeze({ ...resolved, inputs, wholesale_rate: wholesaleRate, waterfall })
 }

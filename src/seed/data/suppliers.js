@@ -26,8 +26,8 @@ export const suppliers = [
       averagedFrom: [{ label: 'Fabrics', pct: 0.05 }, { label: 'Wallpapers', pct: 0.05 }],
     },
     // The Pierre Frey house as the office stated it (Sept 2026): Pierre Frey Paris invoices
-    // all six. Le Manach and Thorp of London are not catalogued yet — the backfill reports
-    // them and links nothing until they are.
+    // all six. Le Manach and Thorp of London are represented-only houses (no products yet),
+    // catalogued 10 Sep 2026 so the backfill can link them.
     brands: [
       { name: 'Pierre Frey' },
       { name: 'Boussac' },

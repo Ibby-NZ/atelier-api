@@ -41,6 +41,11 @@ export const BRAND_WEBSITES = Object.freeze({
   'de-le-cuona': 'https://delecuona.com/',
   fabricut: 'https://fabricut.com/',
   'fadini-borghi': 'https://www.pierrefrey.com/en/collections?brand=fadini-borghi',
+  // Added 10 Sep 2026 with the two Pierre Frey houses. The group's site refuses
+  // non-browser requests, so this follows the Boussac entry's brand-page
+  // pattern rather than a fetched URL; a reseed never overwrites a correction
+  // made in the CRM (website_url is COALESCEd).
+  'le-manach': 'https://www.pierrefrey.com/en/brands/le-manach',
   'filippo-uecher': 'https://filippouecher.it/',
   fine: 'https://www.fine.at/',
   'garrett-leather': 'https://www.garrettleather.com/',
@@ -62,6 +67,8 @@ export const BRAND_WEBSITES = Object.freeze({
   // Diffusion line with no domain of its own — parent's brand page.
   'no-9-thompson': 'https://www.jimthompsonfabrics.com/our-brands/no-9-thompson',
   'pierre-frey': 'https://www.pierrefrey.com/',
+  // The house's own site (thorp.co.uk answers; the www. form redirects to it).
+  'thorp-of-london': 'https://thorp.co.uk/',
   'rubelli-venezia': 'https://rubelli.com/',
   's-harris': 'https://fabricut.com/sharris/',
   sette: 'https://sette7.es/',

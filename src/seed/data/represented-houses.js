@@ -107,4 +107,24 @@ export const REPRESENTED_HOUSES = Object.freeze([
     country: 'Italy',
     currency: 'EUR',
   }),
+  // --- Added 10 Sep 2026, from the office's supplier note -----------------
+  // Charlotte listed the Pierre Frey house as Pierre Frey, Boussac, Braquenié,
+  // Le Manach, Fadini Borghi and Thorp of London. The first four were already
+  // catalogued; these two appeared nowhere — not in the catalogue, and Thorp
+  // not even in the Dynamics export — so the supplier backfill could only
+  // report them. Currency is EUR for both because Pierre Frey Paris invoices
+  // the whole house (the suppliers.js roster), Thorp's London address
+  // notwithstanding.
+  Object.freeze({
+    name: 'Le Manach',
+    slug: 'le-manach',
+    country: 'France',
+    currency: 'EUR',
+  }),
+  Object.freeze({
+    name: 'Thorp of London',
+    slug: 'thorp-of-london',
+    country: 'England',
+    currency: 'EUR',
+  }),
 ])

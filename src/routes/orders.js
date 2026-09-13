@@ -10,6 +10,7 @@ import {
   MAX_LIMIT,
 } from '../orders/order-history.js'
 import { notifyRequestReceived } from '../email/notifications.js'
+import { honeypotProperty, honeypotTripped } from '../lib/honeypot.js'
 
 // Paging for /orders/mine. Fastify coerces both from the querystring; an
 // out-of-range value is a 400 by schema rather than a silently clamped read.
@@ -39,6 +40,7 @@ const orderRequestBodySchema = {
   additionalProperties: false,
   required: ['lines'],
   properties: {
+    ...honeypotProperty,
     accepted_lead_time: { type: 'boolean' },
     contact: {
       type: 'object',
@@ -90,6 +92,12 @@ export const orderRoutes = async (app, { pool, mailer = null }) => {
       config: { rateLimit: ORDER_REQUEST_RATE_LIMIT },
     },
     async (request, reply) => {
+      // A bot filled the hidden field: answer as if it worked, store and send
+      // nothing.
+      if (honeypotTripped(request)) {
+        reply.code(201)
+        return { order: null }
+      }
       const user = await app.guards.loadOptionalUser(request)
 
       const errors = validateOrderRequestInput(request.body, {

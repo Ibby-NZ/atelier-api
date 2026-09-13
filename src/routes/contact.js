@@ -13,6 +13,7 @@ import {
 } from '../contact/contact.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { notifyContactReceived } from '../email/notifications.js'
+import { honeypotProperty, honeypotTripped } from '../lib/honeypot.js'
 
 // Same posture as register/login: 10 submissions per 15 min per IP.
 const CONTACT_RATE_LIMIT = Object.freeze({ max: 10, timeWindow: 15 * 60 * 1000 })
@@ -29,6 +30,7 @@ const contactBodySchema = {
     phone: { type: 'string', maxLength: 50 },
     subject: { type: 'string', maxLength: 200 },
     message: { type: 'string', minLength: 1, maxLength: 5000 },
+    ...honeypotProperty,
   },
 }
 
@@ -55,6 +57,12 @@ export const contactRoutes = async (app, { pool, mailer = null }) => {
     '/contact',
     { schema: { body: contactBodySchema }, config: { rateLimit: CONTACT_RATE_LIMIT } },
     async (request, reply) => {
+      // A bot filled the hidden field: answer as if it worked, store and send
+      // nothing.
+      if (honeypotTripped(request)) {
+        reply.code(201)
+        return { enquiry: null }
+      }
       const errors = validateContactInput(request.body)
       if (errors.length > 0) {
         reply.code(422)

@@ -32,6 +32,7 @@ const sendBackofficeAlert = (mailer, order, customerEmail) =>
   mailer.send({
     template: 'backoffice_new_request',
     to: mailer.backofficeEmail,
+    replyTo: customerEmail ?? null,
     data: {
       order_number: order.order_number,
       kind: order.kind,
@@ -179,6 +180,7 @@ export const notifyContactReceived = async (mailer, enquiry) => {
   await mailer.send({
     template: 'backoffice_new_contact',
     to: mailer.backofficeEmail,
+    replyTo: enquiry.email,
     data: {
       name: enquiry.name,
       email: enquiry.email,
@@ -205,6 +207,35 @@ export const notifyPasswordReset = async (mailer, { user, resetUrl, expiresMinut
     template: 'password_reset',
     to: user.email,
     data: { name: user.name, reset_url: resetUrl, expires_minutes: expiresMinutes },
+  })
+}
+
+/**
+ * A new trade application is waiting: alert the back office (the single
+ * configured address, like every other alert) with a link to the CRM's
+ * Applicants tab. The applicant is NOT mailed here — a pending account cannot
+ * sign in, and the acceptance letter on approval is the one letter they get.
+ * No-op when mailer is null; never throws.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ user: { email: string }, application: { business_name: string, business_type?: string|null, signatory_name?: string|null }, crmBaseUrl: string }} args
+ */
+export const notifyTradeApplicationReceived = async (mailer, { user, application, crmBaseUrl }) => {
+  if (!mailer) {
+    return
+  }
+  await mailer.send({
+    template: 'backoffice_new_trade_application',
+    to: mailer.backofficeEmail,
+    replyTo: user.email,
+    data: {
+      business_name: application.business_name,
+      business_type: application.business_type ?? null,
+      signatory_name: application.signatory_name ?? null,
+      email: user.email,
+      // The CRM is a hash router; this is its Applicants tab.
+      review_url: `${crmBaseUrl}/#/clients/applicants`,
+    },
   })
 }
 

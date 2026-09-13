@@ -103,6 +103,27 @@ describe('contact form + enquiries inbox', () => {
   })
 
   describe('POST /contact', () => {
+    it('a filled honeypot answers 201 and neither stores the enquiry nor sends a letter', async () => {
+      transport.sent.length = 0
+      const response = await app.inject({
+        method: 'POST',
+        url: '/contact',
+        payload: {
+          website: 'http://spam.example',
+          name: 'Bot',
+          email: testEmail('bot'),
+          message: 'buy now',
+        },
+      })
+      expect(response.statusCode).toBe(201)
+      expect(response.json()).toEqual({ enquiry: null })
+      expect(transport.sent).toHaveLength(0)
+      const { rows } = await pool.query('SELECT 1 FROM contact_enquiries WHERE email = $1', [
+        testEmail('bot'),
+      ])
+      expect(rows).toHaveLength(0)
+    })
+
     it('stores an enquiry and emails sender + back office (201)', async () => {
       const response = await post({
         name: 'Ada Lovelace',

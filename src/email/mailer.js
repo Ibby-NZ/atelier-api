@@ -32,16 +32,31 @@ export const createMailer = ({ transport, from, backofficeEmail, log = noopLog }
    * Resolves to a result object; it does not reject — failures come back as
    * { ok: false }, including a caller that supplied neither form.
    *
-   * @param {{ template?: string, to: string, data?: object, subject?: string, text?: string }} args
+   * `replyTo` is optional and only the back-office alerts set it: it is the
+   * person the alert is ABOUT, so a staffer answering from the inbox reaches
+   * them rather than the no-reply sender.
+   *
+   * @param {{ template?: string, to: string, data?: object, subject?: string, text?: string, replyTo?: string|null }} args
    * @returns {Promise<{ ok: boolean, error?: Error }>}
    */
-  const send = async ({ template, to, data = {}, ...rendered }) => {
+  const send = async ({ template, to, data = {}, replyTo = null, ...rendered }) => {
     try {
       const message = template ? renderTemplate(template, data) : rendered
       if (!message.subject || !message.text) {
         throw new Error('send requires either a template name or a subject and text')
       }
-      await transport.sendMail({ from, to, subject: message.subject, text: message.text })
+      // Reply-To is a caller-supplied address. Every route validates it with a
+      // no-whitespace pattern first; this is the belt to that brace — an
+      // address carrying a line break is a header injection, so it is dropped
+      // rather than handed to the transport.
+      const safeReplyTo = replyTo && !/\s/.test(replyTo) ? replyTo : null
+      await transport.sendMail({
+        from,
+        to,
+        subject: message.subject,
+        text: message.text,
+        ...(safeReplyTo ? { replyTo: safeReplyTo } : {}),
+      })
       log.info({ template: template ?? null, to }, 'transactional email sent')
       return { ok: true }
     } catch (error) {

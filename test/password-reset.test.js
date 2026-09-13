@@ -112,6 +112,21 @@ describe('password reset by emailed link', () => {
   })
 
   describe('POST /auth/forgot-password', () => {
+    it('a filled honeypot gets the usual sentence and no letter, even for a real account', async () => {
+      const userId = await insertUser(pool, 'honeypot')
+      const response = await app.inject({
+        method: 'POST',
+        url: '/auth/forgot-password',
+        payload: { website: 'http://spam.example', email: testEmail('honeypot') },
+      })
+      expect(response.statusCode).toBe(202)
+      expect(transport.sent).toHaveLength(0)
+      const { rows } = await pool.query('SELECT 1 FROM password_reset_tokens WHERE user_id = $1', [
+        userId,
+      ])
+      expect(rows).toHaveLength(0)
+    })
+
     it('emails a storefront link to a client, and the letter names the expiry', async () => {
       await insertUser(pool, 'client')
       const response = await forgot(testEmail('client'))

@@ -3,6 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { createMailer } from '../src/email/mailer.js'
 import { validateTradeApplication } from '../src/users/trade-applications.js'
 import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
@@ -144,6 +145,79 @@ describe('trade applications', () => {
         cash_account_acceptable: true,
         terms_accepted: true,
         signature: 'Alex Designer',
+      })
+    })
+
+    // Its own instance: the alert needs a mailer, and the shared app has none
+    // (nor spare register/login bucket to lend).
+    describe('the back-office alert', () => {
+      const BACKOFFICE = 'office@trade-app-test.example.com'
+      const CRM = 'http://crm.test'
+      let mailApp
+      let sent
+
+      beforeAll(async () => {
+        sent = []
+        const mailer = createMailer({
+          transport: { sendMail: async (message) => sent.push(message) },
+          from: 'studio@trade-app-test.example.com',
+          backofficeEmail: BACKOFFICE,
+        })
+        mailApp = buildApp({
+          pool,
+          cookieSecret: TEST_COOKIE_SECRET,
+          mailer,
+          crmBaseUrl: CRM,
+          logger: false,
+        })
+        await mailApp.ready()
+      })
+
+      afterAll(async () => {
+        await mailApp.close()
+      })
+
+      it('goes to the one back-office address, Reply-To the applicant, linking the CRM', async () => {
+        const response = await mailApp.inject({
+          method: 'POST',
+          url: '/auth/trade-application',
+          payload: {
+            email: testEmail('alerted'),
+            password: PASSWORD,
+            application: sampleTradeApplication(),
+          },
+        })
+        expect(response.statusCode).toBe(201)
+        expect(sent).toHaveLength(1)
+        expect(sent[0]).toMatchObject({
+          to: BACKOFFICE,
+          replyTo: testEmail('alerted'),
+          subject: 'New trade application to review: Studio Interiors Ltd',
+        })
+        expect(sent[0].text).toContain(`${CRM}/#/clients/applicants`)
+        // The applicant is NOT mailed: the acceptance letter is their one letter.
+        expect(sent.some((m) => m.to === testEmail('alerted'))).toBe(false)
+      })
+
+      it('a filled honeypot answers 201 and creates neither account nor letter', async () => {
+        sent.length = 0
+        const response = await mailApp.inject({
+          method: 'POST',
+          url: '/auth/trade-application',
+          payload: {
+            website: 'http://spam.example',
+            email: testEmail('bot'),
+            password: PASSWORD,
+            application: sampleTradeApplication(),
+          },
+        })
+        expect(response.statusCode).toBe(201)
+        expect(response.json()).toEqual({ user: null })
+        expect(sent).toHaveLength(0)
+        const { rows } = await pool.query('SELECT 1 FROM users WHERE email = $1', [
+          testEmail('bot'),
+        ])
+        expect(rows).toHaveLength(0)
       })
     })
 

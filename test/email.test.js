@@ -13,6 +13,7 @@ import {
   notifyOrderTransition,
   notifyOrderCreated,
   notifyBackofficeNewOrder,
+  notifyTradeApplicationReceived,
 } from '../src/email/notifications.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
@@ -63,11 +64,28 @@ describe('email templates', () => {
         'password_reset',
         // The acceptance letter, store-backed too, sent on trade approval.
         'trade_application_approved',
+        // The back office's alert that an application is waiting for review.
+        'backoffice_new_trade_application',
       ])
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(14)
+    expect(TEMPLATE_NAMES).toHaveLength(15)
+  })
+
+  it('backoffice_new_trade_application names the business and links the CRM applicants tab', () => {
+    const { subject, text } = renderTemplate('backoffice_new_trade_application', {
+      business_name: 'Studio Interiors Ltd',
+      business_type: 'limited_liability_company',
+      signatory_name: 'Alex Designer',
+      email: 'alex@studio.example',
+      review_url: 'http://crm.example/#/clients/applicants',
+    })
+    expect(subject).toBe('New trade application to review: Studio Interiors Ltd')
+    expect(text).toContain('Business: Studio Interiors Ltd')
+    expect(text).toContain('Signatory: Alex Designer')
+    expect(text).toContain('Login email: alex@studio.example')
+    expect(text).toContain('http://crm.example/#/clients/applicants')
   })
 
   it('trade_application_approved is the office acceptance letter, addressed by name', () => {
@@ -190,6 +208,26 @@ describe('mailer', () => {
     expect(msg).toMatchObject({ from: FROM, to: 'buyer@test.example' })
     expect(msg.subject).toContain('REQ-1')
     expect(msg.text).toContain('REQ-1')
+  })
+
+  it('sets Reply-To only when asked, so a no-reply sender never swallows a staff answer', async () => {
+    const { transport, mailer } = buildMailer()
+    await mailer.send({ subject: 's', text: 't', to: 'a@b.c' })
+    expect(transport.sent[0]).not.toHaveProperty('replyTo')
+    await mailer.send({ subject: 's', text: 't', to: 'a@b.c', replyTo: 'client@b.c' })
+    expect(transport.sent[1].replyTo).toBe('client@b.c')
+  })
+
+  it('drops a Reply-To carrying a line break instead of handing a header injection to the transport', async () => {
+    const { transport, mailer } = buildMailer()
+    const result = await mailer.send({
+      subject: 's',
+      text: 't',
+      to: 'a@b.c',
+      replyTo: 'client@b.c\r\nBcc: attacker@evil.example',
+    })
+    expect(result.ok).toBe(true)
+    expect(transport.sent[0]).not.toHaveProperty('replyTo')
   })
 
   it('never throws when the transport fails; returns { ok: false }', async () => {
@@ -348,6 +386,22 @@ describe('notifications', () => {
 
   // W12 US-004/FR-119: the alert goes to the ONE configured address. Not a
   // per-salesperson routing table — the restriction is the requirement.
+  it('notifyTradeApplicationReceived alerts the back office with Reply-To the applicant', async () => {
+    const { transport, mailer } = buildMailer()
+    await notifyTradeApplicationReceived(mailer, {
+      user: { email: 'alex@studio.example' },
+      application: { business_name: 'Studio Interiors Ltd', signatory_name: 'Alex Designer' },
+      crmBaseUrl: 'http://crm.example',
+    })
+    expect(transport.sent).toHaveLength(1)
+    expect(transport.sent[0]).toMatchObject({
+      to: BACKOFFICE,
+      replyTo: 'alex@studio.example',
+      subject: 'New trade application to review: Studio Interiors Ltd',
+    })
+    expect(transport.sent[0].text).toContain('http://crm.example/#/clients/applicants')
+  })
+
   it('notifyBackofficeNewOrder alerts the single configured address only', async () => {
     const { transport, mailer } = buildMailer()
     const db = { query: async () => ({ rows: [] }) }
@@ -408,6 +462,13 @@ describe('notifications', () => {
     ).resolves.toBeUndefined()
     await expect(
       notifyBackofficeNewOrder(null, db, { order_number: 'x', kind: 'checkout' })
+    ).resolves.toBeUndefined()
+    await expect(
+      notifyTradeApplicationReceived(null, {
+        user: { email: 'a@b.c' },
+        application: { business_name: 'x' },
+        crmBaseUrl: 'http://crm',
+      })
     ).resolves.toBeUndefined()
   })
 })
@@ -523,6 +584,25 @@ describe('order-request trigger wiring', () => {
     const staff = transport.sent.find((m) => m.to === BACKOFFICE)
     expect(customer.subject).toContain(orderNumber)
     expect(staff.text).toContain(orderNumber)
+  })
+
+  it('a filled honeypot answers 201 and neither stores the order nor sends a letter', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/orders/request',
+      payload: {
+        website: 'http://spam.example',
+        lines: [{ sku: SKU, qty_metres: 4 }],
+        contact: { name: 'Bot', email: 'bot@email-test.example' },
+      },
+    })
+    expect(response.statusCode).toBe(201)
+    expect(response.json()).toEqual({ order: null })
+    expect(transport.sent).toHaveLength(0)
+    const { rows } = await pool.query('SELECT 1 FROM orders WHERE guest_email = $1', [
+      'bot@email-test.example',
+    ])
+    expect(rows).toHaveLength(0)
   })
 
   // W12 US-004 + US-005: the back-office order path notified nobody at all —

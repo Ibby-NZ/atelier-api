@@ -98,6 +98,17 @@ export const loadConfig = (env = process.env) => {
     )
   }
 
+  // With SMTP configured the mail is REAL, and Postmark refuses a From it has
+  // not verified (sender signature / domain): the placeholder defaults would
+  // turn every letter into a 4xx at the relay, or every alert into a bounce.
+  // Fail at boot instead of on the first order.
+  const smtpHost = env.SMTP_HOST ?? null
+  if (smtpHost && !(env.EMAIL_FROM && env.BACKOFFICE_EMAIL)) {
+    throw new Error(
+      'SMTP_HOST is set but EMAIL_FROM and/or BACKOFFICE_EMAIL are not. Set both to real addresses on the verified sending domain (see .env.example).'
+    )
+  }
+
   const adminSessionSecret = env.ADMIN_SESSION_SECRET ?? null
   if (adminSessionSecret && adminSessionSecret.length < MIN_COOKIE_SECRET_LENGTH) {
     throw new Error(
@@ -125,7 +136,7 @@ export const loadConfig = (env = process.env) => {
     crmBaseUrl: env.CRM_BASE_URL ?? DEFAULT_CRM_BASE_URL,
     // Email (US-015). With no SMTP_HOST the transport captures mail instead of
     // sending it (dev/test). from/backoffice have sensible non-secret defaults.
-    smtpHost: env.SMTP_HOST ?? null,
+    smtpHost,
     smtpPort: Number(env.SMTP_PORT ?? DEFAULT_SMTP_PORT),
     smtpSecure: env.SMTP_SECURE === 'true',
     smtpUser: env.SMTP_USER ?? null,

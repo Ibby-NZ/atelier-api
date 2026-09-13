@@ -275,6 +275,32 @@ const TEMPLATES = Object.freeze({
       `— ${BRAND}`,
     ].join('\n'),
   }),
+
+  // Alert to the back office that a trade application is waiting for review
+  // (POST /auth/trade-application -> notifyTradeApplicationReceived). Enough
+  // of the form to triage from the inbox; the full form is in the CRM's
+  // Applicants tab, which `review_url` points at. The applicant gets no mail
+  // here — the acceptance letter (trade_application_approved) is the ONE
+  // notification, sent on approval.
+  backoffice_new_trade_application: ({
+    business_name,
+    business_type,
+    signatory_name,
+    email,
+    review_url,
+  }) => ({
+    subject: `New trade application to review: ${business_name}`,
+    text: [
+      'A new trade account application has been submitted and is awaiting review.',
+      '',
+      `Business: ${business_name}`,
+      `Type: ${business_type ?? '—'}`,
+      `Signatory: ${signatory_name ?? '—'}`,
+      `Login email: ${email}`,
+      '',
+      `Review it in the CRM: ${review_url}`,
+    ].join('\n'),
+  }),
 })
 
 export const TEMPLATE_NAMES = Object.freeze(Object.keys(TEMPLATES))

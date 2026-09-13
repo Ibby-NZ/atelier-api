@@ -22,7 +22,8 @@ import {
   resetUrlFor,
   RESET_TOKEN_TTL_MINUTES,
 } from '../auth/password-reset.js'
-import { notifyPasswordReset } from '../email/notifications.js'
+import { notifyPasswordReset, notifyTradeApplicationReceived } from '../email/notifications.js'
+import { honeypotProperty, honeypotTripped } from '../lib/honeypot.js'
 import {
   validateTradeApplication,
   submitTradeApplication,
@@ -64,6 +65,7 @@ const tradeApplicationBodySchema = {
   required: ['email', 'password', 'application'],
   additionalProperties: false,
   properties: {
+    ...honeypotProperty,
     email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
     password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
     name: { type: 'string', maxLength: 200 },
@@ -122,6 +124,7 @@ const forgotPasswordBodySchema = {
   required: ['email'],
   additionalProperties: false,
   properties: {
+    ...honeypotProperty,
     email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
   },
 }
@@ -196,6 +199,11 @@ export const authRoutes = async (
       config: { rateLimit: AUTH_RATE_LIMIT },
     },
     async (request, reply) => {
+      // A bot filled the hidden field: answer as if it worked, create nothing.
+      if (honeypotTripped(request)) {
+        reply.code(201)
+        return { user: null }
+      }
       const { email, password, name, application } = request.body
       const errors = validateTradeApplication(application)
       if (errors.length > 0) {
@@ -211,6 +219,9 @@ export const authRoutes = async (
           name,
           application,
         })
+        // The office learns of the application by mail; the applicant does
+        // not — their one letter is the acceptance on approval.
+        await notifyTradeApplicationReceived(mailer, { user, application, crmBaseUrl })
         // Deliberately NO session cookie: the account cannot sign in until the
         // back office approves the application (login answers 403 "pending").
         reply.code(201)
@@ -289,6 +300,11 @@ export const authRoutes = async (
       config: { rateLimit: AUTH_RATE_LIMIT },
     },
     async (request, reply) => {
+      // A bot filled the hidden field: the usual sentence, no token, no mail.
+      if (honeypotTripped(request)) {
+        reply.code(202)
+        return { message: RESET_REQUESTED }
+      }
       // A server that cannot send mail cannot do this at all. Said plainly —
       // it reveals nothing about any account — rather than answering the
       // sentence below with no letter behind it.

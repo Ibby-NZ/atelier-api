@@ -60,6 +60,7 @@ const start = async () => {
     tradePriceListsEnabled: config.tradePriceListsEnabled,
     logLevel: config.logLevel,
     trustProxy: config.trustProxy,
+    lineAmountTypes: config.lineAmountTypes,
     adminPanel: {
       databaseUrl: config.databaseUrl,
       sessionSecret: config.adminSessionSecret,

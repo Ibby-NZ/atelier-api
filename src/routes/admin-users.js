@@ -106,6 +106,9 @@ const patchBodySchema = {
     can_view_finance: { type: 'boolean' },
     name: { type: ['string', 'null'], maxLength: 200 },
     email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
+    // The office takes a number down over the phone; the client edits their own
+    // via PATCH /auth/me. Same column, same cap (Userback 8367823).
+    phone: { type: ['string', 'null'], maxLength: 50 },
   },
 }
 

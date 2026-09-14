@@ -129,6 +129,24 @@ describe('order history + guest lookup', () => {
     expect(orders[0].status).toBe('requested')
   })
 
+  // The office's discount used to be invisible to the client: a $700 subtotal
+  // and a $665 total with nothing in between reads as an arithmetic error
+  // (Userback 8367809). The percentage travels; the reason and who applied it
+  // stay in the back office.
+  it('GET /orders/mine carries the discount percentage but not its reason', async () => {
+    const user = await registerUser(app, `${PREFIX}-disc@example.com`)
+    const orderId = await insertOrder(pool, colourwayId, { userId: user.id, orderNumber: `${PREFIX}-D1` })
+    await pool.query(
+      `UPDATE orders SET discount_pct = 5, discount_reason = 'Loyal', total_cents = 4750 WHERE id = $1`,
+      [orderId]
+    )
+    const res = await app.inject({ method: 'GET', url: '/orders/mine', headers: { cookie: user.cookie } })
+    const [order] = res.json().orders
+    expect(Number(order.discount_pct)).toBe(5)
+    expect(order).not.toHaveProperty('discount_reason')
+    expect(order).not.toHaveProperty('discount_applied_by')
+  })
+
   it('GET /orders/mine never returns another user\'s orders', async () => {
     const userA = await registerUser(app, `${PREFIX}-a@example.com`)
     const userB = await registerUser(app, `${PREFIX}-b@example.com`)

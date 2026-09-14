@@ -20,6 +20,7 @@ const ORDER_COLUMNS = `o.id,
         o.shipping_cents,
         o.total_cents,
         o.shipping_zone,
+        o.discount_pct,
         o.xero_invoice_ref,
         o.shipping_address,
         o.guest_email,
@@ -91,6 +92,9 @@ const toOrder = (row, linesByOrderId) => ({
   shipping_cents: row.shipping_cents,
   total_cents: row.total_cents,
   shipping_zone: row.shipping_zone,
+  // The percentage only: the client sees why their total is under the
+  // subtotal, the reason and who applied it stay in the back office.
+  discount_pct: row.discount_pct,
   xero_invoice_ref: row.xero_invoice_ref,
   // Where a card checkout is being delivered. Null for request-kind orders and
   // for checkouts placed before delivery details were collected.

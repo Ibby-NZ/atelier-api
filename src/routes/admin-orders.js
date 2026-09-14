@@ -2,6 +2,7 @@
 // (director inherits backoffice via the role guard). Business rules and the state
 // machine live in ../orders/admin-orders.js; these handlers stay thin.
 
+import { withGst } from '../orders/gst.js'
 import {
   ORDER_STATUSES,
   DEFAULT_PAGE,
@@ -249,8 +250,27 @@ const shipBodySchema = {
   },
 }
 
-export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
+export const adminOrderRoutes = async (
+  app,
+  { pool, mailer = null, lineAmountTypes = 'Exclusive' }
+) => {
   const backoffice = app.guards.requireRole('backoffice')
+
+  // Every order this plugin answers with carries its GST figures. Added at
+  // serialisation rather than in each of the dozen handlers because the figure
+  // is a function of the total and the Xero basis, not of which route produced
+  // the order — see src/orders/gst.js. Encapsulated: this hook sees only
+  // responses from routes registered in this plugin.
+  app.addHook('preSerialization', async (request, reply, payload) => {
+    if (!payload || typeof payload !== 'object') return payload
+    if (Array.isArray(payload.orders)) {
+      return { ...payload, orders: payload.orders.map((order) => withGst(order, lineAmountTypes)) }
+    }
+    if (payload.order) {
+      return { ...payload, order: withGst(payload.order, lineAmountTypes) }
+    }
+    return payload
+  })
 
   app.get(
     '/admin/orders',

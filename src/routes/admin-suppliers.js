@@ -15,6 +15,7 @@
 //     properties, so a thrown error could not carry `blockers`, which is the
 //     entire point of the 409.
 
+import { backfillSuppliers } from '../suppliers/backfill.js'
 import {
   listSuppliers,
   getSupplier,
@@ -320,6 +321,19 @@ const termsListQuerySchema = {
 
 export const adminSupplierRoutes = async (app, { pool }) => {
   const backoffice = app.guards.requireRole('backoffice')
+  const director = app.guards.requireRole('director')
+
+  // `npm run backfill:suppliers` without a shell. Staging showed an empty
+  // Suppliers screen for a week because the backfill only existed as a CLI and
+  // the server has no console (Userback 8367793). Director-only: it writes
+  // supplier records, aliases and per-house terms in one transaction. Idempotent
+  // by construction (src/suppliers/backfill.js), so a second press changes
+  // nothing, and it answers the same summary + worklist the CLI prints.
+  app.post('/admin/suppliers/backfill', { preHandler: director }, async (request) => {
+    const summary = await backfillSuppliers(pool)
+    request.log.info({ suppliers: summary.suppliers, brands: summary.brands }, 'supplier backfill')
+    return { summary }
+  })
 
   app.get(
     '/admin/suppliers',

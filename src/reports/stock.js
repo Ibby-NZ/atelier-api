@@ -48,8 +48,9 @@ export const STOCK_TITLE = 'Stock holdings by colourway'
 // lifecycle this report does not touch. buildReportFilters throws on an unknown
 // name here, which is what makes this list a declaration rather than a comment.
 // `brand_code` and `range` join it because both columns are already in this
-// FROM (`b` and `p`), and `category` (Rebecca-R1) for the same reason; the
-// four it still declines are the ones about a lifecycle it does not touch.
+// FROM (`b` and `p`), `category` (Rebecca-R1) for the same reason, and the two
+// drill-down pins `product`/`sku` (`p` and `c`); the five it still declines
+// are the ones about a lifecycle it does not touch.
 export const STOCK_FILTERS = Object.freeze([
   'brand',
   'brand_code',
@@ -57,6 +58,8 @@ export const STOCK_FILTERS = Object.freeze([
   'product_type',
   'category',
   'collection',
+  'product',
+  'sku',
 ])
 
 // No `finance` column, deliberately — see the header. Order is the table's and

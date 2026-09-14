@@ -50,6 +50,8 @@ import { stockReport } from '../reports/stock.js'
 import { notInvoicedReport } from '../reports/not-invoiced.js'
 import { revenueLinesReport } from '../reports/revenue-lines.js'
 import { salesByRepReport } from '../reports/sales-by-rep.js'
+import { colourwayPerformanceReport } from '../reports/colourway-performance.js'
+import { insightReport, maskInsight } from '../reports/insight.js'
 import { DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT } from '../reports/limits.js'
 
 // Generous for a screen that re-reads on every filter change, tight enough that
@@ -92,6 +94,9 @@ const FILTER_PROPERTIES = {
   product_type: { type: 'string', enum: [...PRODUCT_TYPES] },
   category: { type: 'string', enum: [...PRODUCT_CATEGORIES] },
   collection: { type: 'string', maxLength: 200 },
+  // The insight view's two drill-down pins — a design slug and a colourway SKU.
+  product: { type: 'string', maxLength: 200 },
+  sku: { type: 'string', maxLength: 100 },
   kind: { type: 'string', enum: [...ORDER_KINDS] },
   status: { type: 'string', enum: [...ORDER_STATUSES] },
   // A staff id (A6 groundwork). Integer at the boundary; the filter module
@@ -223,4 +228,26 @@ export const adminReportRoutes = async (app, { pool }) => {
   // Order-grain attribution over the same scope. NULL reps are an explicit
   // 'Unassigned' row — see the module header for the A6 caveats it states.
   registerReport('/admin/reports/sales-by-rep', salesByRepReport)
+  // Sales and stock on one row per colourway (CRM R-12). Catalogue-rooted like
+  // the stock report, so a colour nobody buys is a row too.
+  registerReport('/admin/reports/colourway-performance', colourwayPerformanceReport)
+
+  // The insight view: every section above for one subject, in one round trip.
+  // Not registerReport — it has no CSV (the CRM exports the sections it drew),
+  // and masking runs per section (maskInsight) rather than once over the
+  // envelope. Same bucket as a table: it is several aggregates, and the screen
+  // that opens it does so once per click rather than per keystroke.
+  app.get(
+    '/admin/reports/insight',
+    {
+      preHandler: backoffice,
+      config: { rateLimit: REPORT_RATE_LIMIT },
+      schema: { querystring: reportQuerySchema },
+    },
+    async (request) => {
+      const filters = parseReportFilters(request.query)
+      const insight = await insightReport(pool, filters, { limit: request.query.limit })
+      return maskInsight(insight, await loadReportAccess(pool, request.user))
+    }
+  )
 }

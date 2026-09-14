@@ -27,14 +27,33 @@
 //     is a made-up number. Checkout refuses a mixed-currency cart for exactly
 //     this reason; here the row keeps its currency and the totals row omits the
 //     value when the population holds more than one.
+//
+// THE GRAINS ARE ONE REGISTRY. `group=` swaps which columns the one population
+// is rolled up to — house, collection, design (the default), category, month,
+// client, lifecycle status — and everything else (the scope, the filters, the
+// coverage, the masking, the export) stays the one code path. The insight view
+// (src/reports/insight.js) is built out of these grains, which is why they live
+// here rather than in a file per section: a grain is a projection of the SAME
+// sale, and two files would be two chances to disagree about what one is.
 
 import { defineColumns } from './access.js'
 import { dimensionCoverage } from './coverage.js'
-import { buildRevenueScope, SCOPE_NAME } from './revenue-lines.js'
+import { ORDER_STATUSES } from './filters.js'
+import { buildRevenueScope, REVENUE_STATUSES, SCOPE_NAME } from './revenue-lines.js'
 import { clampLimit, DEFAULT_ROW_LIMIT } from './limits.js'
 
 export const PRODUCT_PERFORMANCE = 'product-performance'
 export const PRODUCT_PERFORMANCE_TITLE = 'Product performance by house and design'
+
+// The four figures every grain carries, in the order every grain's table ends
+// with. Declared once so a grain cannot spell a count differently from its
+// neighbours.
+const MEASURES = Object.freeze([
+  { key: 'orders', label: 'Orders', kind: 'number' },
+  { key: 'qty', label: 'Quantity', kind: 'number' },
+  { key: 'value_cents', label: 'Sales', kind: 'money' },
+  { key: 'unpriced_lines', label: 'Unpriced lines', kind: 'number' },
+])
 
 // Declared at module load, so a malformed column throws while this file is
 // loading rather than as a response. Order is the table's order and the CSV's
@@ -45,6 +64,12 @@ export const PRODUCT_PERFORMANCE_TITLE = 'Product performance by house and desig
 // column open to every staff login and masks the landed/cost ones, which is what
 // US-007's stock report will declare. Masking still runs over this report, so it
 // carries `meta.masked_columns` like every other.
+//
+// The two slugs at the end are LINK columns: the CRM needs a stable identity to
+// open a row's insight (`?brand=…&product=…`), and maskReport projects rows onto
+// the declared columns, so an undeclared key would never reach the screen. They
+// are declared last so the visible table reads as it always did; the CRM does
+// not draw them, and in the CSV they are the identities a spreadsheet can key on.
 export const PRODUCT_PERFORMANCE_COLUMNS = defineColumns([
   { key: 'brand_name', label: 'House' },
   { key: 'product_name', label: 'Design' },
@@ -55,10 +80,9 @@ export const PRODUCT_PERFORMANCE_COLUMNS = defineColumns([
   // column earns its place where brand_code and range (filters only) do not.
   { key: 'category', label: 'Category' },
   { key: 'currency', label: 'Currency' },
-  { key: 'orders', label: 'Orders', kind: 'number' },
-  { key: 'qty', label: 'Quantity', kind: 'number' },
-  { key: 'value_cents', label: 'Sales', kind: 'money' },
-  { key: 'unpriced_lines', label: 'Unpriced lines', kind: 'number' },
+  ...MEASURES,
+  { key: 'brand_slug', label: 'House slug' },
+  { key: 'product_slug', label: 'Design slug' },
 ])
 
 // Rebecca-R1's own grain: fabrics, trims and wallpapers reported SEPARATELY,
@@ -72,16 +96,68 @@ export const PRODUCT_PERFORMANCE_CATEGORY_COLUMNS = defineColumns([
   { key: 'category', label: 'Category' },
   { key: 'product_type', label: 'Type' },
   { key: 'currency', label: 'Currency' },
-  { key: 'orders', label: 'Orders', kind: 'number' },
-  { key: 'qty', label: 'Quantity', kind: 'number' },
-  { key: 'value_cents', label: 'Sales', kind: 'money' },
-  { key: 'unpriced_lines', label: 'Unpriced lines', kind: 'number' },
+  ...MEASURES,
 ])
 
-// The groupings this report offers. A code-literal registry like the lifecycle
-// one: the route's schema is what keeps an unknown value from a caller (Ajv
-// strips or 400s it), so an unknown key HERE is a bug and throws plain.
-export const PRODUCT_PERFORMANCE_GROUPINGS = Object.freeze(['category'])
+// One row per house: how many designs and colours of it sold, and what for.
+export const PRODUCT_PERFORMANCE_HOUSE_COLUMNS = defineColumns([
+  { key: 'brand_name', label: 'House' },
+  { key: 'product_type', label: 'Type' },
+  { key: 'currency', label: 'Currency' },
+  { key: 'designs', label: 'Designs sold', kind: 'number' },
+  { key: 'colourways', label: 'Colourways sold', kind: 'number' },
+  ...MEASURES,
+  { key: 'brand_slug', label: 'House slug' },
+])
+
+// One row per collection within a house. A design need not belong to one, so
+// the uncollected designs of a house aggregate as their own row rather than
+// vanishing from the house's total.
+export const PRODUCT_PERFORMANCE_COLLECTION_COLUMNS = defineColumns([
+  { key: 'brand_name', label: 'House' },
+  { key: 'collection_name', label: 'Collection' },
+  { key: 'product_type', label: 'Type' },
+  { key: 'currency', label: 'Currency' },
+  { key: 'designs', label: 'Designs sold', kind: 'number' },
+  ...MEASURES,
+  { key: 'brand_slug', label: 'House slug' },
+  { key: 'collection_slug', label: 'Collection slug' },
+])
+
+// The trend: one row per calendar month the population sold in. Months with
+// no sale are simply absent — a gap is honest where a zero row would state a
+// month the report never observed.
+export const PRODUCT_PERFORMANCE_MONTH_COLUMNS = defineColumns([
+  { key: 'month', label: 'Month' },
+  { key: 'product_type', label: 'Type' },
+  { key: 'currency', label: 'Currency' },
+  ...MEASURES,
+])
+
+// Who buys it. An order is placed by an account or by a guest and never both,
+// so `client` is the COALESCE every line-grain report already makes and
+// `account` says which of the two a row is.
+export const PRODUCT_PERFORMANCE_CLIENT_COLUMNS = defineColumns([
+  { key: 'client', label: 'Client' },
+  { key: 'account', label: 'Account' },
+  { key: 'product_type', label: 'Type' },
+  { key: 'currency', label: 'Currency' },
+  ...MEASURES,
+  { key: 'last_order_at', label: 'Last order', kind: 'date' },
+])
+
+// Where the demand sits in the lifecycle. This grain is the one that does NOT
+// default to the paid/shipped population: its whole question is how much is
+// requested, confirmed, paid, shipped and declined, so it declares every
+// status as its default — a `status` filter still replaces it like any other.
+export const PRODUCT_PERFORMANCE_STATUS_COLUMNS = defineColumns([
+  { key: 'status', label: 'Status' },
+  { key: 'kind', label: 'Kind' },
+  { key: 'product_type', label: 'Type' },
+  { key: 'currency', label: 'Currency' },
+  { key: 'lines', label: 'Lines', kind: 'number' },
+  ...MEASURES,
+])
 
 // What the figures are of, in the payload rather than in a screen's footnote:
 // the CSV is the copy that leaves the building, and a file that does not say
@@ -103,28 +179,46 @@ export const CATEGORY_TOTALS_LABELS = Object.freeze({
   category: 'All categories',
 })
 
-// Everything that differs between the two grains, declared side by side so the
+// The four common aggregates, spelled once. Rounded at the aggregate, never per
+// line: qty is numeric(12,2), so a line can be worth 4997.5 cents and rounding
+// each one multiplies the error by the row count.
+const MEASURES_SQL = `COUNT(DISTINCT order_id)::int AS orders,
+          COALESCE(SUM(qty), 0) AS qty,
+          COALESCE(ROUND(SUM(line_value_cents)), 0) AS value_cents,
+          COUNT(*) FILTER (WHERE unpriced)::int AS unpriced_lines`
+
+// Everything that differs between the grains, declared side by side so the
 // query, the row mapper, the totals label and the rows_total identity cannot be
 // mixed across grains. `identity` is what a row IS — the same tuple GROUP BY
 // takes and rows_total counts, so the truncation arithmetic stays honest.
+// `join` is the one extra join a grain may need beyond the scope (the client
+// grain reads names off `users`); `statuses` is a grain's own default
+// population, absent for every grain that means "a sale".
 const GRAINS = Object.freeze({
   design: Object.freeze({
+    title: PRODUCT_PERFORMANCE_TITLE,
     columns: PRODUCT_PERFORMANCE_COLUMNS,
     select: `brand_name,
           product_name,
           product_type,
           category,
-          currency`,
-    groupBy: 'brand_id, brand_name, product_id, product_name, product_type, category, currency',
+          currency,
+          ${MEASURES_SQL},
+          brand_slug,
+          product_slug`,
+    groupBy:
+      'brand_id, brand_name, brand_slug, product_id, product_name, product_slug, product_type, category, currency',
     order: 'value_cents DESC, qty DESC, brand_name, product_name',
     identity: '(brand_id, product_id, currency)',
     totalsLabels: TOTALS_LABELS,
   }),
   category: Object.freeze({
+    title: PRODUCT_PERFORMANCE_TITLE,
     columns: PRODUCT_PERFORMANCE_CATEGORY_COLUMNS,
     select: `category,
           product_type,
-          currency`,
+          currency,
+          ${MEASURES_SQL}`,
     // product_type and currency stay in the grain: a category can hold both
     // metres and units (a trimming and its fabric), and a quantity with no unit
     // or a value across two currencies is the figure this file refuses to emit.
@@ -133,7 +227,96 @@ const GRAINS = Object.freeze({
     identity: '(category, product_type, currency)',
     totalsLabels: CATEGORY_TOTALS_LABELS,
   }),
+  house: Object.freeze({
+    title: 'Sales by house',
+    columns: PRODUCT_PERFORMANCE_HOUSE_COLUMNS,
+    select: `brand_name,
+          product_type,
+          currency,
+          COUNT(DISTINCT product_id)::int AS designs,
+          COUNT(DISTINCT colourway_id)::int AS colourways,
+          ${MEASURES_SQL},
+          brand_slug`,
+    groupBy: 'brand_id, brand_name, brand_slug, product_type, currency',
+    order: 'value_cents DESC, qty DESC, brand_name',
+    identity: '(brand_id, product_type, currency)',
+    totalsLabels: Object.freeze({ brand_name: 'All houses' }),
+  }),
+  collection: Object.freeze({
+    title: 'Sales by collection',
+    columns: PRODUCT_PERFORMANCE_COLLECTION_COLUMNS,
+    // A design outside any collection is a real row of its house, labelled so —
+    // a NULL here would render as a dash beside a figure with no explanation.
+    select: `brand_name,
+          COALESCE(collection_name, 'No collection') AS collection_name,
+          product_type,
+          currency,
+          COUNT(DISTINCT product_id)::int AS designs,
+          ${MEASURES_SQL},
+          brand_slug,
+          collection_slug`,
+    groupBy:
+      'brand_id, brand_name, brand_slug, collection_id, collection_name, collection_slug, product_type, currency',
+    order: 'value_cents DESC, qty DESC, brand_name, collection_name',
+    identity: '(brand_id, collection_id, product_type, currency)',
+    totalsLabels: Object.freeze({ brand_name: 'All houses', collection_name: 'All collections' }),
+  }),
+  month: Object.freeze({
+    title: 'Sales by month',
+    columns: PRODUCT_PERFORMANCE_MONTH_COLUMNS,
+    // The month resolves in the database session's timezone, like every date
+    // bound in src/reports/filters.js — nothing here pins one.
+    select: `to_char(date_trunc('month', created_at), 'YYYY-MM') AS month,
+          product_type,
+          currency,
+          ${MEASURES_SQL}`,
+    groupBy: `date_trunc('month', created_at), product_type, currency`,
+    order: 'month, product_type, currency',
+    identity: `(date_trunc('month', created_at), product_type, currency)`,
+    totalsLabels: Object.freeze({ month: 'All months' }),
+  }),
+  client: Object.freeze({
+    title: 'Sales by client',
+    columns: PRODUCT_PERFORMANCE_CLIENT_COLUMNS,
+    // Grouped by the identity (user id, or the guest's address), displayed by
+    // the name — two accounts sharing a display name stay two rows.
+    select: `COALESCE(u.name, u.email, guest_email) AS client,
+          CASE WHEN ${SCOPE_NAME}.user_id IS NULL THEN 'guest' ELSE 'account' END AS account,
+          product_type,
+          currency,
+          ${MEASURES_SQL},
+          MAX(${SCOPE_NAME}.created_at) AS last_order_at`,
+    // `users` carries a created_at of its own, hence the qualified column above.
+    join: `LEFT JOIN users u ON u.id = ${SCOPE_NAME}.user_id`,
+    groupBy: `${SCOPE_NAME}.user_id, guest_email, u.name, u.email, product_type, currency`,
+    order: 'value_cents DESC, qty DESC, client',
+    identity: `(${SCOPE_NAME}.user_id, guest_email, product_type, currency)`,
+    totalsLabels: Object.freeze({ client: 'All clients' }),
+  }),
+  status: Object.freeze({
+    title: 'Orders by lifecycle status',
+    columns: PRODUCT_PERFORMANCE_STATUS_COLUMNS,
+    select: `status,
+          kind,
+          product_type,
+          currency,
+          COUNT(*)::int AS lines,
+          ${MEASURES_SQL}`,
+    groupBy: 'status, kind, product_type, currency',
+    order: 'status, kind, product_type, currency',
+    identity: '(status, kind, product_type, currency)',
+    totalsLabels: Object.freeze({ status: 'All statuses' }),
+    statuses: ORDER_STATUSES,
+  }),
 })
+
+// The groupings this report offers. A code-literal registry like the lifecycle
+// one: the route's schema is what keeps an unknown value from a caller (Ajv
+// strips or 400s it), so an unknown key HERE is a bug and throws plain. The
+// default grain is not in it — it is what no `group` means.
+export const PRODUCT_PERFORMANCE_GROUPINGS = Object.freeze(
+  Object.keys(GRAINS).filter((key) => key !== 'design')
+)
 
 const grainOf = (group) => {
   const grain = GRAINS[group === undefined || group === null ? 'design' : group]
@@ -147,15 +330,9 @@ const grainOf = (group) => {
 }
 
 const rowsSql = (cte, grain, limitPlaceholder) => `WITH ${cte}
-   SELECT ${grain.select},
-          COUNT(DISTINCT order_id)::int AS orders,
-          COALESCE(SUM(qty), 0) AS qty,
-          -- Rounded at the aggregate, never per line: qty is numeric(12,2), so a
-          -- line can be worth 4997.5 cents and rounding each one multiplies the
-          -- error by the row count.
-          COALESCE(ROUND(SUM(line_value_cents)), 0) AS value_cents,
-          COUNT(*) FILTER (WHERE unpriced)::int AS unpriced_lines
+   SELECT ${grain.select}
      FROM ${SCOPE_NAME}
+     ${grain.join ?? ''}
     GROUP BY ${grain.groupBy}
     ORDER BY ${grain.order}
    ${limitPlaceholder ? `LIMIT ${limitPlaceholder}` : ''}`
@@ -229,11 +406,12 @@ const totalsFrom = (summary, grain) => {
  * labels and kinds, every row is keyed by column key in column order, and
  * `totals` is a row of the same shape.
  *
- * `group: 'category'` (Rebecca-R1) swaps the grain: rows aggregate by category
- * rather than by house and design, columns and totals labels move with them,
- * and everything else — the scope, the filters, the coverage, the masking —
- * stays the one code path, so the grouped table and its export still cannot
- * disagree with the default one about what a sale is.
+ * `group` swaps the grain (see GRAINS): rows aggregate by house, collection,
+ * category, month, client or status rather than by house and design, columns
+ * and totals labels move with them, and everything else — the scope, the
+ * filters, the coverage, the masking — stays the one code path, so a grouped
+ * table and its export still cannot disagree with the default one about what a
+ * sale is.
  *
  * @param {import('pg').Pool} db
  * @param {object} [filters] output of parseReportFilters
@@ -242,7 +420,7 @@ const totalsFrom = (summary, grain) => {
 export const productPerformanceReport = async (db, filters = {}, { limit, group } = {}) => {
   const capped = clampLimit(limit === undefined ? DEFAULT_ROW_LIMIT : limit)
   const grain = grainOf(group)
-  const { cte, params } = buildRevenueScope(filters)
+  const { cte, params } = buildRevenueScope(filters, { statuses: grain.statuses })
 
   const [rowsResult, summaryResult] = await Promise.all([
     db.query(
@@ -257,17 +435,20 @@ export const productPerformanceReport = async (db, filters = {}, { limit, group 
 
   return Object.freeze({
     report: PRODUCT_PERFORMANCE,
-    title: PRODUCT_PERFORMANCE_TITLE,
+    title: grain.title,
     columns: grain.columns,
     rows,
     totals: totalsFrom(summary, grain),
     meta: Object.freeze({
       filters,
       // Which grain the rows are at, so a screen (and a reader of the CSV's
-      // meta) can tell a category rollup from the by-design default.
+      // meta) can tell a rollup from the by-design default.
       grouped_by: group ?? null,
       houses: summary.houses,
       designs: summary.designs,
+      lines: summary.lines,
+      orders: summary.orders,
+      unpriced_lines: summary.unpriced_lines,
       rows_total: summary.rows_total,
       row_limit: capped,
       // Said rather than implied: a table cut at the limit with totals covering
@@ -278,6 +459,12 @@ export const productPerformanceReport = async (db, filters = {}, { limit, group 
       // value. The flag is what lets a screen explain the gap instead of drawing
       // a blank cell.
       mixed_currency: summary.currencies.length > 1,
+      // Which lifecycle window the rows are of. A `status` filter replaces the
+      // grain's default rather than narrowing it, so an empty answer can be
+      // told from one outside the default.
+      statuses: filters.status
+        ? Object.freeze([filters.status])
+        : (grain.statuses ?? REVENUE_STATUSES),
       coverage: Object.freeze({
         source: 'live platform orders',
         // The window the figures actually came from, not the window that was

@@ -136,17 +136,35 @@ const shippingLineItem = (zone, quote, currency) => ({
   quantity: 1,
 })
 
+// The free text a shopper may add at checkout, kept as Stripe metadata entries
+// and dropped when blank — metadata is strings throughout, so an empty one would
+// reach the order row as a note that says nothing. Returns a new object; nothing
+// is mutated.
+const filledMetadata = (entries) =>
+  Object.fromEntries(
+    entries
+      .map(([key, value]) => [key, typeof value === 'string' ? value.trim() : ''])
+      .filter(([, value]) => value !== '')
+  )
+
 /**
  * Validate a cart, add a live shipping quote, and create a Stripe Checkout
  * Session (test mode). Returns the redirect URL and session id.
  *
  * @param {{ pool: import('pg').Pool, stripe: import('stripe').Stripe, storeBaseUrl: string }} deps
- * @param {{ lines: Array<{ sku: string, qty: number }>, zone: string, user?: { id: string, email: string } | null }} input
+ * @param {{ lines: Array<{ sku: string, qty: number }>, zone: string, user?: { id: string, email: string } | null, notes?: string | null, clientReference?: string | null, customerPoNumber?: string | null }} input
  * @returns {Promise<{ url: string, session_id: string }>}
  */
 export const createCheckoutSession = async (
   { pool, stripe, storeBaseUrl },
-  { lines, zone, user = null }
+  {
+    lines,
+    zone,
+    user = null,
+    notes = null,
+    clientReference = null,
+    customerPoNumber = null,
+  }
 ) => {
   if (!stripe) {
     throw httpError(503, CARD_PAYMENT_UNAVAILABLE)
@@ -208,23 +226,63 @@ export const createCheckoutSession = async (
       zone,
       shipping_cents: String(quote.rate_cents),
       trade: String(trade),
+      // The order row is written by the webhook, not here, so anything the
+      // shopper typed has to travel with the session or it is lost. Stripe caps
+      // a metadata value at 500 characters — the body schema caps them lower.
+      ...filledMetadata([
+        ['notes', notes],
+        ['client_reference', clientReference],
+        ['customer_po_number', customerPoNumber],
+      ]),
     },
   })
 
   return { url: session.url, session_id: session.id }
 }
 
+// The lines of the order the webhook wrote, in the shape the success page
+// shows them. Money comes off the ORDER, never off the live catalogue: what the
+// client paid is what they must see afterwards, whatever the price is today.
+const orderLines = async (pool, orderId) => {
+  const { rows } = await pool.query(
+    `SELECT c.sku, p.name, ol.qty, ol.unit_price_cents
+       FROM order_lines ol
+       JOIN colourways c ON c.id = ol.colourway_id
+       JOIN products p ON p.id = c.product_id
+      WHERE ol.order_id = $1
+      ORDER BY ol.id`,
+    [orderId]
+  )
+  // pg hands numeric `qty` back as a string; the success page multiplies it.
+  return rows.map((row) => ({
+    sku: row.sku,
+    name: row.name,
+    qty: Number(row.qty),
+    unit_price_cents: row.unit_price_cents,
+  }))
+}
+
 /**
  * Verify a Checkout Session with Stripe and return the customer-facing summary
- * used by the store success page (US-019). The order itself is created
- * asynchronously by the webhook (US-011), but `order_number` is deterministic
- * (`WEB-<session id>`), so the success page can show it without waiting.
+ * used by the store success page (US-019).
  *
- * @param {{ stripe: import('stripe').Stripe }} deps
+ * The order itself is created asynchronously by the webhook (US-011) and carries
+ * a human `order_number` (`WEB-9F3A21BC`), so this looks the row up by
+ * `orders.stripe_session_id` rather than deriving a number from the session id.
+ * The webhook is usually there first, but it is a different HTTP request from a
+ * different origin: when it has not landed yet the answer is `pending: true`
+ * with a null number and no lines, and the store polls (it must never invent a
+ * number, and must never wait for one before telling the shopper they paid).
+ *
+ * The session id is the only key the caller presents, exactly as before — it
+ * comes back from Stripe on the redirect and is unguessable, so the delivery
+ * address and lines behind it belong to whoever holds it.
+ *
+ * @param {{ pool: import('pg').Pool, stripe: import('stripe').Stripe }} deps
  * @param {string} sessionId
- * @returns {Promise<{ order_number: string, paid: boolean, amount_total_cents: number|null, currency: string|null, email: string|null }>}
+ * @returns {Promise<{ order_number: string|null, pending: boolean, paid: boolean, amount_total_cents: number|null, currency: string|null, email: string|null, lines: object[], shipping_address: object|null }>}
  */
-export const retrieveCheckoutSession = async ({ stripe }, sessionId) => {
+export const retrieveCheckoutSession = async ({ pool, stripe }, sessionId) => {
   if (!stripe) {
     throw httpError(503, CARD_PAYMENT_UNAVAILABLE)
   }
@@ -239,11 +297,22 @@ export const retrieveCheckoutSession = async ({ stripe }, sessionId) => {
     throw httpError(404, 'Checkout session not found.')
   }
 
+  const { rows } = await pool.query(
+    `SELECT id, order_number, shipping_address
+       FROM orders
+      WHERE stripe_session_id = $1`,
+    [session.id]
+  )
+  const order = rows[0] ?? null
+
   return {
-    order_number: `WEB-${session.id}`,
+    order_number: order ? order.order_number : null,
+    pending: order === null,
     paid: session.payment_status === 'paid',
     amount_total_cents: session.amount_total ?? null,
     currency: session.currency ? session.currency.toUpperCase() : null,
     email: session.customer_details?.email || session.customer_email || null,
+    lines: order ? await orderLines(pool, order.id) : [],
+    shipping_address: order?.shipping_address ?? null,
   }
 }

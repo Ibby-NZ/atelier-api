@@ -14,8 +14,6 @@
 // orders (kind='checkout') arrive already paid with inventory decremented and
 // hold no reservation, so their inventory is never touched here.
 
-import { randomUUID } from 'node:crypto'
-
 import { setArchived } from '../lifecycle/archive.js'
 // The staff segment is the rep vocabulary — one frozen list, never retyped.
 import { USER_SEGMENTS } from '../users/admin-users.js'
@@ -26,6 +24,8 @@ import { reserves } from './order-states.js'
 // The same packing the storefront's request flow writes, so `orders.notes` reads
 // identically however the order was raised.
 import { buildNotes } from './order-request.js'
+// One shape of human order number for every channel — `SO` here.
+import { orderNumber } from './order-number.js'
 // The discount tiers and the director-only override gate (Rebecca-R2) — pure,
 // like order-states.js, so the CRM can mirror the tiers and the gate tests
 // without a database.
@@ -103,6 +103,7 @@ const ORDER_COLUMNS = `o.id,
         o.contact_phone,
         o.client_reference,
         o.customer_po_number,
+        o.tracking_url,
         o.sales_rep_user_id,
         rep.name AS sales_rep_name,
         o.notes,
@@ -200,6 +201,9 @@ const toOrder = (row, lineRows) => {
     // CLIENT issued to us — never one of our purchase orders (W13).
     client_reference: row.client_reference ?? null,
     customer_po_number: row.customer_po_number ?? null,
+    // The courier link the office typed at `ship`, so the CRM can show the same
+    // link the client was emailed rather than a number nobody kept.
+    tracking_url: row.tracking_url ?? null,
     notes: row.notes,
     archived_at: row.archived_at ?? null,
     created_at: row.created_at,
@@ -474,6 +478,21 @@ const isAnnotationOnly = (patch) => {
   return keys.length > 0 && keys.every((key) => ANNOTATION_COLUMNS.includes(key))
 }
 
+// `notes` ALONE is the third thing the office writes down after the fact — the
+// courier they used, the phone call about a delivery, what the client asked for
+// on the doorstep — and the order it belongs on is usually one that has already
+// been paid or shipped. A guard that refuses it there is a guard that sends the
+// note to a spreadsheet instead.
+//
+// It rides alone deliberately, rather than joining ANNOTATION_COLUMNS: `notes`
+// is also the header field an ordinary edit carries alongside lines and money,
+// and a body that says anything else keeps the status guard exactly as it was.
+// One key, one meaning.
+const isNotesOnly = (patch) => {
+  const keys = Object.keys(patch)
+  return keys.length === 1 && keys[0] === 'notes'
+}
+
 // A rep must be a STAFF login (USER_SEGMENTS.staff) or null. Checked here —
 // once, for both write paths — so a bad id is a 422 naming the problem rather
 // than an FK 23503 surfacing as a 500, and a customer can never appear as the
@@ -510,7 +529,10 @@ const applyOrderHeader = async (client, id, patch) => {
  *
  * Only allowed while the order is still in the reservation phase
  * (requested/confirmed); later states have already converted or released the
- * reservation, and their money has been invoiced.
+ * reservation, and their money has been invoiced. The two exceptions are the
+ * ANNOTATION_COLUMNS and a patch carrying nothing but `notes`: neither moves
+ * money, stock or a reservation, and both are written after the fact by
+ * definition.
  *
  * This is what turns a storefront request (every line priced at 0 by
  * `createOrderRequest`) into a sales order the office can invoice.
@@ -534,7 +556,7 @@ const applyOrderHeader = async (client, id, patch) => {
  */
 export const editOrderLines = (pool, id, patch, actor) =>
   withOrderTxn(pool, id, async (client, order) => {
-    if (!isAnnotationOnly(patch)) {
+    if (!isAnnotationOnly(patch) && !isNotesOnly(patch)) {
       requireStatus(order, ['requested', 'confirmed'], 'edit')
     }
 
@@ -731,7 +753,7 @@ export const createManualOrder = async (pool, input, actor) => {
         // A guest email only when there is no account: the account's own address
         // is the one to write to, and duplicating it here would go stale.
         userId === null ? (contact.email ?? null) : null,
-        `SO-${randomUUID().slice(0, 8).toUpperCase()}`,
+        orderNumber('SO'),
         notes === '' ? null : notes,
         hasDiscount ? input.discount_pct : 0,
         discountReason,
@@ -788,8 +810,17 @@ export const markOrderPaid = (pool, id) =>
 /**
  * Ship a paid order: set status=shipped and convert the held reservation into a
  * real stock decrement (qty_reserved down, qty_available down by the same amount).
+ *
+ * `trackingUrl` is optional — plenty of orders are hand-delivered — and is
+ * written in the SAME statement as the status, so the order the route hands to
+ * `notifyOrderTransition` already carries the link the shipped letter quotes.
+ * Its shape is the route schema's business (`^https?://`).
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {{ trackingUrl?: string|null }} [options]
  */
-export const shipOrder = (pool, id) =>
+export const shipOrder = (pool, id, { trackingUrl = null } = {}) =>
   withOrderTxn(pool, id, async (client, order) => {
     requireStatus(order, 'paid', 'ship')
     if (reserves(order.kind)) {
@@ -802,7 +833,10 @@ export const shipOrder = (pool, id) =>
         [id]
       )
     }
-    await client.query(`UPDATE orders SET status = 'shipped' WHERE id = $1`, [id])
+    await client.query(
+      `UPDATE orders SET status = 'shipped', tracking_url = $2 WHERE id = $1`,
+      [id, trackingUrl]
+    )
   })
 
 /**

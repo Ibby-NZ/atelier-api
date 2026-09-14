@@ -422,6 +422,51 @@ describe('back-office users admin', () => {
       expect(response.json().user.trade_approved).toBe(true)
     })
 
+    // Finance visibility is the one permission the CRM has no other way to
+    // grant. `updateUser` has accepted it since the reporting migration, but the
+    // route's body schema did not list it, and Ajv's removeAdditional stripped
+    // the lone key to `{}` -> 400 on minProperties. The screen read as broken
+    // rather than as a closed door, so the round trip is asserted THROUGH the
+    // route, not against updateUser (test/admin-reports.test.js covers that).
+    it('grants and revokes can_view_finance on a staff account', async () => {
+      const id = await insertUser(pool, { local: 'finance-eyes', role: 'backoffice' })
+      const granted = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        can_view_finance: true,
+      })
+      expect(granted.statusCode).toBe(200)
+      expect(granted.json().user.can_view_finance).toBe(true)
+
+      const revoked = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        can_view_finance: false,
+      })
+      expect(revoked.statusCode).toBe(200)
+      expect(revoked.json().user.can_view_finance).toBe(false)
+    })
+
+    // The flag only means anything on a staff row: the role is the stronger
+    // statement, so a demotion clears it even when the same body asks for it.
+    it('clears can_view_finance when the role moves off staff', async () => {
+      const id = await insertUser(pool, { local: 'finance-demoted', role: 'backoffice' })
+      expect(
+        (await inject('PATCH', `/admin/users/${id}`, backofficeCookie, { can_view_finance: true }))
+          .statusCode
+      ).toBe(200)
+      const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        role: 'customer',
+        can_view_finance: true,
+      })
+      expect(response.statusCode).toBe(200)
+      expect(response.json().user.can_view_finance).toBe(false)
+    })
+
+    it('rejects a non-boolean can_view_finance with 400 by schema', async () => {
+      const id = await insertUser(pool, { local: 'finance-typo', role: 'backoffice' })
+      const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
+        can_view_finance: 'yes',
+      })
+      expect(response.statusCode).toBe(400)
+    })
+
     it('rejects a malformed email with 400 by schema', async () => {
       const id = await insertUser(pool, { local: 'badmail', role: 'customer' })
       const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {

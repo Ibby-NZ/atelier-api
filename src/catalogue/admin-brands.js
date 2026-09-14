@@ -11,7 +11,11 @@
 //     pre-check would race and would still need this handler.
 //
 // This module also exports the two helpers admin-products.js shares (slugFrom,
-// rethrowConflict) so both halves of the catalogue behave identically.
+// rethrowConflict) so both halves of the catalogue behave identically, plus
+// `buildUpdate` — which is NOT catalogue-only: it is the house SET-clause
+// builder every admin PATCH in the API imports from here (suppliers,
+// purchasing, samples, users, inventory, pricing, reserves, /auth/me). Moving
+// or renaming it is a codebase-wide change, not a catalogue one.
 
 import { slugify } from '../seed/slugify.js'
 import { setArchived } from '../lifecycle/archive.js'

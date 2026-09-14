@@ -5,36 +5,18 @@
 //
 // Money is never trusted from the webhook payload: line prices are re-resolved
 // from the database off the cart (sku + qty) stashed in the session metadata by
-// the checkout endpoint (US-010). shipping_cents is carried in metadata.
+// the checkout endpoint (US-010), through the shared `resolveCartLines`.
+// shipping_cents is carried in metadata.
 
-// Re-resolve each cart line's colourway + current price from the DB, on the
-// price BASIS the session was quoted on (`metadata.trade`, written by the
-// checkout endpoint). Resolving retail for a session Stripe charged at trade
-// would record an order for money nobody paid.
-const resolveCartLines = async (client, cart, trade) => {
-  const lines = []
-  for (const { sku, qty } of cart) {
-    const { rows } = await client.query(
-      `SELECT c.id AS colourway_id, p.name, p.retail_price_cents, p.trade_price_cents
-         FROM colourways c
-         JOIN products p ON p.id = c.product_id
-        WHERE c.sku = $1`,
-      [sku]
-    )
-    const row = rows[0]
-    const unitPriceCents = row
-      ? (trade ? row.trade_price_cents : null) ?? row.retail_price_cents
-      : null
-    if (unitPriceCents === null) {
-      throw new Error(`Webhook cannot resolve a price for SKU "${sku}".`)
-    }
-    lines.push({
-      colourway_id: row.colourway_id,
-      qty,
-      unit_price_cents: unitPriceCents,
-    })
-  }
-  return lines
+import { resolveCartLines } from '../catalogue/line-prices.js'
+import { orderNumber } from '../orders/order-number.js'
+
+// Free text the shopper typed at checkout and Stripe handed back. Metadata is
+// strings throughout and an absent key reads as undefined, so an empty value is
+// "not given", never a note that says nothing.
+const metaText = (value) => {
+  const text = typeof value === 'string' ? value.trim() : ''
+  return text === '' ? null : text
 }
 
 // The delivery details Stripe collected during the hosted checkout. Newer
@@ -87,9 +69,11 @@ const createPaidOrder = async (client, session) => {
     ? null
     : session.customer_details?.email ?? session.customer_email ?? null
 
-  // Derived from the session id (unique per checkout), so the order number is
-  // stable even if this handler is retried before the ledger claim commits.
-  const orderNumber = `WEB-${session.id}`
+  // A human number the client can read back to the office (`WEB-9F3A21BC`), not
+  // `WEB-<stripe session id>`. Idempotency does not rest on it: the ledger claim
+  // and this INSERT commit together, so a retried event either finds the claim
+  // taken (creates nothing) or rolls the whole thing back.
+  const number = orderNumber('WEB')
 
   const { shippingAddress, contactPhone } = deliveryDetails(session)
 
@@ -97,13 +81,13 @@ const createPaidOrder = async (client, session) => {
     `INSERT INTO orders
        (user_id, guest_email, order_number, kind, status,
         subtotal_cents, shipping_cents, total_cents, shipping_zone, stripe_session_id,
-        shipping_address, contact_phone)
-     VALUES ($1, $2, $3, 'checkout', 'paid', $4, $5, $6, $7, $8, $9, $10)
+        shipping_address, contact_phone, notes, client_reference, customer_po_number)
+     VALUES ($1, $2, $3, 'checkout', 'paid', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
      RETURNING id, order_number, kind, user_id, guest_email, total_cents`,
     [
       userId,
       guestEmail,
-      orderNumber,
+      number,
       subtotalCents,
       shippingCents,
       totalCents,
@@ -111,6 +95,11 @@ const createPaidOrder = async (client, session) => {
       session.id,
       shippingAddress ? JSON.stringify(shippingAddress) : null,
       contactPhone,
+      // What the shopper typed on the store's checkout form, carried across
+      // Stripe in metadata because this is where the order row is written.
+      metaText(session.metadata?.notes),
+      metaText(session.metadata?.client_reference),
+      metaText(session.metadata?.customer_po_number),
     ]
   )
   const order = rows[0]

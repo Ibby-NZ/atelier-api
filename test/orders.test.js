@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
@@ -11,6 +11,14 @@ const SKU = {
   inStock: `${PREFIX}-INSTOCK`,
   short: `${PREFIX}-SHORT`,
 }
+
+const PASSWORD = 'super-secret-pw'
+
+// The in-stock design is priced on both bases; the short one is priced on
+// neither, which is the ordinary case for fabric (the office quotes it per job)
+// and the reason an unpriced request line still has to be allowed.
+const RETAIL_CENTS = 4500
+const TRADE_CENTS = 3000
 
 const seedFixtures = async (pool) => {
   const { rows: brands } = await pool.query(
@@ -25,12 +33,13 @@ const seedFixtures = async (pool) => {
 
   const { rows: products } = await pool.query(
     `INSERT INTO products
-       (brand_id, name, slug, product_type, currency, show_on_website)
+       (brand_id, name, slug, product_type, currency, show_on_website,
+        retail_price_cents, trade_price_cents)
      VALUES
-       ($1, 'Ord InStock', $2, 'fabric', 'NZD', true),
-       ($1, 'Ord Short',   $3, 'fabric', 'NZD', true)
+       ($1, 'Ord InStock', $2, 'fabric', 'NZD', true, $4, $5),
+       ($1, 'Ord Short',   $3, 'fabric', 'NZD', true, NULL, NULL)
      RETURNING id, slug`,
-    [brandId, `${PREFIX}-instock`, `${PREFIX}-short`]
+    [brandId, `${PREFIX}-instock`, `${PREFIX}-short`, RETAIL_CENTS, TRADE_CENTS]
   )
   const idBySlug = new Map(products.map((p) => [p.slug, p.id]))
 
@@ -69,6 +78,33 @@ const cleanup = async (pool) => {
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
 }
 
+const orderRow = async (pool, id) => {
+  const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [id])
+  return rows[0]
+}
+
+const lineRows = async (pool, orderId) => {
+  const { rows } = await pool.query(
+    'SELECT qty, unit_price_cents FROM order_lines WHERE order_id = $1 ORDER BY id',
+    [orderId]
+  )
+  return rows
+}
+
+// Register shares a 10-per-15-min-per-IP bucket with login and the store is per
+// app instance, so a test registers at most one account and only when it needs
+// a session.
+const registerCookie = async (app, email) => {
+  const response = await app.inject({
+    method: 'POST',
+    url: '/auth/register',
+    payload: { email, password: PASSWORD, name: 'Ord Client' },
+  })
+  expect(response.statusCode).toBe(201)
+  const setCookie = response.headers['set-cookie']
+  return (Array.isArray(setCookie) ? setCookie[0] : setCookie).split(';')[0]
+}
+
 const reservedFor = async (pool, sku) => {
   const { rows } = await pool.query(
     `SELECT i.qty_reserved
@@ -96,19 +132,27 @@ describe('POST /orders/request', () => {
       migrationsTable: 'pgmigrations',
       log: () => {},
     })
-    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
-    await app.ready()
   })
 
   beforeEach(async () => {
     // Fresh fixtures each test so reservation counts start from a known state.
     await cleanup(pool)
     await seedFixtures(pool)
+    // Fresh APP each test too: POST /orders/request is rate limited to 10 per
+    // 15 min per IP and the limiter store is per app instance, so one shared
+    // instance runs the bucket dry part-way down the file and every later test
+    // 429s. Per-test instances keep that a property of the route, not a cap on
+    // how many cases this suite may hold.
+    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+    await app.ready()
+  })
+
+  afterEach(async () => {
+    await app.close()
   })
 
   afterAll(async () => {
     await cleanup(pool)
-    await app.close()
     await pool.end()
   })
 
@@ -201,18 +245,7 @@ describe('POST /orders/request', () => {
   })
 
   it('links the order to a logged-in user (no guest email needed)', async () => {
-    const register = await app.inject({
-      method: 'POST',
-      url: '/auth/register',
-      payload: {
-        email: `${PREFIX}-user@example.com`,
-        password: 'super-secret-pw',
-        name: 'Logged In',
-      },
-    })
-    expect(register.statusCode).toBe(201)
-    const setCookie = register.headers['set-cookie']
-    const cookie = (Array.isArray(setCookie) ? setCookie[0] : setCookie).split(';')[0]
+    const cookie = await registerCookie(app, `${PREFIX}-user@example.com`)
 
     const response = await post(
       { lines: [{ sku: SKU.inStock, qty_metres: 8 }] },
@@ -227,5 +260,108 @@ describe('POST /orders/request', () => {
     )
     expect(rows[0].user_id).not.toBeNull()
     expect(rows[0].guest_email).toBeNull()
+  })
+
+  it('stores the phone in its own column, not in the notes line', async () => {
+    const response = await post({
+      lines: [{ sku: SKU.inStock, qty_metres: 3 }],
+      contact: { name: 'Ada', email: 'ada@example.com', phone: '021 555 0100' },
+      client_reference: 'Drawing room',
+      customer_po_number: 'PO-99812',
+    })
+    expect(response.statusCode).toBe(201)
+
+    const row = await orderRow(pool, response.json().order.id)
+    expect(row.contact_phone).toBe('021 555 0100')
+    expect(row.notes).toBe('Name: Ada | Email: ada@example.com')
+    expect(row.notes).not.toMatch(/Phone/i)
+    expect(row.client_reference).toBe('Drawing room')
+    expect(row.customer_po_number).toBe('PO-99812')
+  })
+
+  it('folds blank client numbers to null rather than storing empty strings', async () => {
+    const response = await post({
+      lines: [{ sku: SKU.inStock, qty_metres: 3 }],
+      contact: { email: 'ada@example.com', phone: '   ' },
+      client_reference: '   ',
+      customer_po_number: '',
+    })
+    expect(response.statusCode).toBe(201)
+
+    const row = await orderRow(pool, response.json().order.id)
+    expect(row.contact_phone).toBeNull()
+    expect(row.client_reference).toBeNull()
+    expect(row.customer_po_number).toBeNull()
+  })
+
+  it('remembers a signed-in client\'s phone for the next request', async () => {
+    const email = `${PREFIX}-phone@example.com`
+    const cookie = await registerCookie(app, email)
+
+    const response = await post(
+      {
+        lines: [{ sku: SKU.inStock, qty_metres: 2 }],
+        contact: { phone: '021 555 0199' },
+      },
+      { cookie }
+    )
+    expect(response.statusCode).toBe(201)
+
+    const { rows } = await pool.query('SELECT phone FROM users WHERE email = $1', [
+      email,
+    ])
+    expect(rows[0].phone).toBe('021 555 0199')
+  })
+
+  it('prices lines at the catalogue retail figure and totals the order', async () => {
+    const response = await post({
+      lines: [{ sku: SKU.inStock, qty_metres: 4 }],
+      contact: { email: 'ada@example.com' },
+    })
+    expect(response.statusCode).toBe(201)
+    const { order } = response.json()
+    expect(order.lines[0].unit_price_cents).toBe(RETAIL_CENTS)
+
+    const lines = await lineRows(pool, order.id)
+    expect(lines[0].unit_price_cents).toBe(RETAIL_CENTS)
+
+    const row = await orderRow(pool, order.id)
+    expect(row.subtotal_cents).toBe(RETAIL_CENTS * 4)
+    // Nothing is shipped from a request, so the total is the subtotal.
+    expect(row.shipping_cents).toBe(0)
+    expect(row.total_cents).toBe(RETAIL_CENTS * 4)
+  })
+
+  it('prices an approved trade client at the trade figure', async () => {
+    const email = `${PREFIX}-trade@example.com`
+    const cookie = await registerCookie(app, email)
+    await pool.query(
+      `UPDATE users SET role = 'trade', trade_approved = true WHERE email = $1`,
+      [email]
+    )
+
+    const response = await post(
+      { lines: [{ sku: SKU.inStock, qty_metres: 2 }] },
+      { cookie }
+    )
+    expect(response.statusCode).toBe(201)
+    expect(response.json().order.lines[0].unit_price_cents).toBe(TRADE_CENTS)
+
+    const row = await orderRow(pool, response.json().order.id)
+    expect(row.total_cents).toBe(TRADE_CENTS * 2)
+  })
+
+  it('leaves a design the catalogue does not price at 0', async () => {
+    const response = await post({
+      lines: [{ sku: SKU.short, qty_metres: 20 }],
+      contact: { email: 'guest@example.com' },
+      accepted_lead_time: true,
+    })
+    expect(response.statusCode).toBe(201)
+    const { order } = response.json()
+    expect(order.lines[0].unit_price_cents).toBe(0)
+
+    const row = await orderRow(pool, order.id)
+    expect(row.subtotal_cents).toBe(0)
   })
 })

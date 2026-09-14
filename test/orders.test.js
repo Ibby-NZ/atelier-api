@@ -273,10 +273,60 @@ describe('POST /orders/request', () => {
 
     const row = await orderRow(pool, response.json().order.id)
     expect(row.contact_phone).toBe('021 555 0100')
-    expect(row.notes).toBe('Name: Ada | Email: ada@example.com')
-    expect(row.notes).not.toMatch(/Phone/i)
+    // A guest's name is the one contact detail with no column of its own; the
+    // email is in guest_email, so it no longer clutters the note.
+    expect(row.notes).toBe('Name: Ada')
+    expect(row.notes).not.toMatch(/Phone|Email/i)
     expect(row.client_reference).toBe('Drawing room')
     expect(row.customer_po_number).toBe('PO-99812')
+  })
+
+  // The office opened a request and found the Notes box full of "Name: … |
+  // Email: …" and no note, and the Delivery block saying "No address
+  // collected" because the form never asked (Userback 8373461).
+  it('keeps the client\'s own note first and stores a delivery address in the checkout shape', async () => {
+    const response = await post({
+      lines: [{ sku: SKU.inStock, qty_metres: 3 }],
+      contact: { name: 'Ada', email: 'ada@example.com' },
+      notes: 'Please match the batch to the sample we hold.',
+      shipping_address: {
+        name: ' Ada Lovelace ',
+        line1: '12 Analytical Lane',
+        line2: '',
+        city: 'Auckland',
+        postal_code: '1010',
+        country: 'New Zealand',
+      },
+    })
+    expect(response.statusCode).toBe(201)
+    const row = await orderRow(pool, response.json().order.id)
+    expect(row.notes).toBe('Please match the batch to the sample we hold.\nName: Ada')
+    expect(row.shipping_address).toEqual({
+      name: 'Ada Lovelace',
+      line1: '12 Analytical Lane',
+      line2: null,
+      city: 'Auckland',
+      state: null,
+      postal_code: '1010',
+      country: 'New Zealand',
+    })
+  })
+
+  it('stores no address for a form that names nowhere, and packs nothing for a signed-in client', async () => {
+    const cookie = await registerCookie(app, `${PREFIX}-noted@example.com`)
+    const response = await post(
+      {
+        lines: [{ sku: SKU.inStock, qty_metres: 2 }],
+        contact: { name: 'Signed In' },
+        notes: '  ',
+        shipping_address: { name: 'Just a name', line1: '', city: ' ' },
+      },
+      { cookie }
+    )
+    expect(response.statusCode).toBe(201)
+    const row = await orderRow(pool, response.json().order.id)
+    expect(row.notes).toBeNull()
+    expect(row.shipping_address).toBeNull()
   })
 
   it('folds blank client numbers to null rather than storing empty strings', async () => {

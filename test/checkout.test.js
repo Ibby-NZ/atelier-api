@@ -273,6 +273,37 @@ describe('POST /checkout/session', () => {
     expect(stripe.lastCreateParams.metadata.trade).toBe('false')
   })
 
+  // 8367547 / 8367555: the checkout form had nowhere to say "leave it with the
+  // concierge" or name the client's own PO. This endpoint writes no order row —
+  // the webhook does — so anything typed has to travel in the session metadata.
+  it("carries the shopper's notes, reference and PO number in the metadata", async () => {
+    const response = await post({
+      lines: [{ sku: SKU.good, qty: 1 }],
+      zone: ZONE,
+      notes: '  Leave with the concierge.  ',
+      client_reference: 'Ponsonby Rd — master bedroom',
+      customer_po_number: 'PO-4417',
+    })
+    expect(response.statusCode).toBe(200)
+    const { metadata } = stripe.lastCreateParams
+    expect(metadata.notes).toBe('Leave with the concierge.') // trimmed
+    expect(metadata.client_reference).toBe('Ponsonby Rd — master bedroom')
+    expect(metadata.customer_po_number).toBe('PO-4417')
+  })
+
+  it('omits a blank note rather than sending an empty metadata value', async () => {
+    await post({
+      lines: [{ sku: SKU.good, qty: 1 }],
+      zone: ZONE,
+      notes: '   ',
+      client_reference: '',
+    })
+    const { metadata } = stripe.lastCreateParams
+    expect(metadata).not.toHaveProperty('notes')
+    expect(metadata).not.toHaveProperty('client_reference')
+    expect(metadata).not.toHaveProperty('customer_po_number')
+  })
+
   it('rejects an order that exceeds available stock (422)', async () => {
     const response = await post({ lines: [{ sku: SKU.low, qty: 5 }], zone: ZONE })
     expect(response.statusCode).toBe(422)
@@ -330,13 +361,73 @@ describe('POST /checkout/session', () => {
   })
 })
 
+// The success page (US-019). The order is written by the webhook, so this reads
+// the row back by stripe_session_id rather than deriving anything from the
+// session id — which is what used to put `WEB-cs_test_a1b2c3…` in front of the
+// client (8367539).
 describe('GET /checkout/session/:id', () => {
   let pool
   let app
 
+  const SESSION_PREFIX = 'chk-sess'
+  const PAID_SESSION = 'cs_test_abc123'
+  const PENDING_SESSION = 'cs_test_pending'
+  const ORDER_NUMBER = 'WEB-9F3A21BC'
+  const SESSION_SKU = `${SESSION_PREFIX}-GOOD`
+  const ADDRESS = {
+    name: 'Olivia Marlow',
+    line1: '12 Parnell Road',
+    line2: null,
+    city: 'Auckland',
+    state: 'Auckland',
+    postal_code: '1052',
+    country: 'NZ',
+  }
+
+  const cleanupSession = async () => {
+    // order_lines.colourway_id is ON DELETE RESTRICT — orders go first.
+    await pool.query('DELETE FROM orders WHERE stripe_session_id = $1', [PAID_SESSION])
+    await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${SESSION_PREFIX}-%`])
+  }
+
   beforeAll(async () => {
     const config = loadConfig()
     pool = createPool(config.databaseUrl)
+    await cleanupSession()
+
+    const { rows: brands } = await pool.query(
+      `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story)
+       VALUES ($1, $2, 'New Zealand', 'NZD', false, false, 'A test house.')
+       RETURNING id`,
+      ['Chk Session House', `${SESSION_PREFIX}-house`]
+    )
+    const { rows: products } = await pool.query(
+      `INSERT INTO products
+         (brand_id, name, slug, product_type, retail_price_cents, currency, show_on_website)
+       VALUES ($1, 'Chk Session Good', $2, 'finished_good', 4500, 'NZD', true)
+       RETURNING id`,
+      [brands[0].id, `${SESSION_PREFIX}-good`]
+    )
+    const { rows: colourways } = await pool.query(
+      `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Default', $2)
+       RETURNING id`,
+      [products[0].id, SESSION_SKU]
+    )
+    const { rows: orders } = await pool.query(
+      `INSERT INTO orders
+         (guest_email, order_number, kind, status, subtotal_cents, shipping_cents,
+          total_cents, shipping_zone, stripe_session_id, shipping_address)
+       VALUES ($1, $2, 'checkout', 'paid', 9000, 1200, 10200, $3, $4, $5)
+       RETURNING id`,
+      // jsonb binds as text: a raw JS object would map to a Postgres record.
+      ['buyer@example.test', ORDER_NUMBER, ZONE, PAID_SESSION, JSON.stringify(ADDRESS)]
+    )
+    await pool.query(
+      `INSERT INTO order_lines (order_id, colourway_id, qty, unit_price_cents)
+       VALUES ($1, $2, 2, 4500)`,
+      [orders[0].id, colourways[0].id]
+    )
+
     app = buildApp({
       pool,
       cookieSecret: TEST_COOKIE_SECRET,
@@ -348,22 +439,51 @@ describe('GET /checkout/session/:id', () => {
   })
 
   afterAll(async () => {
+    await cleanupSession()
     await app.close()
     await pool.end()
   })
 
-  it('verifies a paid session and returns the deterministic order number', async () => {
+  it('returns the human order number the webhook wrote, with lines and address', async () => {
     const response = await app.inject({
       method: 'GET',
-      url: '/checkout/session/cs_test_abc123',
+      url: `/checkout/session/${PAID_SESSION}`,
     })
     expect(response.statusCode).toBe(200)
     const body = response.json()
-    expect(body.order_number).toBe('WEB-cs_test_abc123')
+    // Not `WEB-<stripe session id>`: something a client can read down a phone.
+    expect(body.order_number).toBe(ORDER_NUMBER)
+    expect(body.order_number).toMatch(/^WEB-[A-Z0-9]{8}$/)
+    expect(body.pending).toBe(false)
     expect(body.paid).toBe(true)
     expect(body.amount_total_cents).toBe(5700)
     expect(body.currency).toBe('NZD')
     expect(body.email).toBe('buyer@example.test')
+    expect(body.lines).toEqual([
+      {
+        sku: SESSION_SKU,
+        name: 'Chk Session Good',
+        qty: 2,
+        unit_price_cents: 4500,
+      },
+    ])
+    expect(body.shipping_address).toEqual(ADDRESS)
+  })
+
+  // The webhook is a separate request from Stripe: the shopper can land here
+  // first. Say so rather than invent a number — and still confirm the payment.
+  it('reports pending with a null order number until the webhook lands', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/checkout/session/${PENDING_SESSION}`,
+    })
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body.pending).toBe(true)
+    expect(body.order_number).toBeNull()
+    expect(body.lines).toEqual([])
+    expect(body.shipping_address).toBeNull()
+    expect(body.paid).toBe(true)
   })
 
   it('returns 404 for an unknown session', async () => {
@@ -384,7 +504,7 @@ describe('GET /checkout/session/:id', () => {
     await noStripe.ready()
     const response = await noStripe.inject({
       method: 'GET',
-      url: '/checkout/session/cs_test_abc123',
+      url: `/checkout/session/${PAID_SESSION}`,
     })
     expect(response.statusCode).toBe(503)
     await noStripe.close()

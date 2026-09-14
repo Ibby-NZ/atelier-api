@@ -104,11 +104,18 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
-  shipped: ({ order_number }) => ({
+  // `tracking_url` is OPTIONAL: the office hand-delivers orders too, and a
+  // letter reading "Track your parcel:" with nothing after it is worse than one
+  // that never mentions tracking. The spread is what keeps the blank line out on
+  // that path. Rendered against the template store's placeholder Proxy
+  // (src/email/template-store.js) every field reads truthy, so the CRM's Letters
+  // editor opens on the version WITH the line and `{{ tracking_url }}` in it.
+  shipped: ({ order_number, tracking_url }) => ({
     subject: `${BRAND}: order ${order_number} has shipped`,
     text: [
       `Good news — order ${order_number} has shipped.`,
       '',
+      ...(tracking_url ? [`Track your parcel: ${tracking_url}`, ''] : []),
       'Thank you for choosing us.',
       '',
       `— ${BRAND}`,

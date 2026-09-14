@@ -42,6 +42,14 @@ const orderRequestBodySchema = {
   properties: {
     ...honeypotProperty,
     accepted_lead_time: { type: 'boolean' },
+    // The client's own two numbers — what they call this job, and the PO their
+    // accounts payable issued to us (`orders.client_reference` /
+    // `orders.customer_po_number`, the same columns and the same 200-char
+    // limits the back-office PATCH writes). Both optional — most requests carry
+    // neither — but a trade client's accounts payable will not pay an invoice
+    // that does not quote the PO they issued.
+    client_reference: { type: 'string', maxLength: 200 },
+    customer_po_number: { type: 'string', maxLength: 200 },
     contact: {
       type: 'object',
       additionalProperties: false,
@@ -108,10 +116,15 @@ export const orderRoutes = async (app, { pool, mailer = null }) => {
         return { error: 'Unprocessable Entity', message: 'Validation failed.', errors }
       }
 
+      // Named one by one rather than spread: Ajv's `removeAdditional` strips
+      // unknown keys silently, so this list — not the schema — is what decides
+      // which of the body's fields ever reach a column.
       const { order } = await createOrderRequest(pool, {
         lines: request.body.lines,
         contact: request.body.contact ?? {},
         acceptedLeadTime: request.body.accepted_lead_time ?? false,
+        clientReference: request.body.client_reference ?? null,
+        customerPoNumber: request.body.customer_po_number ?? null,
         user,
       })
 

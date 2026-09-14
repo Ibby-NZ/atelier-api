@@ -3,6 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { createMailer } from '../src/email/mailer.js'
 import { createOrderRequest } from '../src/orders/order-request.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
@@ -314,6 +315,114 @@ describe('back-office order management', () => {
     })
   })
 
+  // A4 (Userback 8367567). "Your order has shipped" was the whole letter: the
+  // office had nowhere to put the courier link, so it went out in a mail
+  // somebody typed by hand, or nowhere.
+  describe('POST /admin/orders/:id/ship — the tracking URL', () => {
+    const TRACKING = 'https://tracking.courier.test/parcel/ABC123'
+
+    const paidOrder = async () => {
+      const placed = await placeRequest(10)
+      await inject('POST', `/admin/orders/${placed.id}/confirm`, backofficeCookie, {
+        xero_invoice_ref: 'INV-TRACK',
+      })
+      await inject('POST', `/admin/orders/${placed.id}/mark-paid`, backofficeCookie)
+      return placed
+    }
+
+    // The suite's own app carries no mailer, so a letter needs an app of its
+    // own. Nothing is re-registered for it: a session is a stateless signed
+    // cookie, so the boss's cookie is valid on any instance built with the same
+    // secret — and the rate-limit bucket a second instance does NOT share is
+    // precisely why registering again would be the wrong move.
+    const shipCapturingMail = async (id, payload) => {
+      const sent = []
+      const mailed = buildApp({
+        pool,
+        cookieSecret: TEST_COOKIE_SECRET,
+        mailer: createMailer({
+          transport: { sendMail: async (message) => sent.push(message) },
+          from: 'Atelier <no-reply@test.example>',
+          backofficeEmail: 'office@test.example',
+        }),
+        logger: false,
+      })
+      await mailed.ready()
+      try {
+        const response = await mailed.inject({
+          method: 'POST',
+          url: `/admin/orders/${id}/ship`,
+          headers: { cookie: backofficeCookie },
+          payload,
+        })
+        return { response, sent }
+      } finally {
+        await mailed.close()
+      }
+    }
+
+    it('stores the link, returns it, and puts it in the shipped letter', async () => {
+      const placed = await paidOrder()
+
+      const { response, sent } = await shipCapturingMail(placed.id, {
+        tracking_url: TRACKING,
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.status).toBe('shipped')
+      expect(response.json().order.tracking_url).toBe(TRACKING)
+
+      const { rows } = await pool.query(
+        'SELECT tracking_url FROM orders WHERE id = $1',
+        [placed.id]
+      )
+      expect(rows[0].tracking_url).toBe(TRACKING)
+
+      const letter = sent.find((message) => message.subject.includes('has shipped'))
+      expect(letter.text).toContain(TRACKING)
+    })
+
+    // The office hand-delivers plenty of orders. A letter reading "Track your
+    // parcel:" with nothing after it is worse than one that never mentions it.
+    // `''` is what a text input sends when the field is left empty — it means
+    // hand-delivered, not "bad URL", and it must not be stored as an empty
+    // string either (FR-127). The body-less ship the CRM sends today is proved
+    // by the full-lifecycle test above.
+    it('says nothing about tracking when the order is hand-delivered', async () => {
+      const placed = await paidOrder()
+
+      const { response, sent } = await shipCapturingMail(placed.id, { tracking_url: '' })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.status).toBe('shipped')
+      expect(response.json().order.tracking_url).toBeNull()
+      const letter = sent.find((message) => message.subject.includes('has shipped'))
+      expect(letter.text).not.toContain('Track your parcel')
+    })
+
+    // The value lands in a client's inbox as a link, so `javascript:` and a
+    // bare hostname are both refused before anything ships.
+    it('refuses a tracking URL that is not http(s) with 400, and ships nothing', async () => {
+      const placed = await paidOrder()
+
+      const response = await inject(
+        'POST',
+        `/admin/orders/${placed.id}/ship`,
+        backofficeCookie,
+        { tracking_url: 'javascript:alert(1)' }
+      )
+
+      expect(response.statusCode).toBe(400)
+      const order = (
+        await inject('GET', `/admin/orders/${placed.id}`, backofficeCookie)
+      ).json().order
+      expect(order.status).toBe('paid')
+      expect(order.tracking_url).toBeNull()
+      // The refused transition converted no reservation.
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+    })
+  })
+
   describe('PATCH /admin/orders/:id', () => {
     it('edits a line quantity and adjusts the reservation to match', async () => {
       const placed = await placeRequest(10)
@@ -615,6 +724,71 @@ describe('back-office order management', () => {
       const placed = await placeRequest(10)
       const response = await patch(placed.id, {})
       expect(response.statusCode).toBe(400)
+    })
+
+    // A4 (Userback 8367567). The note about a delivery — the courier used, the
+    // phone call, what the client asked for on the doorstep — arrives once the
+    // order is paid or shipped. A guard that refuses it there sends it to
+    // somebody's notebook instead. `notes` ALONE is the whole relaxation.
+    describe('notes past confirmed', () => {
+      const advanceTo = async (id, ...verbs) => {
+        for (const verb of verbs) {
+          const response = await inject(
+            'POST',
+            `/admin/orders/${id}/${verb}`,
+            backofficeCookie,
+            { xero_invoice_ref: 'INV-NOTES' }
+          )
+          expect(response.statusCode).toBe(200)
+        }
+      }
+
+      it('accepts a notes-only patch on a paid order', async () => {
+        const placed = await placeRequest(10)
+        await advanceTo(placed.id, 'confirm', 'mark-paid')
+
+        const response = await patch(placed.id, { notes: 'Courier called, left with reception.' })
+
+        expect(response.statusCode).toBe(200)
+        expect(response.json().order.status).toBe('paid')
+        expect(response.json().order.notes).toBe('Courier called, left with reception.')
+      })
+
+      it('accepts a notes-only patch on a shipped order', async () => {
+        const placed = await placeRequest(10)
+        await advanceTo(placed.id, 'confirm', 'mark-paid', 'ship')
+
+        const response = await patch(placed.id, { notes: 'Client rang to say it arrived.' })
+
+        expect(response.statusCode).toBe(200)
+        expect(response.json().order.notes).toBe('Client rang to say it arrived.')
+      })
+
+      // The relaxation is one key wide. Notes in company with anything else is
+      // an ordinary edit, and the money, the lines and the delivery details
+      // stay frozen exactly as they were.
+      it('keeps the status guard for every other body', async () => {
+        const placed = await placeRequest(10)
+        const order = await orderFor(placed.id)
+        await advanceTo(placed.id, 'confirm', 'mark-paid')
+
+        const withCompany = await patch(placed.id, {
+          notes: 'Courier called.',
+          contact_phone: '021 555 0000',
+        })
+        expect(withCompany.statusCode).toBe(409)
+
+        const lineEdit = await patch(placed.id, {
+          lines: [{ id: order.lines[0].id, unit_price_cents: 1 }],
+        })
+        expect(lineEdit.statusCode).toBe(409)
+
+        // Neither refusal wrote anything.
+        const after = await orderFor(placed.id)
+        expect(after.notes).toBe(order.notes)
+        expect(after.contact_phone).toBeNull()
+        expect(after.subtotal_cents).toBe(order.subtotal_cents)
+      })
     })
 
     it('rejects a line edit that says nothing but its id with 400', async () => {
@@ -923,8 +1097,13 @@ describe('back-office order management', () => {
         expect(late.json().order.customer_po_number).toBe('PO-LATE-1')
 
         // An annotation is not a licence to edit the commercial terms: money,
-        // lines and the reservation stay frozen once an order is paid.
-        const lines = await patch(order.id, { notes: 'nudge the header' })
+        // lines and the reservation stay frozen once an order is paid. (A note
+        // on its own IS allowed past confirmed — A4, covered above — so the
+        // frozen half is proved with a line edit, which is the half that moves
+        // money.)
+        const lines = await patch(order.id, {
+          lines: [{ id: order.lines[0].id, unit_price_cents: 12345 }],
+        })
         expect(lines.statusCode).toBe(409)
       })
     })

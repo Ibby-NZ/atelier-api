@@ -24,6 +24,7 @@ import {
 } from '../auth/password-reset.js'
 import { notifyPasswordReset, notifyTradeApplicationReceived } from '../email/notifications.js'
 import { honeypotProperty, honeypotTripped } from '../lib/honeypot.js'
+import { buildUpdate } from '../catalogue/admin-brands.js'
 import {
   validateTradeApplication,
   submitTradeApplication,
@@ -137,6 +138,46 @@ const resetPasswordBodySchema = {
     token: { type: 'string', minLength: 1, maxLength: 200 },
     password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
   },
+}
+
+// Self-service profile edit. name and phone ONLY: `email` is the login identity,
+// and editing it stays with the office (`PATCH /admin/users/:id`), where the
+// lower-casing and the duplicate-address 409 already live. Ajv runs with
+// removeAdditional, so an `email` key here is silently STRIPPED rather than
+// rejected — PROFILE_COLUMNS is the real gate, the schema only shapes what a
+// client may send.
+const PROFILE_COLUMNS = Object.freeze(['name', 'phone'])
+
+const profileBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: {
+    name: { type: 'string', maxLength: 200 },
+    phone: { type: 'string', maxLength: 50 },
+  },
+}
+
+// current_password deliberately has no minLength, the same asymmetry the login
+// schema keeps: a password chosen before the floor existed must still be
+// typable, or the one person who needs to change it cannot.
+const changePasswordBodySchema = {
+  type: 'object',
+  required: ['current_password', 'new_password'],
+  additionalProperties: false,
+  properties: {
+    current_password: { type: 'string', maxLength: 200 },
+    new_password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
+  },
+}
+
+const WRONG_CURRENT_PASSWORD = 'Your current password is not correct.'
+
+// An emptied field clears the column rather than storing '' — a blank phone box
+// means "I have no number here", and null is how the rest of the schema says it.
+const trimmedOrNull = (value) => {
+  const trimmed = String(value).trim()
+  return trimmed === '' ? null : trimmed
 }
 
 // One sentence for every forgot-password call, known address or not: the reply
@@ -276,13 +317,10 @@ export const authRoutes = async (
         }
       }
 
-      const user = {
-        id: row.id,
-        email: row.email,
-        name: row.name,
-        role: row.role,
-        trade_approved: row.trade_approved,
-      }
+      // Projected rather than hand-listed: the row also carries password_hash
+      // and archived_at, and a column added to PUBLIC_USER_COLUMNS must reach
+      // this response without a second edit (`phone` arrived that way).
+      const user = publicUser(row)
       setSessionCookie(reply, user.id)
       return { user }
     }
@@ -378,4 +416,68 @@ export const authRoutes = async (
     // statement is computed from the row, and the row is fetched by id.
     return { user: { ...publicUser(rows[0]), report_access: reportAccess(rows[0]) } }
   })
+
+  // Self-service details. The account holder edits their own name and phone;
+  // everything else about the row (role, trade approval, the sign-in email) is
+  // the back office's, so it is not in PROFILE_COLUMNS and cannot be patched
+  // here. Rate limited with the rest of /auth/* — it is a write behind a cookie,
+  // and the bucket costs a legitimate editor nothing.
+  app.patch(
+    '/auth/me',
+    {
+      schema: { body: profileBodySchema },
+      preHandler: app.guards.requireAuth,
+      config: { rateLimit: AUTH_RATE_LIMIT },
+    },
+    async (request) => {
+      const patch = Object.fromEntries(
+        PROFILE_COLUMNS.filter((column) => Object.hasOwn(request.body, column)).map((column) => [
+          column,
+          trimmedOrNull(request.body[column]),
+        ])
+      )
+      const { sets, params } = buildUpdate(patch, PROFILE_COLUMNS)
+      // requireAuth already resolved the session through SESSION_USER_CONDITION,
+      // so the id is an active, non-pending account by the time we get here.
+      const { rows } = await pool.query(
+        `UPDATE users SET ${sets.join(', ')}
+          WHERE id = $${params.length + 1}
+          RETURNING ${PUBLIC_USER_COLUMNS}`,
+        [...params, request.user.id]
+      )
+      return { user: rows[0] }
+    }
+  )
+
+  // Change your own password. The current one is verified first: a session
+  // cookie left open on a shared machine must not be enough to lock the owner
+  // out of their own account. Sessions are stateless signed cookies, so there is
+  // nothing to invalidate afterwards — this one stays live, and so does any
+  // other the account already has.
+  app.post(
+    '/auth/change-password',
+    {
+      schema: { body: changePasswordBodySchema },
+      preHandler: app.guards.requireAuth,
+      config: { rateLimit: AUTH_RATE_LIMIT },
+    },
+    async (request, reply) => {
+      const { rows } = await pool.query('SELECT password_hash FROM users WHERE id = $1', [
+        request.user.id,
+      ])
+      const currentOk =
+        rows[0] && (await verifyPassword(rows[0].password_hash, request.body.current_password))
+      if (!currentOk) {
+        reply.code(401)
+        return { error: WRONG_CURRENT_PASSWORD }
+      }
+
+      const passwordHash = await hashPassword(request.body.new_password)
+      await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [
+        passwordHash,
+        request.user.id,
+      ])
+      return { ok: true }
+    }
+  )
 }

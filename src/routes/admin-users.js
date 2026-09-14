@@ -87,6 +87,15 @@ const idParamsSchema = {
 // PATCH can clear it; `email` is not — an account with no address could never
 // sign in again. password/archived_at stay off this route (a password is an auth
 // flow, archiving has its own endpoint).
+//
+// `can_view_finance` has been in `USER_UPDATE_COLUMNS` since the reporting
+// migration, but it was missing HERE, so the only ways to grant it were SQL and
+// the AdminJS panel: Ajv runs `removeAdditional: true`, so a lone
+// `{ can_view_finance: true }` body was stripped to `{}` and answered 400 on
+// minProperties. A CRM checkbox for it therefore failed with "body must NOT have
+// fewer than 1 properties", which reads as a broken screen rather than a closed
+// door. Self-grant needs no guard: `backoffice` can already POST a director
+// account and is handed its password, so the flag adds no reach it lacked.
 const patchBodySchema = {
   type: 'object',
   additionalProperties: false,
@@ -94,6 +103,7 @@ const patchBodySchema = {
   properties: {
     role: { type: 'string', enum: USER_ROLES },
     trade_approved: { type: 'boolean' },
+    can_view_finance: { type: 'boolean' },
     name: { type: ['string', 'null'], maxLength: 200 },
     email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
   },

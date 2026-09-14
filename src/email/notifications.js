@@ -136,7 +136,7 @@ export const notifyCheckoutReceipt = async (mailer, db, order) => {
  *
  * @param {import('./mailer.js').Mailer|null} mailer
  * @param {{ query: Function }} db
- * @param {{ order_number: string, status: string, xero_invoice_ref?: string|null, guest_email?: string|null, user_id?: number|null }} order
+ * @param {{ order_number: string, status: string, xero_invoice_ref?: string|null, tracking_url?: string|null, guest_email?: string|null, user_id?: number|null }} order
  */
 export const notifyOrderTransition = async (mailer, db, order) => {
   if (!mailer) {
@@ -156,6 +156,10 @@ export const notifyOrderTransition = async (mailer, db, order) => {
     data: {
       order_number: order.order_number,
       xero_invoice_ref: order.xero_invoice_ref ?? null,
+      // The courier link the office typed at `ship`. Null on every other
+      // transition, and null for a hand-delivered order; the shipped template
+      // drops its line rather than printing an empty one.
+      tracking_url: order.tracking_url ?? null,
     },
   })
 }

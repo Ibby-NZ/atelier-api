@@ -84,6 +84,9 @@ describe('auth endpoints', () => {
         name: 'Alice',
         role: 'customer',
         trade_approved: false,
+        // PUBLIC_USER_COLUMNS carries the account's own phone; nothing sets one
+        // at registration, so it comes back null rather than missing.
+        phone: null,
       })
       expect(body.user.id).toBeGreaterThan(0)
       expect(JSON.stringify(body)).not.toContain('hash')
@@ -159,6 +162,7 @@ describe('auth endpoints', () => {
       expect(me.json().user).toMatchObject({
         email: testEmail('alice'),
         role: 'customer',
+        phone: null,
       })
       expect(JSON.stringify(me.json())).not.toContain('hash')
     })

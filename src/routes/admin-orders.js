@@ -228,6 +228,27 @@ const confirmBodySchema = {
   },
 }
 
+// Shipping takes an OPTIONAL courier link — the office hand-delivers plenty of
+// orders, and the ship transition must not start demanding one. The type is
+// `['object','null']` rather than `'object'` because Fastify validates a
+// body-less POST as null: declaring only `object` would 400 every ship the CRM
+// sends today.
+//
+// `https?://` is the whole validation and it lives in the schema, so a bad
+// value is Fastify's own 400 rather than a hand-rolled one. It has to be
+// validated somewhere: the shipped letter puts this string in a client's inbox
+// as a link, and `javascript:…` or a bare `nzpost.co.nz` is either dangerous or
+// simply broken. The empty alternative is the header-field rule again (FR-127):
+// a text input sends `''` when a person types nothing, and that means "hand
+// delivered", not "bad URL" — the handler folds it to null.
+const shipBodySchema = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  properties: {
+    tracking_url: { type: 'string', maxLength: 500, pattern: '^(https?://.*)?$' },
+  },
+}
+
 export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
@@ -333,9 +354,18 @@ export const adminOrderRoutes = async (app, { pool, mailer = null }) => {
 
   app.post(
     '/admin/orders/:id/ship',
-    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    {
+      preHandler: backoffice,
+      schema: { params: idParamsSchema, body: shipBodySchema },
+    },
     async (request) => {
-      const order = await shipOrder(pool, request.params.id)
+      const order = await shipOrder(pool, request.params.id, {
+        // `|| null`, not `?? null`: '' is the CRM's "left blank", and a stored
+        // '' is an absence every `IS NULL` read misses (FR-127).
+        trackingUrl: request.body?.tracking_url || null,
+      })
+      // The shipped letter carries the link (src/email/templates.js) — which is
+      // why the URL is written before this line, not alongside it.
       await notifyOrderTransition(mailer, pool, order)
       return { order }
     }

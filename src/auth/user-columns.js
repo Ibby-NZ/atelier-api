@@ -1,6 +1,11 @@
 // The only columns ever selected into a response. Single source of truth so
 // password_hash can never leak through a drifted copy of this list.
-export const PUBLIC_USER_COLUMNS = 'id, email, name, role, trade_approved'
+//
+// `phone` is public because it is the account holder's OWN number, and the one
+// place it is used is their own form: the storefront's order-request form asked
+// for it on every request and forgot it every time, so /auth/me hands it back to
+// prefill and `PATCH /auth/me` edits it. Nullable — nothing requires a number.
+export const PUBLIC_USER_COLUMNS = 'id, email, name, role, trade_approved, phone'
 
 // Every authentication path must exclude archived accounts. Archiving is a soft
 // delete (`users.archived_at`) because orders reference the row, so the account

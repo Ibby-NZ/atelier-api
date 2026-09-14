@@ -5,19 +5,22 @@ import { buildApp } from '../src/app.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 
-// The three unauthenticated routes that cost something to serve. /contact and
-// the auth routes were limited from the start; these three were not, and each
-// is reachable by anyone with the URL:
+// The unauthenticated routes that cost something to serve. /contact and the
+// auth routes were limited from the start; these were not, and each is
+// reachable by anyone with the URL:
 //
-//   POST /checkout/session — creates a Checkout Session at STRIPE on every call
-//   POST /orders/request   — writes an order and sends TWO emails
-//   GET  /orders/lookup    — guesses against order_number + email
+//   POST /checkout/session    — creates a Checkout Session at STRIPE on every call
+//   POST /orders/request      — writes an order and sends TWO emails
+//   GET  /orders/lookup       — guesses against order_number + email
+//   GET  /checkout/session/:id — retrieves the session from STRIPE on every call
 //
-// Every case below sends a payload the schema rejects. That is deliberate: the
-// limiter runs before validation, so the bucket still fills while nothing
-// reaches Stripe, the mailer or the order table — the same trick the register
-// limit test uses. It also proves the limit is not merely a side effect of the
-// handler failing somewhere further in.
+// Every case below sends something that dies short of the third party — a
+// payload the schema rejects, or (for the GET by id, which has no rejectable
+// id) a request to an app with no stripe. That is deliberate: the limiter runs
+// before validation, so the bucket still fills while nothing reaches Stripe,
+// the mailer or the order table — the same trick the register limit test uses.
+// It also proves the limit is not merely a side effect of the handler failing
+// somewhere further in.
 const exhaust = async (app, attempt, max, expectedStatus) => {
   for (let i = 0; i < max; i += 1) {
     const response = await attempt()
@@ -68,6 +71,26 @@ describe('rate limits on the public, costly routes', () => {
         () => app.inject({ method: 'POST', url: '/orders/request', payload: {} }),
         10,
         400
+      )
+      expect(over.statusCode).toBe(429)
+    } finally {
+      await app.close()
+    }
+  })
+
+  // No schema-rejectable id exists here (find-my-way caps a param at 100 chars
+  // and answers 414 before any hook runs), so this case leans on the other end
+  // instead: `freshApp` injects no stripe, so the handler throws 503 before it
+  // could retrieve anything. The limiter still counts every call. 120 is eight
+  // success-page polls; the 121st is not a buyer.
+  it('429s the 121st GET /checkout/session/:id from one IP', async () => {
+    const app = await freshApp()
+    try {
+      const over = await exhaust(
+        app,
+        () => app.inject({ method: 'GET', url: '/checkout/session/cs_test_rate_limit' }),
+        120,
+        503
       )
       expect(over.statusCode).toBe(429)
     } finally {

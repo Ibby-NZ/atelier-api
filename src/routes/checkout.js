@@ -11,6 +11,14 @@ const checkoutBodySchema = {
   required: ['lines', 'zone'],
   properties: {
     zone: { type: 'string', minLength: 1, maxLength: 200 },
+    // Optional, and free text: what the shopper wants the office to know, plus
+    // the two numbers a client files the job under (`client_reference` is the
+    // name they call it; `customer_po_number` is their own purchase order).
+    // They ride to the webhook as Stripe metadata, whose values cap at 500
+    // characters — these caps stay under it.
+    notes: { type: 'string', maxLength: 500 },
+    client_reference: { type: 'string', maxLength: 200 },
+    customer_po_number: { type: 'string', maxLength: 200 },
     lines: {
       type: 'array',
       minItems: 1,
@@ -35,6 +43,14 @@ const checkoutBodySchema = {
 // buyers, but bounded, which it was not.
 const CHECKOUT_RATE_LIMIT = Object.freeze({ max: 20, timeWindow: 15 * 60 * 1000 })
 
+// The success page SPENDS too: every call retrieves the session from Stripe,
+// the 404 path included. That page polls this route every 2s for up to 30s
+// while it waits for the webhook, so one completed order costs ~15 calls. 120
+// is eight of those — a buyer who reloads the page and buys twice over is
+// nowhere near it — while a scripted loop is capped at eight Stripe retrieves
+// a minute from one IP.
+const CHECKOUT_LOOKUP_RATE_LIMIT = Object.freeze({ max: 120, timeWindow: 15 * 60 * 1000 })
+
 export const checkoutRoutes = async (app, { pool, stripe, storeBaseUrl }) => {
   // Public: guests may check out. When logged in, the session is tagged with the
   // user for reconciliation and their email is pre-filled.
@@ -45,14 +61,23 @@ export const checkoutRoutes = async (app, { pool, stripe, storeBaseUrl }) => {
       const user = await app.guards.loadOptionalUser(request)
       const { url, session_id } = await createCheckoutSession(
         { pool, stripe, storeBaseUrl },
-        { lines: request.body.lines, zone: request.body.zone, user }
+        {
+          lines: request.body.lines,
+          zone: request.body.zone,
+          user,
+          notes: request.body.notes ?? null,
+          clientReference: request.body.client_reference ?? null,
+          customerPoNumber: request.body.customer_po_number ?? null,
+        }
       )
       return { url, session_id }
     }
   )
 
   // Public: the success page verifies the completed session and shows the order
-  // number. Only non-sensitive fields are returned (no line items / prices).
+  // it became — its human order number, what was bought and where it is going.
+  // Keyed on the Stripe session id the redirect carries, so the order comes
+  // back only to whoever completed that checkout.
   app.get(
     '/checkout/session/:id',
     {
@@ -63,7 +88,8 @@ export const checkoutRoutes = async (app, { pool, stripe, storeBaseUrl }) => {
           properties: { id: { type: 'string', minLength: 1, maxLength: 200 } },
         },
       },
+      config: { rateLimit: CHECKOUT_LOOKUP_RATE_LIMIT },
     },
-    async (request) => retrieveCheckoutSession({ stripe }, request.params.id)
+    async (request) => retrieveCheckoutSession({ pool, stripe }, request.params.id)
   )
 }

@@ -183,6 +183,9 @@ describe('POST /webhooks/stripe', () => {
     const order = orders[0]
     expect(order.kind).toBe('checkout')
     expect(order.status).toBe('paid')
+    // A number the client can read down a phone, not `WEB-<stripe session id>`
+    // (8367539). Idempotency keys on the event id, never on this.
+    expect(order.order_number).toMatch(/^WEB-[A-Z0-9]{8}$/)
     expect(order.guest_email).toBe('buyer@example.test')
     expect(order.subtotal_cents).toBe(4500 * 2 + 2000) // priced server-side
     expect(order.shipping_cents).toBe(1200)
@@ -293,6 +296,45 @@ describe('POST /webhooks/stripe', () => {
     expect(order.contact_phone).toBeNull()
   })
 
+  // What the shopper typed at checkout reaches the order row only through the
+  // session metadata — this handler writes the row, the checkout endpoint does
+  // not (8367547, 8367555).
+  it("lands the shopper's notes, reference and PO number on the order", async () => {
+    const event = completedEvent(
+      `evt_${PREFIX}_meta`,
+      `cs_${PREFIX}_meta`,
+      [{ sku: SKU.good, qty: 1 }],
+      {
+        metadata: {
+          notes: 'Leave with the concierge.',
+          client_reference: 'Ponsonby Rd — master bedroom',
+          customer_po_number: 'PO-4417',
+        },
+      }
+    )
+    expect((await post(event)).statusCode).toBe(200)
+
+    const [order] = await orderBySession(`cs_${PREFIX}_meta`)
+    expect(order.notes).toBe('Leave with the concierge.')
+    expect(order.client_reference).toBe('Ponsonby Rd — master bedroom')
+    expect(order.customer_po_number).toBe('PO-4417')
+  })
+
+  it('records a blank or absent metadata field as null, not an empty note', async () => {
+    const event = completedEvent(
+      `evt_${PREFIX}_meta_blank`,
+      `cs_${PREFIX}_meta_blank`,
+      [{ sku: SKU.good, qty: 1 }],
+      { metadata: { notes: '   ' } }
+    )
+    expect((await post(event)).statusCode).toBe(200)
+
+    const [order] = await orderBySession(`cs_${PREFIX}_meta_blank`)
+    expect(order.notes).toBeNull()
+    expect(order.client_reference).toBeNull()
+    expect(order.customer_po_number).toBeNull()
+  })
+
   it('is idempotent: a replayed event creates nothing', async () => {
     const event = completedEvent(`evt_${PREFIX}_2`, `cs_${PREFIX}_2`, [
       { sku: SKU.good, qty: 3 },
@@ -393,9 +435,12 @@ describe('POST /webhooks/stripe', () => {
       })
 
     expect((await send(event)).statusCode).toBe(200)
+    const [order] = await orderBySession(`cs_${PREFIX}_alert`)
     const staff = sent.filter((message) => message.to === BACKOFFICE)
     expect(staff).toHaveLength(1)
-    expect(staff[0].subject).toContain(`WEB-cs_${PREFIX}_alert`)
+    // The desk is told the number the client will quote, not the Stripe id.
+    expect(staff[0].subject).toContain(order.order_number)
+    expect(order.order_number).toMatch(/^WEB-[A-Z0-9]{8}$/)
 
     // A replay creates no order, so it must announce none either.
     await send(event)

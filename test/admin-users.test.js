@@ -362,6 +362,22 @@ describe('back-office users admin', () => {
       expect(response.statusCode).toBe(404)
     })
 
+    // The number the office takes down over the phone lands on the account —
+    // the same column the client edits via PATCH /auth/me — and reads back on
+    // the list, where it used to be selected and then dropped (Userback 8367823).
+    it('saves a phone, lists it, and folds a cleared field to null', async () => {
+      const id = await insertUser(pool, { local: 'phoned', role: 'trade' })
+      const saved = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, { phone: '021 555 0199' })
+      expect(saved.statusCode).toBe(200)
+      expect(saved.json().user.phone).toBe('021 555 0199')
+
+      const listed = await inject('GET', `/admin/users?q=phoned`, backofficeCookie)
+      expect(listed.json().users.find((u) => u.id === id).phone).toBe('021 555 0199')
+
+      const cleared = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, { phone: '  ' })
+      expect(cleared.json().user.phone).toBeNull()
+    })
+
     // Email is editable so a typo taken down over the phone can be corrected;
     // without it the account is unreachable and unfixable short of SQL.
     it('updates the email, lower-cased so login still resolves it', async () => {

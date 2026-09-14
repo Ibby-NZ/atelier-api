@@ -50,6 +50,26 @@ const orderRequestBodySchema = {
     // that does not quote the PO they issued.
     client_reference: { type: 'string', maxLength: 200 },
     customer_po_number: { type: 'string', maxLength: 200 },
+    // The client's own note for the quote — goes into `orders.notes`, which
+    // used to hold only a packed "Name | Email" line (Userback 8373461).
+    notes: { type: 'string', maxLength: 2000 },
+    // Where the cloth is going, in the shape the Stripe webhook already writes
+    // to `orders.shipping_address`, so the CRM's Delivery block and the packing
+    // slip read both without knowing which path wrote it. Optional: a request
+    // is priced before it ships, and many are collected.
+    shipping_address: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      properties: {
+        name: { type: ['string', 'null'], maxLength: 200 },
+        line1: { type: ['string', 'null'], maxLength: 200 },
+        line2: { type: ['string', 'null'], maxLength: 200 },
+        city: { type: ['string', 'null'], maxLength: 100 },
+        state: { type: ['string', 'null'], maxLength: 100 },
+        postal_code: { type: ['string', 'null'], maxLength: 20 },
+        country: { type: ['string', 'null'], maxLength: 100 },
+      },
+    },
     contact: {
       type: 'object',
       additionalProperties: false,
@@ -125,6 +145,8 @@ export const orderRoutes = async (app, { pool, mailer = null }) => {
         acceptedLeadTime: request.body.accepted_lead_time ?? false,
         clientReference: request.body.client_reference ?? null,
         customerPoNumber: request.body.customer_po_number ?? null,
+        notes: request.body.notes ?? null,
+        shippingAddress: request.body.shipping_address ?? null,
         user,
       })
 

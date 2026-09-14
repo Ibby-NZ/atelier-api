@@ -192,6 +192,34 @@ describe('back-office order management', () => {
       expect(Number(order.lines[0].inventory.qty_reserved)).toBe(10)
     })
 
+    // A line names where it came from, so the CRM can open the catalogue
+    // record behind a SKU rather than retyping it (Userback 8367841).
+    it('each line carries the product id, slug and colourway name', async () => {
+      const placed = await placeRequest(1)
+      const response = await inject('GET', `/admin/orders/${placed.id}`, backofficeCookie)
+      const [line] = response.json().order.lines
+      expect(line.product_id).toEqual(expect.any(Number))
+      expect(line.product_slug).toEqual(expect.any(String))
+      expect(line.colourway_name).toEqual(expect.any(String))
+    })
+
+    // GST is a function of the total and the Xero basis (Exclusive unless
+    // configured), computed at read time on every admin order response so the
+    // Money block and the invoice agree (Userback 8367857).
+    it('every order answers with its GST figures on the configured basis', async () => {
+      const placed = await placeRequest(1)
+      const one = await inject('GET', `/admin/orders/${placed.id}`, backofficeCookie)
+      const { order } = one.json()
+      expect(order.gst).toEqual({
+        basis: 'Exclusive',
+        rate: 0.15,
+        gst_cents: Math.round(Number(order.total_cents) * 0.15),
+        total_incl_gst_cents: Number(order.total_cents) + Math.round(Number(order.total_cents) * 0.15),
+      })
+      const list = await inject('GET', '/admin/orders', backofficeCookie)
+      expect(list.json().orders.find((o) => o.id === placed.id).gst.basis).toBe('Exclusive')
+    })
+
     it('filters by status', async () => {
       const placed = await placeRequest(10)
       const shipped = await inject('GET', '/admin/orders?status=shipped', backofficeCookie)

@@ -107,6 +107,22 @@ export const buildNotes = (contact, fallbackEmail) => {
 // Free text somebody typed: a blank one is an absence, never a stored ''. The
 // header-column rule the order desk already applies (`applyOrderHeader`) — a
 // stored '' is missed by every IS NULL read and matched by every search.
+/** Paragraphs of notes, blanks dropped, or null when there is nothing. */
+const joinNotes = (...parts) => {
+  const kept = parts.filter(Boolean)
+  return kept.length > 0 ? kept.join('\n') : null
+}
+
+// An address is worth storing only if it says WHERE: a form with a name and
+// nothing else is the absence of an address, not one. Every field is trimmed,
+// blanks fold to null, the key set is fixed to the webhook's shape.
+const ADDRESS_KEYS = ['name', 'line1', 'line2', 'city', 'state', 'postal_code', 'country']
+const addressOrNull = (input) => {
+  if (!input || typeof input !== 'object') return null
+  const address = Object.fromEntries(ADDRESS_KEYS.map((key) => [key, trimmedOrNull(input[key])]))
+  return address.line1 || address.city ? address : null
+}
+
 const trimmedOrNull = (value) => {
   const text = typeof value === 'string' ? value.trim() : ''
   return text === '' ? null : text
@@ -194,6 +210,8 @@ const resolveLine = async (client, line, includeTradeOnly) => {
  *   acceptedLeadTime?: boolean,
  *   clientReference?: string|null,
  *   customerPoNumber?: string|null,
+ *   notes?: string|null,
+ *   shippingAddress?: object|null,
  *   user?: { id: number, email: string, role?: string, trade_approved?: boolean } | null,
  * }} input
  * @returns {Promise<{ order: object }>}
@@ -206,6 +224,8 @@ export const createOrderRequest = async (
     acceptedLeadTime = false,
     clientReference = null,
     customerPoNumber = null,
+    notes: clientNotes = null,
+    shippingAddress = null,
     user = null,
   }
 ) => {
@@ -239,9 +259,19 @@ export const createOrderRequest = async (
 
     const userId = user ? user.id : null
     const guestEmail = user ? null : contact.email ?? null
-    // Name and email only: the phone has its own column below.
-    const notes = buildNotes({ name: contact.name, email: contact.email }, user?.email)
+    // `notes` is the client's own note for the quote, first. A guest's name
+    // follows it, packed the way the back office's manual create packs one,
+    // because a guest has no account row to carry it; the email and phone do
+    // NOT — `guest_email` and `contact_phone` are columns the CRM shows and
+    // searches, and a signed-in client's name and email are on the account.
+    // The old line packed all three for everyone, so the office read a note
+    // field full of contact details and no note (Userback 8373461).
+    const notes = joinNotes(
+      trimmedOrNull(clientNotes),
+      user ? null : buildNotes({ name: contact.name })
+    )
     const phone = trimmedOrNull(contact.phone)
+    const address = addressOrNull(shippingAddress)
 
     // Rounded once over the whole order — rounding each line multiplies the
     // error by the line count (the `recomputeOrderMoney` rule). Nothing is
@@ -259,8 +289,8 @@ export const createOrderRequest = async (
       `INSERT INTO orders
          (user_id, guest_email, order_number, kind, status,
           subtotal_cents, shipping_cents, total_cents, notes,
-          contact_phone, client_reference, customer_po_number)
-       VALUES ($1, $2, $3, $4, 'requested', $5, 0, $5, $6, $7, $8, $9)
+          contact_phone, client_reference, customer_po_number, shipping_address)
+       VALUES ($1, $2, $3, $4, 'requested', $5, 0, $5, $6, $7, $8, $9, $10)
        RETURNING id, order_number, kind, status`,
       [
         userId,
@@ -272,6 +302,8 @@ export const createOrderRequest = async (
         phone,
         trimmedOrNull(clientReference),
         trimmedOrNull(customerPoNumber),
+        // jsonb: pg maps a raw object to a record, not to jsonb.
+        address ? JSON.stringify(address) : null,
       ]
     )
     const order = orderRows[0]

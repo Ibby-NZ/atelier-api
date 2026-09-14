@@ -199,6 +199,7 @@ describe('back-office supplier routes', () => {
       ['DELETE', '/admin/suppliers/1/contacts/1', undefined],
       ['GET', '/admin/suppliers/1/contact-log', undefined],
       ['POST', '/admin/suppliers/1/contact-log', { method: 'call' }],
+      ['POST', '/admin/suppliers/backfill', undefined],
     ]
 
     it.each(ROUTES)('%s %s is 401 for an anonymous caller', async (method, url, payload) => {
@@ -208,6 +209,16 @@ describe('back-office supplier routes', () => {
 
     it.each(ROUTES)('%s %s is 403 for a signed-in customer', async (method, url, payload) => {
       const response = await inject(method, url, customerCookie, payload)
+      expect(response.statusCode).toBe(403)
+    })
+
+    // The backfill writes supplier records, aliases and per-house terms from
+    // the vendored office snapshot in one transaction; that is a director's
+    // press, not a showroom login's. Its happy path is the CLI's, covered with
+    // an injected snapshot in suppliers-backfill.test.js — the real snapshot
+    // is never run against the shared test database.
+    it('POST /admin/suppliers/backfill is 403 for backoffice, director only', async () => {
+      const response = await inject('POST', '/admin/suppliers/backfill', backofficeCookie)
       expect(response.statusCode).toBe(403)
     })
   })

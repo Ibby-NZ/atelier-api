@@ -52,6 +52,7 @@ const USER_UPDATE_COLUMNS = Object.freeze([
   'name',
   'email',
   'can_view_finance',
+  'phone',
 ])
 
 // The roles for which `can_view_finance` is meaningful. Reporting masks cost and
@@ -80,6 +81,7 @@ const toUser = (row) =>
     name: row.name,
     role: row.role,
     trade_approved: row.trade_approved,
+    phone: row.phone,
     created_at: row.created_at,
     archived_at: row.archived_at,
     can_view_finance: row.can_view_finance,
@@ -218,6 +220,13 @@ export const updateUser = async (pool, id, input) => {
     ? { ...input, email: String(input.email).trim().toLowerCase() }
     : input
 
+  // A cleared phone field arrives as '' from a form; the column is nullable and
+  // `PATCH /auth/me` folds the same way, so an emptied number reads as none.
+  const phoned =
+    Object.hasOwn(emailed, 'phone') && String(emailed.phone ?? '').trim() === ''
+      ? { ...emailed, phone: null }
+      : emailed
+
   // **Moving a login off `trade` clears its approval.** `trade_approved` only
   // means anything on a trade row, so demoting an approved trade account used to
   // leave a true flag stranded where nothing displays it — and re-promoting the
@@ -227,9 +236,9 @@ export const updateUser = async (pool, id, input) => {
   // `trade_approved: true` in the same body loses: the role is the stronger
   // statement, and the two together are a contradiction, not an instruction.
   const demoted =
-    Object.hasOwn(emailed, 'role') && emailed.role !== 'trade'
-      ? { ...emailed, trade_approved: false }
-      : emailed
+    Object.hasOwn(phoned, 'role') && phoned.role !== 'trade'
+      ? { ...phoned, trade_approved: false }
+      : phoned
 
   // The same discipline for `can_view_finance`. It grants a staff login sight of
   // cost and margin in every report, so a role change off backoffice/director

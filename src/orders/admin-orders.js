@@ -124,6 +124,9 @@ const loadLinesByOrderId = async (db, orderIds) => {
             ol.cut_requirements,
             ol.colourway_id,
             c.sku,
+            c.name AS colourway_name,
+            p.id AS product_id,
+            p.slug AS product_slug,
             p.name AS product_name,
             i.qty_available,
             i.qty_reserved
@@ -151,6 +154,11 @@ const toLine = (row, state) => ({
   id: row.id,
   sku: row.sku,
   product_name: row.product_name,
+  // Where the line came from, so the CRM can open the catalogue record behind
+  // a SKU instead of retyping it into a search (Userback 8367841).
+  colourway_name: row.colourway_name,
+  product_id: row.product_id,
+  product_slug: row.product_slug,
   qty: row.qty,
   unit_price_cents: row.unit_price_cents,
   cut_requirements: row.cut_requirements,

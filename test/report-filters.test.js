@@ -87,7 +87,7 @@ describe('report filters', () => {
       expect(Object.isFrozen(REPORT_FILTER_NAMES)).toBe(true)
     })
 
-    it('names exactly the eleven filters the reports accept', () => {
+    it('names exactly the thirteen filters the reports accept', () => {
       expect([...REPORT_FILTER_NAMES]).toEqual([
         'from',
         'to',
@@ -97,6 +97,8 @@ describe('report filters', () => {
         'product_type',
         'category',
         'collection',
+        'product',
+        'sku',
         'kind',
         'status',
         'rep',
@@ -760,6 +762,10 @@ describe('product performance', () => {
       'qty',
       'value_cents',
       'unpriced_lines',
+      // Link columns, declared last: the CRM opens a row's insight by them and
+      // does not draw them (test/report-insight.test.js).
+      'brand_slug',
+      'product_slug',
     ])
   })
 
@@ -767,8 +773,15 @@ describe('product performance', () => {
   // Type and currency stay in it because a quantity needs a unit and a value a
   // currency — the two rules the by-design view already lives by.
   describe('the category grouping', () => {
-    it('offers exactly the one grouping, as a frozen registry', () => {
-      expect([...PRODUCT_PERFORMANCE_GROUPINGS]).toEqual(['category'])
+    it('offers the seven grains as a frozen registry, the default design grain excluded', () => {
+      expect([...PRODUCT_PERFORMANCE_GROUPINGS]).toEqual([
+        'category',
+        'house',
+        'collection',
+        'month',
+        'client',
+        'status',
+      ])
       expect(Object.isFrozen(PRODUCT_PERFORMANCE_GROUPINGS)).toBe(true)
     })
 
@@ -1120,6 +1133,8 @@ describe('W5-US-007 — stock and not-invoiced, declared', () => {
         'product_type',
         'category',
         'collection',
+        'product',
+        'sku',
       ])
       for (const name of STOCK_FILTERS) {
         expect(REPORT_FILTER_NAMES).toContain(name)

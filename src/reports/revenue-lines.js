@@ -110,6 +110,11 @@ const LIVE_ORDER_LINES = Object.freeze({
     brand_name: 'b.name',
     brand_code: 'b.brand_code',
     collection_slug: 'col.slug',
+    // The collection grain (insight's by-collection section) groups by the id
+    // and displays the name, the sales-by-rep rule — a slug alone cannot label
+    // a row and (brand_id, slug) is the unique key, not slug.
+    collection_id: 'col.id',
+    collection_name: 'col.name',
     // Staff-asserted sales attribution (A6 groundwork). Both ride the scope so
     // sales-by-rep groups and every report filters (`rep`) without a second
     // join tree; the name comes off the join, so a departed rep still displays.

@@ -16,8 +16,8 @@
 //     canonical form here and bound as a $n placeholder by buildReportFilters.
 //
 // The column literals also fix the table aliases every report query must use:
-// `o` orders, `b` brands, `p` products, `col` collections — the same letters the
-// order and catalogue read models already carry.
+// `o` orders, `b` brands, `p` products, `c` colourways, `col` collections — the
+// same letters the order and catalogue read models already carry.
 
 import { ORDER_STATUSES } from '../orders/admin-orders.js'
 import { CATEGORIES } from '../../scripts/lib/price-template.js'
@@ -43,6 +43,11 @@ export const FILTER_COLUMNS = Object.freeze({
   // match would only ever hide a typo.
   category: 'p.category',
   collection: 'col.slug',
+  // The two drill-down pins the insight view narrows by (a design, then one of
+  // its colours). Slugs and SKUs are identities, so both are exact matches; `c`
+  // is the colourways alias every report FROM already carries.
+  product: 'p.slug',
+  sku: 'c.sku',
   kind: 'o.kind',
   status: 'o.status',
   // W-feedback: sales attribution (A6 groundwork). An id, not a name — the
@@ -193,6 +198,20 @@ const parseSlugList = (name, value) => {
   return Object.freeze([...new Set(slugs)])
 }
 
+// A SKU is a supplier-shaped code (`PF-CAP-01`, `LAR-WRT-03`): letters, digits
+// and the four separators the live catalogue uses. Not a slug (upper case is
+// the norm) and not free text (it is an identity, compared exactly, and never
+// reaches an ILIKE), so it has its own shape rule.
+const SKU_PATTERN = /^[A-Za-z0-9._/-]{1,64}$/
+
+const parseSku = (name, value) => {
+  const text = textOf(name, value)
+  if (!SKU_PATTERN.test(text)) {
+    throw invalid(name, text, 'a SKU of letters, digits, dots, hyphens, underscores or slashes')
+  }
+  return text
+}
+
 // A positive integer id, arriving as the route schema's integer or as a
 // hand-typed querystring string. Anything else is a 400 naming the filter.
 const parseId = (name, value) => {
@@ -212,6 +231,8 @@ const PARSERS = Object.freeze({
   product_type: (value) => parseEnum('product_type', value, PRODUCT_TYPES),
   category: (value) => parseEnum('category', value, PRODUCT_CATEGORIES),
   collection: (value) => parseSlug('collection', value),
+  product: (value) => parseSlug('product', value),
+  sku: (value) => parseSku('sku', value),
   kind: (value) => parseEnum('kind', value, ORDER_KINDS),
   status: (value) => parseEnum('status', value, ORDER_STATUSES),
   rep: (value) => parseId('rep', value),
@@ -295,6 +316,8 @@ const CLAUSES = Object.freeze({
   product_type: (column, index) => `${column} = $${index}`,
   category: (column, index) => `${column} = $${index}`,
   collection: (column, index) => `${column} = $${index}`,
+  product: (column, index) => `${column} = $${index}`,
+  sku: (column, index) => `${column} = $${index}`,
   kind: (column, index) => `${column} = $${index}`,
   status: (column, index) => `${column} = $${index}`,
   rep: (column, index) => `${column} = $${index}`,

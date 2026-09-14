@@ -699,6 +699,8 @@ describe('W5-US-005 — product performance by house and design', () => {
           qty: 4,
           value_cents: 100000,
           unpriced_lines: 0,
+          brand_slug: `${PREFIX}-other`,
+          product_slug: `${PREFIX}-other-design`,
         },
         {
           brand_name: `${PREFIX} House`,
@@ -710,6 +712,8 @@ describe('W5-US-005 — product performance by house and design', () => {
           qty: 2,
           value_cents: 20000,
           unpriced_lines: 0,
+          brand_slug: `${PREFIX}-house`,
+          product_slug: `${PREFIX}-design`,
         },
         {
           brand_name: `${PREFIX} House`,
@@ -723,6 +727,8 @@ describe('W5-US-005 — product performance by house and design', () => {
           qty: 3,
           value_cents: 0,
           unpriced_lines: 1,
+          brand_slug: `${PREFIX}-house`,
+          product_slug: `${PREFIX}-loose`,
         },
       ])
     })

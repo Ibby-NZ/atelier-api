@@ -135,7 +135,7 @@ export const buildApp = ({
     api.register(accountRoutes, { pool, mailer, tradePriceListsEnabled })
     // /admin/orders — called by the storefront's AdminOrders island, so it needs
     // the same CORS allowance. Unrelated to the AdminJS panel below.
-    api.register(adminOrderRoutes, { pool, mailer, lineAmountTypes })
+    api.register(adminOrderRoutes, { pool, mailer, lineAmountTypes, xero })
     // /admin/brands|collections|products|colourways — catalogue CRUD for the
     // storefront admin islands. Same CORS allowance, same backoffice guard.
     api.register(adminCatalogueRoutes, { pool })

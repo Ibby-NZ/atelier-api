@@ -41,6 +41,7 @@ import {
   contactForUser,
   invoiceForOrder,
   itemForColourway,
+  paymentForInvoice,
   pickInvoice,
   pickContact,
   matchContact,
@@ -83,6 +84,16 @@ export class XeroValidationError extends Error {
 const EXPIRY_SLACK_MS = 60_000
 const CONTACT_PAGE_SIZE = 100
 const UPSERT_BATCH_SIZE = 40
+
+// The statuses at which money has already changed hands, so a freshly pushed
+// invoice is recorded paid on the spot (card checkouts are born `paid`).
+const PAID_STATUSES = Object.freeze(['paid', 'shipped'])
+
+/** One sentence for a payment that Xero, or the connection, refused. */
+const paymentFailureReason = (error) =>
+  error instanceof XeroHttpError
+    ? validationMessages(error.body).join('; ') || `Xero answered ${error.status}.`
+    : error?.message || 'Xero did not record the payment.'
 
 export const createXeroService = ({ pool, config, http, now = () => Date.now() }) => {
   // client_credentials keeps its short-lived token in memory only: it can be
@@ -497,12 +508,75 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
       }
     }
 
+    // A card checkout arrives already paid, and an order can be marked paid
+    // before anyone pushes it — either way the invoice must not sit AUTHORISED
+    // and unpaid in Xero for money the platform already holds. Recorded here
+    // rather than left to the office to remember; a failure is a warning on a
+    // push that succeeded, never a rollback of it.
+    let payment = null
+    if (PAID_STATUSES.includes(order.status)) {
+      payment = await recordOrderPayment(orderId).catch((error) => ({
+        recorded: false,
+        reason: paymentFailureReason(error),
+      }))
+      if (!payment.recorded && !warning) warning = `Invoice created but not marked paid: ${payment.reason}`
+    }
+
     return {
       order: await getAdminOrder(pool, orderId),
       invoice: { id: invoice.invoiceId, number: invoice.invoiceNumber },
       emailed,
+      ...(payment ? { payment } : {}),
       ...(warning ? { warning } : {}),
     }
+  }
+
+  /**
+   * Mark the order's Xero invoice PAID by recording a Payment against it for
+   * exactly what Xero says is still due. Answers `{ recorded, reason? }` rather
+   * than throwing for the three ordinary non-events — no invoice pushed yet, no
+   * bank account configured, nothing outstanding — because none of them is a
+   * reason to refuse the order transition that asked for it. Xero refusing the
+   * payment IS thrown, so the caller can report it in its own words.
+   *
+   * Idempotent by construction: the amount is Xero's own AmountDue, so a second
+   * call finds zero due and records nothing.
+   */
+  const recordOrderPayment = async (orderId) => {
+    const order = await getAdminOrder(pool, orderId)
+    if (!order) return null // route answers 404
+    if (!order.xero_invoice_id) {
+      return { recorded: false, reason: 'this order has no invoice in Xero yet.' }
+    }
+    if (!config.paymentAccountCode) {
+      return {
+        recorded: false,
+        reason: 'XERO_PAYMENT_ACCOUNT_CODE is not set on the API, so payments are recorded in Xero by hand.',
+      }
+    }
+    const read = await call('GET', `Invoices/${order.xero_invoice_id}`, {}).catch(rethrowValidation)
+    const invoice = read?.Invoices?.[0] ?? null
+    if (!invoice) throw new XeroValidationError('Xero answered without the invoice — nothing recorded.')
+    const amountDue = Number(invoice.AmountDue ?? 0)
+    if (!(amountDue > 0)) {
+      return { recorded: false, reason: `${invoice.InvoiceNumber ?? 'the invoice'} is already paid in Xero.` }
+    }
+    const body = await call('PUT', 'Payments', {
+      body: {
+        Payments: [
+          paymentForInvoice({
+            invoiceId: order.xero_invoice_id,
+            accountCode: config.paymentAccountCode,
+            amount: amountDue,
+            now: () => new Date(now()),
+          }),
+        ],
+      },
+      query: { summarizeErrors: 'true' },
+      idempotencyKey: `atelier-order-${orderId}-payment`,
+    }).catch(rethrowValidation)
+    const paymentId = body?.Payments?.[0]?.PaymentID ?? null
+    return { recorded: true, amount: amountDue, payment_id: paymentId, invoice_number: invoice.InvoiceNumber ?? null }
   }
 
   return {
@@ -515,5 +589,6 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     syncContacts,
     syncItems,
     pushOrderInvoice,
+    recordOrderPayment,
   }
 }

@@ -147,6 +147,7 @@ const brandCreateSchema = {
   properties: {
     name: nameProp,
     currency: currencyProp,
+    headline: nullableShort,
     story: nullableText,
     country: nullableShort,
     is_international: { type: 'boolean', default: false },
@@ -167,6 +168,7 @@ const brandPatchSchema = {
   properties: {
     name: nameProp,
     currency: currencyProp,
+    headline: nullableShort,
     story: nullableText,
     country: nullableShort,
     is_international: { type: 'boolean' },

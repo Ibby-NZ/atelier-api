@@ -122,10 +122,12 @@ export const buildUpdate = (input, columns) => {
 // it is the office's D365 reporting designation, deliberately absent from the
 // public brand read model (test/reporting-codes.test.js scans for the VALUE as
 // well as the key), and readable here because the CRM is where it is typed in.
-const BRAND_COLUMNS = `id, name, slug, story, country, currency, is_international, trade_only, bespoke, website_url, image_url, logo_url, featured_rank, supplier_id, brand_code, archived_at, created_at`
+const BRAND_COLUMNS = `id, name, slug, headline, story, country, currency, is_international, trade_only, bespoke, website_url, image_url, logo_url, featured_rank, supplier_id, brand_code, archived_at, created_at`
 
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
+  // The one line the storefront house page opens on, above the story.
+  'headline',
   'story',
   'country',
   'currency',
@@ -173,6 +175,7 @@ const toBrand = (row, extra) =>
     id: row.id,
     name: row.name,
     slug: row.slug,
+    headline: row.headline ?? null,
     story: row.story,
     country: row.country,
     currency: row.currency,
@@ -334,8 +337,8 @@ export const createBrand = async (pool, input) => {
   const slug = slugFrom(name)
   try {
     const { rows } = await pool.query(
-      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, bespoke, website_url, image_url, logo_url, brand_code)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO brands (name, slug, story, country, currency, is_international, trade_only, bespoke, website_url, image_url, logo_url, brand_code, headline)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING ${BRAND_COLUMNS}`,
       [
         name,
@@ -353,6 +356,7 @@ export const createBrand = async (pool, input) => {
         websiteUrlFrom(input.image_url, 'Image'),
         websiteUrlFrom(input.logo_url, 'Logo'),
         reportingLabelFrom(input.brand_code),
+        input.headline ?? null,
       ]
     )
     return toBrand(rows[0])

@@ -28,6 +28,7 @@ const XERO_CONFIG = Object.freeze({
   lineAmountTypes: 'Exclusive',
   invoiceStatus: 'AUTHORISED',
   invoiceDueDays: 30,
+  paymentAccountCode: '090',
 })
 
 // A scriptable stand-in for xero-http.js. `on(method, path, fn)` registers a
@@ -297,6 +298,155 @@ describe('xero integration', () => {
       expect(response.json().xero.connected).toBe(false)
       const status = await inject('GET', '/admin/xero/status', backofficeCookie)
       expect(status.json().xero.connected).toBe(false)
+    })
+  })
+
+  // Marking an order paid marks its invoice paid in Xero (16 Sep 2026
+  // feedback). A Payment for exactly Xero's own AmountDue, against the bank
+  // account XERO_PAYMENT_ACCOUNT_CODE names; the order transition never fails
+  // because of Xero — a refusal comes back as `xero_payment.reason`.
+  describe('the invoice follows the order to paid', () => {
+    const scriptInvoiceCreate = () => {
+      fake.on('GET', 'Contacts', () => ({
+        Contacts: [
+          { ContactID: 'contact-9', Name: 'Zomia Interiors', EmailAddress: testEmail('client') },
+        ],
+      }))
+      fake.on('POST', 'Invoices', () => ({
+        Invoices: [{ InvoiceID: 'inv-uuid-1', InvoiceNumber: 'INV-0042', Sent: false }],
+      }))
+    }
+    const scriptInvoiceDue = (amountDue) =>
+      fake.on('GET', 'Invoices/inv-uuid-1', () => ({
+        Invoices: [{ InvoiceID: 'inv-uuid-1', InvoiceNumber: 'INV-0042', AmountDue: amountDue }],
+      }))
+    const paymentCalls = () => fake.calls.filter((c) => c.method === 'PUT' && c.path === 'Payments')
+
+    // A priced order keyed by the office (POST /admin/orders) rather than
+    // requested through the storefront: /orders/request shares one
+    // 10-per-15-min bucket per app instance and the push tests above already
+    // spend most of it.
+    const keyPricedOrder = async () => {
+      const { rows: users } = await pool.query(`SELECT id FROM users WHERE email = $1`, [
+        testEmail('client'),
+      ])
+      const { rows: colourways } = await pool.query(`SELECT id FROM colourways WHERE sku = $1`, [
+        `${PREFIX}-SKU-1`,
+      ])
+      const keyed = await inject('POST', '/admin/orders', backofficeCookie, {
+        user_id: users[0].id,
+        lines: [{ colourway_id: colourways[0].id, qty: 10, unit_price_cents: 5000 }],
+      })
+      expect(keyed.statusCode).toBe(201)
+      return keyed.json().order.id
+    }
+
+    // requested → confirmed (against the pushed ref) so mark-paid is legal.
+    const pushedAndConfirmed = async () => {
+      scriptInvoiceCreate()
+      const orderId = await keyPricedOrder()
+      await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+      const confirmed = await inject('POST', `/admin/orders/${orderId}/confirm`, backofficeCookie, {
+        xero_invoice_ref: 'INV-0042',
+      })
+      expect(confirmed.statusCode).toBe(200)
+      return orderId
+    }
+
+    it('mark-paid records a payment for what Xero says is due', async () => {
+      const orderId = await pushedAndConfirmed()
+      scriptInvoiceDue(575)
+      fake.on('PUT', 'Payments', () => ({ Payments: [{ PaymentID: 'pay-1' }] }))
+      const response = await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.status).toBe('paid')
+      expect(response.json().xero_payment).toEqual({
+        recorded: true,
+        amount: 575,
+        payment_id: 'pay-1',
+        invoice_number: 'INV-0042',
+      })
+      const [put] = paymentCalls()
+      expect(put.idempotencyKey).toBe(`atelier-order-${orderId}-payment`)
+      expect(put.body.Payments[0]).toMatchObject({
+        Invoice: { InvoiceID: 'inv-uuid-1' },
+        Account: { Code: '090' },
+        Amount: 575,
+      })
+      expect(put.body.Payments[0].Date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    })
+
+    it('records nothing when Xero already shows the invoice paid', async () => {
+      const orderId = await pushedAndConfirmed()
+      scriptInvoiceDue(0)
+      const response = await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.status).toBe('paid')
+      expect(response.json().xero_payment.recorded).toBe(false)
+      expect(response.json().xero_payment.reason).toMatch(/already paid/)
+      expect(paymentCalls()).toHaveLength(0)
+    })
+
+    it('still marks the order paid when the order was never pushed, and says so', async () => {
+      const orderId = await keyPricedOrder()
+      await inject('POST', `/admin/orders/${orderId}/confirm`, backofficeCookie, {
+        xero_invoice_ref: 'INV-BY-HAND',
+      })
+      const response = await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.status).toBe('paid')
+      expect(response.json().xero_payment).toEqual({
+        recorded: false,
+        reason: 'this order has no invoice in Xero yet.',
+      })
+      expect(paymentCalls()).toHaveLength(0)
+    })
+
+    it('still marks the order paid when Xero refuses the payment, and carries the refusal', async () => {
+      const orderId = await pushedAndConfirmed()
+      scriptInvoiceDue(575)
+      fake.on('PUT', 'Payments', () => {
+        throw new XeroHttpError('Xero 400', {
+          status: 400,
+          body: {
+            Elements: [{ ValidationErrors: [{ Message: 'Account code 090 is not a bank account.' }] }],
+          },
+        })
+      })
+      const response = await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.status).toBe('paid')
+      expect(response.json().xero_payment.recorded).toBe(false)
+      expect(response.json().xero_payment.reason).toMatch(/not a bank account/)
+    })
+
+    it('a push for an order that is already paid records the payment on the spot', async () => {
+      const orderId = await keyPricedOrder()
+      await inject('POST', `/admin/orders/${orderId}/confirm`, backofficeCookie, {
+        xero_invoice_ref: 'INV-BY-HAND',
+      })
+      await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      scriptInvoiceCreate()
+      scriptInvoiceDue(575)
+      fake.on('PUT', 'Payments', () => ({ Payments: [{ PaymentID: 'pay-2' }] }))
+      const response = await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+      expect(response.statusCode).toBe(200)
+      expect(response.json().payment).toMatchObject({ recorded: true, amount: 575, payment_id: 'pay-2' })
+      expect(response.json().warning).toBeUndefined()
+      expect(paymentCalls()).toHaveLength(1)
+    })
+
+    it('without XERO_PAYMENT_ACCOUNT_CODE the payment is left to the office, in words', async () => {
+      const orderId = await pushedAndConfirmed()
+      const unconfigured = createXeroService({
+        pool,
+        config: { ...XERO_CONFIG, paymentAccountCode: null },
+        http: fake,
+      })
+      const result = await unconfigured.recordOrderPayment(orderId)
+      expect(result.recorded).toBe(false)
+      expect(result.reason).toMatch(/XERO_PAYMENT_ACCOUNT_CODE/)
+      expect(paymentCalls()).toHaveLength(0)
     })
   })
 

@@ -112,6 +112,20 @@ export const invoiceForOrder = (
  * POST /Items upserts on Code, which is what makes the item sync idempotent
  * with no directory fetch.
  */
+/**
+ * A Payment against a pushed invoice — what marks it PAID in Xero. `amount`
+ * is the invoice's own AmountDue (read back from Xero, never recomputed here,
+ * so rounding between our cents and Xero's tax lines can never leave one cent
+ * outstanding). `accountCode` must be a BANK account: Xero refuses a payment
+ * into a revenue account.
+ */
+export const paymentForInvoice = ({ invoiceId, accountCode, amount, now = () => new Date() }) => ({
+  Invoice: { InvoiceID: invoiceId },
+  Account: { Code: accountCode },
+  Date: isoDay(now()),
+  Amount: amount,
+})
+
 export const itemForColourway = ({ sku, product_name, colourway_name }) => ({
   Code: truncate(sku, 30),
   Name: truncate(`${product_name} — ${colourway_name}`, 50),

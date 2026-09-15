@@ -554,6 +554,23 @@ describe('back-office catalogue admin', () => {
       expect(response.statusCode).toBe(404)
     })
 
+    // The house page's opening line (16 Sep 2026 feedback). Nullable, patchable,
+    // and public — the storefront prints it above the story.
+    it('headline is null by default, patchable, and reaches the public brand', async () => {
+      const created = await createBrandFixture('Headline House')
+      expect(created.headline).toBeNull()
+      const response = await inject(
+        'PATCH',
+        `/admin/brands/${created.id}`,
+        backofficeCookie,
+        { headline: 'Silk, woven in Lyon since 1787.' }
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().brand.headline).toBe('Silk, woven in Lyon since 1787.')
+      const pub = await app.inject({ method: 'GET', url: `/catalogue/brands/${created.slug}` })
+      expect(pub.json().brand.headline).toBe('Silk, woven in Lyon since 1787.')
+    })
+
     // The CRM toggle behind the storefront's /bespoke page and the enquiry form
     // on a house page: off at birth, and the public read model carries it.
     it('bespoke defaults to false, is patchable, and reaches the public brand', async () => {

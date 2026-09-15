@@ -45,6 +45,18 @@ automatically when working in this directory.
   JSON — it is a browser navigation, not an API call.
 - **Item sync keys on SKU** (`POST /Items` upserts on Code) — re-running is a
   refresh, never a duplicate. Code truncates to 30 chars, Name to 50.
+- **The invoice follows the order to PAID.** `recordOrderPayment(orderId)` PUTs
+  a Payment against the pushed invoice for exactly Xero's own `AmountDue` (read
+  back first, never recomputed from our cents — rounding between our totals and
+  Xero's tax lines would otherwise leave a cent outstanding), against the BANK
+  account `XERO_PAYMENT_ACCOUNT_CODE` names. Idempotent by construction: a
+  second call finds nothing due and records nothing. Two callers: the
+  `mark-paid` route (the order transition NEVER fails because of Xero — a
+  refusal comes back as `xero_payment.reason` for the CRM to print) and
+  `pushOrderInvoice` itself when the order is already `paid`/`shipped` (a card
+  checkout is born paid), where a failure is a `warning` on a push that
+  succeeded. Unset account code = "recorded by hand", said in words, not an
+  error.
 - `expires_at_ms` in the stored token set is OUR computed absolute expiry
   (minted-at + expires_in); Xero itself only sends the relative form.
 

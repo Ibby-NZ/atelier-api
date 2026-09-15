@@ -252,7 +252,7 @@ const shipBodySchema = {
 
 export const adminOrderRoutes = async (
   app,
-  { pool, mailer = null, lineAmountTypes = 'Exclusive' }
+  { pool, mailer = null, lineAmountTypes = 'Exclusive', xero = null }
 ) => {
   const backoffice = app.guards.requireRole('backoffice')
 
@@ -368,7 +368,20 @@ export const adminOrderRoutes = async (
     async (request) => {
       const order = await markOrderPaid(pool, request.params.id)
       await notifyOrderTransition(mailer, pool, order)
-      return { order }
+      // The invoice in Xero follows the order: marking it paid here records
+      // the payment there (client feedback, 16 Sep 2026 — "xero invoice should
+      // be marked as paid when the order is paid"). Never fails the
+      // transition: the order IS paid, whatever Xero said, so a refusal comes
+      // back as `xero_payment.reason` for the CRM to print beside the toast.
+      // Absent when Xero is not configured, so an un-integrated deployment's
+      // answer is unchanged.
+      const xeroPayment = xero
+        ? await xero.recordOrderPayment(order.id).catch((error) => ({
+            recorded: false,
+            reason: error?.message || 'Xero did not record the payment.',
+          }))
+        : null
+      return { order, ...(xeroPayment ? { xero_payment: xeroPayment } : {}) }
     }
   )
 

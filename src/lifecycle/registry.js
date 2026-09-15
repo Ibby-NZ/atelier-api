@@ -618,6 +618,22 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     ],
   },
 
+  // The submitted trade-account form. Nothing references it, so there is no
+  // probe to write — it is registered so the DELETE route answers the shared
+  // envelope, and because it is the only way to clear the `user` probe above:
+  // a declined applicant's archived login cannot be deleted while its form is
+  // on file, and the same email cannot be signed up again while the login
+  // exists, so without this route that address was stuck for ever. Not
+  // archivable: the table has no `archived_at`, and the account's own archive
+  // is the reversible "no" (the CRM's Decline).
+  trade_application: {
+    table: 'trade_applications',
+    idColumn: 'id',
+    label: 'trade application',
+    archivable: false,
+    probes: [],
+  },
+
   // The two edges out of a showroom differ, and the SET NULL one is why the
   // probes are here at all. `sample_orders.showroom_id` is NOT NULL and
   // RESTRICT, so the database would refuse that half loudly; `samples.showroom_id`

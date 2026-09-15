@@ -41,8 +41,16 @@ export const contactForUser = ({ name, email }) => ({
  * design and carries the SKU and any cut requirements — the invoice is what
  * the client's accounts payable reads, so it must identify the goods without
  * a lookup.
+ *
+ * `discountPct` is `orders.discount_pct`, applied as Xero's own per-line
+ * DiscountRate (ACCREC supports it) so the invoice total agrees with
+ * `total_cents` — it used to be ignored, and a discounted order invoiced at
+ * full price. Xero rounds each line to the cent where `recomputeOrderMoney`
+ * rounds the discounted subtotal once, so the two can differ by at most half
+ * a cent per goods line; the invoice is the legal figure. Omitted at 0 so an
+ * undiscounted line is byte-identical to before.
  */
-export const lineItemForOrderLine = (line, { accountCode }) => ({
+export const lineItemForOrderLine = (line, { accountCode, discountPct = 0 }) => ({
   Description: [
     `${line.product_name} — ${line.sku}`,
     line.cut_requirements ? `Cut: ${line.cut_requirements}` : null,
@@ -52,13 +60,16 @@ export const lineItemForOrderLine = (line, { accountCode }) => ({
   Quantity: Number(line.qty),
   UnitAmount: centsToAmount(line.unit_price_cents),
   AccountCode: accountCode,
+  ...(Number(discountPct) > 0 ? { DiscountRate: Number(discountPct) } : {}),
 })
 
 /**
  * The full ACCREC invoice payload for an admin-shaped order.
  *
  * - Shipping rides as its own line (it is a charge, not a discount, and Xero
- *   has no header-level freight field on invoices).
+ *   has no header-level freight field on invoices). The order discount is
+ *   off the goods only (`src/orders/discounts.js`), so the freight line never
+ *   carries a DiscountRate.
  * - Reference carries the CLIENT'S number — customer_po_number is the PO they
  *   issued to us, which is exactly what a Reference is for on their remittance;
  *   client_reference is the fallback.
@@ -69,7 +80,9 @@ export const invoiceForOrder = (
   order,
   { contactId, accountCode, lineAmountTypes, status, dueDays, now = () => new Date() }
 ) => {
-  const lineItems = order.lines.map((line) => lineItemForOrderLine(line, { accountCode }))
+  const lineItems = order.lines.map((line) =>
+    lineItemForOrderLine(line, { accountCode, discountPct: order.discount_pct })
+  )
   const shippingCents = Number(order.shipping_cents ?? 0)
   if (shippingCents > 0) {
     lineItems.push({

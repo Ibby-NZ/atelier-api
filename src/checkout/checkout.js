@@ -210,6 +210,10 @@ export const createCheckoutSession = async (
 
   const session = await stripe.checkout.sessions.create({
     mode: 'payment',
+    // Off, or a shopper abroad is shown Stripe's converted USD (with NZD as a
+    // toggle) for a cart the store quoted in NZD — the order and the invoice
+    // are NZD whatever the buyer's location.
+    adaptive_pricing: { enabled: false },
     line_items: lineItems,
     success_url: `${storeBaseUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${storeBaseUrl}/cart`,

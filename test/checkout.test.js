@@ -206,6 +206,9 @@ describe('POST /checkout/session', () => {
     expect(params.success_url).toContain(STORE_BASE_URL)
     expect(params.success_url).toContain('{CHECKOUT_SESSION_ID}')
     expect(params.cancel_url).toBe(`${STORE_BASE_URL}/cart`)
+    // Stripe must present the NZD figure the store quoted, not a converted
+    // local currency for a buyer abroad.
+    expect(params.adaptive_pricing).toEqual({ enabled: false })
     // Cart is stashed in metadata for the webhook to rebuild the order (US-011).
     expect(JSON.parse(params.metadata.cart)).toEqual([{ sku: SKU.good, qty: 2 }])
     expect(params.metadata.zone).toBe(ZONE)

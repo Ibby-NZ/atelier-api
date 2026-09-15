@@ -14,6 +14,7 @@ import {
   pickContact,
   matchContact,
 } from '../src/xero/mapping.js'
+import { discountedTotalCents } from '../src/orders/discounts.js'
 
 describe('centsToAmount', () => {
   it('is exact for awkward integer cents', () => {
@@ -71,6 +72,16 @@ describe('lineItemForOrderLine', () => {
     )
     expect(line.Description).toBe('Harbour — H-1')
   })
+
+  it('applies the order discount as a DiscountRate, and omits it at 0', () => {
+    const line = { product_name: 'Harbour', sku: 'H-1', qty: 1, unit_price_cents: 100 }
+    // pg hands discount_pct back as a numeric string.
+    expect(lineItemForOrderLine(line, { accountCode: '200', discountPct: '5.00' }).DiscountRate).toBe(5)
+    expect(lineItemForOrderLine(line, { accountCode: '200', discountPct: 0 })).not.toHaveProperty(
+      'DiscountRate'
+    )
+    expect(lineItemForOrderLine(line, { accountCode: '200' })).not.toHaveProperty('DiscountRate')
+  })
 })
 
 describe('invoiceForOrder', () => {
@@ -112,6 +123,24 @@ describe('invoiceForOrder', () => {
       AccountCode: '200',
     })
     expect(invoiceForOrder(base, opts).LineItems).toHaveLength(1)
+  })
+
+  // A discounted order used to invoice at full price: the mapping ignored
+  // `discount_pct`. The discount is off the goods, never the freight, and on a
+  // fixture where no rounding can intervene Xero's arithmetic must land on
+  // exactly the platform's `total_cents`.
+  it('discounts every goods line but never the freight line', () => {
+    const invoice = invoiceForOrder(
+      { ...base, discount_pct: '10.00', shipping_cents: 1500 },
+      opts
+    )
+    const [goods, freight] = invoice.LineItems
+    expect(goods.DiscountRate).toBe(10)
+    expect(freight.DiscountRate).toBeUndefined()
+    const xeroTotal =
+      goods.Quantity * goods.UnitAmount * (1 - goods.DiscountRate / 100) +
+      freight.Quantity * freight.UnitAmount
+    expect(xeroTotal).toBe(discountedTotalCents(50000, 10, 1500) / 100)
   })
 
   it("carries the client's PO number as the Reference, falling back to their reference", () => {

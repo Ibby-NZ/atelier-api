@@ -27,6 +27,7 @@
 
 import crypto from 'node:crypto'
 import { getAdminOrder } from '../orders/admin-orders.js'
+import { unpricedLineCount } from '../orders/order-states.js'
 import {
   loadConnection,
   saveTokenSet,
@@ -435,6 +436,15 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     if (order.xero_invoice_id) {
       throw new XeroConflictError(
         `This order is already in Xero as ${order.xero_invoice_ref ?? order.xero_invoice_id}.`
+      )
+    }
+    // Same predicate `confirm` uses: a positive total with one $0.00 line
+    // would otherwise reach Xero as a nil line. The total clause stays for
+    // the one case the lines cannot catch — a 100% discount.
+    const unpriced = unpricedLineCount(order.lines)
+    if (unpriced > 0) {
+      throw new XeroConflictError(
+        `Price every line before invoicing — ${unpriced} line${unpriced === 1 ? ' is' : 's are'} still at $0.00.`
       )
     }
     if (Number(order.total_cents) <= 0) {

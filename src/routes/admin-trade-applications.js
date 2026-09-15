@@ -1,14 +1,18 @@
 // Back-office trade application review (the CRM's Users -> Applicants tab).
 //
-// Read-only: staff review the submitted form here, then approve by flipping
+// Staff review the submitted form here, then approve by flipping
 // trade_approved via the existing PATCH /admin/users/:id — approval state lives
-// on the users row, never on the application. Business logic lives in
-// ../users/trade-applications.js; these handlers stay thin.
+// on the users row, never on the application. The one write is DELETE, for a
+// form that should not stay on file (a declined or mistaken application): the
+// `user` delete refuses while a form points at the account, so this is what
+// frees a declined applicant's email to be signed up again. Business logic
+// lives in ../users/trade-applications.js; these handlers stay thin.
 
 import {
   listTradeApplications,
   getTradeApplication,
 } from '../users/trade-applications.js'
+import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 
 const idParamsSchema = {
   type: 'object',
@@ -44,5 +48,17 @@ export const adminTradeApplicationRoutes = async (app, { pool }) => {
       }
       return { application }
     }
+  )
+
+  app.delete(
+    '/admin/trade-applications/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'trade_application', request.params.id, {
+          user: request.user,
+        })
+      )
   )
 }

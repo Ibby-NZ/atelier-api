@@ -387,4 +387,60 @@ describe('trade applications', () => {
       expect(response.statusCode).toBe(404)
     })
   })
+
+  // Runs last: it spends the applicant the earlier blocks rely on.
+  describe('DELETE /admin/trade-applications/:id', () => {
+    const findApplication = async () => {
+      const list = await inject('GET', '/admin/trade-applications', backofficeCookie)
+      return list.json().applications.find((a) => a.user?.email === testEmail('applicant'))
+    }
+
+    it('rejects an anonymous request with 401', async () => {
+      const { id } = await findApplication()
+      expect((await inject('DELETE', `/admin/trade-applications/${id}`, null)).statusCode).toBe(401)
+    })
+
+    it('rejects a non-backoffice user with 403', async () => {
+      const { id } = await findApplication()
+      const response = await inject('DELETE', `/admin/trade-applications/${id}`, customerCookie)
+      expect(response.statusCode).toBe(403)
+    })
+
+    it('returns 404 for an unknown id', async () => {
+      const response = await inject('DELETE', '/admin/trade-applications/999999', backofficeCookie)
+      expect(response.statusCode).toBe(404)
+    })
+
+    // The scenario the route exists for: a declined applicant's email must be
+    // usable for a new account. Archiving the login leaves the email taken, the
+    // login cannot be deleted while its form is on file, so the form has to go
+    // first — and once it has, both the delete and the fresh account succeed.
+    it('frees a declined applicant\'s email once the form is deleted', async () => {
+      const application = await findApplication()
+      const userId = application.user.id
+      const email = testEmail('applicant')
+
+      const archived = await inject('POST', `/admin/users/${userId}/archive`, backofficeCookie, {})
+      expect(archived.statusCode).toBe(200)
+
+      const taken = await inject('POST', '/admin/users', backofficeCookie, { email, role: 'customer' })
+      expect(taken.statusCode).toBe(409)
+
+      const blocked = await inject('DELETE', `/admin/users/${userId}`, backofficeCookie)
+      expect(blocked.statusCode).toBe(409)
+      expect(blocked.json().blockers.map((b) => b.relation)).toEqual(['trade_applications'])
+
+      const deleted = await inject('DELETE', `/admin/trade-applications/${application.id}`, backofficeCookie)
+      expect(deleted.statusCode).toBe(200)
+      expect(deleted.json()).toEqual({ deleted: { entity: 'trade_application', id: application.id } })
+      expect((await inject('GET', `/admin/trade-applications/${application.id}`, backofficeCookie)).statusCode).toBe(404)
+
+      const gone = await inject('DELETE', `/admin/users/${userId}`, backofficeCookie)
+      expect(gone.statusCode).toBe(200)
+
+      const fresh = await inject('POST', '/admin/users', backofficeCookie, { email, role: 'customer' })
+      expect(fresh.statusCode).toBe(201)
+      expect(fresh.json().user).toMatchObject({ email, role: 'customer' })
+    })
+  })
 })

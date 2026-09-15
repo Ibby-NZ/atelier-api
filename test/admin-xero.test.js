@@ -400,12 +400,35 @@ describe('xero integration', () => {
         {}
       )
       expect(unpriced.statusCode).toBe(409)
-      expect(unpriced.json().message).toContain('zero')
+      expect(unpriced.json().message).toMatch(/1 line is still at \$0\.00/)
 
       expect(
         (await inject('POST', '/admin/xero/orders/999999/invoice', backofficeCookie, {}))
           .statusCode
       ).toBe(404)
+    })
+
+    // The total check alone let a positive order through with one nil line,
+    // which Xero would have invoiced as a $0.00 item. Same predicate `confirm`
+    // uses (`unpricedLineCount`), so the two cannot disagree.
+    it('refuses an order whose total is positive but a line is still unpriced', async () => {
+      scriptInvoiceCreate()
+      const orderId = await placePricedOrder(0)
+      const { rows } = await pool.query('SELECT id FROM colourways WHERE sku = $1', [
+        `${PREFIX}-SKU-1`,
+      ])
+      await inject('PATCH', `/admin/orders/${orderId}`, backofficeCookie, {
+        add_lines: [{ colourway_id: rows[0].id, qty: 1, unit_price_cents: 5000 }],
+      })
+      const response = await inject(
+        'POST',
+        `/admin/xero/orders/${orderId}/invoice`,
+        backofficeCookie,
+        {}
+      )
+      expect(response.statusCode).toBe(409)
+      expect(response.json().message).toMatch(/1 line is still at \$0\.00/)
+      expect(fake.calls.some((c) => c.method === 'POST' && c.path === 'Invoices')).toBe(false)
     })
 
     it('surfaces a Xero validation refusal as a 422 with its messages', async () => {

@@ -114,12 +114,23 @@ describe('back-office order management', () => {
   // /admin/orders tests below, not the subject of them; the route's own
   // behaviour — validation, the 422s, the mail — is covered in
   // test/orders.test.js, and this app is built with no mailer anyway.
-  const placeRequest = async (qty = 10) => {
+  //
+  // The line is PRICED before it is handed back (through the real PATCH, so the
+  // money is recomputed the way the office's edit would): `confirm` and
+  // `mark-paid` refuse a $0.00 line, and most of this file drives the fixture
+  // through them. Pass `{ unitPriceCents: 0 }` to get the raw storefront state.
+  const placeRequest = async (qty = 10, { unitPriceCents = 1000 } = {}) => {
     const { order } = await createOrderRequest(pool, {
       lines: [{ sku: SKU.inStock, qty_metres: qty }],
       contact: { email: 'buyer@example.com' },
     })
-    return order
+    if (unitPriceCents === 0) return order
+    const detail = await inject('GET', `/admin/orders/${order.id}`, backofficeCookie)
+    const lineId = detail.json().order.lines[0].id
+    const priced = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+      lines: [{ id: lineId, unit_price_cents: unitPriceCents }],
+    })
+    return priced.json().order
   }
 
   beforeAll(async () => {
@@ -201,6 +212,8 @@ describe('back-office order management', () => {
       expect(line.product_id).toEqual(expect.any(Number))
       expect(line.product_slug).toEqual(expect.any(String))
       expect(line.colourway_name).toEqual(expect.any(String))
+      // And its unit, so "10" reads as metres on the order desk.
+      expect(line.unit).toBe('metres')
     })
 
     // GST is a function of the total and the Xero basis (Exclusive unless
@@ -524,6 +537,44 @@ describe('back-office order management', () => {
     })
   })
 
+  // A storefront request arrives with every line at $0.00 — "not priced yet",
+  // not "free" — and used to confirm and invoice at nil. The money transitions
+  // refuse until every line is priced (422, not 409: it is a business rule,
+  // not a wrong state), naming the count so the desk knows what is left.
+  describe('unpriced lines (422)', () => {
+    const orderFor = async (id) =>
+      (await inject('GET', `/admin/orders/${id}`, backofficeCookie)).json().order
+
+    it('refuses to confirm while any line is unpriced and names the count', async () => {
+      const placed = await placeRequest(10, { unitPriceCents: 0 })
+      await inject('PATCH', `/admin/orders/${placed.id}`, backofficeCookie, {
+        add_lines: [{ colourway_id: colourwayId.get(SKU.second), qty: 1, unit_price_cents: 0 }],
+      })
+      const response = await inject('POST', `/admin/orders/${placed.id}/confirm`, backofficeCookie, {
+        xero_invoice_ref: 'INV-1',
+      })
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toMatch(/2 lines are still at \$0\.00/)
+      expect((await orderFor(placed.id)).status).toBe('requested')
+    })
+
+    it('refuses mark-paid after a confirmed order was zeroed back', async () => {
+      const placed = await placeRequest(10)
+      const confirmed = await inject('POST', `/admin/orders/${placed.id}/confirm`, backofficeCookie, {
+        xero_invoice_ref: 'INV-1',
+      })
+      expect(confirmed.statusCode).toBe(200)
+      // A price edit is still allowed at `confirmed`.
+      await inject('PATCH', `/admin/orders/${placed.id}`, backofficeCookie, {
+        lines: [{ id: placed.lines[0].id, unit_price_cents: 0 }],
+      })
+      const response = await inject('POST', `/admin/orders/${placed.id}/mark-paid`, backofficeCookie)
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toMatch(/1 line is still at \$0\.00/)
+      expect((await orderFor(placed.id)).status).toBe('confirmed')
+    })
+  })
+
   // A sales order the office keys itself. It lands in the same queue as a
   // storefront request and drives the same lifecycle from there — what differs
   // is that it carries prices from the first minute and names its own client.
@@ -594,6 +645,7 @@ describe('back-office order management', () => {
 
       expect(response.statusCode).toBe(201)
       expect(response.json().order.lines[0].inventory).toBeNull()
+      expect(response.json().order.lines[0].unit).toBeNull()
     })
 
     it('refuses an order nobody can be billed for with 422', async () => {
@@ -647,7 +699,7 @@ describe('back-office order management', () => {
       inject('PATCH', `/admin/orders/${id}`, backofficeCookie, body)
 
     it('prices a request line and recomputes the money, touching no stock', async () => {
-      const placed = await placeRequest(10)
+      const placed = await placeRequest(10, { unitPriceCents: 0 })
       const order = await orderFor(placed.id)
       expect(order.subtotal_cents).toBe(0)
 
@@ -665,7 +717,7 @@ describe('back-office order management', () => {
     })
 
     it('adds a line, reserving its stock and re-totalling', async () => {
-      const placed = await placeRequest(10)
+      const placed = await placeRequest(10, { unitPriceCents: 0 })
 
       const response = await patch(placed.id, {
         add_lines: [

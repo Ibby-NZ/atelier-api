@@ -20,7 +20,7 @@ import { USER_SEGMENTS } from '../users/admin-users.js'
 // Which kinds hold a reservation lives in a leaf module: src/lifecycle/registry.js
 // needs the same predicate for the delete guard and cannot import this file
 // (archive.js -> registry.js -> here would be a cycle).
-import { reserves } from './order-states.js'
+import { reserves, unpricedLineCount } from './order-states.js'
 // The same packing the storefront's request flow writes, so `orders.notes` reads
 // identically however the order was raised.
 import { buildNotes } from './order-request.js'
@@ -129,7 +129,8 @@ const loadLinesByOrderId = async (db, orderIds) => {
             p.slug AS product_slug,
             p.name AS product_name,
             i.qty_available,
-            i.qty_reserved
+            i.qty_reserved,
+            i.unit
        FROM order_lines ol
        JOIN colourways c ON c.id = ol.colourway_id
        JOIN products p ON p.id = c.product_id
@@ -150,6 +151,28 @@ const loadLinesByOrderId = async (db, orderIds) => {
   return byOrder
 }
 
+/**
+ * Refuse a money transition while any line is still at $0.00 (422, naming the
+ * count — the CRM shows API messages verbatim). Reads the lines inside the
+ * order's own transaction: `withOrderTxn` selects only `id, kind, status`.
+ *
+ * Applied to `confirm` and `mark-paid`, NOT `ship`: a PATCH may still zero a
+ * line at `confirmed`, but money is frozen from `paid` on, so an unpriced paid
+ * order cannot exist once mark-paid refuses. The Xero push applies the same
+ * predicate (`src/xero/service.js`). No director override — an unpriced order
+ * is priced first, not confirmed at nil.
+ */
+const requirePriced = async (client, id, phrase) => {
+  const lines = (await loadLinesByOrderId(client, [id])).get(id) ?? []
+  const count = unpricedLineCount(lines)
+  if (count > 0) {
+    throw httpError(
+      422,
+      `Price every line before you ${phrase} — ${count} line${count === 1 ? ' is' : 's are'} still at $0.00.`
+    )
+  }
+}
+
 const toLine = (row, state) => ({
   id: row.id,
   sku: row.sku,
@@ -160,6 +183,10 @@ const toLine = (row, state) => ({
   product_id: row.product_id,
   product_slug: row.product_slug,
   qty: row.qty,
+  // 'metres' | 'units' from the inventory row; null for a colourway that has
+  // never been stocked, exactly like `inventory` below. The customer shape
+  // does not carry it — its lines have `product_type`, which decides the unit.
+  unit: row.unit ?? null,
   unit_price_cents: row.unit_price_cents,
   cut_requirements: row.cut_requirements,
   colourway_id: row.colourway_id,
@@ -802,6 +829,7 @@ export const createManualOrder = async (pool, input, actor) => {
 export const confirmOrder = (pool, id, xeroInvoiceRef) =>
   withOrderTxn(pool, id, async (client, order) => {
     requireStatus(order, 'requested', 'confirm')
+    await requirePriced(client, id, 'confirm this order')
     await client.query(
       `UPDATE orders SET status = 'confirmed', xero_invoice_ref = $2 WHERE id = $1`,
       [id, xeroInvoiceRef]
@@ -812,6 +840,7 @@ export const confirmOrder = (pool, id, xeroInvoiceRef) =>
 export const markOrderPaid = (pool, id) =>
   withOrderTxn(pool, id, async (client, order) => {
     requireStatus(order, 'confirmed', 'mark paid')
+    await requirePriced(client, id, 'mark this order paid')
     await client.query(`UPDATE orders SET status = 'paid' WHERE id = $1`, [id])
   })
 

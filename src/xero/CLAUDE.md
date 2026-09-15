@@ -38,6 +38,7 @@ automatically when working in this directory.
   duplicate gate) 409s a second push. The push also fills `xero_invoice_ref`
   with Xero's InvoiceNumber, so the confirm flow's manual field fills itself;
   confirm itself is untouched and still accepts a typed ref.
+- **The push refuses an unpriced line, not just a zero total** — `unpricedLineCount(order.lines)` from `src/orders/order-states.js`, the same predicate `confirm` uses, so an order with one priced and one $0.00 line (positive total) no longer reaches Xero as a nil item. The `total_cents <= 0` clause stays for the one case the lines cannot catch, a 100% discount. **`orders.discount_pct` rides on every goods line as Xero's own `DiscountRate`** (`lineItemForOrderLine`, omitted at 0; never on the freight line, because the discount is off the goods per `src/orders/discounts.js`) — the mapping used to ignore it and a discounted order invoiced at full price. Xero rounds each line to the cent where `recomputeOrderMoney` rounds the discounted subtotal once, so the invoice may differ from `total_cents` by at most half a cent per goods line; the invoice is the legal figure and the GST block already derives rather than stores. Guarded by `test/xero-mapping.test.js` (exact fixture agrees with `discountedTotalCents`) and `test/admin-xero.test.js`.
 - **The OAuth `state` nonce is single-use**: `takePendingState` reads AND
   clears in one statement, so a replayed callback matches nothing. The
   callback route answers with REDIRECTS to the CRM (`?connected=1/0`), never

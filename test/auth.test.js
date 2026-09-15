@@ -261,21 +261,42 @@ describe('auth endpoints', () => {
   })
 
   describe('POST /auth/logout', () => {
-    it('clears the session cookie', async () => {
+    it('clears the client cookie; the signed value itself stays valid until expiry', async () => {
       const login = await app.inject({
         method: 'POST',
         url: '/auth/login',
         payload: { email: testEmail('alice'), password: 'correct horse battery' },
       })
+      const cookie = sessionCookieFrom(login)
+      expect(
+        (await app.inject({ method: 'GET', url: '/auth/me', headers: { cookie } })).statusCode
+      ).toBe(200)
+
       const logout = await app.inject({
         method: 'POST',
         url: '/auth/logout',
-        headers: { cookie: sessionCookieFrom(login) },
+        headers: { cookie },
       })
       expect(logout.statusCode).toBe(204)
       const setCookie = String(logout.headers['set-cookie'])
       expect(setCookie).toContain('atelier_session=')
       expect(setCookie).toMatch(/Expires=|Max-Age=0/)
+
+      // The browser holding the CLEARED pair is signed out.
+      const cleared = await app.inject({
+        method: 'GET',
+        url: '/auth/me',
+        headers: { cookie: sessionCookieFrom(logout) },
+      })
+      expect(cleared.statusCode).toBe(401)
+
+      // Sessions are stateless signed cookies (root CLAUDE.md, Auth): logout
+      // asks the browser to forget the value, it does not revoke it. A copy
+      // taken before logout still authenticates until the 30-day expiry. This
+      // assertion is here so that changing it means adding server-side
+      // revocation on purpose, not discovering it.
+      const replayed = await app.inject({ method: 'GET', url: '/auth/me', headers: { cookie } })
+      expect(replayed.statusCode).toBe(200)
     })
   })
 })

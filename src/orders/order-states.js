@@ -82,3 +82,19 @@ export const isDeletableOrder = (order) =>
  */
 export const holdsReservation = (order) =>
   reserves(order?.kind) && HELD_STATUSES.includes(order?.status)
+
+/**
+ * How many of an order's lines are still at $0.00.
+ *
+ * A storefront request arrives with every line at 0 — "not priced yet", not
+ * "free" — and the office prices it on the order desk. `confirm`, `mark-paid`
+ * and the Xero push all refuse while this is non-zero, from this ONE predicate,
+ * so the three cannot disagree; the CRM mirrors it to disable the buttons
+ * rather than discover the 422. pg hands `unit_price_cents` back as a number,
+ * but `Number()` keeps the string form honest too.
+ *
+ * @param {Array<{ unit_price_cents: number|string }>|null|undefined} lines
+ * @returns {number}
+ */
+export const unpricedLineCount = (lines) =>
+  (lines ?? []).filter((line) => Number(line.unit_price_cents) === 0).length

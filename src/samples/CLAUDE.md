@@ -531,3 +531,26 @@ both nullable, with `CHECK (unit_cost IS NULL OR unit_cost >= 0)`.
 - Fixture cleanup gains a step at the front: `sample_loan_reminders` → `sample_loans` → `samples`
   → `brands` → `suppliers` → `showrooms`. `loan_id` is RESTRICT, so a surviving reminder 23503s the
   loan delete inside the next `beforeEach`.
+
+## Sample requests (`sample_requests` + `sample_request_lines`, 16 Sep 2026)
+
+The storefront's "Request a sample" enquiry cart, landed. A shopper collects
+colourways and sends them as ONE request (`POST /samples/request`, public,
+honeypotted, the `/orders/request` rate limit); it lands `pending` with two
+letters sent (`sample_request_received` to the shopper,
+`backoffice_new_sample_request` to the office's one address) and the office
+moves it to `sent` or `declined` from the CRM (`/admin/sample-requests`).
+
+- **A different record from `sample_orders`** (Atelier asking a HOUSE for
+  showroom material — a showroom, no person) and from `samples` (the physical
+  register). It names a person and what they asked for, nothing more.
+- **Lines SNAPSHOT sku / design / colour / house** and `colourway_id` is SET
+  NULL: a request is a record of what someone asked for on the day, and tidying
+  the catalogue afterwards must neither block that tidy-up nor blank the request.
+  No registry probe is needed — the lines cascade with the header.
+- **Every SKU is resolved before anything is written** (422 naming
+  `lines[n].sku`), so a line nobody can act on is never stored.
+- `src/samples/sample-request-states.js` is the zero-import leaf (three states,
+  two moves, both terminal; `pending` and `declined` deletable) that the
+  registry guard and the CRM's mirror both read.
+- Nothing here touches stock; the schema test's source scan covers the module.

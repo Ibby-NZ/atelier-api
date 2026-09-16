@@ -23,6 +23,8 @@ import { adminPricingRoutes } from './routes/admin-pricing.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
 import { adminDashboardRoutes } from './routes/admin-dashboard.js'
 import { adminSampleRoutes } from './routes/admin-samples.js'
+import { adminSampleRequestRoutes } from './routes/admin-sample-requests.js'
+import { sampleRequestRoutes } from './routes/sample-requests.js'
 import { adminSampleLoanRoutes } from './routes/admin-sample-loans.js'
 import { adminEmailTemplateRoutes } from './routes/admin-email-templates.js'
 import { adminPurchaseOrderRoutes } from './routes/admin-purchase-orders.js'
@@ -129,6 +131,8 @@ export const buildApp = ({
     api.register(shippingRoutes, { pool })
     api.register(checkoutRoutes, { pool, stripe, storeBaseUrl })
     api.register(orderRoutes, { pool, mailer })
+    // The storefront's sample enquiry cart (public, honeypotted, rate-limited).
+    api.register(sampleRequestRoutes, { pool, mailer })
     // /account/* — the approved-trade client portal (dashboard, sample history,
     // invoice record, price lists). requireRole('trade') throughout: staff are
     // excluded exactly as they are from trade pricing.
@@ -188,6 +192,7 @@ export const buildApp = ({
     // is out, what is late back) plus the scanner's by-barcode lookup. Back
     // office only, same CORS allowance as every other CRM screen.
     api.register(adminSampleRoutes, { pool })
+    api.register(adminSampleRequestRoutes, { pool })
     // /admin/sample-loans — the cross-register outstanding read and the
     // reminders composed off it. Its own plugin because it is the one samples
     // surface that needs the mailer: a reminder is a staff action off a work

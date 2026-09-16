@@ -33,6 +33,34 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
+  sample_request_received: ({ request_number, lines_text }) => ({
+    subject: `${BRAND}: we've received your sample request ${request_number}`,
+    text: [
+      `Thank you for your sample request (reference ${request_number}).`,
+      '',
+      'You asked for:',
+      lines_text ?? '',
+      '',
+      'We will confirm what is available and send your cuttings out shortly.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  backoffice_new_sample_request: ({ request_number, customer_email, lines_text }) => ({
+    subject: `New sample request: ${request_number}`,
+    text: [
+      'A new sample request has come in from the website.',
+      '',
+      `Reference: ${request_number}`,
+      `Customer: ${customer_email ?? 'unknown'}`,
+      '',
+      lines_text ?? '',
+      '',
+      'Review it under Samples → Sample requests in the back office.',
+    ].join('\n'),
+  }),
+
   backoffice_new_request: ({ order_number, kind, customer_email }) => ({
     subject: `New ${kind} to verify: ${order_number}`,
     text: [

@@ -31,6 +31,7 @@
 // reach production — the server refuses to boot instead.
 
 import { DELETABLE_SAMPLE_ORDER_STATUSES } from '../samples/sample-order-states.js'
+import { DELETABLE_SAMPLE_REQUEST_STATUSES } from '../samples/sample-request-states.js'
 import { DELETABLE_RESERVE_LINE_STATUSES } from '../reserves/reserve-line-states.js'
 import { isDeletableOrder, holdsReservation } from '../orders/order-states.js'
 
@@ -106,6 +107,22 @@ const shippingRateGuard = async (client, id) => {
  * imports nothing, which is what keeps this import out of a cycle with
  * `archive.js`.
  */
+// A sample request the office has SENT is a record of cuttings that left the
+// building; only an untouched or declined one may be deleted outright. The
+// lines cascade, so nothing points at a request from outside it.
+const sampleRequestGuard = async (client, id) => {
+  const { rows } = await client.query(`SELECT status FROM sample_requests WHERE id = $1`, [id])
+  const status = rows[0]?.status
+  if (status && !DELETABLE_SAMPLE_REQUEST_STATUSES.includes(status)) {
+    return refuse(
+      409,
+      `This sample request is "${status}", so it is a record of cuttings that went out. ` +
+        'Archive it instead to hide it without losing that.'
+    )
+  }
+  return null
+}
+
 const sampleOrderGuard = async (client, id) => {
   const { rows } = await client.query(
     `SELECT status FROM sample_orders WHERE id = $1`,
@@ -677,6 +694,15 @@ export const LIFECYCLE_ENTITIES = defineEntities({
   // here is a GUARD. "Is this row still a record of something" is a question
   // about the row's own state, not about what points at it, and no foreign key
   // can express it.
+  sample_request: {
+    table: 'sample_requests',
+    idColumn: 'id',
+    label: 'sample request',
+    archivable: true,
+    guard: sampleRequestGuard,
+    probes: [],
+  },
+
   sample_order: {
     table: 'sample_orders',
     idColumn: 'id',

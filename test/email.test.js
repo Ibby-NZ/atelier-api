@@ -66,11 +66,15 @@ describe('email templates', () => {
         'trade_application_approved',
         // The back office's alert that an application is waiting for review.
         'backoffice_new_trade_application',
+        // The storefront's sample enquiry cart, sent (16 Sep 2026): the
+        // shopper's acknowledgement and the office's alert.
+        'sample_request_received',
+        'backoffice_new_sample_request',
       ])
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(15)
+    expect(TEMPLATE_NAMES).toHaveLength(17)
   })
 
   it('backoffice_new_trade_application names the business and links the CRM applicants tab', () => {

@@ -277,3 +277,52 @@ export const notifyTradeApproved = async (mailer, db, user) => {
   const { subject, text } = await renderStoredTemplate(db, TRADE_APPROVED_TEMPLATE, { name })
   await mailer.send({ to: user.email, subject, text })
 }
+
+/**
+ * The line list as the two sample-request letters print it: one line per
+ * colourway — "House · Design — Colour (SKU)" — with the shopper's note under
+ * it where there is one.
+ *
+ * @param {Array<{sku: string, product_name?: string|null, colourway_name?: string|null, brand_name?: string|null, note?: string|null}>} lines
+ * @returns {string}
+ */
+export const sampleRequestLinesText = (lines = []) =>
+  lines
+    .map((line) => {
+      const name = [line.brand_name, line.product_name].filter(Boolean).join(' · ')
+      const colour = line.colourway_name ? ` — ${line.colourway_name}` : ''
+      const head = `- ${name || line.sku}${colour} (${line.sku})`
+      return line.note ? `${head}\n    ${line.note}` : head
+    })
+    .join('\n')
+
+/**
+ * A new sample request from the storefront's enquiry cart (16 Sep 2026):
+ * acknowledge to the shopper and alert the back office, the
+ * notifyRequestReceived shape. The back office's alert goes to the ONE
+ * configured address, never a per-person list (see sendBackofficeAlert).
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ request_number: string, contact_email: string, lines: Array }} sampleRequest
+ */
+export const notifySampleRequestReceived = async (mailer, sampleRequest) => {
+  if (!mailer) {
+    return
+  }
+  const linesText = sampleRequestLinesText(sampleRequest.lines)
+  await mailer.send({
+    template: 'sample_request_received',
+    to: sampleRequest.contact_email,
+    data: { request_number: sampleRequest.request_number, lines_text: linesText },
+  })
+  await mailer.send({
+    template: 'backoffice_new_sample_request',
+    to: mailer.backofficeEmail,
+    replyTo: sampleRequest.contact_email,
+    data: {
+      request_number: sampleRequest.request_number,
+      customer_email: sampleRequest.contact_email,
+      lines_text: linesText,
+    },
+  })
+}

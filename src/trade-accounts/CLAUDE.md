@@ -26,3 +26,12 @@ Extracted from the root CLAUDE.md (root conventions still apply). Loaded automat
 - **`user_id` is now OPTIONAL on `POST /admin/trade-accounts`**: a bare create upserts the company row and grants nobody anything (the viewer CTE keys off the grant and fails closed), so the contact book can exist before any login does. A later real link upserts onto the SAME row — the GUID is unique — and contacts survive it.
 - **`GET /admin/trade-accounts/by-guid/:guid`** bridges the CRM's mirror screens (keyed by D365 GUID) to the company row; its 404 is the screen's "enable contacts" branch. Contact CRUD lives under `/admin/trade-accounts/:id/contacts(/:contactId)`, backoffice; writes fold `''` to null, scope child rows in the WRITING statement, and answer with the fresh account via `getTradeAccount`.
 - **`getTradeAccount` also serves `d365_people`**: the `legacy_contacts` rows whose `company_name` matches the snapshotted name (same match the coverage counts use — a shared name unions same-named companies, which the ambiguity flag already warns about). The projection is a WHITELIST — `full_name, job_title, email, mobile_phone, business_phone` — never the credit / do-not-contact / GDPR columns; `test/trade-account-contacts.test.js` scans the serialised body for the keys AND a fixture value.
+
+- **A trade client edits their own application from the portal** (16 Sep 2026):
+  `GET /account/trade-application` (404 when the office created the login by hand)
+  and `PATCH /account/trade-application` over `APPLICATION_EDITABLE_COLUMNS` —
+  everything on the form EXCEPT the consent block (terms, who signed, as what,
+  the signature), which is the record of what was agreed. The patch is merged
+  over the stored row and the whole thing re-run through
+  `validateTradeApplication`, so a client can no more blank their NZBN than they
+  could have on the day (422 naming the field). Both routes are `requireRole('trade')`.

@@ -285,3 +285,72 @@ export const getTradeApplication = async (pool, id) => {
   const { rows } = await pool.query(`${APPLICATION_SELECT} WHERE ta.id = $1`, [id])
   return rows[0] ? toTradeApplication(rows[0]) : null
 }
+
+// ---- the client's own application (16 Sep 2026) -----------------------------
+//
+// A trade client edits their business details from the storefront portal.
+// Everything on the form is theirs to keep current EXCEPT the consent block —
+// terms accepted, who signed, as what, and the signature itself — which is the
+// record of what was agreed on the day and is not a preference to update.
+export const APPLICATION_EDITABLE_COLUMNS = Object.freeze(
+  APPLICATION_INSERT_COLUMNS.filter(
+    (column) =>
+      ![
+        'user_id',
+        'terms_accepted',
+        'customer_full_name',
+        'signatory_name',
+        'signatory_position',
+        'signature',
+      ].includes(column)
+  )
+)
+
+/**
+ * The signed-in client's own application, or null when the office created the
+ * login by hand and no form was ever submitted.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} userId
+ */
+export const getTradeApplicationForUser = async (pool, userId) => {
+  const { rows } = await pool.query(
+    `${APPLICATION_SELECT} WHERE ta.user_id = $1 ORDER BY ta.created_at DESC, ta.id DESC LIMIT 1`,
+    [userId]
+  )
+  return rows[0] ? toTradeApplication(rows[0]) : null
+}
+
+/**
+ * Patch the client's own application from the editable whitelist. The patch is
+ * merged over the stored row and the WHOLE result validated with the same rule
+ * the form was submitted under, so a client can no more blank their NZBN than
+ * they could have left it blank on the day. Answers null when there is no
+ * application to edit; throws a 422 with field errors on a refusal.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} userId
+ * @param {object} patch
+ */
+export const updateTradeApplicationForUser = async (pool, userId, patch) => {
+  const current = await getTradeApplicationForUser(pool, userId)
+  if (!current) return null
+  const keys = APPLICATION_EDITABLE_COLUMNS.filter((column) => Object.hasOwn(patch, column))
+  if (keys.length === 0) {
+    throw Object.assign(new Error('Nothing to save.'), { statusCode: 400 })
+  }
+  const merged = { ...current }
+  for (const key of keys) {
+    merged[key] = typeof patch[key] === 'string' ? trimToNull(patch[key]) : patch[key]
+  }
+  const errors = validateTradeApplication(merged)
+  if (errors.length > 0) {
+    throw Object.assign(new Error('Validation failed.'), { statusCode: 422, errors })
+  }
+  const sets = keys.map((key, index) => `${key} = $${index + 2}`)
+  await pool.query(
+    `UPDATE trade_applications SET ${sets.join(', ')} WHERE id = $1`,
+    [current.id, ...keys.map((key) => merged[key])]
+  )
+  return getTradeApplicationForUser(pool, userId)
+}

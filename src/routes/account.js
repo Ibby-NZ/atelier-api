@@ -33,6 +33,11 @@ import {
 import { loadViewerTradeAccount } from '../trade-accounts/viewer.js'
 import { getAccountSummary } from '../account/summary.js'
 import {
+  APPLICATION_EDITABLE_COLUMNS,
+  getTradeApplicationForUser,
+  updateTradeApplicationForUser,
+} from '../users/trade-applications.js'
+import {
   listTradePriceListBrands,
   getTradePriceList,
   toTradePriceListCsv,
@@ -73,6 +78,25 @@ const brandParamsSchema = {
   },
 }
 
+// The client's own trade form, editable from the portal (16 Sep 2026). The
+// schema is structural (types + lengths); the field rules are the same
+// validator the form was submitted under, so a 422 names the field.
+const APPLICATION_TEXT = { type: ['string', 'null'], maxLength: 2000 }
+const tradeDetailsPatchSchema = {
+  type: 'object',
+  additionalProperties: false,
+  minProperties: 1,
+  properties: Object.fromEntries(
+    APPLICATION_EDITABLE_COLUMNS.map((column) => [
+      column,
+      ['mailchimp_opt_in', 'wants_showroom_visit', 'wants_account_manager', 'cash_account_acceptable'].includes(column)
+        ? { type: 'boolean' }
+        : APPLICATION_TEXT,
+    ])
+  ),
+}
+const TRADE_DETAILS_RATE_LIMIT = { max: 30, timeWindow: '15 minutes' }
+
 export const accountRoutes = async (
   app,
   { pool, mailer = null, tradePriceListsEnabled = false }
@@ -86,6 +110,46 @@ export const accountRoutes = async (
     { preHandler: trade, config: { rateLimit: READ_RATE_LIMIT } },
     async (request) =>
       getAccountSummary(pool, request.user, { priceListsEnabled: tradePriceListsEnabled })
+  )
+
+  // The client's own trade application — what they typed on the day, kept
+  // current by them. 404 when the office created the login by hand.
+  app.get(
+    '/account/trade-application',
+    { preHandler: trade, config: { rateLimit: READ_RATE_LIMIT } },
+    async (request, reply) => {
+      const application = await getTradeApplicationForUser(pool, request.user.id)
+      if (!application) {
+        reply.code(404)
+        return { error: 'Not Found', message: 'No trade application is on file for this account.' }
+      }
+      return { application }
+    }
+  )
+
+  app.patch(
+    '/account/trade-application',
+    {
+      preHandler: trade,
+      schema: { body: tradeDetailsPatchSchema },
+      config: { rateLimit: TRADE_DETAILS_RATE_LIMIT },
+    },
+    async (request, reply) => {
+      try {
+        const application = await updateTradeApplicationForUser(pool, request.user.id, request.body)
+        if (!application) {
+          reply.code(404)
+          return { error: 'Not Found', message: 'No trade application is on file for this account.' }
+        }
+        return { application }
+      } catch (error) {
+        if (error.statusCode === 422) {
+          reply.code(422)
+          return { error: 'Unprocessable Entity', message: error.message, errors: error.errors }
+        }
+        throw error
+      }
+    }
   )
 
   // Sample history: the client's own cuttings out of the D365 register.

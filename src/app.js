@@ -34,6 +34,7 @@ import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
 import { accountRoutes } from './routes/account.js'
 import { contactRoutes } from './routes/contact.js'
+import { newsletterRoutes } from './routes/newsletter.js'
 import { webhookRoutes } from './routes/webhooks.js'
 
 export const buildApp = ({
@@ -44,6 +45,9 @@ export const buildApp = ({
   storeBaseUrl = 'http://localhost:4321',
   crmBaseUrl = 'http://localhost:5273',
   mailer = null,
+  // Mailchimp audience config (src/config.js `newsletter`). null = POST
+  // /newsletter answers 503.
+  newsletter = null,
   // The Xero service (src/xero/service.js). null = not configured; the
   // /admin/xero routes answer 503, same posture as checkout without Stripe.
   xero = null,
@@ -226,6 +230,8 @@ export const buildApp = ({
     // POST /contact (public) + /admin/contact-enquiries (backoffice) — the
     // storefront contact form posts here; both need the storefront CORS scope.
     api.register(contactRoutes, { pool, mailer })
+    // POST /newsletter (public) — the footer sign-up, forwarded to Mailchimp.
+    api.register(newsletterRoutes, { newsletter })
 
     api.get('/health', async (request, reply) => {
       try {

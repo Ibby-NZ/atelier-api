@@ -148,6 +148,17 @@ export const loadConfig = (env = process.env) => {
     smtpPass: env.SMTP_PASS ?? null,
     emailFrom: env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM,
     backofficeEmail: env.BACKOFFICE_EMAIL ?? DEFAULT_BACKOFFICE_EMAIL,
+
+    // Newsletter (Mailchimp). null until all three are set; POST /newsletter
+    // answers 503 meanwhile. MAILCHIMP_SERVER is the key's `-usNN` suffix.
+    newsletter:
+      env.MAILCHIMP_API_KEY && env.MAILCHIMP_SERVER && env.MAILCHIMP_AUDIENCE_ID
+        ? {
+            apiKey: env.MAILCHIMP_API_KEY,
+            server: env.MAILCHIMP_SERVER,
+            audienceId: env.MAILCHIMP_AUDIENCE_ID,
+          }
+        : null,
     port: Number(env.PORT ?? DEFAULT_PORT),
     host: env.HOST ?? DEFAULT_HOST,
     logLevel: env.LOG_LEVEL ?? DEFAULT_LOG_LEVEL,

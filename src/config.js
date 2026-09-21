@@ -19,6 +19,8 @@ const MIN_COOKIE_SECRET_LENGTH = 32
 const DEFAULT_XERO_SCOPES =
   'openid profile email offline_access accounting.transactions accounting.contacts accounting.settings'
 const DEFAULT_XERO_SALES_ACCOUNT_CODE = '200'
+// Xero's stock "Purchases" account — where a supplier bill's lines post.
+const DEFAULT_XERO_PURCHASES_ACCOUNT_CODE = '300'
 const DEFAULT_XERO_LINE_AMOUNT_TYPES = 'Exclusive'
 const DEFAULT_XERO_INVOICE_STATUS = 'AUTHORISED'
 const DEFAULT_XERO_INVOICE_DUE_DAYS = 30
@@ -72,6 +74,7 @@ const parseXero = (env, port) => {
     redirectUri: env.XERO_REDIRECT_URI ?? `http://localhost:${port}/admin/xero/callback`,
     scopes: env.XERO_SCOPES ?? DEFAULT_XERO_SCOPES,
     salesAccountCode: env.XERO_SALES_ACCOUNT_CODE ?? DEFAULT_XERO_SALES_ACCOUNT_CODE,
+    purchasesAccountCode: env.XERO_PURCHASES_ACCOUNT_CODE ?? DEFAULT_XERO_PURCHASES_ACCOUNT_CODE,
     lineAmountTypes,
     invoiceStatus,
     invoiceDueDays,

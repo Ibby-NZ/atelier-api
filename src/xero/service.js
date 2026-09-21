@@ -27,7 +27,9 @@
 
 import crypto from 'node:crypto'
 import { getAdminOrder } from '../orders/admin-orders.js'
+import { getPurchaseOrder, payPurchaseOrder } from '../purchasing/admin-purchase-orders.js'
 import { unpricedLineCount } from '../orders/order-states.js'
+import { SOURCE_STATUSES } from '../purchasing/po-states.js'
 import {
   loadConnection,
   saveTokenSet,
@@ -38,6 +40,9 @@ import {
 } from './connection-store.js'
 import { XeroHttpError, XERO_LOGIN_BASE, validationMessages } from './xero-http.js'
 import {
+  billForPurchaseOrder,
+  billStateFrom,
+  contactForSupplier,
   contactForUser,
   invoiceForOrder,
   itemForColourway,
@@ -338,6 +343,33 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     return matchContact(body?.Contacts ?? [], { email, name })
   }
 
+  /**
+   * The Xero contact a purchase order bills against — the SUPPLIER (who
+   * invoices Atelier), remembered on suppliers.xero_contact_id. Match by PO
+   * email then exact name before creating, the same rule clients follow:
+   * every maison Atelier buys from is already in Xero as a supplier.
+   */
+  const ensureContactForSupplier = async (supplierId) => {
+    const { rows } = await pool.query(
+      `SELECT id, name, po_email, xero_contact_id FROM suppliers WHERE id = $1`,
+      [supplierId]
+    )
+    const supplier = rows[0]
+    if (!supplier) throw new XeroConflictError('The supplier this order is addressed to no longer exists.')
+    if (supplier.xero_contact_id) return supplier.xero_contact_id
+    const found = await searchContact({ email: supplier.po_email, name: supplier.name })
+    let contactId = found
+    if (!contactId) {
+      const body = await call('POST', 'Contacts', {
+        body: { Contacts: [contactForSupplier(supplier)] },
+        query: { summarizeErrors: 'true' },
+      }).catch(rethrowValidation)
+      contactId = pickContact(body)
+    }
+    await pool.query(`UPDATE suppliers SET xero_contact_id = $2 WHERE id = $1`, [supplier.id, contactId])
+    return contactId
+  }
+
   const syncContacts = async () => {
     const { rows: users } = await pool.query(
       `SELECT id, name, email FROM users
@@ -579,6 +611,101 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     return { recorded: true, amount: amountDue, payment_id: paymentId, invoice_number: invoice.InvoiceNumber ?? null }
   }
 
+  // ---- bills (purchase orders) ---------------------------------------------
+
+  /**
+   * Push a purchase order to Xero as an ACCPAY bill against its supplier.
+   * Idempotent at both ends like the invoice push: `Idempotency-Key
+   * atelier-po-<id>` at Xero, `purchase_orders.xero_bill_id` here (409 on a
+   * second push). Read with `finance: true` — a bill carries prices whoever
+   * pressed the button; the purchase order handed BACK is read with the
+   * caller's own grant, so a masked login stays masked.
+   */
+  const pushPurchaseOrderBill = async (purchaseOrderId, { finance = false } = {}) => {
+    const order = await getPurchaseOrder(pool, purchaseOrderId, { finance: true })
+    if (!order) return null // route answers 404
+    if (order.status === 'cancelled') {
+      throw new XeroConflictError('A cancelled purchase order is not billable.')
+    }
+    if (order.xero_bill_id) {
+      throw new XeroConflictError(
+        `This purchase order is already in Xero as ${order.xero_bill_ref ?? order.xero_bill_id}.`
+      )
+    }
+    if (order.unpriced_lines > 0) {
+      throw new XeroConflictError(
+        `Price every line before billing — ${order.unpriced_lines} line${order.unpriced_lines === 1 ? ' is' : 's are'} unpriced.`
+      )
+    }
+    if (!order.supplier_id) {
+      throw new XeroConflictError('This purchase order names no supplier to bill against.')
+    }
+
+    const contactId = await ensureContactForSupplier(order.supplier_id)
+    const payload = billForPurchaseOrder(order, {
+      contactId,
+      accountCode: config.purchasesAccountCode,
+      lineAmountTypes: config.lineAmountTypes,
+      status: config.invoiceStatus,
+      dueDays: config.invoiceDueDays,
+      now: () => new Date(now()),
+    })
+    const body = await call('POST', 'Invoices', {
+      body: { Invoices: [payload] },
+      query: { summarizeErrors: 'true' },
+      idempotencyKey: `atelier-po-${purchaseOrderId}`,
+    }).catch(rethrowValidation)
+    const bill = pickInvoice(body)
+    if (!bill) throw new XeroValidationError('Xero answered without a bill — nothing stored.')
+    const state = billStateFrom(body?.Invoices?.[0])
+
+    await pool.query(
+      `UPDATE purchase_orders
+          SET xero_bill_id = $2, xero_bill_ref = $3, xero_bill_status = $4, xero_bill_paid_at = $5
+        WHERE id = $1 AND xero_bill_id IS NULL`,
+      [purchaseOrderId, bill.invoiceId, bill.invoiceNumber, state.status, state.paidAt]
+    )
+    return {
+      purchase_order: await getPurchaseOrder(pool, purchaseOrderId, { finance }),
+      bill: { id: bill.invoiceId, number: bill.invoiceNumber, status: state.status },
+    }
+  }
+
+  /**
+   * Re-read the bill from Xero and mirror its Status / FullyPaidOnDate onto
+   * the purchase order. This is how "paid in Xero" reaches the CRM — a poll on
+   * demand, no webhook. Answers null for an unknown order and `{ synced: false }`
+   * for one with no bill; both are non-events, not refusals.
+   */
+  const syncPurchaseOrderBill = async (purchaseOrderId, { finance = false } = {}) => {
+    const order = await getPurchaseOrder(pool, purchaseOrderId, { finance })
+    if (!order) return null
+    if (!order.xero_bill_id) return { synced: false, reason: 'this purchase order has no bill in Xero yet.' }
+    const read = await call('GET', `Invoices/${order.xero_bill_id}`, {}).catch(rethrowValidation)
+    const bill = read?.Invoices?.[0] ?? null
+    if (!bill) throw new XeroValidationError('Xero answered without the bill — nothing stored.')
+    const state = billStateFrom(bill)
+    await pool.query(
+      `UPDATE purchase_orders
+          SET xero_bill_status = $2, xero_bill_paid_at = $3,
+              xero_bill_ref = COALESCE($4, xero_bill_ref)
+        WHERE id = $1`,
+      [purchaseOrderId, state.status, state.paidAt, bill.InvoiceNumber ?? null]
+    )
+    // Xero saying PAID moves the order's own status to `paid`, where the
+    // machine allows it (sent or closed). A draft with a bill, or an order
+    // already paid, is left where it is — the mirror columns above still say
+    // what Xero said.
+    if (state.status === 'PAID' && SOURCE_STATUSES.paid.includes(order.status)) {
+      await payPurchaseOrder(pool, purchaseOrderId)
+    }
+    return {
+      synced: true,
+      bill: { id: order.xero_bill_id, number: bill.InvoiceNumber ?? order.xero_bill_ref, status: state.status, paid_at: state.paidAt },
+      purchase_order: await getPurchaseOrder(pool, purchaseOrderId, { finance }),
+    }
+  }
+
   return {
     isConfigured: true,
     grantType: config.grantType,
@@ -590,5 +717,7 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     syncItems,
     pushOrderInvoice,
     recordOrderPayment,
+    pushPurchaseOrderBill,
+    syncPurchaseOrderBill,
   }
 }

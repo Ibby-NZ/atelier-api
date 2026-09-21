@@ -126,6 +126,72 @@ export const paymentForInvoice = ({ invoiceId, accountCode, amount, now = () => 
   Amount: amount,
 })
 
+/**
+ * A supplier as a Xero Contact payload — the house Atelier BUYS from, so it is
+ * flagged as a supplier. Matched before created, like every contact.
+ */
+export const contactForSupplier = ({ name, po_email }) => ({
+  Name: truncate(name, 255),
+  IsSupplier: true,
+  ...(po_email ? { EmailAddress: po_email } : {}),
+})
+
+/**
+ * The ACCPAY (bill) payload for an admin-shaped purchase order — read with
+ * `finance: true`, because a bill without prices is not a bill.
+ *
+ * - `unit_price` is `numeric(12,4)` in the SUPPLIER'S currency, not cents, so
+ *   it goes across as-is and `CurrencyCode` is the order's snapshot currency
+ *   (Xero converts at its own rate; the org must have that currency enabled).
+ * - Reference is OUR PO number — what the supplier quotes on their invoice.
+ * - The caller has already refused an unpriced line; a NULL here is a bug,
+ *   not a zero, so it is not defaulted.
+ */
+export const billForPurchaseOrder = (
+  purchaseOrder,
+  { contactId, accountCode, lineAmountTypes, status, dueDays, now = () => new Date() }
+) => {
+  const today = now()
+  return {
+    Type: 'ACCPAY',
+    Contact: { ContactID: contactId },
+    LineItems: purchaseOrder.lines.map((line) => ({
+      Description: [
+        `${line.product_name} — ${line.colourway_name} (${line.sku})`,
+        line.is_sample ? 'Sample' : null,
+        line.supplier_code ? `Supplier code ${line.supplier_code}` : null,
+      ]
+        .filter(Boolean)
+        .join('. '),
+      Quantity: Number(line.qty_ordered),
+      UnitAmount: Number(line.unit_price),
+      AccountCode: accountCode,
+    })),
+    Status: status,
+    LineAmountTypes: lineAmountTypes,
+    Date: isoDay(today),
+    DueDate: isoDay(addDays(today, dueDays)),
+    Reference: purchaseOrder.po_number,
+    ...(purchaseOrder.currency ? { CurrencyCode: purchaseOrder.currency } : {}),
+  }
+}
+
+/**
+ * What the sync stores off a GET /Invoices/:id answer for a bill: Xero's own
+ * Status and the day it was fully paid (null until it is).
+ */
+export const billStateFrom = (invoice) => ({
+  status: invoice?.Status ?? null,
+  paidAt: invoice?.FullyPaidOnDate ? xeroDate(invoice.FullyPaidOnDate) : null,
+})
+
+// Xero's JSON dates are `/Date(1700000000000+0000)/`; ISO also accepted.
+const xeroDate = (value) => {
+  const ms = /\/Date\((\d+)/.exec(String(value))?.[1]
+  const date = ms ? new Date(Number(ms)) : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
 export const itemForColourway = ({ sku, product_name, colourway_name }) => ({
   Code: truncate(sku, 30),
   Name: truncate(`${product_name} — ${colourway_name}`, 50),

@@ -46,6 +46,8 @@ const createBodySchema = {
     name: { type: ['string', 'null'], maxLength: 200 },
     role: { type: 'string', enum: USER_ROLES },
     password: { type: 'string', minLength: MIN_PASSWORD_LENGTH, maxLength: 200 },
+    // Grant the new login to a client company in the same transaction.
+    trade_account_id: { type: 'integer', minimum: 1 },
   },
 }
 
@@ -145,6 +147,7 @@ export const adminUsersRoutes = async (
         name: request.body.name ?? null,
         role: request.body.role,
         password: request.body.password ?? DEFAULT_TEMP_PASSWORD,
+        tradeAccountId: request.body.trade_account_id ?? null,
       })
       reply.code(201)
       return { user, temp_password: request.body.password ? undefined : DEFAULT_TEMP_PASSWORD }

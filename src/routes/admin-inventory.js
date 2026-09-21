@@ -15,6 +15,7 @@ import {
   updateInventory,
   adjustInventory,
 } from '../inventory/admin-inventory.js'
+import { DEFAULT_PAGE, DEFAULT_LIMIT, MAX_LIMIT } from '../catalogue/admin-products.js'
 
 // :colourwayId is coerced to an integer by Fastify; a non-numeric id is a 400.
 const colourwayIdParamsSchema = {
@@ -25,11 +26,16 @@ const colourwayIdParamsSchema = {
   },
 }
 
+// Pages: inventory is one row per colourway, the largest table in the
+// catalogue, and the CRM reads it a screen at a time. Same window as the
+// colourway browse it mirrors.
 const listQuerySchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
     q: { type: 'string' },
+    page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
+    limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
   },
 }
 
@@ -79,9 +85,11 @@ export const adminInventoryRoutes = async (app, { pool }) => {
   app.get(
     '/admin/inventory',
     { preHandler: backoffice, schema: { querystring: listQuerySchema } },
-    async (request) => ({
-      inventory: await listInventory(pool, { q: request.query.q }),
-    })
+    async (request) => {
+      const { q, page, limit } = request.query
+      const { items, total } = await listInventory(pool, { q, page, limit })
+      return { inventory: items, meta: { total, page, limit } }
+    }
   )
 
   app.post(

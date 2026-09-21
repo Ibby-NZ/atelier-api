@@ -417,7 +417,7 @@ describe('notifications', () => {
       replyTo: 'alex@studio.example',
       subject: 'New trade application to review: Studio Interiors Ltd',
     })
-    expect(transport.sent[0].text).toContain('http://crm.example/#/clients/applicants')
+    expect(transport.sent[0].text).toContain('http://crm.example/#/clients/accounts?pending=true')
   })
 
   it('notifyBackofficeNewOrder alerts the single configured address only', async () => {

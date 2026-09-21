@@ -18,7 +18,7 @@
 //     `order_lines.colourway_id` — is a backstop, not the defence.
 
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
-import { CATEGORIES } from '../../scripts/lib/price-template.js'
+import { listCategories, createCategory } from '../catalogue/categories.js'
 import {
   listAdminBrands,
   getAdminBrand,
@@ -36,6 +36,7 @@ import {
 } from '../catalogue/admin-brands.js'
 import {
   listAdminProducts,
+  countAdminProductsByCategory,
   getAdminProduct,
   createProduct,
   updateProduct,
@@ -76,10 +77,13 @@ const slugProp = { type: 'string', minLength: 1, maxLength: 200 }
 // removeAdditional STRIPS an unlisted body key rather than 400ing it, so a
 // column added to a whitelist alone would answer 200 having written nothing.
 const reportingLabelProp = { type: ['string', 'null'], maxLength: 100 }
-// `enum` must carry null as well as the nine words: Ajv checks the enum against
-// the value, so a `type` that admits null and an enum that does not is a schema
-// that rejects every clear.
-const categoryProp = { type: ['string', 'null'], enum: [...CATEGORIES, null] }
+// NOT an enum, and that is the change migration 1791379200000 makes: the
+// vocabulary is `product_categories`, a table the office adds to, and an Ajv
+// enum is fixed at boot — a category added at 10am would be refused by a schema
+// compiled at 9. The value is checked by the column's foreign key instead, which
+// cannot go stale, and `rethrowConflict` turns its 23503 into a 422 naming the
+// Categories screen. Nullable because uncategorised is a real state.
+const categoryProp = { type: ['string', 'null'], maxLength: 200 }
 
 // Spec + pricing fields shared by product create and patch.
 const productDetailProps = {
@@ -87,8 +91,8 @@ const productDetailProps = {
   collection_id: { type: ['integer', 'null'], minimum: 1 },
   // Free text (the office writes `RAMM, SON & CROCKER`), never a slug or an FK.
   product_range: reportingLabelProp,
-  // The merchandising axis, enumerated from the stored vocabulary rather than
-  // retyped (the posture src/routes/admin-price-lists.js takes). Nullable so a
+  // The merchandising axis, checked against `product_categories` by the column's
+  // foreign key rather than by a schema enum (see categoryProp). Nullable so a
   // PATCH can put a design back to uncategorised — which is a real state, not a
   // gap: NULL means nobody has looked at the row, and `misc` means somebody did
   // and the vocabulary had no word for it.
@@ -128,6 +132,26 @@ const brandQuerySchema = {
   properties: {
     brand_id: { type: 'integer', minimum: 1 },
     include_archived: { type: 'boolean', default: false },
+  },
+}
+
+// The product list pages and filters like the colourway one below: the CRM
+// reads it a screen at a time. A price band arrives as a cents range (or
+// `unpriced` for "No price"); the CRM owns the band arithmetic.
+const productQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    brand_id: { type: 'integer', minimum: 1 },
+    include_archived: { type: 'boolean', default: false },
+    q: { type: 'string', maxLength: 200 },
+    category: { type: 'string', maxLength: 100 },
+    uncategorised: { type: 'boolean', default: false },
+    price_min_cents: { type: 'integer', minimum: 0 },
+    price_max_cents: { type: 'integer', minimum: 0 },
+    unpriced: { type: 'boolean', default: false },
+    page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
+    limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
   },
 }
 
@@ -311,8 +335,65 @@ const colourwayPatchSchema = {
   properties: colourwayProps,
 }
 
+// A category is created from its label alone. The slug is derived and immutable,
+// the same posture as a brand's or a collection's: it is the value stored on
+// three tables, so it can never be a thing staff retype.
+const categoryCreateSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['label'],
+  properties: {
+    label: { type: 'string', minLength: 1, maxLength: 60 },
+  },
+}
+
+// The category key is its slug, not an integer — the one DELETE in this file
+// whose params are text.
+const categoryParamsSchema = {
+  type: 'object',
+  required: ['slug'],
+  properties: {
+    slug: slugProp,
+  },
+}
+
 export const adminCatalogueRoutes = async (app, { pool }) => {
   const backoffice = app.guards.requireRole('backoffice')
+
+  // The merchandising vocabulary, which the office now maintains itself. Read
+  // by every screen that offers a category, so it is a plain list with the
+  // product count beside each row — the count is what says in advance whether
+  // the Delete below will be accepted.
+  app.get('/admin/categories', { preHandler: backoffice }, async () => ({
+    categories: await listCategories(pool),
+  }))
+
+  app.post(
+    '/admin/categories',
+    { preHandler: backoffice, schema: { body: categoryCreateSchema } },
+    async (request, reply) => {
+      const category = await createCategory(pool, request.body)
+      reply.code(201)
+      return { category }
+    }
+  )
+
+  // Hard delete, through the same registry every other DELETE here uses. All
+  // three referencing columns are ON DELETE RESTRICT, so the database would
+  // refuse anyway; the probes are what turn that into a 409 naming what still
+  // carries the category and how many of them there are. There is no archive
+  // arm — a category is a word, not a record with a history.
+  app.delete(
+    '/admin/categories/:slug',
+    { preHandler: backoffice, schema: { params: categoryParamsSchema } },
+    async (request, reply) =>
+      replyDelete(
+        reply,
+        await deleteOrExplain(pool, 'category', request.params.slug, {
+          user: request.user,
+        })
+      )
+  )
 
   app.get(
     '/admin/brands',
@@ -426,9 +507,35 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
 
   app.get(
     '/admin/products',
+    { preHandler: backoffice, schema: { querystring: productQuerySchema } },
+    async (request) => {
+      const { page, limit } = request.query
+      const { items, total, maxPriceCents } = await listAdminProducts(pool, {
+        brandId: request.query.brand_id,
+        includeArchived: request.query.include_archived,
+        q: request.query.q,
+        category: request.query.category,
+        uncategorised: request.query.uncategorised,
+        priceMinCents: request.query.price_min_cents,
+        priceMaxCents: request.query.price_max_cents,
+        unpriced: request.query.unpriced,
+        page,
+        limit,
+      })
+      return {
+        products: items,
+        meta: { total, page, limit, max_price_cents: maxPriceCents },
+      }
+    }
+  )
+
+  // Static, so it must be declared before the parametric read below wins the
+  // route. The Categories screen's rows: one count per category.
+  app.get(
+    '/admin/products/categories',
     { preHandler: backoffice, schema: { querystring: brandQuerySchema } },
     async (request) => ({
-      products: await listAdminProducts(pool, {
+      categories: await countAdminProductsByCategory(pool, {
         brandId: request.query.brand_id,
         includeArchived: request.query.include_archived,
       }),

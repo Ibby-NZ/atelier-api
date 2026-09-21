@@ -103,14 +103,14 @@ describe('/admin/contacts and the director-only account details', () => {
     expect((await app.inject({ method: 'GET', url: '/admin/contacts' })).statusCode).toBe(401)
   })
 
-  it('lets a director edit company details and keeps them from backoffice', async () => {
+  // Backoffice edits every detail (22 Sep 2026): the director gate on the
+  // detail columns went with the CRM's Clients tab — the order desk fixes what
+  // it takes down.
+  it('lets backoffice edit company details, the account manager alongside', async () => {
     const details = { account_number: ' 01234 ', customer_type: 'Trade', email: 'Hello@Studio.test', city: 'Auckland', payment_terms: '20th of the month' }
-    const refused = await as(staffCookie)('PATCH', `/admin/trade-accounts/${accountId}`, details)
-    expect(refused.statusCode).toBe(403)
-    // The account-manager block is still the office's.
     expect((await as(staffCookie)('PATCH', `/admin/trade-accounts/${accountId}`, { account_manager_name: 'Charlotte' })).statusCode).toBe(200)
 
-    const ok = await as(directorCookie)('PATCH', `/admin/trade-accounts/${accountId}`, details)
+    const ok = await as(staffCookie)('PATCH', `/admin/trade-accounts/${accountId}`, details)
     expect(ok.statusCode).toBe(200)
     expect(ok.json().trade_account).toMatchObject({ account_number: '01234', customer_type: 'Trade', email: 'hello@studio.test', city: 'Auckland', payment_terms: '20th of the month', account_manager: { name: 'Charlotte' } })
     // A blank clears.

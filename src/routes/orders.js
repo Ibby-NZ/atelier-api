@@ -5,7 +5,6 @@ import {
 } from '../orders/order-request.js'
 import {
   listUserOrders,
-  lookupOrder,
   DEFAULT_PAGE,
   DEFAULT_LIMIT,
   MAX_LIMIT,
@@ -20,17 +19,6 @@ const ordersMineQuerySchema = {
   properties: {
     page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
     limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
-  },
-}
-
-// Guest lookup requires both the order number and the matching email. Schema is
-// structural only (both required, non-empty); a mismatch is a 404, not a 400.
-const orderLookupQuerySchema = {
-  type: 'object',
-  required: ['order_number', 'email'],
-  properties: {
-    order_number: { type: 'string', minLength: 1, maxLength: 100 },
-    email: { type: 'string', minLength: 1, maxLength: 254 },
   },
 }
 
@@ -92,12 +80,6 @@ const orderRequestBodySchema = {
 // same shape of abuse POST /contact is limited for — so it carries the same
 // number.
 const ORDER_REQUEST_RATE_LIMIT = Object.freeze({ max: 10, timeWindow: 15 * 60 * 1000 })
-
-// Unauthenticated lookup on order_number AND email. The pair is the only thing
-// standing between a guessed order number and someone else's order, so it must
-// not be brute-forceable. Roomier than the write limits because a guest
-// legitimately re-checks an order, and a wrong guess is cheap to serve.
-const ORDER_LOOKUP_RATE_LIMIT = Object.freeze({ max: 30, timeWindow: 15 * 60 * 1000 })
 
 export const orderRoutes = async (app, { pool, mailer = null }) => {
   // Public: guests may request an order. When logged in, the request is tied to
@@ -166,24 +148,4 @@ export const orderRoutes = async (app, { pool, mailer = null }) => {
     }
   )
 
-  // Public guest lookup: a single order matched by order number AND email.
-  // 404 when either half is wrong — never reveal an order without both keys.
-  app.get(
-    '/orders/lookup',
-    {
-      schema: { querystring: orderLookupQuerySchema },
-      config: { rateLimit: ORDER_LOOKUP_RATE_LIMIT },
-    },
-    async (request, reply) => {
-      const order = await lookupOrder(pool, {
-        orderNumber: request.query.order_number,
-        email: request.query.email,
-      })
-      if (!order) {
-        reply.code(404)
-        return { error: 'Not Found', message: 'No matching order found.' }
-      }
-      return { order }
-    }
-  )
 }

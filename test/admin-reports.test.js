@@ -279,14 +279,19 @@ describe('W5-US-003 — the report filter vocabularies against the schema', () =
     expect(await checkValues(pool, 'orders_status_check')).toEqual([...ORDER_STATUSES].sort())
   })
 
-  // PRODUCT_CATEGORIES is derived from the pipeline registry rather than
-  // retyped, so what this proves is that the REGISTRY still describes the
-  // database — the same drift the other three assertions catch for their
-  // boundary copies.
-  it('accepts exactly the categories products_category_check allows', async () => {
-    expect(await checkValues(pool, 'products_category_check')).toEqual(
-      [...PRODUCT_CATEGORIES].sort()
+  // `products_category_check` is gone: migration 1791379200000 replaced it with
+  // a foreign key onto `product_categories`, so the vocabulary is rows the
+  // office maintains rather than a constraint definition. What is still worth
+  // proving is that the seeded nine ARE those rows — the reporting registry
+  // describes the database it reports on. Everything the table itself owes
+  // (three columns pointing at it, a delete refused while in use) is
+  // test/categories.test.js.
+  it('holds exactly the seeded categories the reporting registry names', async () => {
+    const { rows } = await pool.query(
+      `SELECT slug FROM product_categories WHERE slug = ANY($1::text[]) ORDER BY slug`,
+      [[...PRODUCT_CATEGORIES]]
     )
+    expect(rows.map((row) => row.slug)).toEqual([...PRODUCT_CATEGORIES].sort())
   })
 })
 
@@ -935,10 +940,15 @@ describe('W5-US-005 — product performance by house and design', () => {
       expect(rows.map((row) => row.product_name)).toEqual([`${PREFIX} Design`])
     })
 
-    it('refuses a value outside the vocabulary with a 400 naming the filter', async () => {
+    // Was a 400 while the vocabulary was a CHECK the filter could be pinned to.
+    // It is a table the office adds to now (migration 1791379200000), so a
+    // category this build has never heard of is reported on rather than
+    // refused — empty, which is what a category with no sales looks like.
+    it('reports nothing for a category no product carries', async () => {
       const response = await get('&category=fabrics')
 
-      expect(response.statusCode).toBe(400)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().rows).toEqual([])
     })
 
     describe('grouped by category', () => {

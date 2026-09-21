@@ -28,6 +28,7 @@ import {
   SUPPLIER_ALIAS_SOURCES,
   SUPPLIER_FILL_COLUMNS,
   D365_SUPPLIER_ALIASES,
+  fillColumnType,
   planSupplierBackfill,
 } from './backfill-plan.js'
 import { planSupplierRollup } from './supplier-rollup.js'
@@ -43,7 +44,7 @@ const CURRENT = SUPPLIER_FILL_COLUMNS.map((c) => `suppliers.${c}`)
 // unchanged conflicting row returns nothing at all and is counted as neither.
 const UPSERT_SUPPLIERS = `
   INSERT INTO suppliers (name, slug, ${SUPPLIER_FILL_COLUMNS.join(', ')})
-  SELECT * FROM unnest(${['text', 'text', ...SUPPLIER_FILL_COLUMNS.map(() => 'text')]
+  SELECT * FROM unnest(${['text', 'text', ...SUPPLIER_FILL_COLUMNS.map(fillColumnType)]
     .map((type, i) => `$${i + 1}::${type}[]`)
     .join(', ')})
   ON CONFLICT (name) DO UPDATE SET

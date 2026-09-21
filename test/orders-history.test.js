@@ -166,7 +166,10 @@ describe('order history + guest lookup', () => {
     expect(res.statusCode).toBe(401)
   })
 
-  it('GET /orders/lookup returns a guest order when number and email match', async () => {
+  // The public order_number + email lookup was removed: anyone who knew both
+  // halves could read another client's order. Even a correct pair must now
+  // find no route.
+  it('GET /orders/lookup no longer exists (404 even with a matching pair)', async () => {
     await insertOrder(pool, colourwayId, {
       guestEmail: 'guest@example.com',
       orderNumber: `${PREFIX}-G1`,
@@ -175,49 +178,7 @@ describe('order history + guest lookup', () => {
       method: 'GET',
       url: `/orders/lookup?order_number=${PREFIX}-G1&email=guest@example.com`,
     })
-    expect(res.statusCode).toBe(200)
-    const { order } = res.json()
-    expect(order.order_number).toBe(`${PREFIX}-G1`)
-    expect(order.lines).toHaveLength(1)
-  })
-
-  it('GET /orders/lookup matches the placing user\'s email (case-insensitive)', async () => {
-    const userA = await registerUser(app, `${PREFIX}-a@example.com`)
-    await insertOrder(pool, colourwayId, { userId: userA.id, orderNumber: `${PREFIX}-A1` })
-
-    const res = await app.inject({
-      method: 'GET',
-      url: `/orders/lookup?order_number=${PREFIX}-A1&email=${PREFIX}-A@EXAMPLE.COM`,
-    })
-    expect(res.statusCode).toBe(200)
-    expect(res.json().order.order_number).toBe(`${PREFIX}-A1`)
-  })
-
-  it('GET /orders/lookup returns 404 when the email does not match', async () => {
-    await insertOrder(pool, colourwayId, {
-      guestEmail: 'guest@example.com',
-      orderNumber: `${PREFIX}-G1`,
-    })
-    const res = await app.inject({
-      method: 'GET',
-      url: `/orders/lookup?order_number=${PREFIX}-G1&email=someone-else@example.com`,
-    })
     expect(res.statusCode).toBe(404)
-  })
-
-  it('GET /orders/lookup returns 404 for an unknown order number', async () => {
-    const res = await app.inject({
-      method: 'GET',
-      url: `/orders/lookup?order_number=${PREFIX}-NOPE&email=guest@example.com`,
-    })
-    expect(res.statusCode).toBe(404)
-  })
-
-  it('GET /orders/lookup requires both params (400)', async () => {
-    const res = await app.inject({
-      method: 'GET',
-      url: `/orders/lookup?order_number=${PREFIX}-G1`,
-    })
-    expect(res.statusCode).toBe(400)
+    expect(res.json().order).toBeUndefined()
   })
 })

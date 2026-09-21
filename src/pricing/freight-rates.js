@@ -25,12 +25,17 @@
 // preview today: every resolve is a miss, and that is the mechanism working.
 
 import { CATEGORIES, UNITS } from '../../scripts/lib/price-template.js'
+import { categorySlugs } from '../catalogue/categories.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
 
 /** Boundary copies of the column CHECKs, so a typo is a 422 and not a 500. */
 export const FREIGHT_BASES = Object.freeze(['dollar', 'percent'])
+// The SEEDED nine. `supplier_freight_rates.category` references
+// `product_categories` since migration 1791379200000, so the live vocabulary is
+// that table and `createFreightRate` reads it; this is the fallback for a
+// validation call made without one.
 export const FREIGHT_CATEGORIES = Object.freeze([...CATEGORIES])
 export const FREIGHT_UNITS = Object.freeze([...UNITS])
 
@@ -191,9 +196,12 @@ export const listFreightRates = async (
  * form start disagreeing.
  *
  * @param {object} input
+ * @param {Set<string>|readonly string[]} [vocabulary] the categories a rate may
+ *   be filed under; defaults to the seeded nine for a call with no database.
  * @returns {string|null} the first problem, or null
  */
-export const validateFreightRate = (input = {}) => {
+export const validateFreightRate = (input = {}, vocabulary = FREIGHT_CATEGORIES) => {
+  const categories = [...vocabulary]
   const scope = scopeOf(input)
   if (!scope) return 'State either a supplier or a range, and not both.'
 
@@ -219,8 +227,8 @@ export const validateFreightRate = (input = {}) => {
     return 'A percent rate is per nothing — leave the unit blank.'
   }
 
-  if (input.category != null && !FREIGHT_CATEGORIES.includes(input.category)) {
-    return `"${input.category}" is not a category. Use one of: ${FREIGHT_CATEGORIES.join(', ')}, or leave it blank for every category.`
+  if (input.category != null && !categories.includes(input.category)) {
+    return `"${input.category}" is not a category. Use one of: ${categories.join(', ')}, or leave it blank for every category.`
   }
 
   if (!ISO_DAY.test(input.effective_from ?? '')) {
@@ -239,7 +247,9 @@ export const validateFreightRate = (input = {}) => {
  * @returns {Promise<object>}
  */
 export const createFreightRate = async (db, input) => {
-  const problem = validateFreightRate(input)
+  // The vocabulary is read per write rather than cached: the office adds a
+  // category on one screen and files a rate under it on the next.
+  const problem = validateFreightRate(input, await categorySlugs(db))
   if (problem) throw httpError(422, problem)
   const scope = scopeOf(input)
 
@@ -269,7 +279,16 @@ export const createFreightRate = async (db, input) => {
           'append-only — date the correction from the day it takes effect.'
       )
     }
+    // Two foreign keys can raise this now, so the message is chosen by which
+    // one did: before migration 1791379200000 `supplier_id` was the only one and
+    // an unknown category was a CHECK violation instead.
     if (error?.code === '23503') {
+      if (error.constraint === 'supplier_freight_rates_category_fkey') {
+        throw httpError(
+          422,
+          `"${input.category}" is not a category. Add it on Categories first.`
+        )
+      }
       throw httpError(422, `No supplier with id ${scope.supplierId}.`)
     }
     throw error

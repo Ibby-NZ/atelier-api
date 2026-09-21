@@ -33,6 +33,7 @@ import {
   createPurchaseOrder,
   updatePurchaseOrder,
   sendPurchaseOrder,
+  payPurchaseOrder,
   closePurchaseOrder,
   cancelPurchaseOrder,
   allocatePurchaseOrderLine,
@@ -214,7 +215,7 @@ const receiptBodySchema = {
   },
 }
 
-export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null }) => {
+export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero = null }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
   // Whether this login may see cost figures. Resolved per request from the row
@@ -313,10 +314,11 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null }) => 
     })
   )
 
-  // The three moves, and the three letters that hang off them. `send` writes to
-  // the house and copies the office; `close`/`cancel` write to the house alone
-  // (src/email/purchasing-notifications.js). A `draft` deliberately mails
-  // nobody — nothing has left the building until Send.
+  // The four moves, and the letters that hang off three of them. `send` writes
+  // to the house and copies the office; `close`/`cancel` write to the house
+  // alone (src/email/purchasing-notifications.js). `pay` mails nobody — it
+  // records a fact about the bank, not a change the house needs telling. A
+  // `draft` deliberately mails nobody — nothing has left the building until Send.
   //
   // **The notification re-reads the order with `finance: true`, whatever the
   // staffer may see.** A purchase order without prices is not a purchase order,
@@ -327,6 +329,7 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null }) => 
   // nothing the caller receives changes.
   for (const [verb, move, notify] of [
     ['send', sendPurchaseOrder, notifyPurchaseOrderSent],
+    ['pay', payPurchaseOrder, null],
     ['close', closePurchaseOrder, (m, po) => notifyPurchaseOrderEnded(m, po, 'closed')],
     ['cancel', cancelPurchaseOrder, (m, po) => notifyPurchaseOrderEnded(m, po, 'cancelled')],
   ]) {
@@ -334,13 +337,29 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null }) => 
       `/admin/purchase-orders/:id/${verb}`,
       { preHandler: backoffice, schema: { params: idParamsSchema } },
       async (request) => {
-        const purchase_order = await move(pool, request.params.id, {
-          finance: await financeFor(request),
-        })
-        if (mailer) {
+        const finance = await financeFor(request)
+        let purchase_order = await move(pool, request.params.id, { finance })
+        // Sending is the commitment, so the bill is raised in Xero here. The
+        // transition NEVER fails because of Xero (the `mark-paid` posture):
+        // a refusal — unpriced lines, Xero down, not connected — comes back as
+        // `xero_bill.reason` for the CRM to print, and the Xero screen's push
+        // button is the retry.
+        let xero_bill = null
+        if (verb === 'send' && xero) {
+          xero_bill = await xero
+            .pushPurchaseOrderBill(request.params.id, { finance })
+            .then((result) => {
+              purchase_order = result.purchase_order
+              return { raised: true, ...result.bill }
+            })
+            .catch((error) => ({ raised: false, reason: error.message }))
+        }
+        // The letter goes after the Xero push so the re-read carries the bill
+        // ref if one was raised; the letter itself is unchanged either way.
+        if (mailer && notify) {
           await notify(mailer, await getPurchaseOrder(pool, request.params.id, { finance: true }))
         }
-        return { purchase_order }
+        return { purchase_order, ...(xero_bill ? { xero_bill } : {}) }
       }
     )
   }

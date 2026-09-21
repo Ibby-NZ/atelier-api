@@ -276,16 +276,26 @@ describe('report filters', () => {
       // category and NOT a product_type, and each filter refuses the other's
       // vocabulary — the office's most likely crossover typo is a 400 naming
       // the filter, never a report matching nothing.
-      it('keeps category and product_type as two vocabularies, each refusing the other', () => {
-        // The stored vocabulary, read from its one definition — the point of
-        // the assertion is that the report filter uses the SAME set the column
-        // does, which a copy of the words here would stop proving.
+      it('keeps product_type closed and lets category be any slug the office added', () => {
+        // The seeded vocabulary, read from its one definition.
         expect([...PRODUCT_CATEGORIES]).toEqual([...CATEGORIES])
 
-        const error = statusOf(() => parseReportFilters({ category: 'finished_good' }))
+        // product_type is still a closed vocabulary — it decides an inventory
+        // unit, so an unknown one is a mistake worth a 400.
+        const error = statusOf(() => parseReportFilters({ product_type: 'wallpaper' }))
         expect(error.statusCode).toBe(400)
-        expect(error.message).toContain('"category"')
-        expect(error.message).toContain('wallpaper')
+        expect(error.message).toContain('"product_type"')
+
+        // `category` is NOT, since migration 1791379200000 made the vocabulary a
+        // table the office adds to: pinning the filter to the seeded nine would
+        // 400 a report on a category created this morning. Any slug parses; an
+        // unknown one simply reports nothing, the same as an unused category.
+        expect(parseReportFilters({ category: 'area-rug' })).toMatchObject({
+          category: 'area-rug',
+        })
+        const shapeError = statusOf(() => parseReportFilters({ category: 'NOT A SLUG' }))
+        expect(shapeError.statusCode).toBe(400)
+        expect(shapeError.message).toContain('"category"')
       })
     })
 

@@ -23,7 +23,7 @@ import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
 import { LEGACY_ENTITIES } from '../src/legacy/legacy-read.js'
 import { CSV_HEADER, toTradePriceListCsv } from '../src/pricing/trade-price-lists.js'
-import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
+import { cleanupTradeApplications, sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'exposure-test'
@@ -66,6 +66,7 @@ describe('cost-side exposure', () => {
       log: () => {},
     })
     await pool.query(`DELETE FROM trade_applications WHERE business_name LIKE $1`, [`${PREFIX}%`])
+    await cleanupTradeApplications(pool, `${PREFIX}-%`)
     await pool.query(`DELETE FROM users WHERE email LIKE $1`, [`${PREFIX}-%`])
 
     // Price lists ON, so the strongest version of the portal is under test.
@@ -100,6 +101,7 @@ describe('cost-side exposure', () => {
 
   afterAll(async () => {
     await pool.query(`DELETE FROM trade_applications WHERE business_name LIKE $1`, [`${PREFIX}%`])
+    await cleanupTradeApplications(pool, `${PREFIX}-%`)
     await pool.query(`DELETE FROM users WHERE email LIKE $1`, [`${PREFIX}-%`])
     await app?.close()
     await pool?.end()

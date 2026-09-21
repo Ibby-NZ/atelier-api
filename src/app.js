@@ -214,7 +214,7 @@ export const buildApp = ({
     // — the buying desk: the day's confirmed demand grouped by house, sent,
     // receipted against and closed. Back office only, and every cost figure on
     // it is finance-gated on top of that guard.
-    api.register(adminPurchaseOrderRoutes, { pool, mailer })
+    api.register(adminPurchaseOrderRoutes, { pool, mailer, xero })
     // /admin/supplier-invoices — one house's bill across a 2-4 week cycle, and
     // which purchase orders it covers. Back office only, every money figure on
     // it finance-gated, and the variance between the bill and what those orders

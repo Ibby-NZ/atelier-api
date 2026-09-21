@@ -20,7 +20,7 @@
 // with Number() before it leaves this module so callers never do string maths.
 
 import { buildUpdate } from '../catalogue/admin-brands.js'
-import { unitFor } from '../catalogue/admin-products.js'
+import { unitFor, pageWindow } from '../catalogue/admin-products.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -35,6 +35,12 @@ const escapeLike = (value) => value.replace(/[\\%_]/g, (char) => `\\${char}`)
 
 // Joined stock view: the inventory row plus the human-readable identifiers staff
 // need to recognise what they are editing (SKU, colourway, product, house).
+// The FROM stands alone so the list's count query can share it.
+const INVENTORY_FROM = `FROM inventory i
+         JOIN colourways c ON c.id = i.colourway_id
+         JOIN products p ON p.id = c.product_id
+         JOIN brands b ON b.id = p.brand_id`
+
 const INVENTORY_SELECT = `SELECT i.colourway_id,
               i.qty_available,
               i.qty_reserved,
@@ -43,10 +49,7 @@ const INVENTORY_SELECT = `SELECT i.colourway_id,
               c.name AS colourway_name,
               p.name AS product_name,
               b.name AS brand_name
-         FROM inventory i
-         JOIN colourways c ON c.id = i.colourway_id
-         JOIN products p ON p.id = c.product_id
-         JOIN brands b ON b.id = p.brand_id`
+         ${INVENTORY_FROM}`
 
 // Immutable public shape. Quantities are coerced out of pg's numeric strings so
 // the caller can do arithmetic and equality checks without surprises.
@@ -77,15 +80,18 @@ const assertQuantities = (input) => {
 }
 
 /**
- * Every inventory row, joined to its colourway/product/brand for display and
- * ordered house -> product -> colourway. An optional free-text `q` narrows the
- * list by SKU, product name or colourway name (ILIKE, wildcards escaped).
+ * A page of inventory rows, joined to colourway/product/brand for display and
+ * ordered house -> product -> colourway -> id (stable page to page). An
+ * optional free-text `q` narrows the list by SKU, product name or colourway
+ * name (ILIKE, wildcards escaped). Returns { items, total }; the route builds
+ * the meta envelope.
  *
  * @param {import('pg').Pool} pool
- * @param {{ q?: string }} [filter]
- * @returns {Promise<object[]>}
+ * @param {{ q?: string, page?: number, limit?: number }} [filter]
+ * @returns {Promise<{ items: object[], total: number }>}
  */
-export const listInventory = async (pool, { q } = {}) => {
+export const listInventory = async (pool, { q, page, limit } = {}) => {
+  const window = pageWindow({ page, limit })
   const params = []
   let where = ''
   const term = typeof q === 'string' ? q.trim() : ''
@@ -98,12 +104,17 @@ export const listInventory = async (pool, { q } = {}) => {
         OR c.name ILIKE $${i} ESCAPE '\\'
       )`
   }
-  const { rows } = await pool.query(
-    `${INVENTORY_SELECT} ${where}
-      ORDER BY b.name ASC, p.name ASC, c.name ASC, i.colourway_id ASC`,
+  const countResult = await pool.query(
+    `SELECT count(*)::int AS total ${INVENTORY_FROM} ${where}`,
     params
   )
-  return rows.map(toInventory)
+  const { rows } = await pool.query(
+    `${INVENTORY_SELECT} ${where}
+      ORDER BY b.name ASC, p.name ASC, c.name ASC, i.colourway_id ASC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, window.limit, window.offset]
+  )
+  return { items: rows.map(toInventory), total: countResult.rows[0].total }
 }
 
 /**

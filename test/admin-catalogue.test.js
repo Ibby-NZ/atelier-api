@@ -1071,6 +1071,128 @@ describe('back-office catalogue admin', () => {
       )
       expect(response.json().products.map((row) => row.name)).toEqual(['Twill Two'])
     })
+
+    // The CRM pages this list now: `meta.total` is the filtered total it
+    // divides by to draw the pager, and the pages partition the result set.
+    it('pages in a stable order with a filtered total', async () => {
+      const brand = await createBrandFixture('Paged House')
+      await createProductFixture(brand.id, { name: 'Alpha' })
+      await createProductFixture(brand.id, { name: 'Bravo' })
+      await createProductFixture(brand.id, { name: 'Charlie' })
+
+      const first = await inject(
+        'GET',
+        `/admin/products?brand_id=${brand.id}&limit=2`,
+        backofficeCookie
+      )
+      expect(first.json().meta).toMatchObject({ total: 3, page: 1, limit: 2 })
+      expect(first.json().products.map((row) => row.name)).toEqual(['Alpha', 'Bravo'])
+
+      const second = await inject(
+        'GET',
+        `/admin/products?brand_id=${brand.id}&limit=2&page=2`,
+        backofficeCookie
+      )
+      expect(second.json().meta).toMatchObject({ total: 3, page: 2, limit: 2 })
+      expect(second.json().products.map((row) => row.name)).toEqual(['Charlie'])
+    })
+
+    it('rejects a limit above the maximum with 400', async () => {
+      const response = await inject('GET', '/admin/products?limit=500', backofficeCookie)
+      expect(response.statusCode).toBe(400)
+    })
+
+    it('searches by name and narrows by category', async () => {
+      const brand = await createBrandFixture('Search House')
+      await createProductFixture(brand.id, { name: 'Atlas Velvet', category: 'wallpaper' })
+      await createProductFixture(brand.id, { name: 'Atlas Linen', category: 'fabric' })
+      await createProductFixture(brand.id, { name: 'Bora Linen', category: 'fabric' })
+
+      const byName = await inject(
+        'GET',
+        `/admin/products?brand_id=${brand.id}&q=atlas`,
+        backofficeCookie
+      )
+      expect(byName.json().products.map((row) => row.name)).toEqual(['Atlas Linen', 'Atlas Velvet'])
+
+      const byCategory = await inject(
+        'GET',
+        `/admin/products?brand_id=${brand.id}&category=fabric`,
+        backofficeCookie
+      )
+      expect(byCategory.json().products.map((row) => row.name)).toEqual(['Atlas Linen', 'Bora Linen'])
+      expect(byCategory.json().meta.total).toBe(2)
+    })
+
+    // A price band is a cents range over the figure the CRM bands on — retail
+    // first, trade where there is no retail — and "No price" is neither.
+    it('narrows by price range and by having no price at all', async () => {
+      const brand = await createBrandFixture('Priced House')
+      await createProductFixture(brand.id, { name: 'Cheap', retail_price_cents: 5000 })
+      await createProductFixture(brand.id, { name: 'Trade only', trade_price_cents: 15000 })
+      await createProductFixture(brand.id, { name: 'Dear', retail_price_cents: 25000 })
+      await createProductFixture(brand.id, { name: 'Unpriced' })
+
+      const list = (query) =>
+        inject('GET', `/admin/products?brand_id=${brand.id}&${query}`, backofficeCookie)
+      const names = (response) => response.json().products.map((row) => row.name)
+
+      expect(names(await list('price_min_cents=10000&price_max_cents=20000'))).toEqual(['Trade only'])
+      expect(names(await list('price_max_cents=9999'))).toEqual(['Cheap'])
+      expect(names(await list('unpriced=true'))).toEqual(['Unpriced'])
+      // The ceiling the CRM builds its band list from, over the whole catalogue.
+      expect((await list('')).json().meta.max_price_cents).toBeGreaterThanOrEqual(25000)
+    })
+
+    it('narrows to the uncategorised with a flag, since "" cannot travel', async () => {
+      const brand = await createBrandFixture('Sorted House')
+      await createProductFixture(brand.id, { name: 'Filed', category: 'fabric' })
+      await createProductFixture(brand.id, { name: 'Nobody looked' })
+
+      const response = await inject(
+        'GET',
+        `/admin/products?brand_id=${brand.id}&uncategorised=true`,
+        backofficeCookie
+      )
+      expect(response.json().products.map((row) => row.name)).toEqual(['Nobody looked'])
+    })
+  })
+
+  // The Categories screen used to group the whole product list on the client;
+  // now that the list pages, the counts come from here.
+  describe('GET /admin/products/categories', () => {
+    it('counts products per category under the same filters as the list', async () => {
+      const brand = await createBrandFixture('Counted House')
+      await createProductFixture(brand.id, { name: 'A', category: 'fabric' })
+      await createProductFixture(brand.id, { name: 'B', category: 'fabric' })
+      await createProductFixture(brand.id, { name: 'C', category: 'wallpaper' })
+      const gone = await createProductFixture(brand.id, { name: 'D', category: 'wallpaper' })
+      await inject('POST', `/admin/products/${gone.id}/archive`, backofficeCookie)
+      await createProductFixture(brand.id, { name: 'E' })
+
+      const response = await inject(
+        'GET',
+        `/admin/products/categories?brand_id=${brand.id}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().categories).toEqual([
+        { category: 'fabric', count: 2 },
+        { category: 'wallpaper', count: 1 },
+        { category: null, count: 1 },
+      ])
+
+      const archived = await inject(
+        'GET',
+        `/admin/products/categories?brand_id=${brand.id}&include_archived=true`,
+        backofficeCookie
+      )
+      expect(archived.json().categories.find((row) => row.category === 'wallpaper').count).toBe(2)
+    })
+
+    it('is backoffice-only', async () => {
+      expect((await inject('GET', '/admin/products/categories', customerCookie)).statusCode).toBe(403)
+    })
   })
 
   describe('GET /admin/products/:id', () => {

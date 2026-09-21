@@ -70,9 +70,11 @@ one fact drives everything below.
   recallable. Being there, it also covers every notification added later without anyone being told
   about it. `server.js` warns loudly on boot while it is set; `mailer.redirectTo` surfaces it but is
   never read to decide WHETHER to send — a redirected letter is still a letter sent. Guarded by
-  `test/email-redirect.test.js`, which also asserts the working `.env` still has it set. **Unsetting
-  it is what makes suppliers start receiving real purchase orders** — delete that last assertion in
-  the same commit, so going live is a decision somebody makes rather than a line that rots.
+  `test/email-redirect.test.js`, which tests the BEHAVIOUR and deliberately asserts nothing about
+  the ambient environment: a test reading `loadConfig().emailRedirectTo` passes for whoever wrote it
+  and fails in CI, which has no `.env` and needs none. **Unsetting it is what makes suppliers start
+  receiving real purchase orders**, and the thing that keeps that from being forgotten is the boot
+  warning in `server.js`, printed on every start while the valve is open.
 - **The house is told what a PERSON did, never what arithmetic says.** The purchase-order letters
   hang off `send`, `close` and `cancel` — the three moves in `src/purchasing/po-states.js` — and
   the reserve letters off a raised line and a cancelled one. The DERIVED receipt state

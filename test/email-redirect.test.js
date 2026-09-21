@@ -4,10 +4,17 @@
 // function every send in the codebase passes through, and the whole point of
 // putting it there is that no caller can opt out of it. These tests assert that
 // property directly rather than through any one route.
+//
+// **Nothing here asserts what the ambient environment has set, deliberately.**
+// A test reading `loadConfig().emailRedirectTo` passes on the machine that
+// wrote it and fails in CI, which has no `.env` and needs none — CI never
+// sends mail at all (no `SMTP_HOST`, so the capture transport takes every
+// letter). The reminder that the valve is still open belongs where somebody
+// will actually see it: the boot warning in `server.js`, printed on every
+// start, and `.env.example`.
 
 import { describe, it, expect } from 'vitest'
 import { createMailer } from '../src/email/mailer.js'
-import { loadConfig } from '../src/config.js'
 
 const REDIRECT = 'ibrahim@verum.nz'
 
@@ -104,14 +111,5 @@ describe('EMAIL_REDIRECT_TO', () => {
 
     expect(transport.sent[0].to).toBe(REDIRECT)
     expect(transport.sent[0].replyTo).toBe('client@example.test')
-  })
-
-  it('is what the working .env has set — suppliers are not live yet', () => {
-    // A guard on the actual configuration, not on the code: this repo is
-    // mid-test-drive, and unsetting the valve is what makes purchase orders
-    // start reaching real fabric houses. When the office is happy, DELETE this
-    // test in the same commit that unsets the variable — deliberately, so that
-    // going live is a decision somebody makes rather than a line that rots.
-    expect(loadConfig().emailRedirectTo).toBe(REDIRECT)
   })
 })

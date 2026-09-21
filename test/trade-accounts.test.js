@@ -203,6 +203,66 @@ describe('admin trade accounts', () => {
     })
   })
 
+  // The roster's own create: a client the business won today, in no export and
+  // with no GUID to link to. Without it the order desk cannot bill a new client
+  // at all — every other create path demands a Dynamics customer.
+  describe('a client raised by hand', () => {
+    it('creates a company row with no Dynamics account behind it', async () => {
+      const res = await post({
+        company_name: `${PREFIX} Fernhill Interiors`,
+        email: `${PREFIX}-FERNHILL@example.test`,
+        phone: '09 555 0111',
+        address: '12 Sale Street',
+        city: 'Auckland',
+        country: 'New Zealand',
+        customer_type: 'Trade',
+      })
+
+      expect(res.statusCode).toBe(201)
+      const account = res.json().trade_account
+      expect(account.company_name).toBe(`${PREFIX} Fernhill Interiors`)
+      // No GUID: the row says, truthfully, that it is nobody in Dynamics.
+      expect(account.legacy_account_guid).toBeNull()
+      expect(account.address).toBe('12 Sale Street')
+      expect(account.city).toBe('Auckland')
+      // Normalised on the way in, like every other email column.
+      expect(account.email).toBe(`${PREFIX}-fernhill@example.test`)
+      expect(account.users).toEqual([])
+      // Serves no legacy history, which is correct — none of it is theirs.
+      expect(account.coverage).toEqual({ invoices: 0, samples: 0 })
+    })
+
+    it('is found by the same search the order desk uses', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/admin/trade-accounts?q=${encodeURIComponent('Fernhill')}`,
+        headers: { cookie: staffCookie },
+      })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().trade_accounts.map((a) => a.company_name)).toContain(
+        `${PREFIX} Fernhill Interiors`
+      )
+    })
+
+    // NULLs are distinct to the UNIQUE constraint, so the roster can hold as
+    // many hand-raised clients as the office raises.
+    it('lets a second one exist alongside the first', async () => {
+      const res = await post({ company_name: `${PREFIX} Second Local` })
+      expect(res.statusCode).toBe(201)
+      expect(res.json().trade_account.legacy_account_guid).toBeNull()
+    })
+
+    it('422s a body naming neither a Dynamics customer nor a company', async () => {
+      const res = await post({ city: 'Auckland' })
+      expect(res.statusCode).toBe(422)
+    })
+
+    it('422s a company name that is only whitespace', async () => {
+      const res = await post({ company_name: '   ' })
+      expect(res.statusCode).toBe(422)
+    })
+  })
+
   describe('suggestions', () => {
     it('ranks an exact email match above a name match', async () => {
       const res = await app.inject({

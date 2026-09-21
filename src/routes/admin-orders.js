@@ -19,6 +19,9 @@ import {
   setOrderArchived,
 } from '../orders/admin-orders.js'
 import { parseOrderFilters } from '../orders/order-filters.js'
+// The delivery address's shape lives beside the trimmer that stores it, so this
+// route and the storefront's request route cannot drift apart on it.
+import { SHIPPING_ADDRESS_SCHEMA } from '../orders/order-request.js'
 // The single source of truth for the kind vocabulary — retyping it here is how
 // the CHECK and the filter drift apart on the next kind.
 import { ORDER_KINDS } from '../reports/filters.js'
@@ -214,6 +217,11 @@ const createBodySchema = {
       },
     },
     notes: { type: ['string', 'null'], maxLength: 2000 },
+    // Where the cloth is going. The CRM fills it from the client's own record
+    // when the client it picked has an address on file — the order desk should
+    // not retype what the client roster already holds — and it lands in the
+    // same column the webhook and the storefront request write.
+    shipping_address: SHIPPING_ADDRESS_SCHEMA,
     discount_pct: discountPctProp,
     discount_reason: discountReasonProp,
     sales_rep_user_id: { type: 'integer', minimum: 1 },

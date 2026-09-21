@@ -117,7 +117,28 @@ const joinNotes = (...parts) => {
 // nothing else is the absence of an address, not one. Every field is trimmed,
 // blanks fold to null, the key set is fixed to the webhook's shape.
 const ADDRESS_KEYS = ['name', 'line1', 'line2', 'city', 'state', 'postal_code', 'country']
-const addressOrNull = (input) => {
+
+/**
+ * The body schema for that same address, so the two routes that take one — the
+ * storefront's request and the back office's manual order — cannot drift apart
+ * from each other or from `addressOrNull` below. `null` is allowed: a request
+ * is priced before it ships and plenty are collected.
+ */
+export const SHIPPING_ADDRESS_SCHEMA = Object.freeze({
+  type: ['object', 'null'],
+  additionalProperties: false,
+  properties: {
+    name: { type: ['string', 'null'], maxLength: 200 },
+    line1: { type: ['string', 'null'], maxLength: 200 },
+    line2: { type: ['string', 'null'], maxLength: 200 },
+    city: { type: ['string', 'null'], maxLength: 100 },
+    state: { type: ['string', 'null'], maxLength: 100 },
+    postal_code: { type: ['string', 'null'], maxLength: 20 },
+    country: { type: ['string', 'null'], maxLength: 100 },
+  },
+})
+
+export const addressOrNull = (input) => {
   if (!input || typeof input !== 'object') return null
   const address = Object.fromEntries(ADDRESS_KEYS.map((key) => [key, trimmedOrNull(input[key])]))
   return address.line1 || address.city ? address : null

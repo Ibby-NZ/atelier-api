@@ -245,6 +245,32 @@ describe('back-office stock management', () => {
       expect(swatchRows).toHaveLength(1)
       expect(swatchRows[0].sku).toBe(SKU.linen)
     })
+
+    // The CRM pages this list: one row per colourway is the largest table in
+    // the catalogue, and `meta.total` is what it divides by to draw the pager.
+    it('pages in a stable order with a filtered total', async () => {
+      const first = await inject(
+        'GET',
+        `/admin/inventory?q=${PREFIX}&limit=1`,
+        backofficeCookie
+      )
+      expect(first.statusCode).toBe(200)
+      // Two of the seeded colourways carry a stock row (velvet and linen).
+      expect(first.json().meta).toEqual({ total: 2, page: 1, limit: 1 })
+      const second = await inject(
+        'GET',
+        `/admin/inventory?q=${PREFIX}&limit=1&page=2`,
+        backofficeCookie
+      )
+      expect(second.json().meta).toEqual({ total: 2, page: 2, limit: 1 })
+      const skus = [...first.json().inventory, ...second.json().inventory].map((r) => r.sku)
+      expect(skus.sort()).toEqual([SKU.linen, SKU.velvet].sort())
+    })
+
+    it('rejects a limit above the maximum with 400', async () => {
+      const response = await inject('GET', '/admin/inventory?limit=500', backofficeCookie)
+      expect(response.statusCode).toBe(400)
+    })
   })
 
   describe('PATCH /admin/inventory/:colourwayId', () => {

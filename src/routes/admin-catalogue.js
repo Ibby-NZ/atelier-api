@@ -36,6 +36,7 @@ import {
 } from '../catalogue/admin-brands.js'
 import {
   listAdminProducts,
+  countAdminProductsByCategory,
   getAdminProduct,
   createProduct,
   updateProduct,
@@ -128,6 +129,26 @@ const brandQuerySchema = {
   properties: {
     brand_id: { type: 'integer', minimum: 1 },
     include_archived: { type: 'boolean', default: false },
+  },
+}
+
+// The product list pages and filters like the colourway one below: the CRM
+// reads it a screen at a time. A price band arrives as a cents range (or
+// `unpriced` for "No price"); the CRM owns the band arithmetic.
+const productQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    brand_id: { type: 'integer', minimum: 1 },
+    include_archived: { type: 'boolean', default: false },
+    q: { type: 'string', maxLength: 200 },
+    category: { type: 'string', maxLength: 100 },
+    uncategorised: { type: 'boolean', default: false },
+    price_min_cents: { type: 'integer', minimum: 0 },
+    price_max_cents: { type: 'integer', minimum: 0 },
+    unpriced: { type: 'boolean', default: false },
+    page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
+    limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
   },
 }
 
@@ -426,9 +447,35 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
 
   app.get(
     '/admin/products',
+    { preHandler: backoffice, schema: { querystring: productQuerySchema } },
+    async (request) => {
+      const { page, limit } = request.query
+      const { items, total, maxPriceCents } = await listAdminProducts(pool, {
+        brandId: request.query.brand_id,
+        includeArchived: request.query.include_archived,
+        q: request.query.q,
+        category: request.query.category,
+        uncategorised: request.query.uncategorised,
+        priceMinCents: request.query.price_min_cents,
+        priceMaxCents: request.query.price_max_cents,
+        unpriced: request.query.unpriced,
+        page,
+        limit,
+      })
+      return {
+        products: items,
+        meta: { total, page, limit, max_price_cents: maxPriceCents },
+      }
+    }
+  )
+
+  // Static, so it must be declared before the parametric read below wins the
+  // route. The Categories screen's rows: one count per category.
+  app.get(
+    '/admin/products/categories',
     { preHandler: backoffice, schema: { querystring: brandQuerySchema } },
     async (request) => ({
-      products: await listAdminProducts(pool, {
+      categories: await countAdminProductsByCategory(pool, {
         brandId: request.query.brand_id,
         includeArchived: request.query.include_archived,
       }),

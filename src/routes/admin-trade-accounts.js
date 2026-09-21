@@ -17,7 +17,6 @@ import {
   createTradeAccount,
   unlinkTradeAccountUser,
   updateTradeAccount,
-  touchesDetails,
   suggestTradeAccounts,
   createTradeAccountContact,
   updateTradeAccountContact,
@@ -50,6 +49,8 @@ const listQuerySchema = {
     q: { type: 'string', maxLength: 200 },
     customer_type: { type: 'string', maxLength: 50 },
     include_archived: { type: 'boolean', default: false },
+    // The review queue: only accounts with an unapproved trade login.
+    pending: { type: 'boolean', default: false },
     page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
     limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
   },
@@ -136,8 +137,7 @@ const patchContactSchema = {
   properties: contactBodyProps,
 }
 
-// The account-manager block (backoffice) and the company details (director —
-// checked in the handler, since one route serves both). The identity of the
+// The account-manager block and the company details, both backoffice. The identity of the
 // link (which D365 customer, the snapshotted name) is deliberately absent:
 // re-pointing it is unlink-then-link, which leaves a trail.
 const patchBodySchema = {
@@ -145,6 +145,8 @@ const patchBodySchema = {
   additionalProperties: false,
   minProperties: 1,
   properties: {
+    // Hand-raised rows only; a Dynamics-linked row 422s (updateTradeAccount).
+    company_name: { type: 'string', minLength: 1, maxLength: 200 },
     account_manager_name: text(200),
     account_manager_email: text(254),
     account_manager_phone: text(50),
@@ -177,6 +179,7 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
         q: request.query.q ?? null,
         customerType: request.query.customer_type ?? null,
         includeArchived: request.query.include_archived,
+        pending: request.query.pending,
         page: request.query.page,
         limit: request.query.limit,
       })
@@ -222,12 +225,10 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
     }
   )
 
-  // Backoffice, not director, for BOTH creates. Editing an existing client's
-  // details is the director's (the PATCH below gates it) because those are the
-  // terms and identity of a company the business already trades with; taking
-  // down a new client's name and address at the order desk is the order desk's
-  // own work, and gating it would mean a client who rang up cannot be billed
-  // until a director is free.
+  // Backoffice for create AND edit (22 Sep 2026, client asked): taking down a
+  // client's name, address and terms is the order desk's own work, and the
+  // detail PATCH used to 403 anyone but a director, which meant a typo taken
+  // over the phone waited until one was free.
   app.post(
     '/admin/trade-accounts',
     { preHandler: backoffice, schema: { body: createBodySchema } },
@@ -258,10 +259,6 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
     '/admin/trade-accounts/:id',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: patchBodySchema } },
     async (request, reply) => {
-      if (touchesDetails(request.body) && request.user.role !== 'director') {
-        reply.code(403)
-        return { error: 'Forbidden', message: 'Editing a client\'s details is for a director.' }
-      }
       const tradeAccount = await updateTradeAccount(pool, request.params.id, request.body)
       if (!tradeAccount) {
         return notFound(reply, `Trade account ${request.params.id} not found.`)

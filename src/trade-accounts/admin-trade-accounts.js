@@ -52,7 +52,9 @@ const ACCOUNT_COLUMNS = `ta.id,
         ta.payment_terms,
         ta.xero_contact_id,
         ta.archived_at,
-        (SELECT COUNT(*)::int FROM trade_account_contacts tac WHERE tac.trade_account_id = ta.id) AS contact_count`
+        (SELECT COUNT(*)::int FROM trade_account_contacts tac WHERE tac.trade_account_id = ta.id) AS contact_count,
+        (SELECT tap.id FROM trade_applications tap WHERE tap.trade_account_id = ta.id
+          ORDER BY tap.created_at DESC, tap.id DESC LIMIT 1) AS trade_application_id`
 
 // Staff-editable fields. The identity columns (guid, snapshotted name, the
 // ambiguity flag) are deliberately absent: re-pointing a link at a different
@@ -64,16 +66,14 @@ export const MANAGER_COLUMNS = Object.freeze([
   'account_manager_email',
   'account_manager_phone',
 ])
-// The company details the cutover merge carried over. Editing these is the
-// DIRECTOR's (the route gates it): they are the client's terms and identity,
-// where the account manager block is who at Atelier looks after them.
+// The company details the cutover merge carried over — the client's terms and
+// identity, where the account manager block is who at Atelier looks after
+// them. Backoffice edits both (the director gate went in Sept 2026).
 export const DETAIL_COLUMNS = Object.freeze([
   'account_number', 'customer_type', 'primary_contact_name', 'email', 'phone',
   'address', 'city', 'country', 'payment_terms', 'xero_contact_id',
 ])
 const UPDATE_COLUMNS = Object.freeze([...MANAGER_COLUMNS, ...DETAIL_COLUMNS])
-
-export const touchesDetails = (input) => DETAIL_COLUMNS.some((column) => Object.hasOwn(input, column))
 
 const toTradeAccount = (row, users = []) => ({
   id: row.id,
@@ -103,6 +103,9 @@ const toTradeAccount = (row, users = []) => ({
   xero_contact_id: row.xero_contact_id ?? null,
   archived_at: row.archived_at ?? null,
   contact_count: row.contact_count ?? 0,
+  // The trade application that raised this company, when one did (the
+  // storefront form; migration 1791379200000). The CRM reviews it on the row.
+  trade_application_id: row.trade_application_id ?? null,
   users,
 })
 
@@ -116,8 +119,11 @@ const loadUsersByAccountId = async (db, accountIds) => {
             u.id,
             u.email,
             u.name,
+            u.phone,
             u.role,
-            u.trade_approved
+            u.trade_approved,
+            u.archived_at,
+            u.created_at
        FROM trade_account_users tau
        JOIN users u ON u.id = tau.user_id
       WHERE tau.trade_account_id = ANY($1::int[])
@@ -126,12 +132,18 @@ const loadUsersByAccountId = async (db, accountIds) => {
   )
   const byAccount = new Map()
   for (const row of rows) {
+    // The whole editable shape: the CRM's Accounts screen edits a login in
+    // place (Sept 2026), so it needs phone and the archived flag, not a
+    // name-and-role summary.
     const user = {
       id: row.id,
       email: row.email,
       name: row.name,
+      phone: row.phone ?? null,
       role: row.role,
       trade_approved: row.trade_approved,
+      archived_at: row.archived_at ?? null,
+      created_at: row.created_at,
     }
     const existing = byAccount.get(row.trade_account_id)
     if (existing) {
@@ -143,17 +155,36 @@ const loadUsersByAccountId = async (db, accountIds) => {
   return byAccount
 }
 
+// An account awaiting review: a live trade login on it that nobody has
+// approved. This is the trade-application queue, expressed on the roster —
+// approving flips `users.trade_approved` and the row simply stops matching.
+const PENDING_LOGIN_EXISTS = `EXISTS (
+  SELECT 1 FROM trade_account_users pu
+    JOIN users u ON u.id = pu.user_id
+   WHERE pu.trade_account_id = ta.id
+     AND u.role = 'trade' AND NOT u.trade_approved AND u.archived_at IS NULL)`
+
 /**
  * The client roster, A–Z. `q` matches the company name, account number, primary
- * contact, email or phone; `customer_type` narrows to Trade / Retail;
- * `include_archived` keeps the rows the merge or the office closed.
+ * contact, email or phone — or a LOGIN's email, so an order's "open the client"
+ * link lands on the company; `customer_type` narrows to Trade / Retail;
+ * `include_archived` keeps the rows the merge or the office closed; `pending`
+ * narrows to the accounts with an unapproved trade login (the review queue).
  *
  * @param {import('pg').Pool} pool
- * @param {{ q?: string, page?: number, limit?: number }} [options]
+ * @param {{ q?: string, customerType?: string, includeArchived?: boolean,
+ *   pending?: boolean, page?: number, limit?: number }} [options]
  */
 export const listTradeAccounts = async (
   pool,
-  { q = null, customerType = null, includeArchived = false, page = DEFAULT_PAGE, limit = DEFAULT_LIMIT } = {}
+  {
+    q = null,
+    customerType = null,
+    includeArchived = false,
+    pending = false,
+    page = DEFAULT_PAGE,
+    limit = DEFAULT_LIMIT,
+  } = {}
 ) => {
   const safeLimit = Math.min(Math.max(limit, 1), MAX_LIMIT)
   const safePage = Math.max(page, 1)
@@ -168,12 +199,15 @@ export const listTradeAccounts = async (
              OR ta.account_number ILIKE $1 ESCAPE '\\'
              OR ta.primary_contact_name ILIKE $1 ESCAPE '\\'
              OR ta.email ILIKE $1 ESCAPE '\\'
-             OR ta.phone ILIKE $1 ESCAPE '\\')
+             OR ta.phone ILIKE $1 ESCAPE '\\'
+             OR EXISTS (SELECT 1 FROM trade_account_users qu JOIN users qq ON qq.id = qu.user_id
+                         WHERE qu.trade_account_id = ta.id AND qq.email ILIKE $1 ESCAPE '\\'))
         AND ($2::text IS NULL OR ta.customer_type = $2)
         AND (ta.archived_at IS NULL OR $3)
+        AND (NOT $4 OR ${PENDING_LOGIN_EXISTS})
       ORDER BY ta.legacy_customer_name ASC, ta.id ASC
-      LIMIT $4 OFFSET $5`,
-    [term, type, includeArchived, safeLimit, (safePage - 1) * safeLimit]
+      LIMIT $5 OFFSET $6`,
+    [term, type, includeArchived, pending, safeLimit, (safePage - 1) * safeLimit]
   )
   const usersByAccount = await loadUsersByAccountId(pool, rows.map((row) => row.id))
   return {
@@ -350,7 +384,7 @@ const withLinkTxn = async (pool, { legacyAccountGuid, userId, linkedByUserId }) 
         if (error?.code === '23505') {
           throw httpError(
             409,
-            'That login is already linked to a different Dynamics customer. Unlink it first.'
+            'That login is already linked to another client account. Unlink it there first.'
           )
         }
         throw error
@@ -564,7 +598,13 @@ export const unlinkTradeAccountUser = async (pool, { id, userId }) => {
 }
 
 /**
- * Edit the client-visible account manager.
+ * Edit the account manager and the company details.
+ *
+ * `company_name` is accepted ONLY on a row with no Dynamics GUID: on a linked
+ * row the name is the snapshot the client portal matches invoice history on
+ * (viewer.js), so renaming it would silently empty that history — 422 names
+ * the reason. A hand-raised or application-raised company has no history to
+ * lose, and a typo in its name is exactly what the office needs to fix.
  *
  * @param {import('pg').Pool} pool
  * @param {number} id
@@ -579,6 +619,25 @@ export const updateTradeAccount = async (pool, id, input) => {
       params.push(value === '' ? null : column === 'email' ? value.toLowerCase() : value)
       sets.push(`${column} = $${params.length}`)
     }
+  }
+  if (Object.hasOwn(input, 'company_name')) {
+    const name = trimmedOrNull(input.company_name)
+    if (!name) {
+      throw httpError(422, 'A client needs a company name.')
+    }
+    const { rows } = await pool.query(
+      `SELECT legacy_account_guid FROM trade_accounts WHERE id = $1`,
+      [id]
+    )
+    if (!rows[0]) return null
+    if (rows[0].legacy_account_guid) {
+      throw httpError(
+        422,
+        'This company came over from Dynamics; its name is what its invoice history is matched on, so it cannot be renamed here.'
+      )
+    }
+    params.push(name)
+    sets.push(`legacy_customer_name = $${params.length}`)
   }
   if (sets.length === 0) {
     throw httpError(400, 'No updatable fields provided.')

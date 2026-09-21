@@ -5,7 +5,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
-import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
+import { cleanupTradeApplications, sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const DOMAIN = 'trade-details.test'
@@ -39,6 +39,7 @@ describe('GET/PATCH /account/trade-application', () => {
     })
     app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
     await app.ready()
+    await cleanupTradeApplications(pool, `%@${DOMAIN}`)
     await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${DOMAIN}`])
 
     const applied = await inject('POST', '/auth/trade-application', null, {
@@ -61,6 +62,7 @@ describe('GET/PATCH /account/trade-application', () => {
   })
 
   afterAll(async () => {
+    await cleanupTradeApplications(pool, `%@${DOMAIN}`)
     await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${DOMAIN}`])
     await app.close()
     await pool.end()

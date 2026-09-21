@@ -142,30 +142,53 @@ export const listUsers = async (
   return rows.map(toUser)
 }
 
+const PG_FOREIGN_KEY_VIOLATION = '23503'
+
 /**
  * Create an account from the back office (a staff login, or a customer/trade
  * account the office sets up on someone's behalf). The password is hashed with
  * the same argon2id path as self-serve register; a duplicate email is a 409.
  *
+ * With `tradeAccountId` the login is also granted to that client company
+ * (`trade_account_users`) in the same transaction — the Accounts screen adds a
+ * login to the company it is looking at, and a login that exists but is on no
+ * company is the state that screen cannot see. An unknown company is a 422.
+ *
  * @param {import('pg').Pool} pool
- * @param {{ email: string, name?: string, role: string, password: string }} input
+ * @param {{ email: string, name?: string, role: string, password: string,
+ *   tradeAccountId?: number|null }} input
  * @returns {Promise<object>}
  */
-export const createUser = async (pool, { email, name, role, password }) => {
+export const createUser = async (pool, { email, name, role, password, tradeAccountId = null }) => {
   const passwordHash = await hashPassword(password)
+  const client = await pool.connect()
   try {
-    const { rows } = await pool.query(
+    await client.query('BEGIN')
+    const { rows } = await client.query(
       `INSERT INTO users (email, password_hash, name, role)
        VALUES ($1, $2, $3, $4)
        RETURNING ${USER_READ_COLUMNS}`,
       [email.toLowerCase(), passwordHash, name ?? null, role]
     )
+    if (tradeAccountId != null) {
+      await client.query(
+        `INSERT INTO trade_account_users (trade_account_id, user_id) VALUES ($1, $2)`,
+        [tradeAccountId, rows[0].id]
+      )
+    }
+    await client.query('COMMIT')
     return toUser(rows[0])
   } catch (error) {
+    await client.query('ROLLBACK')
     if (error.code === PG_UNIQUE_VIOLATION) {
       throw httpError(409, 'An account with that email already exists.')
     }
+    if (error.code === PG_FOREIGN_KEY_VIOLATION) {
+      throw httpError(422, `Trade account ${tradeAccountId} not found.`)
+    }
     throw error
+  } finally {
+    client.release()
   }
 }
 

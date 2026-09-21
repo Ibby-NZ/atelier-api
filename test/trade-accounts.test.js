@@ -122,6 +122,14 @@ describe('admin trade accounts', () => {
     expect(res.statusCode).toBe(201)
     await pool.query(`UPDATE users SET trade_approved = true WHERE email = $1`, [email])
     const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [email])
+    // The application raised its own company and granted this login to it
+    // (Sept 2026). These tests want a login on NO company, so drop that row —
+    // the grant cascades with it.
+    await pool.query(
+      `DELETE FROM trade_accounts WHERE id IN
+         (SELECT trade_account_id FROM trade_applications WHERE user_id = $1)`,
+      [rows[0].id]
+    )
     return { id: rows[0].id, email }
   }
 

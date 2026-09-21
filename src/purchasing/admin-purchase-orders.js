@@ -138,6 +138,9 @@ const PO_COLUMNS = `po.id,
         po.created_by,
         u.name AS created_by_name,
         po.notes,
+        po.xero_bill_id,
+        po.xero_bill_ref,
+        po.xero_bill_status,
         po.created_at,
         po.updated_at`
 
@@ -286,6 +289,12 @@ const toPurchaseOrder = (row, lines, finance, invoice) =>
     created_by: row.created_by,
     created_by_name: row.created_by_name ?? null,
     notes: row.notes,
+    // The Xero bill this purchase order was pushed as (id = duplicate gate,
+    // ref = the number on the screen, status = Xero's word at the last pull).
+    // Not money, so not finance-gated: which bill, not what it cost.
+    xero_bill_id: row.xero_bill_id ?? null,
+    xero_bill_ref: row.xero_bill_ref ?? null,
+    xero_bill_status: row.xero_bill_status ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     // Which supplier invoice, if any, has already billed for this purchase

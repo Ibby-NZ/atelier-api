@@ -13,6 +13,11 @@ import {
   pickInvoice,
   pickContact,
   matchContact,
+  contactForTradeAccount,
+  contactForSupplier,
+  contactDetailsFromXero,
+  billForPurchaseOrder,
+  isDeadInXero,
 } from '../src/xero/mapping.js'
 import { discountedTotalCents } from '../src/orders/discounts.js'
 
@@ -171,7 +176,7 @@ describe('response picking', () => {
   it('picks the invoice id and number', () => {
     expect(
       pickInvoice({ Invoices: [{ InvoiceID: 'abc', InvoiceNumber: 'INV-0042' }] })
-    ).toEqual({ invoiceId: 'abc', invoiceNumber: 'INV-0042' })
+    ).toEqual({ invoiceId: 'abc', invoiceNumber: 'INV-0042', status: null })
     expect(pickInvoice({ Invoices: [] })).toBeNull()
     expect(pickInvoice(null)).toBeNull()
   })
@@ -208,5 +213,176 @@ describe('date helpers', () => {
     const day = new Date('2026-01-31T12:00:00Z')
     expect(isoDay(day)).toBe('2026-01-31')
     expect(isoDay(addDays(day, 1))).toBe('2026-02-01')
+  })
+})
+
+describe('contactForTradeAccount / contactForSupplier', () => {
+  it('shapes a company as a customer with its street address', () => {
+    expect(
+      contactForTradeAccount({
+        legacy_customer_name: 'Zomia Interiors',
+        email: 'accounts@zomia.example',
+        phone: '09 555 0100',
+        address: '1 Quay St',
+        city: 'Auckland',
+        country: 'New Zealand',
+      })
+    ).toEqual({
+      Name: 'Zomia Interiors',
+      EmailAddress: 'accounts@zomia.example',
+      IsCustomer: true,
+      Phones: [{ PhoneType: 'DEFAULT', PhoneNumber: '09 555 0100' }],
+      Addresses: [
+        { AddressType: 'STREET', AddressLine1: '1 Quay St', City: 'Auckland', Country: 'New Zealand' },
+      ],
+    })
+  })
+
+  it('omits what we do not hold', () => {
+    expect(contactForTradeAccount({ legacy_customer_name: 'Bare Co' })).toEqual({
+      Name: 'Bare Co',
+      IsCustomer: true,
+    })
+  })
+
+  it('shapes a supplier with IsSupplier, its ordering email and currency', () => {
+    expect(
+      contactForSupplier({ name: 'Maison Test', po_email: 'orders@maison.example', currency: 'EUR' })
+    ).toEqual({
+      Name: 'Maison Test',
+      EmailAddress: 'orders@maison.example',
+      IsSupplier: true,
+      DefaultCurrency: 'EUR',
+    })
+  })
+})
+
+describe('contactDetailsFromXero', () => {
+  it('reads the street address, default phone and flags', () => {
+    expect(
+      contactDetailsFromXero({
+        ContactID: 'c-1',
+        Name: 'Zomia Interiors',
+        EmailAddress: 'Accounts@Zomia.Example',
+        IsCustomer: true,
+        IsSupplier: false,
+        DefaultCurrency: 'NZD',
+        Phones: [
+          { PhoneType: 'MOBILE', PhoneNumber: '021 000' },
+          { PhoneType: 'DEFAULT', PhoneCountryCode: '64', PhoneAreaCode: '9', PhoneNumber: '5550100' },
+        ],
+        Addresses: [
+          { AddressType: 'POBOX', AddressLine1: 'PO Box 1' },
+          { AddressType: 'STREET', AddressLine1: '1 Quay St', AddressLine2: 'Level 2', City: 'Auckland', Country: 'New Zealand' },
+        ],
+      })
+    ).toEqual({
+      xero_contact_id: 'c-1',
+      name: 'Zomia Interiors',
+      email: 'accounts@zomia.example',
+      phone: '64 9 5550100',
+      address: '1 Quay St, Level 2',
+      city: 'Auckland',
+      country: 'New Zealand',
+      is_customer: true,
+      is_supplier: false,
+      currency: 'NZD',
+    })
+  })
+
+  it('falls back to POBOX and any phone, and nulls what is blank', () => {
+    const details = contactDetailsFromXero({
+      ContactID: 'c-2',
+      Name: '  ',
+      Phones: [{ PhoneType: 'MOBILE', PhoneNumber: '021 000' }, { PhoneType: 'DEFAULT', PhoneNumber: '' }],
+      Addresses: [{ AddressType: 'STREET' }, { AddressType: 'POBOX', AddressLine1: 'PO Box 1', City: 'Nelson' }],
+    })
+    expect(details).toMatchObject({
+      name: null,
+      email: null,
+      phone: '021 000',
+      address: 'PO Box 1',
+      city: 'Nelson',
+      country: null,
+      is_customer: false,
+      is_supplier: false,
+    })
+  })
+})
+
+describe('billForPurchaseOrder', () => {
+  const purchaseOrder = {
+    po_number: 'PO-000123',
+    currency: 'EUR',
+    sent_at: '2026-03-01T22:00:00.000Z',
+    lines: [
+      {
+        product_name: 'Linen',
+        colourway_name: 'Clay',
+        sku: 'LIN-CLAY',
+        qty_ordered: 12.5,
+        unit_price: 48.25,
+        is_sample: false,
+        supplier_code: 'L-01',
+      },
+      {
+        product_name: 'Linen',
+        colourway_name: 'Moss',
+        sku: 'LIN-MOSS',
+        qty_ordered: 1,
+        unit_price: 0.5,
+        is_sample: true,
+        supplier_code: null,
+      },
+    ],
+  }
+
+  it('builds an ACCPAY bill dated the day it went to the house, numbered by our PO', () => {
+    const bill = billForPurchaseOrder(purchaseOrder, {
+      contactId: 'sup-1',
+      accountCode: '300',
+      lineAmountTypes: 'Exclusive',
+      status: 'DRAFT',
+      dueDays: 30,
+    })
+    expect(bill).toEqual({
+      Type: 'ACCPAY',
+      Contact: { ContactID: 'sup-1' },
+      Status: 'DRAFT',
+      LineAmountTypes: 'Exclusive',
+      Date: '2026-03-01',
+      DueDate: '2026-03-31',
+      InvoiceNumber: 'PO-000123',
+      Reference: 'PO-000123',
+      CurrencyCode: 'EUR',
+      LineItems: [
+        {
+          Description: 'Linen — Clay (LIN-CLAY). Supplier code L-01',
+          Quantity: 12.5,
+          UnitAmount: 48.25,
+          AccountCode: '300',
+        },
+        { Description: 'Linen — Moss (LIN-MOSS). Sample', Quantity: 1, UnitAmount: 0.5, AccountCode: '300' },
+      ],
+    })
+  })
+
+  it('dates an unsent order today', () => {
+    const bill = billForPurchaseOrder(
+      { ...purchaseOrder, sent_at: null, currency: null },
+      { contactId: 'x', accountCode: '300', lineAmountTypes: 'Exclusive', status: 'DRAFT', dueDays: 0, now: () => new Date('2026-05-05T03:00:00Z') }
+    )
+    expect(bill.Date).toBe('2026-05-05')
+    expect(bill.DueDate).toBe('2026-05-05')
+    expect(bill).not.toHaveProperty('CurrencyCode')
+  })
+})
+
+describe('isDeadInXero', () => {
+  it('is true only for VOIDED and DELETED', () => {
+    expect(isDeadInXero('VOIDED')).toBe(true)
+    expect(isDeadInXero('DELETED')).toBe(true)
+    expect(isDeadInXero('PAID')).toBe(false)
+    expect(isDeadInXero(null)).toBe(false)
   })
 })

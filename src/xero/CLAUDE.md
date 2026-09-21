@@ -17,9 +17,20 @@ automatically when working in this directory.
 - `service.js` — the ONE object the rest of the API sees. `buildApp({ xero })`
   takes it (null = unconfigured → routes 503, the Stripe posture);
   `server.js` builds the real one from `config.xero`.
-- `routes/admin-xero.js` — status/connect/callback/disconnect, contact + item
-  sync, invoice push. Connect/disconnect are **director-only**; the rest is
-  backoffice.
+- `routes/admin-xero.js` — status/connect/callback/disconnect, contact +
+  supplier + item sync, invoice push, bill push, and the two pulls.
+  Connect/disconnect are **director-only**; the rest is backoffice.
+
+## Two directions
+
+Platform → Xero: `/sync/contacts` (client companies + unfiled logins),
+`/sync/suppliers`, `/sync/items`, `/orders/:id/invoice` (ACCREC),
+`/purchase-orders/:id/bill` (ACCPAY). Xero → platform: `/pull/contacts` and
+`/pull/statuses`; `pullAll()` is both, and `server.js` runs it every
+`XERO_PULL_INTERVAL_MINUTES` (0 = buttons only). Three tables remember a
+contact — `users`, `trade_accounts`, `suppliers` — each with its own
+`xero_contact_id`; `orders.xero_invoice_id/_ref/_status` and
+`purchase_orders.xero_bill_id/_ref/_status` remember the documents.
 
 ## Invariants — each one guards a real failure mode
 
@@ -31,7 +42,40 @@ automatically when working in this directory.
   name (`matchContact`). Atelier's clients already exist in Xero (the old
   D365 connector put them there); create-on-miss without a search would mint
   duplicates Xero cannot merge. Contact Name is Xero's uniqueness key, so a
-  name-taken refusal retries once as `Name (email)`.
+  name-taken refusal retries once as `Name (email)`. `pushContacts` is the
+  ONE match-then-batch-create routine; `syncContacts` and `syncSuppliers`
+  only differ in the rows, the payload shape and the table that remembers.
+- **The COMPANY is the customer.** A login filed under a `trade_accounts` row
+  (`trade_account_users`) invoices as that company's contact and is skipped by
+  `syncContacts` — the person gets no contact of their own, because Xero has
+  always invoiced the company. Unfiled logins and guests still invoice as
+  themselves. `trade_accounts.xero_contact_id` already carried the D365 ids
+  for the merged roster, which is why the company path links first.
+- **A purchase order pushes as a DRAFT bill** (`XERO_BILL_STATUS`), only
+  once `sent`/`closed`, only with every line priced, numbered by our
+  `po_number` in BOTH `InvoiceNumber` and `Reference` — the accountant
+  overwrites the former with the house's own invoice number when it arrives,
+  and the latter keeps the link. `unit_price` is decimal dollars in the
+  house's currency (`CurrencyCode` rides along); no cents anywhere in
+  purchasing. The bill route answers `{ bill }` and NO purchase order, because
+  the PO read model is finance-gated and this route is not.
+- **The pull never renames.** `pullContacts` refreshes email/phone/address
+  by `COALESCE(xero, ours)` on rows already linked by id, links unlinked rows
+  by email then exact name, and only then creates — a Xero customer becomes a
+  client company, a Xero supplier a supplier, an unflagged contact is counted
+  as `skipped`. `trade_accounts.legacy_customer_name` is what the client
+  portal matches invoice history on, so a rename from Xero would silently
+  empty a client's history. ARCHIVED Xero contacts are ignored.
+- **Xero's status word is stored, not derived, and it re-opens a push.**
+  `pullStatuses` reads every unsettled pushed document (`GET Invoices?IDs=`)
+  and writes `xero_invoice_status` / `xero_bill_status`. PAID on an invoice
+  runs `markOrderPaid` (the same transition and letter as the CRM button,
+  via the injected `notifyOrderPaid`); an order still `requested` is reported,
+  not forced. VOIDED/DELETED (`isDeadInXero`) lets `pushOrderInvoice` /
+  `pushPurchaseOrderBill` run again under the key
+  `atelier-order-<id>-after-<deadId>` — Xero's idempotency window is 24h,
+  so the plain key would hand the voided invoice straight back. PAID /
+  VOIDED / DELETED are terminal and are not re-read.
 - **Invoice pushes are idempotent at both ends**: `Idempotency-Key
   atelier-order-<id>` makes Xero return the SAME invoice on a retry, and
   `orders.xero_invoice_id` (now in the admin order shape — that's the
@@ -79,4 +123,7 @@ Xero cannot EMAIL a draft, so the email-on-push option degrades to a warning.
 - `test/admin-xero.test.js` — real service + real DB + `createFakeXero()`
   scripting the HTTP seam (`findLast` so a test's script shadows the
   defaults). Covers the state nonce, rotation-under-expiry, both duplicate
-  gates, the email warning path, and both sync directions.
+  gates, the email warning path, company-as-customer, supplier sync, the
+  bill push, both pulls and the void-then-re-push cycle. New tests raise
+  orders through `POST /admin/orders` (`raisePricedOrder`), not the public
+  request route — its 10-per-15-min bucket is spent by the earlier cases.

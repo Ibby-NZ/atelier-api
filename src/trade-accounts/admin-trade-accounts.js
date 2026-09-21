@@ -367,6 +367,65 @@ const withLinkTxn = async (pool, { legacyAccountGuid, userId, linkedByUserId }) 
   }
 }
 
+/** A typed cell: trimmed, and blank means "nothing said", never a stored ''. */
+const trimmedOrNull = (value) => {
+  const text = value == null ? '' : String(value).trim()
+  return text === '' ? null : text
+}
+
+/**
+ * Raise a client the business won today — a company with no Dynamics account
+ * behind it, and so no GUID (nullable since
+ * migrations/1791206400000_client-raised-by-hand.js; NULLs are distinct to the
+ * UNIQUE constraint, so any number of them coexist).
+ *
+ * This is the roster's own create, and it exists because the roster became the
+ * client list at cutover: every path before it demanded a D365 GUID, which a
+ * new client by definition does not have. The order desk is the caller — a
+ * client rings up who is in no export, and keying the order should not mean
+ * leaving the order to go and make a client somewhere else.
+ *
+ * The company NAME is all that is required; everything else is what the office
+ * happened to take down. No duplicate-name check: account names are famously
+ * not unique in this corpus (866 rows, 865 distinct names), so a 409 on one
+ * would refuse legitimate clients — the caller searches first, which is what
+ * the form is built around.
+ *
+ * `linked_by_user_id` carries who raised it, the same audit trail a real link
+ * writes. `name_is_ambiguous` keeps its default: it describes a collision with
+ * a D365 name, and with no GUID the viewer CTE resolves nothing for this row
+ * regardless — a hand-raised client is served no legacy history, which is
+ * correct, since none of it is theirs.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ company_name: string, created_by_user_id?: number|null }} input
+ *   plus any of DETAIL_COLUMNS (account number, contact, email, phone,
+ *   address, city, country, terms).
+ * @returns {Promise<object>} the fresh account, in getTradeAccount's shape
+ */
+export const createTradeAccount = async (pool, input = {}) => {
+  const name = trimmedOrNull(input.company_name)
+  if (!name) {
+    throw httpError(422, 'A client needs a company name.')
+  }
+  const columns = ['legacy_customer_name', 'linked_by_user_id']
+  const params = [name, input.created_by_user_id ?? null]
+  for (const column of DETAIL_COLUMNS) {
+    if (Object.hasOwn(input, column)) {
+      const value = trimmedOrNull(input[column])
+      params.push(column === 'email' && value ? value.toLowerCase() : value)
+      columns.push(column)
+    }
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO trade_accounts (${columns.join(', ')})
+     VALUES (${params.map((_, i) => `$${i + 1}`).join(', ')})
+     RETURNING id`,
+    params
+  )
+  return getTradeAccount(pool, rows[0].id)
+}
+
 /**
  * The trade account behind a mirror GUID — the bridge the CRM's ClientAccount
  * screen (keyed by D365 GUID) crosses to reach the contact book. Null when no

@@ -1,6 +1,7 @@
 import {
   validateOrderRequestInput,
   createOrderRequest,
+  SHIPPING_ADDRESS_SCHEMA,
 } from '../orders/order-request.js'
 import {
   listUserOrders,
@@ -57,19 +58,7 @@ const orderRequestBodySchema = {
     // to `orders.shipping_address`, so the CRM's Delivery block and the packing
     // slip read both without knowing which path wrote it. Optional: a request
     // is priced before it ships, and many are collected.
-    shipping_address: {
-      type: ['object', 'null'],
-      additionalProperties: false,
-      properties: {
-        name: { type: ['string', 'null'], maxLength: 200 },
-        line1: { type: ['string', 'null'], maxLength: 200 },
-        line2: { type: ['string', 'null'], maxLength: 200 },
-        city: { type: ['string', 'null'], maxLength: 100 },
-        state: { type: ['string', 'null'], maxLength: 100 },
-        postal_code: { type: ['string', 'null'], maxLength: 20 },
-        country: { type: ['string', 'null'], maxLength: 100 },
-      },
-    },
+    shipping_address: SHIPPING_ADDRESS_SCHEMA,
     contact: {
       type: 'object',
       additionalProperties: false,

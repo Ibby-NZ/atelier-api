@@ -23,7 +23,7 @@ import { USER_SEGMENTS } from '../users/admin-users.js'
 import { reserves, unpricedLineCount } from './order-states.js'
 // The same packing the storefront's request flow writes, so `orders.notes` reads
 // identically however the order was raised.
-import { buildNotes } from './order-request.js'
+import { buildNotes, addressOrNull } from './order-request.js'
 // One shape of human order number for every channel — `SO` here.
 import { orderNumber } from './order-number.js'
 // The discount tiers and the director-only override gate (Rebecca-R2) — pure,
@@ -707,12 +707,20 @@ export const editOrderLines = (pool, id, patch, actor) =>
  * the contact is packed into `notes` in the same shape `createOrderRequest`
  * writes, so one CRM renderer reads both.
  *
+ * `shipping_address` is optional and stored through the request path's own
+ * `addressOrNull`, so an order keyed by the office and one submitted from the
+ * storefront put the same shape in the same column — the CRM's Delivery block
+ * and the packing slip read both without knowing which path wrote it. The
+ * order desk does not type it: the CRM sends what the client's own record
+ * holds, and an order for a client with no address on file simply has none.
+ *
  * @param {import('pg').Pool} pool
  * @param {{
  *   user_id?: number|null,
  *   contact?: { name?: string, email?: string, phone?: string },
  *   lines: Array<{ colourway_id: number, qty: number, unit_price_cents: number, cut_requirements?: string|null }>,
  *   notes?: string|null,
+ *   shipping_address?: object|null,
  *   discount_pct?: number,
  *   discount_reason?: string|null,
  * }} input
@@ -778,12 +786,13 @@ export const createManualOrder = async (pool, input, actor) => {
     const notes = [buildNotes(contact), input.notes ?? null]
       .filter(Boolean)
       .join('\n')
+    const address = addressOrNull(input.shipping_address)
 
     const { rows } = await client.query(
       `INSERT INTO orders (user_id, guest_email, order_number, kind, status, notes,
                            discount_pct, discount_reason, discount_applied_by,
-                           sales_rep_user_id)
-       VALUES ($1, $2, $3, 'manual', 'requested', $4, $5, $6, $7, $8)
+                           sales_rep_user_id, shipping_address)
+       VALUES ($1, $2, $3, 'manual', 'requested', $4, $5, $6, $7, $8, $9)
        RETURNING id`,
       [
         userId,
@@ -798,6 +807,11 @@ export const createManualOrder = async (pool, input, actor) => {
         // one fact the caller must not be able to state.
         hasDiscount ? (actor?.id ?? null) : null,
         input.sales_rep_user_id ?? null,
+        // Where the cloth is going, through the request path's own trimmer: an
+        // address that names neither a street nor a city is the ABSENCE of one,
+        // and a `{}` in the column would print an empty Ship-to block on the
+        // packing slip. jsonb, so it goes in as text.
+        address ? JSON.stringify(address) : null,
       ]
     )
     orderId = rows[0].id

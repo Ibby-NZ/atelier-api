@@ -637,6 +637,43 @@ describe('back-office order management', () => {
       expect(order.notes).toContain('Phone: 021 555')
     })
 
+    // The client roster holds where its clients are, so the order desk does not
+    // retype it: the CRM sends the address off the client it picked, into the
+    // same column the webhook and a storefront request write.
+    it('stores the delivery address the client record carried', async () => {
+      const response = await create({
+        contact: { name: 'Fernhill Interiors', email: 'hello@fernhill.test' },
+        lines: [lineFor(SKU.inStock)],
+        shipping_address: {
+          name: 'Fernhill Interiors',
+          line1: '12 Sale Street',
+          city: 'Auckland',
+          country: 'New Zealand',
+        },
+      })
+
+      expect(response.statusCode).toBe(201)
+      expect(response.json().order.shipping_address).toMatchObject({
+        name: 'Fernhill Interiors',
+        line1: '12 Sale Street',
+        city: 'Auckland',
+        country: 'New Zealand',
+      })
+    })
+
+    // A client with nothing but a name on file has no address, and `{}` in the
+    // column would print an empty Ship-to block on the packing slip.
+    it('treats an address that says nowhere as no address at all', async () => {
+      const response = await create({
+        contact: { name: 'Walk-in' },
+        lines: [lineFor(SKU.inStock)],
+        shipping_address: { name: 'Walk-in', line1: '  ', city: '' },
+      })
+
+      expect(response.statusCode).toBe(201)
+      expect(response.json().order.shipping_address).toBeNull()
+    })
+
     it('reserves nothing for a colourway that has never been stocked', async () => {
       const response = await create({
         contact: { name: 'Walk-in' },

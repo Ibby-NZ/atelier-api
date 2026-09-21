@@ -14,6 +14,7 @@ import {
   getTradeAccount,
   getTradeAccountByGuid,
   linkTradeAccount,
+  createTradeAccount,
   unlinkTradeAccountUser,
   updateTradeAccount,
   touchesDetails,
@@ -64,16 +65,35 @@ const suggestQuerySchema = {
 
 const UUID_PATTERN = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
-// `user_id` is OPTIONAL: without it the company row is created BARE, so its
-// contact book can exist before any login does. A later real link upserts onto
-// the same row (the GUID is unique) and the contacts survive it.
+// A nullable text cell, capped at the column's width.
+const text = (maxLength) => ({ type: ['string', 'null'], maxLength })
+
+// One route, two creates, because they are the same sentence said about two
+// kinds of client: with a `legacy_account_guid` this LINKS a Dynamics customer
+// (`user_id` optional — without it the company row is created BARE, so its
+// contact book can exist before any login does, and a later real link upserts
+// onto the same row because the GUID is unique), and with a `company_name` it
+// RAISES a client that is in no export at all.
+//
+// Which of the two is present is a business rule (422 from the handler), not
+// something the schema can express — the same posture POST /admin/orders takes
+// on account-or-contact attribution.
 const createBodySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['legacy_account_guid'],
   properties: {
     legacy_account_guid: { type: 'string', pattern: UUID_PATTERN },
     user_id: { type: 'integer', minimum: 1 },
+    company_name: { type: 'string', minLength: 1, maxLength: 200 },
+    account_number: text(50),
+    customer_type: text(50),
+    primary_contact_name: text(200),
+    email: text(254),
+    phone: text(50),
+    address: text(1000),
+    city: text(200),
+    country: text(200),
+    payment_terms: text(200),
   },
 }
 
@@ -120,7 +140,6 @@ const patchContactSchema = {
 // checked in the handler, since one route serves both). The identity of the
 // link (which D365 customer, the snapshotted name) is deliberately absent:
 // re-pointing it is unlink-then-link, which leaves a trail.
-const text = (maxLength) => ({ type: ['string', 'null'], maxLength })
 const patchBodySchema = {
   type: 'object',
   additionalProperties: false,
@@ -203,15 +222,33 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
     }
   )
 
+  // Backoffice, not director, for BOTH creates. Editing an existing client's
+  // details is the director's (the PATCH below gates it) because those are the
+  // terms and identity of a company the business already trades with; taking
+  // down a new client's name and address at the order desk is the order desk's
+  // own work, and gating it would mean a client who rang up cannot be billed
+  // until a director is free.
   app.post(
     '/admin/trade-accounts',
     { preHandler: backoffice, schema: { body: createBodySchema } },
     async (request, reply) => {
-      const tradeAccount = await linkTradeAccount(pool, {
-        legacyAccountGuid: request.body.legacy_account_guid,
-        userId: request.body.user_id,
-        linkedByUserId: request.user.id,
-      })
+      if (!request.body.legacy_account_guid && !request.body.company_name) {
+        reply.code(422)
+        return {
+          error: 'Unprocessable Entity',
+          message: 'A client needs either a Dynamics customer or a company name.',
+        }
+      }
+      const tradeAccount = request.body.legacy_account_guid
+        ? await linkTradeAccount(pool, {
+            legacyAccountGuid: request.body.legacy_account_guid,
+            userId: request.body.user_id,
+            linkedByUserId: request.user.id,
+          })
+        : await createTradeAccount(pool, {
+            ...request.body,
+            created_by_user_id: request.user.id,
+          })
       reply.code(201)
       return { trade_account: tradeAccount }
     }

@@ -32,7 +32,6 @@
 import {
   parseReportFilters,
   PRODUCT_TYPES,
-  PRODUCT_CATEGORIES,
   ORDER_KINDS,
   ORDER_STATUSES,
 } from '../reports/filters.js'
@@ -92,7 +91,10 @@ const FILTER_PROPERTIES = {
   brand_code: { type: 'string', maxLength: 100 },
   range: { type: 'string', maxLength: 100 },
   product_type: { type: 'string', enum: [...PRODUCT_TYPES] },
-  category: { type: 'string', enum: [...PRODUCT_CATEGORIES] },
+  // Any slug, not the seeded nine: the vocabulary is a table the office adds to
+  // (migration 1791379200000), and this schema is compiled at boot. filters.js
+  // parses the shape; an unknown category reports nothing.
+  category: { type: 'string', maxLength: 200 },
   collection: { type: 'string', maxLength: 200 },
   // The insight view's two drill-down pins — a design slug and a colourway SKU.
   product: { type: 'string', maxLength: 200 },

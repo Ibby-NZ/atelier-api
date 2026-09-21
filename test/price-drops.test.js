@@ -352,7 +352,7 @@ describe('price-list drop detection', () => {
       expect(response.statusCode).toBe(422)
     })
 
-    it('400s a missing category and an unknown one', async () => {
+    it('400s a missing category, and treats an unknown one as a scope holding nothing', async () => {
       expect(
         (
           await inject(
@@ -363,6 +363,10 @@ describe('price-list drop detection', () => {
           )
         ).statusCode
       ).toBe(400)
+      // Was a 400 from a schema enum. Since migration 1791379200000 the
+      // vocabulary is a table the office adds to, so this route cannot tell a
+      // category it has never heard of from one with no lines under this
+      // supplier — and both are the same refusal, 422, nothing written.
       expect(
         (
           await inject(
@@ -372,7 +376,7 @@ describe('price-list drop detection', () => {
             { supplier: SUPPLIER, category: 'curtains' }
           )
         ).statusCode
-      ).toBe(400)
+      ).toBe(422)
     })
 
     it('refuses a non-backoffice caller', async () => {

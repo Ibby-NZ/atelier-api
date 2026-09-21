@@ -30,11 +30,14 @@
 // states the four values, and US-003 reports an unknown one with its row number.
 
 import { csvDocument, csvRows, decodeText } from '../lib/csv-text.js'
-// products.category and price_list_items.category are ONE vocabulary — that is
-// the whole point of the column — so the accepted set is imported from the
-// pipeline's own registry rather than retyped here. src/ importing from
-// scripts/ is deliberate and already load-bearing (src/seed/price-lists.js,
-// src/routes/admin-price-lists.js): one package, plain relative specifier.
+import { categorySlugs } from '../catalogue/categories.js'
+// The SEEDED nine, and only a fallback now: since migration 1791379200000 the
+// vocabulary is `product_categories`, a table the office adds to, so a sheet is
+// checked against what that table holds AT UPLOAD TIME (validateProductSheet
+// reads it). This stays as the default for `parseProductSheet` called without a
+// database — the parser is pure and tested that way. src/ importing from
+// scripts/ is deliberate and already load-bearing (src/seed/price-lists.js):
+// one package, plain relative specifier.
 import { CATEGORIES } from '../../scripts/lib/price-template.js'
 
 const httpError = (statusCode, message) =>
@@ -156,9 +159,9 @@ export const productSheetFilename = (brandSlug) => `atelier-product-sheet-${bran
 // ---------------------------------------------------------------------------
 
 /**
- * The four values `products.category` accepts, in the CHECK's own order.
- * Re-exported so the CRM panel can state them: a CSV has nowhere to put a note
- * Excel will not hand back as a data row, so the file itself cannot.
+ * The seeded nine, in the order they were added. The live vocabulary is
+ * `GET /admin/categories`; this is what a sheet is checked against when no
+ * database is at hand, and what the error message falls back to naming.
  */
 export const PRODUCT_CATEGORIES = Object.freeze([...CATEGORIES])
 
@@ -211,11 +214,14 @@ const isBlankLine = (fields) => fields.length === 1 && fields[0].trim() === ''
  * the set (US-004 refuses to apply a sheet with any).
  *
  * @param {Buffer} bytes  the raw upload, encoding unknown
+ * @param {Set<string>|readonly string[]} [vocabulary] the categories a cell may
+ *   state; defaults to the seeded nine for callers with no database.
  * @returns {{ rows: number, skipped: number, repeats: number,
  *             entries: { row: number, id: number, design: string, category: string }[],
  *             errors: { row: number, message: string }[] }}
  */
-export const parseProductSheet = (bytes) => {
+export const parseProductSheet = (bytes, vocabulary = CATEGORIES) => {
+  const allowed = vocabulary instanceof Set ? vocabulary : new Set(vocabulary)
   if (!Buffer.isBuffer(bytes)) {
     throw httpError(400, 'Post the sheet as the raw file, with content-type text/csv.')
   }
@@ -278,8 +284,8 @@ export const parseProductSheet = (bytes) => {
     // Lower-cased before matching: the stored vocabulary is lower case and
     // "Fabric" can only mean `fabric`, so refusing it would be pedantry.
     const category = stated.toLowerCase()
-    if (!CATEGORIES.has(category)) {
-      fail(row, `"${stated}" is not a category. Use one of: ${PRODUCT_CATEGORIES.join(', ')}.`)
+    if (!allowed.has(category)) {
+      fail(row, `"${stated}" is not a category. Use one of: ${[...allowed].join(', ')}.`)
       continue
     }
 
@@ -409,7 +415,7 @@ const matchProductSheet = async (db, parsed, { lock = false } = {}) => {
  * @throws 400 when the file is not a product sheet at all
  */
 export const validateProductSheet = async (db, bytes) =>
-  matchProductSheet(db, parseProductSheet(bytes))
+  matchProductSheet(db, parseProductSheet(bytes, await categorySlugs(db)))
 
 // One statement for the whole sheet, the shape every batch write in this API
 // takes (the pricing and legacy imports both unnest their batch): a per-row
@@ -438,8 +444,10 @@ const APPLY_SQL = `UPDATE products AS p
  */
 export const applyProductSheet = async (pool, bytes) => {
   // Parsed before a connection is taken: a file that is not a product sheet at
-  // all is a 400 and has no business holding one open.
-  const parsed = parseProductSheet(bytes)
+  // all is a 400 and has no business holding one open. The vocabulary is read
+  // first for the same reason the dry run reads it — a category added this
+  // morning is a legal cell this afternoon.
+  const parsed = parseProductSheet(bytes, await categorySlugs(pool))
 
   const client = await pool.connect()
   try {

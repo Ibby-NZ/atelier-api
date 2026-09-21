@@ -14,6 +14,8 @@
 // and the route turns that into a 403 the page can render as an invitation to
 // apply for trade. Nothing about the product is returned with it.
 
+import { STORE_CURRENCY } from './visibility.js'
+
 const PRODUCT_COLUMNS = `
   p.slug,
   p.name,
@@ -27,7 +29,6 @@ const PRODUCT_COLUMNS = `
   p.rubs,
   p.price_band,
   p.lead_time,
-  p.currency,
   p.retail_price_cents,
   p.trade_price_cents,
   p.hi_res_asset_url,
@@ -88,7 +89,12 @@ const toProductDetail = (row, colourways, includeTrade) => {
     rubs: row.rubs,
     price_band: row.price_band,
     lead_time: row.lead_time,
-    currency: row.currency,
+    // The SELLING currency, not `products.currency`. That column is the
+    // SUPPLIER's — what Atelier pays a house — and describes neither price
+    // field here: both are stored in New Zealand cents (see visibility.js).
+    // Publishing it beside them is what had the storefront print one card in
+    // NZ$ and the next in US$.
+    currency: STORE_CURRENCY,
     price_hidden: row.is_international,
     hi_res_asset_url: row.hi_res_asset_url,
     brand: { slug: row.brand_slug, name: row.brand_name },

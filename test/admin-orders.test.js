@@ -1432,6 +1432,59 @@ describe('back-office order management', () => {
     })
   })
 
+  describe('price type (trade or retail)', () => {
+    // The basis the order was priced off. A commercial term, not an annotation:
+    // it sits behind the requested/confirmed guard like a price edit does.
+    it('defaults to retail and is patched to trade', async () => {
+      const order = await placeRequest()
+      const read = await inject('GET', `/admin/orders/${order.id}`, backofficeCookie)
+      expect(read.json().order.price_type).toBe('retail')
+
+      const patched = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+        price_type: 'trade',
+      })
+      expect(patched.statusCode).toBe(200)
+      expect(patched.json().order.price_type).toBe('trade')
+    })
+
+    it('travels on a manual order create', async () => {
+      const created = await inject('POST', '/admin/orders', backofficeCookie, {
+        contact: { name: 'Walk-in' },
+        lines: [{ colourway_id: colourwayId.get(SKU.inStock), qty: 2, unit_price_cents: 5000 }],
+        price_type: 'trade',
+      })
+      expect(created.statusCode).toBe(201)
+      expect(created.json().order.price_type).toBe('trade')
+    })
+
+    // Anything off the vocabulary is a 400 from the schema's enum, never a
+    // CHECK violation surfacing as a 500 — and never a null, which the NOT NULL
+    // column would answer with a 23502.
+    it('refuses a value off the list, and a null', async () => {
+      const order = await placeRequest()
+      const bad = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+        price_type: 'wholesale',
+      })
+      expect(bad.statusCode).toBe(400)
+
+      const nulled = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+        price_type: null,
+      })
+      expect(nulled.statusCode).toBe(400)
+    })
+
+    // The commercial-term posture: frozen once the invoice is out, exactly like
+    // a unit price. The annotations (rep, PO number, notes) stay editable.
+    it('is refused on a paid order', async () => {
+      const order = await placeRequest()
+      await pool.query(`UPDATE orders SET status = 'paid' WHERE id = $1`, [order.id])
+      const patched = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
+        price_type: 'trade',
+      })
+      expect(patched.statusCode).toBe(409)
+    })
+  })
+
   describe('a status filter that is a set', () => {
     // The dashboard's Open-orders tile means three statuses at once
     // (HELD_STATUSES), so `status` accepts a repeated param as well as a single

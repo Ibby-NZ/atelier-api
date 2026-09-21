@@ -2,10 +2,13 @@
 // into a full set of waterfall inputs.
 //
 // WHERE EACH INPUT COMES FROM, IN ORDER. A house's override row, then its
-// supplier's default row, then "missing" — never zero. Discount and retail
-// markup are read from the supplier terms (the one place a discount may
-// live: flat, multiplicative chain or tiers, resolved by discount-chain.js),
-// freight from the dated `supplier_freight_rates` ledger, and the exchange rate
+// supplier's default row, then "missing" — never zero. The retail markup is
+// read from the supplier terms; the DISCOUNT follows the same two-step as
+// everything else — the house's own terms (flat, multiplicative chain or
+// tiers, resolved by discount-chain.js), then `suppliers.default_discount`,
+// the one averaged rate a supplier gives on every house it invoices. The two
+// are never summed. Freight comes from the dated `supplier_freight_rates`
+// ledger, and the exchange rate
 // from `fx_rates` by the supplier's invoicing currency. Every resolved input
 // carries its SOURCE, so the screen can say "5% — supplier default" rather than
 // "5%", which is the difference between a figure someone set and a figure
@@ -230,7 +233,8 @@ const pickParameter = (column, house, supplierDefaults) => {
 const loadBrand = async (db, brandId) => {
   const { rows } = await db.query(
     `SELECT b.id, b.name, b.slug, b.currency AS brand_currency, b.supplier_id,
-            s.name AS supplier_name, s.currency AS supplier_currency
+            s.name AS supplier_name, s.currency AS supplier_currency,
+            s.default_discount AS supplier_default_discount
        FROM brands b
        LEFT JOIN suppliers s ON s.id = b.supplier_id
       WHERE b.id = $1 AND b.archived_at IS NULL`,
@@ -240,17 +244,30 @@ const loadBrand = async (db, brandId) => {
   return rows[0]
 }
 
-const discountInput = (terms, category) => {
-  if (!terms) return input(null, 'missing')
-  const resolved = resolveTermsChain(terms, terms.tiers, category)
-  if (resolved.source === 'none') return input(null, 'missing')
-  // A chain is multiplicative; the waterfall takes the one net percentage.
-  const percent = round3((1 - chainMultiplier(resolved.chain)) * 100)
-  return input(percent, 'terms', {
-    shape: resolved.source, // 'chain' | 'tier' | 'flat'
-    label: resolved.label,
-    chain: resolved.chain,
-  })
+// The house's negotiated terms first, then the supplier's own averaged rate —
+// the precedence every other parameter here follows, and the one the 9 Jul rule
+// describes: a supplier is rated by one averaged discount UNLESS it was
+// excluded and handled brand by brand. The two are never added together.
+const discountInput = (terms, category, supplierDefault) => {
+  const resolved = terms ? resolveTermsChain(terms, terms.tiers, category) : null
+  if (resolved && resolved.source !== 'none') {
+    // A chain is multiplicative; the waterfall takes the one net percentage.
+    const percent = round3((1 - chainMultiplier(resolved.chain)) * 100)
+    return input(percent, 'terms', {
+      shape: resolved.source, // 'chain' | 'tier' | 'flat'
+      label: resolved.label,
+      chain: resolved.chain,
+    })
+  }
+  // A fraction off list on the supplier row, reported as the percentage the
+  // waterfall subtracts. 0 is a rate that was recorded (prices already net),
+  // which is why the test is against null and not falsiness.
+  if (supplierDefault != null) {
+    return input(round3(Number(supplierDefault) * 100), 'supplier', {
+      shape: 'supplier-default',
+    })
+  }
+  return input(null, 'missing')
 }
 
 const dutyInput = (dutyClass, house, supplierDefaults) => {
@@ -308,7 +325,7 @@ export const resolveWaterfallInputs = async (db, { brandId, category = null, dut
   })
 
   const inputs = Object.freeze({
-    discount_percent: discountInput(terms, category),
+    discount_percent: discountInput(terms, category, brand.supplier_default_discount),
     fx_rate: fx
       ? input(fx.rate, 'fx', { currency, set_on: fx.set_on })
       : input(null, 'missing', { reason: currency ? `no rate set for ${currency}` : 'no currency on the house or its supplier' }),

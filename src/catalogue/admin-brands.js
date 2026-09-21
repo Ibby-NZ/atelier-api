@@ -274,12 +274,22 @@ const COLLECTION_SELECT = `SELECT ${COLLECTION_COLUMNS} ${COLLECTION_FROM}`
  */
 export const listAdminBrands = async (pool, { includeArchived = false } = {}) => {
   const where = includeArchived ? '' : 'WHERE archived_at IS NULL'
+  // The supplier's NAME, not only its id: a list showing `supplier_id: 7` says
+  // nothing, and every screen that reads this one asks the same question —
+  // which house does this supplier invoice, and which house has no supplier at
+  // all. A correlated subquery rather than a join, because BRAND_COLUMNS is
+  // unqualified and only valid while the statement has no alias. The NAME is
+  // not a rate: what Atelier PAYS a supplier stays on the finance-gated terms
+  // routes (src/suppliers/supplier-terms.js).
   const { rows } = await pool.query(
-    `SELECT ${BRAND_COLUMNS} FROM brands ${where} ORDER BY name ASC, id ASC`
+    `SELECT ${BRAND_COLUMNS},
+            (SELECT name FROM suppliers WHERE suppliers.id = brands.supplier_id)
+              AS supplier_name
+       FROM brands ${where} ORDER BY name ASC, id ASC`
   )
   // Arrow, not a bare `map(toBrand)`: the mapper takes a second `extra`
   // argument, and map would hand it the array index.
-  return rows.map((row) => toBrand(row))
+  return rows.map((row) => toBrand(row, { supplier_name: row.supplier_name ?? null }))
 }
 
 /**

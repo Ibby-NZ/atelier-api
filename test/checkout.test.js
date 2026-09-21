@@ -276,13 +276,25 @@ describe('POST /checkout/session', () => {
     expect(stripe.lastCreateParams.metadata.trade).toBe('true')
   })
 
-  it('charges everyone else the retail price', async () => {
+  // The same product, billed to a retail shopper, used to go to Stripe under the
+  // SUPPLIER's currency — `eur` here — on a figure that is New Zealand cents.
+  // The card said NZ$45.00 and the charge was €45.00.
+  it('charges everyone else the retail price, in the selling currency', async () => {
     const response = await post({ lines: [{ sku: SKU.trade, qty: 1 }], zone: ZONE })
     expect(response.statusCode).toBe(200)
     const product = stripe.lastCreateParams.line_items[0]
     expect(product.price_data.unit_amount).toBe(4500)
-    expect(product.price_data.currency).toBe('eur')
+    expect(product.price_data.currency).toBe('nzd')
     expect(stripe.lastCreateParams.metadata.trade).toBe('false')
+  })
+
+  // Every line item in the session — goods, freight, GST — is one currency, and
+  // it is the shopper's, whoever supplies the goods.
+  it('bills freight and GST in the same currency as the goods', async () => {
+    await post({ lines: [{ sku: SKU.trade, qty: 1 }], zone: ZONE })
+    const items = stripe.lastCreateParams.line_items
+    expect(items.length).toBeGreaterThan(2)
+    expect(new Set(items.map((item) => item.price_data.currency))).toEqual(new Set(['nzd']))
   })
 
   // 8367547 / 8367555: the checkout form had nowhere to say "leave it with the

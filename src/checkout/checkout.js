@@ -13,7 +13,7 @@ import {
   canSeeTradeCatalogue,
   canSeeTradePricing,
   LISTED_SKU_CONDITION,
-  TRADE_CURRENCY,
+  STORE_CURRENCY,
 } from '../catalogue/visibility.js'
 
 // Throw an Error whose statusCode Fastify will honour on the reply.
@@ -41,8 +41,15 @@ const CARD_PAYMENT_UNAVAILABLE =
 // `includeTrade` is the PRICE gate (FR-3, approved trade only) and is the same
 // predicate the catalogue read models use — so the figure the shopper was shown
 // on the card is the figure Stripe takes. Without it the store quoted the trade
-// price and charged retail. A trade figure is integer NZD cents whatever the
-// product's own currency says, so the line's currency moves with it.
+// price and charged retail.
+//
+// EVERY line is `STORE_CURRENCY`, trade and retail alike. Both price columns
+// hold New Zealand cents; `p.currency` is the SUPPLIER's and describes neither
+// (see visibility.js). Reading the retail line's currency off it sent
+// `unit_amount: 42900` to Stripe under `usd` for a house that invoices Atelier
+// in US dollars — a 1.8x overcharge on a figure the card had shown as NZ$429 —
+// and the mixed-currency refusal below could not catch it, because to that
+// check a wholly-USD cart looks consistent.
 //
 // `includeTradeOnly` closes the same door the catalogue does: a SKU a visitor
 // cannot browse is a SKU they cannot buy. Without it the gate would be cosmetic
@@ -68,7 +75,6 @@ export const validateCheckoutLines = async (
               p.product_type,
               p.retail_price_cents,
               p.trade_price_cents,
-              p.currency,
               b.trade_only,
               i.qty_available,
               i.qty_reserved
@@ -113,7 +119,7 @@ export const validateCheckoutLines = async (
       colourway_id: row.colourway_id,
       name: row.name,
       unit_price_cents: unitPriceCents,
-      currency: tradePriceCents === null ? row.currency : TRADE_CURRENCY,
+      currency: STORE_CURRENCY,
     })
   }
   return validated
@@ -213,17 +219,11 @@ export const createCheckoutSession = async (
     includeTrade: trade,
   })
 
-  // One Stripe session charges in one currency, and the shipping line is priced
-  // in it too — so a mixed-currency cart would silently mis-charge. Refuse it
-  // rather than pick a winner.
-  const currencies = [...new Set(validated.map((line) => line.currency))]
-  if (currencies.length > 1) {
-    throw httpError(
-      422,
-      `A single order cannot mix currencies (${currencies.join(', ')}). Please check out separately.`
-    )
-  }
-  const currency = currencies[0]
+  // One Stripe session charges in one currency, and the goods, the freight and
+  // the GST are all priced in it. That used to need a mixed-cart refusal here,
+  // because a line took its currency from the supplier's; now every line is the
+  // selling region's, so the cart cannot be mixed and there is nothing to refuse.
+  const currency = STORE_CURRENCY
   const totalQty = validated.reduce((sum, line) => sum + line.qty, 0)
 
   const quote = await getShippingQuote(pool, { zone, qty: totalQty })

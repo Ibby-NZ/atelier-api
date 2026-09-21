@@ -12,7 +12,7 @@
 // libraries it is looking at, so it can invite a visitor to apply rather than
 // silently serving a short grid.
 
-import { PUBLIC_BRAND_CONDITION } from './visibility.js'
+import { PUBLIC_BRAND_CONDITION, STORE_CURRENCY } from './visibility.js'
 
 export const DEFAULT_PAGE = 1
 export const DEFAULT_LIMIT = 20
@@ -79,7 +79,6 @@ const PRODUCT_COLUMNS = `
   p.rubs,
   p.price_band,
   p.lead_time,
-  p.currency,
   p.retail_price_cents,
   p.trade_price_cents,
   p.hi_res_asset_url,
@@ -162,7 +161,12 @@ const toPublicProduct = (row, includeTrade) => {
     rubs: row.rubs,
     price_band: row.price_band,
     lead_time: row.lead_time,
-    currency: row.currency,
+    // The SELLING currency, not `products.currency`. That column is the
+    // SUPPLIER's — what Atelier pays a house — and describes neither price
+    // field here: both are stored in New Zealand cents (see visibility.js).
+    // Publishing it beside them is what had the storefront print one card in
+    // NZ$ and the next in US$.
+    currency: STORE_CURRENCY,
     price_hidden: row.is_international,
     // Colourway photography first (it is the actual swatch), then the product's
     // hi-res asset as a fallback so a card is rarely image-less.

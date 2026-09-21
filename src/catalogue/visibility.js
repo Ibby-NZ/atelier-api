@@ -47,11 +47,28 @@ export const canSeeTradeCatalogue = (user) =>
  */
 export const canSeeTradePricing = (user) => !!user && effectiveRole(user) === 'trade'
 
-// Trade prices are precomputed through the pricing waterfall and stored in
-// integer NZD cents, whatever `products.currency` (the SUPPLIER's currency,
-// which belongs to the retail figure) says. A line priced off the trade figure
-// is therefore always quoted in NZD.
-export const TRADE_CURRENCY = 'NZD'
+// THE ONE CURRENCY A CUSTOMER IS EVER QUOTED, and it is the CUSTOMER'S, not the
+// supplier's. Every public figure — a card, a product page, a cart line, a
+// Stripe line item — is denominated here.
+//
+// `products.currency` is the SUPPLIER's currency (EUR for Pierre Frey, USD for
+// Trend). It describes what Atelier PAYS, and nothing else: both price columns
+// are already stored in New Zealand cents whatever it says. `trade_price_cents`
+// is precomputed through the pricing waterfall, which computes in NZ$
+// throughout; `retail_price_cents` comes from the office, the seed, or the D365
+// merge — and that merge only ever fills a price from a line whose currency IS
+// New Zealand (`src/legacy/merge.js`). So the supplier currency has never
+// described either figure, and publishing it beside them is what put "US$429"
+// on one card and "NZ$389" on the next one down.
+//
+// ONE SELLING REGION PER DEPLOYMENT. New Zealand: the shipping tiers price only
+// NZ zones, GST is 15%, and one Stripe session charges in one currency. A second
+// selling region is therefore not a formatting change — it needs a rate source,
+// a rounding rule and a Stripe account that settles in it — so this is a
+// constant rather than config that could be set to a currency nothing converts
+// into.
+export const STORE_REGION = 'NZ'
+export const STORE_CURRENCY = 'NZD'
 
 // SQL predicate for "a house a signed-out visitor may browse". Every public
 // read model that reaches products has to apply this when the viewer is not

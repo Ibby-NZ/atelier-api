@@ -8,6 +8,7 @@ import {
   DEFAULT_PAGE,
   DEFAULT_LIMIT,
   MAX_LIMIT,
+  PRICE_TYPES,
   listAdminOrders,
   getAdminOrder,
   createManualOrder,
@@ -97,6 +98,10 @@ const discountReasonProp = { type: ['string', 'null'], maxLength: 2000 }
 // than a key `applyDiscount` would silently ignore.
 const discountDependencies = { discount_reason: ['discount_pct'] }
 
+// The vocabulary comes from the module, never retyped here: the CHECK, the enum
+// and the CRM's dropdown are one list or they drift on the next value.
+const priceTypeProp = { type: 'string', enum: [...PRICE_TYPES] }
+
 // Editing an order: quantities, prices, cut requirements, lines added or
 // removed, and the contact header. Every key is optional and `anyOf` demands at
 // least one — Ajv runs `removeAdditional`, so an unknown key is stripped rather
@@ -116,6 +121,7 @@ const editBodySchema = {
     { required: ['contact_phone'] },
     { required: ['client_reference'] },
     { required: ['customer_po_number'] },
+    { required: ['price_type'] },
     // Deliberately no `discount_reason` member: a reason alone changes nothing
     // (see discountDependencies), so it cannot be the key that makes a body
     // non-empty.
@@ -171,6 +177,10 @@ const editBodySchema = {
     // (or an empty string, which the module folds to null) clears them.
     client_reference: { type: ['string', 'null'], maxLength: 200 },
     customer_po_number: { type: ['string', 'null'], maxLength: 200 },
+    // Which price list the order was written off. NOT nullable, unlike the two
+    // above: the column is NOT NULL, so a null here would reach Postgres as a
+    // 23502 and surface as a 500 rather than the 400 an enum answers with.
+    price_type: priceTypeProp,
     discount_pct: discountPctProp,
     discount_reason: discountReasonProp,
     // Staff-asserted attribution (A6 groundwork): null clears it. Must be
@@ -217,6 +227,9 @@ const createBodySchema = {
       },
     },
     notes: { type: ['string', 'null'], maxLength: 2000 },
+    // Absent means the column default (retail) — the office states the basis
+    // when it knows it, and edits it on the order when it changes.
+    price_type: priceTypeProp,
     // Where the cloth is going. The CRM fills it from the client's own record
     // when the client it picked has an address on file — the order desk should
     // not retype what the client roster already holds — and it lands in the

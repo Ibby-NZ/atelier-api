@@ -52,6 +52,14 @@ export const ORDER_STATUSES = Object.freeze([
   'declined',
 ])
 
+// Which price list the order was written off. Stated on the order, never
+// derived from the account: the storefront's trade-vs-retail rule
+// (`canSeeTradePricing`) says what a shopper is QUOTED, and the office
+// routinely charges the other one — trade terms for a walk-in job, retail for
+// a one-off to a trade client. The route schema spends this as its `enum`, so
+// the vocabulary and the CHECK cannot drift.
+export const PRICE_TYPES = Object.freeze(['trade', 'retail'])
+
 // The reservation a reserving order currently holds against inventory:
 //   held      -> qty_reserved still carries this order's demand
 //   converted -> reservation turned into a real stock decrement (shipped)
@@ -93,6 +101,7 @@ const ORDER_COLUMNS = `o.id,
         o.subtotal_cents,
         o.shipping_cents,
         o.total_cents,
+        o.price_type,
         o.discount_pct,
         o.discount_reason,
         o.discount_applied_by,
@@ -212,6 +221,9 @@ const toOrder = (row, lineRows) => {
     subtotal_cents: row.subtotal_cents,
     shipping_cents: row.shipping_cents,
     total_cents: row.total_cents,
+    // Which price list the order was written off (trade / retail). The office's
+    // own statement, editable while the order is still priceable.
+    price_type: row.price_type,
     // The manual pricing override (Rebecca-R2), ADMIN shape only: the customer
     // toOrder (order-history.js) stays without it, because the totals already
     // reflect the discount and who authorised it is the office's business.
@@ -484,6 +496,7 @@ const applyDiscount = async (client, id, patch, actor) => {
 // orders (W13).
 const ORDER_HEADER_COLUMNS = Object.freeze([
   'notes',
+  'price_type',
   'guest_email',
   'contact_phone',
   'client_reference',
@@ -583,6 +596,7 @@ const applyOrderHeader = async (client, id, patch) => {
  *   contact_phone?: string|null,
  *   client_reference?: string|null,
  *   customer_po_number?: string|null,
+ *   price_type?: 'trade'|'retail',
  *   discount_pct?: number,
  *   discount_reason?: string|null,
  * }} patch
@@ -789,8 +803,8 @@ export const createManualOrder = async (pool, input, actor) => {
     const { rows } = await client.query(
       `INSERT INTO orders (user_id, guest_email, order_number, kind, status, notes,
                            discount_pct, discount_reason, discount_applied_by,
-                           sales_rep_user_id, shipping_address)
-       VALUES ($1, $2, $3, 'manual', 'requested', $4, $5, $6, $7, $8, $9)
+                           sales_rep_user_id, price_type, shipping_address)
+       VALUES ($1, $2, $3, 'manual', 'requested', $4, $5, $6, $7, $8, COALESCE($9, 'retail'), $10)
        RETURNING id`,
       [
         userId,
@@ -805,6 +819,9 @@ export const createManualOrder = async (pool, input, actor) => {
         // one fact the caller must not be able to state.
         hasDiscount ? (actor?.id ?? null) : null,
         input.sales_rep_user_id ?? null,
+        // Absent means the column default: an order keyed with nothing said
+        // about its basis is a retail one until the office says otherwise.
+        input.price_type ?? null,
         // Where the cloth is going, through the request path's own trimmer: an
         // address that names neither a street nor a city is the ABSENCE of one,
         // and a `{}` in the column would print an empty Ship-to block on the

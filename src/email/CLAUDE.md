@@ -55,3 +55,65 @@ Extracted from the root CLAUDE.md (root conventions still apply). Loaded automat
   `trade_approved` flips false → true on a trade row, so it goes out exactly once per approval.
   The order-lifecycle templates still render from code only — an edit to them in the CRM Letters
   screen is stored but not read.
+
+## Purchasing and reserves — the letters that leave the building (W13 / W24)
+
+These are the first notifications addressed to a **counterparty** rather than a client or the
+office: a purchase order goes to a fabric house, a reserve request asks a mill to hold stock. That
+one fact drives everything below.
+
+- **`EMAIL_REDIRECT_TO` is the test-drive valve, and it lives in `createMailer`.** Set it and EVERY
+  letter — client, `BACKOFFICE_EMAIL`, and a supplier's `po_email` alike — is delivered to that one
+  address instead, with the real recipient in the subject (`[to: …]`) and a banner above the body.
+  It is in the mailer, not in each route, deliberately: a valve a caller has to remember to open is
+  a valve that gets forgotten exactly once, and a half-finished template reaching a mill is not
+  recallable. Being there, it also covers every notification added later without anyone being told
+  about it. `server.js` warns loudly on boot while it is set; `mailer.redirectTo` surfaces it but is
+  never read to decide WHETHER to send — a redirected letter is still a letter sent. Guarded by
+  `test/email-redirect.test.js`, which also asserts the working `.env` still has it set. **Unsetting
+  it is what makes suppliers start receiving real purchase orders** — delete that last assertion in
+  the same commit, so going live is a decision somebody makes rather than a line that rots.
+- **The house is told what a PERSON did, never what arithmetic says.** The purchase-order letters
+  hang off `send`, `close` and `cancel` — the three moves in `src/purchasing/po-states.js` — and
+  the reserve letters off a raised line and a cancelled one. The DERIVED receipt state
+  (`none|part|full|over`) mails the back office ONLY: it changes every time a roll is scanned, and a
+  house that got "your order is now part-received" each time would filter us.
+- **A draft mails nobody.** `draft` is the state a purchase order is created in; nothing has left
+  the building and the person who typed it is looking at it. The FIRST letter is `send`, which is
+  exactly what that button means. Same rule on the reserve side: the trigger is the write that
+  raises the lines.
+- **No address is not an error.** `purchase_orders.po_email` is a nullable snapshot, so a house with
+  nothing on file cannot be emailed — and the move still succeeds, because refusing to mark a
+  purchase order sent when the office phones that house instead would make the status lie. The
+  back-office copy says `NO ADDRESS ON FILE`, which is the only place that fact can usefully appear.
+- **The supplier letter carries PRICES whoever pressed Send.** The route re-reads the order with
+  `finance: true` for the notification while the RESPONSE stays masked. A purchase order without
+  prices is not a purchase order, the house quoted them in the first place, and finance masking
+  exists so a staffer without cost access does not read costs *on screen* — this letter is composed
+  server-side for the house and the one configured back-office address.
+- **A reserve line's house is FREE TEXT** (`reserve_lines.supplier`, no foreign key, a D365
+  carry-over). `resolveSupplierEmail` in `recipients.js` matches it against `suppliers.name`
+  case-insensitively and trimmed, and **nothing fuzzier**: a near-match resolved by guesswork
+  addresses a commercial conversation to the wrong mill, which is worse than sending nothing. When
+  it resolves to null no supplier letter goes out, and the back-office copy — which is sent either
+  way — says `NO SUPPLIER MATCH`. That copy is the only record that a house was never actually asked.
+- **The unit of sending is (house × kind), and only the lines THIS request raised.** A docket spans
+  houses (a client rings about cloth from three mills), so one save is several letters; and "hold
+  this" (`supplier_reserve_request`) is a different ask from "post us a cutting"
+  (`supplier_cutting_request`) — a house that receives them merged answers one of them. The notifier
+  is handed `request.body.lines`, never the docket's full list, because a docket the office adds to
+  next week must not re-ask a house for what it already holds.
+- **Only `cancelled` writes to the house after the request.** `confirmed` is the house telling US,
+  `arrived` is our warehouse, `dispatched` is our courier. A cancellation is the one move that costs
+  the house money if the letter never arrives: cloth stays held against a client who walked away.
+- Templates: `purchase_order_sent` / `_closed` / `_cancelled` and `supplier_reserve_request` /
+  `supplier_cutting_request` / `supplier_reserve_cancelled` go OUT;
+  `backoffice_purchase_order_sent` / `_received` and `backoffice_reserve_request` stay in. Triggers
+  live in `purchasing-notifications.js` and `reserve-notifications.js` (separate files from
+  `notifications.js`, which is the order lifecycle); both are no-ops when `mailer` is null and
+  neither throws. Wiring: `buildApp` passes `mailer` into `adminPurchaseOrderRoutes` and
+  `adminReserveRoutes`. Guarded by `test/purchasing-email.test.js` and `test/reserves-email.test.js`.
+- All nine appear in the CRM's Emails screen automatically (`TEMPLATE_NAMES` is `Object.keys`), so a
+  stored row can override any of them. Every list (`lines_text`) is PRE-FORMATTED by the notifier,
+  the `sample_request_received` precedent — a stored override cannot do arithmetic or currency, so
+  the code template must not either, or the two copies drift.

@@ -29,8 +29,16 @@ const start = async () => {
     transport: createMailTransport(config),
     from: config.emailFrom,
     backofficeEmail: config.backofficeEmail,
+    redirectTo: config.emailRedirectTo,
     log: { info: () => {}, error: (details, message) => console.error(message, details) },
   })
+  if (config.emailRedirectTo) {
+    console.warn(
+      `EMAIL_REDIRECT_TO is set — EVERY letter, including purchase orders and ` +
+        `reserve requests addressed to SUPPLIERS, is delivered to ` +
+        `${config.emailRedirectTo} and to nobody else. Unset it to go live.`
+    )
+  }
 
   // Xero stays disabled (every /admin/xero route → 503) until both
   // XERO_CLIENT_ID and XERO_CLIENT_SECRET are set.

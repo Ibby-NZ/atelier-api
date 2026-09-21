@@ -70,11 +70,25 @@ describe('email templates', () => {
         // shopper's acknowledgement and the office's alert.
         'sample_request_received',
         'backoffice_new_sample_request',
+        // Purchasing and reserves — the first letters addressed to a
+        // COUNTERPARTY rather than a client or the office. The house is written
+        // to when a person acts (send / close / cancel a purchase order, raise
+        // or cancel a reserve or cutting), never when arithmetic changes: the
+        // derived receipt state mails the back office only.
+        'purchase_order_sent',
+        'purchase_order_closed',
+        'purchase_order_cancelled',
+        'backoffice_purchase_order_sent',
+        'backoffice_purchase_order_received',
+        'supplier_reserve_request',
+        'supplier_cutting_request',
+        'supplier_reserve_cancelled',
+        'backoffice_reserve_request',
       ])
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(17)
+    expect(TEMPLATE_NAMES).toHaveLength(26)
   })
 
   it('backoffice_new_trade_application names the business and links the CRM applicants tab', () => {

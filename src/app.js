@@ -214,7 +214,7 @@ export const buildApp = ({
     // — the buying desk: the day's confirmed demand grouped by house, sent,
     // receipted against and closed. Back office only, and every cost figure on
     // it is finance-gated on top of that guard.
-    api.register(adminPurchaseOrderRoutes, { pool })
+    api.register(adminPurchaseOrderRoutes, { pool, mailer })
     // /admin/supplier-invoices — one house's bill across a 2-4 week cycle, and
     // which purchase orders it covers. Back office only, every money figure on
     // it finance-gated, and the variance between the bill and what those orders
@@ -225,7 +225,7 @@ export const buildApp = ({
     // shipment against. Back office only; replaces the D365 fulmar_reserve and
     // cutting forms. Deliberately does NOT touch inventory.qty_reserved — a
     // reserve here asks a HOUSE to hold stock at their end.
-    api.register(adminReserveRoutes, { pool })
+    api.register(adminReserveRoutes, { pool, mailer })
     // /admin/legacy/* — read-only window on the Dynamics-365 staging tables the
     // CRM browses (real customers/orders/stock/prices). Same CORS + guard.
     // /admin/xero/* — connection lifecycle, contact/item sync, invoice push

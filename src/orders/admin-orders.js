@@ -92,6 +92,7 @@ const ORDER_COLUMNS = `o.id,
         o.status,
         o.subtotal_cents,
         o.shipping_cents,
+        o.gst_cents,
         o.total_cents,
         o.discount_pct,
         o.discount_reason,
@@ -211,6 +212,7 @@ const toOrder = (row, lineRows) => {
     status: row.status,
     subtotal_cents: row.subtotal_cents,
     shipping_cents: row.shipping_cents,
+    gst_cents: row.gst_cents,
     total_cents: row.total_cents,
     // The manual pricing override (Rebecca-R2), ADMIN shape only: the customer
     // toOrder (order-history.js) stays without it, because the totals already

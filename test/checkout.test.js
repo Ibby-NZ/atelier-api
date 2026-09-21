@@ -21,6 +21,15 @@ const SKU = {
 }
 
 const PASSWORD = 'checkout-test-password-123'
+
+// The delivery details the store collects (Sept 2026); every post carries them
+// unless a test deliberately drops them.
+const CUSTOMER = Object.freeze({
+  name: 'Olivia Marlow',
+  email: 'olivia@example.test',
+  phone: '+6421555000',
+  address: { line1: '12 Parnell Road', line2: 'Level 2', city: 'Auckland', postal_code: '1052' },
+})
 const TRADE_EMAIL = `${PREFIX}-trader@example.test`
 
 // A Stripe stub that records the params of the last create() call and returns a
@@ -140,7 +149,7 @@ describe('POST /checkout/session', () => {
     app.inject({
       method: 'POST',
       url: '/checkout/session',
-      payload,
+      payload: { customer: CUSTOMER, ...payload },
       headers: cookie ? { cookie } : {},
     })
 
@@ -227,7 +236,7 @@ describe('POST /checkout/session', () => {
   it('adds the shipping quote as a line item from the zone', async () => {
     await post({ lines: [{ sku: SKU.good, qty: 2 }], zone: ZONE })
     const items = stripe.lastCreateParams.line_items
-    const shipping = items[items.length - 1]
+    const shipping = items[items.length - 2] // GST is the last line
     expect(shipping.price_data.product_data.name).toContain(ZONE)
     expect(shipping.price_data.unit_amount).toBe(1200) // qty 2 < 20 → base tier
     expect(shipping.quantity).toBe(1)
@@ -321,15 +330,85 @@ describe('POST /checkout/session', () => {
     expect(response.statusCode).toBe(422)
   })
 
-  it('asks Stripe to collect a NZ delivery address and a phone number', async () => {
+  it('forwards the delivery details the store collected, and does not ask Stripe to collect them again', async () => {
     await post({ lines: [{ sku: SKU.good, qty: 1 }], zone: ZONE })
     const params = stripe.lastCreateParams
-    // Physical goods have to be dispatched somewhere, and the shipping tiers
-    // only price the three NZ zones — so no other country may be offered.
-    expect(params.shipping_address_collection).toEqual({ allowed_countries: ['NZ'] })
-    expect(params.phone_number_collection).toEqual({ enabled: true })
+    expect(params.payment_intent_data.shipping).toEqual({
+      name: 'Olivia Marlow',
+      phone: '+6421555000',
+      address: {
+        line1: '12 Parnell Road',
+        line2: 'Level 2',
+        city: 'Auckland',
+        postal_code: '1052',
+        country: 'NZ', // fixed: the shipping tiers only price NZ
+      },
+    })
+    expect(params.customer_email).toBe('olivia@example.test')
+    expect(params.shipping_address_collection).toBeUndefined()
+    expect(params.phone_number_collection).toBeUndefined()
     // Our own zone tiers price the freight; Stripe must not add its own.
     expect(params.shipping_options).toBeUndefined()
+    // The webhook persists the address from metadata (signed), not the intent.
+    expect(params.metadata).toMatchObject({
+      ship_name: 'Olivia Marlow',
+      ship_phone: '+6421555000',
+      ship_line1: '12 Parnell Road',
+      ship_line2: 'Level 2',
+      ship_city: 'Auckland',
+      ship_postal_code: '1052',
+    })
+  })
+
+  it('the confirmed email wins over the account login for the receipt', async () => {
+    await post({ lines: [{ sku: SKU.good, qty: 1 }], zone: ZONE }, tradeCookie)
+    expect(stripe.lastCreateParams.customer_email).toBe('olivia@example.test')
+  })
+
+  it('charges 15% GST on goods plus freight as its own line, and records it in metadata', async () => {
+    await post({ lines: [{ sku: SKU.good, qty: 2 }], zone: ZONE })
+    const items = stripe.lastCreateParams.line_items
+    const gst = items[items.length - 1]
+    expect(gst.price_data.product_data.name).toMatch(/GST/)
+    expect(gst.price_data.unit_amount).toBe(Math.round((4500 * 2 + 1200) * 0.15)) // 1530
+    expect(gst.quantity).toBe(1)
+    expect(stripe.lastCreateParams.metadata.gst_cents).toBe('1530')
+  })
+
+  it('rejects a body with no customer by schema (400)', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/checkout/session',
+      payload: { lines: [{ sku: SKU.good, qty: 1 }], zone: ZONE },
+    })
+    expect(response.statusCode).toBe(400)
+  })
+
+  it('strips a client-sent country: delivery is NZ whatever the body says', async () => {
+    await post({
+      lines: [{ sku: SKU.good, qty: 1 }],
+      zone: ZONE,
+      customer: { ...CUSTOMER, address: { ...CUSTOMER.address, country: 'AU' } },
+    })
+    expect(stripe.lastCreateParams.payment_intent_data.shipping.address.country).toBe('NZ')
+  })
+
+  it('GET /checkout/prefill starts a signed-in shopper from the account, and refuses guests', async () => {
+    const guest = await app.inject({ method: 'GET', url: '/checkout/prefill' })
+    expect(guest.statusCode).toBe(401)
+
+    const trader = await app.inject({
+      method: 'GET',
+      url: '/checkout/prefill',
+      headers: { cookie: tradeCookie },
+    })
+    expect(trader.statusCode).toBe(200)
+    expect(trader.json()).toEqual({
+      name: 'Chk Trader',
+      email: TRADE_EMAIL,
+      phone: '',
+      address: { line1: '', line2: '', city: '', postal_code: '' },
+    })
   })
 
   it('rejects an unknown shipping zone with 400', async () => {
@@ -357,7 +436,7 @@ describe('POST /checkout/session', () => {
     const response = await noStripe.inject({
       method: 'POST',
       url: '/checkout/session',
-      payload: { lines: [{ sku: SKU.good, qty: 1 }], zone: ZONE },
+      payload: { lines: [{ sku: SKU.good, qty: 1 }], zone: ZONE, customer: CUSTOMER },
     })
     expect(response.statusCode).toBe(503)
     await noStripe.close()

@@ -8,6 +8,7 @@
 // order without a pending row here.
 
 import { getShippingQuote } from '../shipping/rates.js'
+import { gstCents } from '../orders/gst.js'
 import {
   canSeeTradeCatalogue,
   canSeeTradePricing,
@@ -127,6 +128,41 @@ const toStripeLineItem = (line) => ({
   quantity: line.qty,
 })
 
+const gstLineItem = (cents, currency) => ({
+  price_data: {
+    currency: currency.toLowerCase(),
+    product_data: { name: 'GST 15%' },
+    unit_amount: cents,
+  },
+  quantity: 1,
+})
+
+// The delivery details the store collected, as Stripe's PaymentIntent
+// `shipping` shape (so the parcel address shows on the payment in the
+// dashboard) and as flat metadata keys (so the webhook can persist them from
+// the signature-verified event alone). Country is fixed: the zone tiers only
+// price New Zealand.
+const stripeShipping = (customer) => ({
+  name: customer.name,
+  phone: customer.phone,
+  address: {
+    line1: customer.address.line1,
+    line2: customer.address.line2 || undefined,
+    city: customer.address.city,
+    postal_code: customer.address.postal_code,
+    country: SHIPPING_COUNTRIES[0],
+  },
+})
+
+const shippingMetadata = (customer) => ({
+  ship_name: customer.name,
+  ship_phone: customer.phone,
+  ship_line1: customer.address.line1,
+  ship_line2: customer.address.line2 ?? '',
+  ship_city: customer.address.city,
+  ship_postal_code: customer.address.postal_code,
+})
+
 const shippingLineItem = (zone, quote, currency) => ({
   price_data: {
     currency: currency.toLowerCase(),
@@ -152,7 +188,7 @@ const filledMetadata = (entries) =>
  * Session (test mode). Returns the redirect URL and session id.
  *
  * @param {{ pool: import('pg').Pool, stripe: import('stripe').Stripe, storeBaseUrl: string }} deps
- * @param {{ lines: Array<{ sku: string, qty: number }>, zone: string, user?: { id: string, email: string } | null, notes?: string | null, clientReference?: string | null, customerPoNumber?: string | null }} input
+ * @param {{ lines: Array<{ sku: string, qty: number }>, zone: string, customer: { name: string, email: string, phone: string, address: { line1: string, line2?: string, city: string, postal_code: string } }, user?: { id: string, email: string } | null, notes?: string | null, clientReference?: string | null, customerPoNumber?: string | null }} input
  * @returns {Promise<{ url: string, session_id: string }>}
  */
 export const createCheckoutSession = async (
@@ -160,6 +196,7 @@ export const createCheckoutSession = async (
   {
     lines,
     zone,
+    customer,
     user = null,
     notes = null,
     clientReference = null,
@@ -194,9 +231,13 @@ export const createCheckoutSession = async (
     throw httpError(400, `Unknown shipping zone "${zone}".`)
   }
 
+  // GST is charged on goods AND freight (domestic NZ delivery is taxable).
+  const goodsCents = validated.reduce((sum, line) => sum + line.unit_price_cents * line.qty, 0)
+  const gst = gstCents(goodsCents + quote.rate_cents)
   const lineItems = [
     ...validated.map(toStripeLineItem),
     shippingLineItem(zone, quote, currency),
+    gstLineItem(gst, currency),
   ]
 
   // The webhook rebuilds the order from this metadata (US-011). Only sku + qty
@@ -217,18 +258,22 @@ export const createCheckoutSession = async (
     line_items: lineItems,
     success_url: `${storeBaseUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${storeBaseUrl}/cart`,
-    // Physical goods: Stripe collects the delivery address and a contact phone
-    // so the back office can actually dispatch the parcel. Shipping is priced
-    // by our own zone tiers above, so no Stripe shipping_options are offered.
-    shipping_address_collection: { allowed_countries: SHIPPING_COUNTRIES },
+    // The store collects the delivery details (Sept 2026) so Stripe must NOT
+    // ask again: no shipping_address_collection / phone_number_collection. The
+    // address rides on the PaymentIntent and in metadata (see stripeShipping).
+    // Shipping is priced by our own zone tiers above, so no Stripe
+    // shipping_options are offered either.
+    payment_intent_data: { shipping: stripeShipping(customer) },
     billing_address_collection: 'auto',
-    phone_number_collection: { enabled: true },
     client_reference_id: user ? String(user.id) : undefined,
-    customer_email: user ? user.email : undefined,
+    // The address the shopper confirmed on our page, account or not — an
+    // account holder may well want the receipt somewhere other than the login.
+    customer_email: customer.email,
     metadata: {
       cart: JSON.stringify(cart),
       zone,
       shipping_cents: String(quote.rate_cents),
+      gst_cents: String(gst),
       trade: String(trade),
       // The order row is written by the webhook, not here, so anything the
       // shopper typed has to travel with the session or it is lost. Stripe caps
@@ -238,6 +283,7 @@ export const createCheckoutSession = async (
         ['client_reference', clientReference],
         ['customer_po_number', customerPoNumber],
       ]),
+      ...shippingMetadata(customer),
     },
   })
 
@@ -318,5 +364,54 @@ export const retrieveCheckoutSession = async ({ pool, stripe }, sessionId) => {
     email: session.customer_details?.email || session.customer_email || null,
     lines: order ? await orderLines(pool, order.id) : [],
     shipping_address: order?.shipping_address ?? null,
+  }
+}
+
+/**
+ * What the checkout form starts with for a signed-in shopper (Sept 2026):
+ * the account's name/email, then the most recent card checkout's delivery
+ * address and phone (already in Stripe's structured shape), then — for a trade
+ * account — the trade application's business name, delivery address and
+ * phones. Every field is editable on the page; this is only the first draft.
+ * Nothing here is authoritative for the order: the body of
+ * POST /checkout/session is.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ id: number, name?: string|null, email: string }} user
+ */
+export const getCheckoutPrefill = async (pool, user) => {
+  const [orders, applications] = await Promise.all([
+    pool.query(
+      `SELECT shipping_address, contact_phone
+         FROM orders
+        WHERE user_id = $1 AND kind = 'checkout' AND shipping_address IS NOT NULL
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1`,
+      [user.id]
+    ),
+    pool.query(
+      `SELECT business_name, delivery_address, mobile_phone, landline_phone
+         FROM trade_applications
+        WHERE user_id = $1
+        ORDER BY id DESC
+        LIMIT 1`,
+      [user.id]
+    ),
+  ])
+  const last = orders.rows[0] ?? null
+  const application = applications.rows[0] ?? null
+  const address = last?.shipping_address ?? null
+  return {
+    name: user.name || address?.name || application?.business_name || '',
+    email: user.email,
+    phone: last?.contact_phone || application?.mobile_phone || application?.landline_phone || '',
+    address: {
+      // A trade application's delivery address is one free-text block, so it
+      // lands in line1 for the shopper to split; a past order is structured.
+      line1: address?.line1 ?? application?.delivery_address ?? '',
+      line2: address?.line2 ?? '',
+      city: address?.city ?? '',
+      postal_code: address?.postal_code ?? '',
+    },
   }
 }

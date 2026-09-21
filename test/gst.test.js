@@ -2,7 +2,7 @@
 // stored — one function, pure, so the rounding the CRM prints is the rounding
 // the invoice will carry. See src/orders/gst.js.
 import { describe, it, expect } from 'vitest'
-import { gstFigures, withGst, GST_RATE } from '../src/orders/gst.js'
+import { gstFigures, withGst, gstCents, GST_RATE } from '../src/orders/gst.js'
 
 describe('gstFigures', () => {
   it('adds 15% on top of an exclusive total', () => {
@@ -39,5 +39,18 @@ describe('withGst', () => {
     expect(withGst({ total_cents: 200 }, 'Exclusive').gst.gst_cents).toBe(30)
     expect(withGst(null, 'Exclusive')).toBeNull()
     expect(withGst({ id: 1 }, 'Exclusive')).toEqual({ id: 1 })
+  })
+})
+
+describe('gstCents (the checkout write side)', () => {
+  it('is 15% in whole cents, half-cents rounding up like Postgres', () => {
+    expect(gstCents(10000)).toBe(1500)
+    expect(gstCents(1230)).toBe(185) // 184.5 → 185
+    expect(gstCents(0)).toBe(0)
+    expect(gstCents('20000')).toBe(3000) // pg numeric string
+  })
+
+  it('agrees with the Exclusive read-side figure', () => {
+    expect(gstCents(66500)).toBe(gstFigures(66500, 'Exclusive').gst_cents)
   })
 })

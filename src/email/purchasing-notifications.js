@@ -208,3 +208,55 @@ export const notifyPurchaseOrderReceipt = async (mailer, purchaseOrder, receipt)
   })
   return { ok: true }
 }
+
+/**
+ * `POST /admin/supplier-invoices/statement` — the office asking a house for ONE
+ * invoice covering several purchase orders, plus the office's copy.
+ *
+ * Unlike the moves above, THE LETTER IS THE ACT. There is no status change
+ * standing on its own behind it, so this helper does not quietly no-op: the
+ * caller (src/purchasing/invoice-statements.js) refuses a missing address with
+ * a 422 and an unconfigured mailer with a 503 before anything reaches here, and
+ * the guard below is the last line rather than the policy.
+ *
+ * The costs go to the house unmasked, for the reason `notifyPurchaseOrderSent`
+ * gives: the house quoted them.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ supplier_name: string, po_email: string|null, lines_text: string,
+ *           purchase_order_count: number, currency: string|null,
+ *           total: number|null, staff_name?: string|null, notes?: string|null }} statement
+ */
+export const notifyConsolidatedInvoiceRequest = async (mailer, statement) => {
+  if (!mailer || !statement?.po_email) {
+    return noop
+  }
+  const total_text = money(statement.total, statement.currency)
+  await mailer.send({
+    template: 'supplier_invoice_request',
+    to: statement.po_email,
+    data: {
+      supplier_name: statement.supplier_name ?? 'Sir or Madam',
+      lines_text: statement.lines_text,
+      purchase_order_count: statement.purchase_order_count,
+      total_text,
+      // Where the bill should come back to. The one configured office address,
+      // so a house replying to the letter reaches the desk that keys it.
+      reply_to: mailer.backofficeEmail,
+      notes: statement.notes ?? null,
+    },
+  })
+  await mailer.send({
+    template: 'backoffice_supplier_invoice_request',
+    to: mailer.backofficeEmail,
+    data: {
+      supplier_name: statement.supplier_name,
+      po_email: statement.po_email,
+      purchase_order_count: statement.purchase_order_count,
+      lines_text: statement.lines_text,
+      total_text,
+      staff_name: statement.staff_name ?? null,
+    },
+  })
+  return { ok: true }
+}

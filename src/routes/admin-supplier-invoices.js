@@ -34,6 +34,10 @@ import {
   attachPurchaseOrder,
   detachPurchaseOrder,
 } from '../purchasing/supplier-invoices.js'
+import {
+  MAX_STATEMENT_PURCHASE_ORDERS,
+  requestConsolidatedInvoice,
+} from '../purchasing/invoice-statements.js'
 import { PURCHASE_ORDER_STATUSES } from '../purchasing/po-states.js'
 import { loadReportAccess } from '../reports/access.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
@@ -169,7 +173,28 @@ const attachBodySchema = {
   },
 }
 
-export const adminSupplierInvoiceRoutes = async (app, { pool }) => {
+// The statement asks a house to bill several purchase orders together, so the
+// body is the house and the tick list — nothing about the bill itself, which
+// does not exist yet and whose number, date and total only the house can state.
+const statementBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['supplier_id', 'purchase_order_ids'],
+  properties: {
+    supplier_id: { type: 'integer', minimum: 1 },
+    purchase_order_ids: {
+      type: 'array',
+      minItems: 1,
+      maxItems: MAX_STATEMENT_PURCHASE_ORDERS,
+      items: { type: 'integer', minimum: 1 },
+    },
+    // Anything the office wants to say alongside — a cycle, a reference, a
+    // reason. Optional, and it is the only free text that reaches the house.
+    notes: nullableText,
+  },
+}
+
+export const adminSupplierInvoiceRoutes = async (app, { pool, mailer = null }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
   // Whether this login may see money figures. Resolved per request from the row
@@ -219,6 +244,32 @@ export const adminSupplierInvoiceRoutes = async (app, { pool }) => {
       })
       return { purchase_orders, meta: { total, page, limit } }
     }
+  )
+
+  // The letter that asks for one bill covering several orders (the other half
+  // of the matching search above: that one finds what a bill covers, this one
+  // asks for the bill in the first place).
+  //
+  // A VERB AND NOT A CREATE. It writes no invoice — a bill that has not arrived
+  // has no number, date or total to key — so there is no 201 and no Location:
+  // what it answers with is what went out and to which address. The contact-log
+  // entry it leaves is the record that the office asked.
+  //
+  // Refused whole rather than narrowed: a purchase order another bill already
+  // covers earns the 409 the attach gives, in the same words, and the statement
+  // does not go with that order silently dropped from it.
+  app.post(
+    '/admin/supplier-invoices/statement',
+    { preHandler: backoffice, schema: { body: statementBodySchema } },
+    async (request) =>
+      requestConsolidatedInvoice(pool, mailer, {
+        supplierId: request.body.supplier_id,
+        purchaseOrderIds: request.body.purchase_order_ids,
+        notes: request.body.notes ?? null,
+        // The session, never the body — who chased a house is not the caller's
+        // to state.
+        user: request.user,
+      })
   )
 
   app.post(

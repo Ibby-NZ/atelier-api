@@ -108,14 +108,26 @@ one fact drives everything below.
 - **Only `cancelled` writes to the house after the request.** `confirmed` is the house telling US,
   `arrived` is our warehouse, `dispatched` is our courier. A cancellation is the one move that costs
   the house money if the letter never arrives: cloth stays held against a client who walked away.
-- Templates: `purchase_order_sent` / `_closed` / `_cancelled` and `supplier_reserve_request` /
-  `supplier_cutting_request` / `supplier_reserve_cancelled` go OUT;
-  `backoffice_purchase_order_sent` / `_received` and `backoffice_reserve_request` stay in. Triggers
+- **`supplier_invoice_request` is the one letter where the LETTER IS THE ACT.** Every other
+  counterparty letter hangs off a move that stands on its own — a purchase order is sent whether or
+  not the relay was up, and `po_email` being null is not an error. The statement asks a house for one
+  bill covering several purchase orders and there is no state change behind it, so
+  `src/purchasing/invoice-statements.js` refuses rather than no-ops: **422** with no address on file,
+  **503** with no mailer configured, and the attach's own **409/422** for an order already billed or
+  raised for another house — all BEFORE anything is sent. A statement is refused WHOLE and never
+  narrowed: a letter that went out missing an order the staffer ticked is worse than one that did not
+  go, because nothing on screen says so.
+- Templates: `purchase_order_sent` / `_closed` / `_cancelled`, `supplier_invoice_request` and
+  `supplier_reserve_request` / `supplier_cutting_request` / `supplier_reserve_cancelled` go OUT;
+  `backoffice_purchase_order_sent` / `_received`, `backoffice_supplier_invoice_request` and
+  `backoffice_reserve_request` stay in. Triggers
   live in `purchasing-notifications.js` and `reserve-notifications.js` (separate files from
   `notifications.js`, which is the order lifecycle); both are no-ops when `mailer` is null and
-  neither throws. Wiring: `buildApp` passes `mailer` into `adminPurchaseOrderRoutes` and
-  `adminReserveRoutes`. Guarded by `test/purchasing-email.test.js` and `test/reserves-email.test.js`.
-- All nine appear in the CRM's Emails screen automatically (`TEMPLATE_NAMES` is `Object.keys`), so a
+  neither throws. Wiring: `buildApp` passes `mailer` into `adminPurchaseOrderRoutes`,
+  `adminSupplierInvoiceRoutes` (for the statement route alone) and
+  `adminReserveRoutes`. Guarded by `test/purchasing-email.test.js`, `test/reserves-email.test.js` and
+  `test/supplier-invoice-statement.test.js`.
+- All of them appear in the CRM's Emails screen automatically (`TEMPLATE_NAMES` is `Object.keys`), so a
   stored row can override any of them. Every list (`lines_text`) is PRE-FORMATTED by the notifier,
   the `sample_request_received` precedent — a stored override cannot do arithmetic or currency, so
   the code template must not either, or the two copies drift.

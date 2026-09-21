@@ -20,7 +20,9 @@ const httpError = (statusCode, message) =>
 
 // The safe-cast function per type (migrations/1787025600000_d365-overrides.js).
 // `text` needs none — every jsonb `->>` result is already text.
-const CAST_FUNCTION = Object.freeze({
+// Exported so src/legacy/archive-read.js applies a correction through the same
+// three functions rather than naming them a second time.
+export const CAST_FUNCTION = Object.freeze({
   numeric: 'd365_override_numeric',
   boolean: 'd365_override_boolean',
   timestamp: 'd365_override_timestamp',

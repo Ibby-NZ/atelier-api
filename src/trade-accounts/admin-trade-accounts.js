@@ -40,16 +40,40 @@ const ACCOUNT_COLUMNS = `ta.id,
         ta.account_manager_phone,
         ta.linked_by_user_id,
         ta.created_at,
-        ta.updated_at`
+        ta.updated_at,
+        ta.account_number,
+        ta.customer_type,
+        ta.primary_contact_name,
+        ta.email,
+        ta.phone,
+        ta.address,
+        ta.city,
+        ta.country,
+        ta.payment_terms,
+        ta.xero_contact_id,
+        ta.archived_at,
+        (SELECT COUNT(*)::int FROM trade_account_contacts tac WHERE tac.trade_account_id = ta.id) AS contact_count`
 
 // Staff-editable fields. The identity columns (guid, snapshotted name, the
 // ambiguity flag) are deliberately absent: re-pointing a link at a different
-// company is unlink-then-link, which leaves an audit trail, not a PATCH.
-const UPDATE_COLUMNS = Object.freeze([
+// company is unlink-then-link, which leaves an audit trail, not a PATCH — and
+// the snapshotted name is what the client portal matches invoice history on
+// (viewer.js), so renaming it would silently empty a client's history.
+export const MANAGER_COLUMNS = Object.freeze([
   'account_manager_name',
   'account_manager_email',
   'account_manager_phone',
 ])
+// The company details the cutover merge carried over. Editing these is the
+// DIRECTOR's (the route gates it): they are the client's terms and identity,
+// where the account manager block is who at Atelier looks after them.
+export const DETAIL_COLUMNS = Object.freeze([
+  'account_number', 'customer_type', 'primary_contact_name', 'email', 'phone',
+  'address', 'city', 'country', 'payment_terms', 'xero_contact_id',
+])
+const UPDATE_COLUMNS = Object.freeze([...MANAGER_COLUMNS, ...DETAIL_COLUMNS])
+
+export const touchesDetails = (input) => DETAIL_COLUMNS.some((column) => Object.hasOwn(input, column))
 
 const toTradeAccount = (row, users = []) => ({
   id: row.id,
@@ -64,6 +88,21 @@ const toTradeAccount = (row, users = []) => ({
   linked_by_user_id: row.linked_by_user_id,
   created_at: row.created_at,
   updated_at: row.updated_at,
+  // The company details the cutover merge carried over from D365 (see
+  // migrations/1790947200000_trade-account-details.js); null on a row raised
+  // by hand.
+  account_number: row.account_number ?? null,
+  customer_type: row.customer_type ?? null,
+  primary_contact_name: row.primary_contact_name ?? null,
+  email: row.email ?? null,
+  phone: row.phone ?? null,
+  address: row.address ?? null,
+  city: row.city ?? null,
+  country: row.country ?? null,
+  payment_terms: row.payment_terms ?? null,
+  xero_contact_id: row.xero_contact_id ?? null,
+  archived_at: row.archived_at ?? null,
+  contact_count: row.contact_count ?? 0,
   users,
 })
 
@@ -105,26 +144,36 @@ const loadUsersByAccountId = async (db, accountIds) => {
 }
 
 /**
- * Linked trade accounts, newest first. `q` matches the snapshotted company name.
+ * The client roster, A–Z. `q` matches the company name, account number, primary
+ * contact, email or phone; `customer_type` narrows to Trade / Retail;
+ * `include_archived` keeps the rows the merge or the office closed.
  *
  * @param {import('pg').Pool} pool
  * @param {{ q?: string, page?: number, limit?: number }} [options]
  */
 export const listTradeAccounts = async (
   pool,
-  { q = null, page = DEFAULT_PAGE, limit = DEFAULT_LIMIT } = {}
+  { q = null, customerType = null, includeArchived = false, page = DEFAULT_PAGE, limit = DEFAULT_LIMIT } = {}
 ) => {
   const safeLimit = Math.min(Math.max(limit, 1), MAX_LIMIT)
   const safePage = Math.max(page, 1)
   const term = typeof q === 'string' && q.trim() !== '' ? `%${escapeLike(q.trim())}%` : null
+  const type = typeof customerType === 'string' && customerType.trim() !== '' ? customerType.trim() : null
   const { rows } = await pool.query(
     `SELECT ${ACCOUNT_COLUMNS},
             count(*) OVER () AS total_count
        FROM trade_accounts ta
-      WHERE ($1::text IS NULL OR ta.legacy_customer_name ILIKE $1 ESCAPE '\\')
-      ORDER BY ta.created_at DESC, ta.id DESC
-      LIMIT $2 OFFSET $3`,
-    [term, safeLimit, (safePage - 1) * safeLimit]
+      WHERE ($1::text IS NULL
+             OR ta.legacy_customer_name ILIKE $1 ESCAPE '\\'
+             OR ta.account_number ILIKE $1 ESCAPE '\\'
+             OR ta.primary_contact_name ILIKE $1 ESCAPE '\\'
+             OR ta.email ILIKE $1 ESCAPE '\\'
+             OR ta.phone ILIKE $1 ESCAPE '\\')
+        AND ($2::text IS NULL OR ta.customer_type = $2)
+        AND (ta.archived_at IS NULL OR $3)
+      ORDER BY ta.legacy_customer_name ASC, ta.id ASC
+      LIMIT $4 OFFSET $5`,
+    [term, type, includeArchived, safeLimit, (safePage - 1) * safeLimit]
   )
   const usersByAccount = await loadUsersByAccountId(pool, rows.map((row) => row.id))
   return {
@@ -180,11 +229,14 @@ export const getTradeAccount = async (pool, id) => {
     // not a key — so a shared name unions same-named companies; staff-facing,
     // and the ambiguity flag already warns about exactly that). The projection
     // is a WHITELIST: names and reachability only — never the credit /
-    // do-not-contact / GDPR columns the staged row also carries.
+    // do-not-contact / GDPR columns the staged row also carries. A person the
+    // cutover merge already landed on the book (`legacy_guid`) is left out, so
+    // the list is what is still only in Dynamics, not a copy of the book.
     pool.query(
       `SELECT c.full_name, c.job_title, c.email, c.mobile_phone, c.business_phone
          FROM legacy_contacts c
         WHERE lower(btrim(c.company_name)) = lower(btrim($1))
+          AND NOT EXISTS (SELECT 1 FROM trade_account_contacts t WHERE t.legacy_guid = c.guid)
         ORDER BY c.full_name ASC`,
       [row.legacy_customer_name]
     ),
@@ -464,7 +516,8 @@ export const updateTradeAccount = async (pool, id, input) => {
   const params = [id]
   for (const column of UPDATE_COLUMNS) {
     if (Object.hasOwn(input, column)) {
-      params.push(input[column])
+      const value = input[column] == null ? null : String(input[column]).trim()
+      params.push(value === '' ? null : column === 'email' ? value.toLowerCase() : value)
       sets.push(`${column} = $${params.length}`)
     }
   }

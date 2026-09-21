@@ -22,6 +22,7 @@
     "sheet:prices": "node scripts/export-category-sheets.js prices",
     "sheet:stock": "node scripts/export-category-sheets.js stock",
     "import:legacy": "node src/seed/import-legacy.js",
+    "merge:legacy": "node src/seed/merge-legacy.js",
     "import:item-types": "node src/seed/import-stock-item-types.js",
     "push:legacy": "node src/seed/push-legacy.js",
     "lint": "eslint .",

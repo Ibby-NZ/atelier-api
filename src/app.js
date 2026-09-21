@@ -33,7 +33,9 @@ import { adminReserveRoutes } from './routes/admin-reserves.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminXeroRoutes } from './routes/admin-xero.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
+import { adminDynamicsArchiveRoutes } from './routes/admin-dynamics-archive.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
+import { adminContactRoutes } from './routes/admin-contacts.js'
 import { accountRoutes } from './routes/account.js'
 import { contactRoutes } from './routes/contact.js'
 import { newsletterRoutes } from './routes/newsletter.js'
@@ -158,6 +160,9 @@ export const buildApp = ({
     // the portal can serve that company's invoices and cuttings. Manual by
     // design: an email match is a suggestion, never an automatic grant.
     api.register(adminTradeAccountRoutes, { pool })
+    // /admin/contacts — the whole address book across companies (the per-company
+    // book stays under /admin/trade-accounts/:id/contacts).
+    api.register(adminContactRoutes, { pool })
     api.register(adminInventoryRoutes, { pool })
     api.register(adminPriceListRoutes, { pool })
     // /admin/price-lists/import/* — the office's own way in for a supplier price
@@ -232,6 +237,9 @@ export const buildApp = ({
     // tables, director-only. Its own plugin scope: it parses application/gzip
     // as a Buffer and that parser must not leak onto any other route.
     api.register(adminLegacyImportRoutes, { pool })
+    // /admin/dynamics/* — the whole D365 corpus for the CRM's Archive page,
+    // every table and column, read-only.
+    api.register(adminDynamicsArchiveRoutes, { pool })
     // POST /contact (public) + /admin/contact-enquiries (backoffice) — the
     // storefront contact form posts here; both need the storefront CORS scope.
     api.register(contactRoutes, { pool, mailer })

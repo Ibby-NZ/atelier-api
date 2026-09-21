@@ -16,6 +16,7 @@ import {
   linkTradeAccount,
   unlinkTradeAccountUser,
   updateTradeAccount,
+  touchesDetails,
   suggestTradeAccounts,
   createTradeAccountContact,
   updateTradeAccountContact,
@@ -46,6 +47,8 @@ const listQuerySchema = {
   type: 'object',
   properties: {
     q: { type: 'string', maxLength: 200 },
+    customer_type: { type: 'string', maxLength: 50 },
+    include_archived: { type: 'boolean', default: false },
     page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
     limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT, default: DEFAULT_LIMIT },
   },
@@ -113,17 +116,29 @@ const patchContactSchema = {
   properties: contactBodyProps,
 }
 
-// Only the account-manager block is patchable. The identity of the link
-// (which D365 customer) is deliberately absent: re-pointing it is
-// unlink-then-link, which leaves a trail.
+// The account-manager block (backoffice) and the company details (director —
+// checked in the handler, since one route serves both). The identity of the
+// link (which D365 customer, the snapshotted name) is deliberately absent:
+// re-pointing it is unlink-then-link, which leaves a trail.
+const text = (maxLength) => ({ type: ['string', 'null'], maxLength })
 const patchBodySchema = {
   type: 'object',
   additionalProperties: false,
   minProperties: 1,
   properties: {
-    account_manager_name: { type: ['string', 'null'], maxLength: 200 },
-    account_manager_email: { type: ['string', 'null'], maxLength: 254 },
-    account_manager_phone: { type: ['string', 'null'], maxLength: 50 },
+    account_manager_name: text(200),
+    account_manager_email: text(254),
+    account_manager_phone: text(50),
+    account_number: text(50),
+    customer_type: text(50),
+    primary_contact_name: text(200),
+    email: text(254),
+    phone: text(50),
+    address: text(1000),
+    city: text(200),
+    country: text(200),
+    payment_terms: text(200),
+    xero_contact_id: text(100),
   },
 }
 
@@ -141,6 +156,8 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
     async (request) =>
       listTradeAccounts(pool, {
         q: request.query.q ?? null,
+        customerType: request.query.customer_type ?? null,
+        includeArchived: request.query.include_archived,
         page: request.query.page,
         limit: request.query.limit,
       })
@@ -204,6 +221,10 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
     '/admin/trade-accounts/:id',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: patchBodySchema } },
     async (request, reply) => {
+      if (touchesDetails(request.body) && request.user.role !== 'director') {
+        reply.code(403)
+        return { error: 'Forbidden', message: 'Editing a client\'s details is for a director.' }
+      }
       const tradeAccount = await updateTradeAccount(pool, request.params.id, request.body)
       if (!tradeAccount) {
         return notFound(reply, `Trade account ${request.params.id} not found.`)

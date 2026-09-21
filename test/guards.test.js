@@ -4,7 +4,7 @@ import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
 import { effectiveRole } from '../src/auth/guards.js'
-import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
+import { cleanupTradeApplications, sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const TEST_DOMAIN = 'guards-test.example.com'
@@ -24,6 +24,7 @@ const deleteTestUsers = async (pool) => {
       WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
     [`%@${TEST_DOMAIN}`]
   )
+  await cleanupTradeApplications(pool, `%@${TEST_DOMAIN}`)
   await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${TEST_DOMAIN}`])
 }
 

@@ -16,7 +16,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
-import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
+import { cleanupTradeApplications, sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 // POST /checkout/session requires the store-collected delivery details (Sept 2026).
 const GATE_CUSTOMER = {
@@ -157,6 +157,7 @@ const cleanup = async (pool) => {
       WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
     [`%@${TEST_DOMAIN}`]
   )
+  await cleanupTradeApplications(pool, `%@${TEST_DOMAIN}`)
   await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${TEST_DOMAIN}`])
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
   await pool.query('DELETE FROM shipping_rates WHERE zone = $1', ['gate-zone'])

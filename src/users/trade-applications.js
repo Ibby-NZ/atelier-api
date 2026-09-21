@@ -16,6 +16,7 @@
 // storefront renders inline, with paths like `application.business_name`.
 
 import { PUBLIC_USER_COLUMNS } from '../auth/user-columns.js'
+import { raiseAccountFromApplication } from '../trade-accounts/from-application.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -172,7 +173,7 @@ const applicationValues = (userId, a) => [
   a.signature.trim(),
 ]
 
-const APPLICATION_READ_COLUMNS = ['id', ...APPLICATION_INSERT_COLUMNS, 'created_at']
+const APPLICATION_READ_COLUMNS = ['id', ...APPLICATION_INSERT_COLUMNS, 'trade_account_id', 'created_at']
   .map((column) => `ta.${column}`)
   .join(', ')
 
@@ -197,11 +198,16 @@ export const submitTradeApplication = async (pool, { email, passwordHash, name, 
     )
     const user = rows[0]
 
-    const placeholders = APPLICATION_INSERT_COLUMNS.map((_, i) => `$${i + 1}`)
+    // The company the form asks for, raised on the day with its two named
+    // people filed and this login granted (see trade-accounts/from-application.js).
+    const tradeAccountId = await raiseAccountFromApplication(client, { userId: user.id, application })
+
+    const columns = [...APPLICATION_INSERT_COLUMNS, 'trade_account_id']
+    const placeholders = columns.map((_, i) => `$${i + 1}`)
     await client.query(
-      `INSERT INTO trade_applications (${APPLICATION_INSERT_COLUMNS.join(', ')})
+      `INSERT INTO trade_applications (${columns.join(', ')})
        VALUES (${placeholders.join(', ')})`,
-      applicationValues(user.id, application)
+      [...applicationValues(user.id, application), tradeAccountId]
     )
 
     await client.query('COMMIT')
@@ -236,6 +242,7 @@ const toTradeApplication = (row) => {
   for (const column of APPLICATION_INSERT_COLUMNS.slice(1)) {
     application[column] = row[column]
   }
+  application.trade_account_id = row.trade_account_id ?? null
   application.created_at = row.created_at
   application.user =
     userId == null

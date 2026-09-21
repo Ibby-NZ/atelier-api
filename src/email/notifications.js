@@ -238,7 +238,7 @@ export const notifyTradeApplicationReceived = async (mailer, { user, application
       signatory_name: application.signatory_name ?? null,
       email: user.email,
       // The CRM is a hash router; this is its Applicants tab.
-      review_url: `${crmBaseUrl}/#/clients/applicants`,
+      review_url: `${crmBaseUrl}/#/clients/accounts?pending=true`,
     },
   })
 }

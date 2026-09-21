@@ -3,7 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
-import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
+import { cleanupTradeApplications, sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'det-test'
@@ -84,6 +84,7 @@ const cleanup = async (pool) => {
       WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
     [`%@${TEST_DOMAIN}`]
   )
+  await cleanupTradeApplications(pool, `%@${TEST_DOMAIN}`)
   await pool.query('DELETE FROM users WHERE email LIKE $1', [`%@${TEST_DOMAIN}`])
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
 }

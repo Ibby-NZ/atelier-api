@@ -255,13 +255,18 @@ describe('back-office price-list management', () => {
       expect(body.meta).toEqual({ total: 2, page: 1, limit: 1 })
     })
 
-    it('rejects an unknown category filter with 400', async () => {
+    // Was a 400 from a schema enum until migration 1791379200000 made the
+    // vocabulary a table the office adds to: a filter compiled at boot cannot
+    // know about a category created since, so an unknown one now reports
+    // nothing — which is what a real category with no lines does too.
+    it('answers an unknown category filter with an empty page', async () => {
       const response = await inject(
         'GET',
         '/admin/price-list-items?category=sofa',
         backofficeCookie
       )
-      expect(response.statusCode).toBe(400)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().items).toEqual([])
     })
   })
 

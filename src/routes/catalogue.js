@@ -10,7 +10,6 @@ import { getProductDetail } from '../catalogue/product-detail.js'
 import { listBrands, getBrandBySlug } from '../catalogue/brands.js'
 import { listCollections, getCollection } from '../catalogue/collections.js'
 import { canSeeTradeCatalogue, canSeeTradePricing } from '../catalogue/visibility.js'
-import { CATEGORIES } from '../../scripts/lib/price-template.js'
 
 // Every public route below resolves the optional session ONCE and derives both
 // gates from it. They are not the same gate (see catalogue/visibility.js):
@@ -43,11 +42,12 @@ const listQuerySchema = {
     lead_time: { type: 'string', maxLength: 200 },
     size: { type: 'string', maxLength: 200 },
     product_type: { type: 'string', enum: ['fabric', 'finished_good'] },
-    // Derived from the stored vocabulary, never retyped — the same posture
-    // src/routes/admin-price-lists.js takes with CURRENCY_ENUM. A value the
-    // database could not hold is a 400 here rather than a query that matches
-    // nothing and reads like an empty catalogue.
-    category: { type: 'string', enum: [...CATEGORIES] },
+    // NOT an enum since migration 1791379200000: the vocabulary is
+    // `product_categories`, a table the office adds to, and this schema is
+    // compiled at boot — a shopper browsing a category added this morning would
+    // get a 400. An unknown value matches nothing, which is also what a real
+    // category with no products in it does.
+    category: { type: 'string', maxLength: 200 },
     q: { type: 'string', maxLength: 200 },
     sort: { type: 'string', enum: SORT_KEYS, default: DEFAULT_SORT },
     page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },

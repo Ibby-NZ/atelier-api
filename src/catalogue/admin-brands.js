@@ -43,6 +43,14 @@ const CONFLICT_MESSAGES = Object.freeze({
 // upstream costs the message, never the status code.
 const REFERENCE_MESSAGES = Object.freeze({
   brands_supplier_id_fkey: 'That supplier does not exist.',
+  // Since migration 1791379200000 the category vocabulary is a table rather than
+  // a CHECK, so an unknown category arrives as a 23503 instead of a 23514 — and
+  // the fix is a screen staff can reach, not a migration.
+  products_category_fkey: 'That category does not exist. Add it on Categories first.',
+  price_list_items_category_fkey:
+    'That category does not exist. Add it on Categories first.',
+  supplier_freight_rates_category_fkey:
+    'That category does not exist. Add it on Categories first.',
 })
 
 /**

@@ -20,17 +20,6 @@ const runMigrations = (databaseUrl) =>
     log: () => {},
   })
 
-// pg_get_constraintdef renders an IN list as
-// CHECK ((category = ANY (ARRAY['fabric'::text, ...]))), so the vocabulary is
-// read back out of the definition rather than re-typed into the assertion.
-const vocabularyOf = (definition) =>
-  [...definition.matchAll(/'([^']+)'::text/g)].map((match) => match[1])
-
-const constraintDefinition = (pool, name) =>
-  pool
-    .query(`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1`, [name])
-    .then(({ rows }) => rows[0]?.def ?? null)
-
 const insertBrand = (pool) =>
   pool
     .query(
@@ -104,37 +93,42 @@ describe('products.category migration', () => {
   })
 
   it('rejects a category outside the vocabulary', async () => {
+    // The refusal moved from a CHECK to a foreign key in migration
+    // 1791379200000 — same refusal, one list instead of three.
     await expect(
       insertProduct(pool, brandId, { slug: 'bad', category: 'curtain' })
-    ).rejects.toThrow(/products_category_check/)
+    ).rejects.toThrow(/products_category_fkey/)
   })
 
-  it('shares its vocabulary with price_list_items.category exactly', async () => {
-    // The two sides are only joinable while the sets are identical, and a drift
-    // would not fail anywhere — it would just stop matching. So the assertion
-    // compares the two live CHECK definitions to each other, not to a literal.
-    const [product, priceList] = await Promise.all([
-      constraintDefinition(pool, 'products_category_check'),
-      constraintDefinition(pool, 'price_list_items_category_check'),
+  it('shares one vocabulary with price_list_items and supplier_freight_rates', async () => {
+    // This used to compare three CHECK definitions to EACH OTHER, because a
+    // value in one and not the others did not fail anywhere — it silently
+    // stopped matching. Migration 1791379200000 makes that unconstructable:
+    // all three columns reference the same table, so "identical sets" is no
+    // longer a property to test but the shape of the schema. What is left to
+    // prove is that all three really do point at it.
+    const { rows } = await pool.query(
+      `SELECT conrelid::regclass::text AS table_name
+         FROM pg_constraint
+        WHERE contype = 'f' AND confrelid = 'product_categories'::regclass
+        ORDER BY 1`
+    )
+    expect(rows.map((row) => row.table_name)).toEqual([
+      'price_list_items',
+      'products',
+      'supplier_freight_rates',
     ])
-    expect(product).not.toBeNull()
-    expect(priceList).not.toBeNull()
-
-    const productVocabulary = vocabularyOf(product).sort()
-    expect(productVocabulary).toEqual([...CATEGORIES].sort())
-    expect(productVocabulary).toEqual(vocabularyOf(priceList).sort())
   })
 
-  it('shares it with supplier_freight_rates.category too — three tables, one vocabulary', async () => {
-    // W16 US-004 joined the comparison: a freight rate is filed by the same
-    // merchandising axis, so a value added to one of the three and not the
-    // others silently stops matching rather than raising anywhere.
-    const [product, freight] = await Promise.all([
-      constraintDefinition(pool, 'products_category_check'),
-      constraintDefinition(pool, 'supplier_freight_rates_category_check'),
-    ])
-    expect(freight).not.toBeNull()
-    expect(vocabularyOf(freight).sort()).toEqual(vocabularyOf(product).sort())
+  it('still holds the nine the pipeline registry names', async () => {
+    // The registry (scripts/lib/price-template.js) seeds the price templates and
+    // the import mapping, so a word in it that is not a row here would import
+    // rows nothing can carry.
+    const { rows } = await pool.query(
+      `SELECT slug FROM product_categories WHERE slug = ANY($1::text[]) ORDER BY slug`,
+      [[...CATEGORIES]]
+    )
+    expect(rows.map((row) => row.slug)).toEqual([...CATEGORIES].sort())
   })
 
   it('is independent of product_type — a finished good may be a wallpaper', async () => {

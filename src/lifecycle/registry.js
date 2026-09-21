@@ -402,6 +402,36 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     ],
   },
 
+  // The one entity here keyed by a text slug, because the slug IS the value the
+  // three referencing columns store (migration 1791379200000).
+  //
+  // All three edges are RESTRICT, so unlike almost every other entry in this
+  // registry the database would refuse the delete on its own. The probes are
+  // still what the office reads: a bare 23503 says "still referenced" and names
+  // one constraint, while a blocker list says which of the three and how many.
+  // Not archivable — the table has no `archived_at`, and a category nobody may
+  // choose while every product still carries it is a vocabulary with a hole in
+  // it.
+  category: {
+    table: 'product_categories',
+    idColumn: 'slug',
+    label: 'category',
+    archivable: false,
+    probes: [
+      probe('products', 'products', 'SELECT 1 FROM products WHERE category = $1'),
+      probe(
+        'price_list_items',
+        'price list lines',
+        'SELECT 1 FROM price_list_items WHERE category = $1'
+      ),
+      probe(
+        'supplier_freight_rates',
+        'freight rates',
+        'SELECT 1 FROM supplier_freight_rates WHERE category = $1'
+      ),
+    ],
+  },
+
   // A product cascades to its colourways, and a colourway carries the order-line
   // history and the stock row. Probing through the colourways is what makes the
   // grandchildren visible.

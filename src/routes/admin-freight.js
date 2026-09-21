@@ -28,7 +28,6 @@ import {
 import { runFreightRecovery } from '../pricing/freight-recovery.js'
 import {
   FREIGHT_BASES,
-  FREIGHT_CATEGORIES,
   FREIGHT_UNITS,
   createFreightRate,
   listFreightRates,
@@ -50,6 +49,12 @@ const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
 
 const ISO_DAY = '^\\d{4}-\\d{2}-\\d{2}$'
+
+// Not an enum: the vocabulary is `product_categories`, a table the office adds
+// to (migration 1791379200000), and an Ajv enum is fixed at boot. The value is
+// checked against the live list by validateFreightRate and, past that, by the
+// column's foreign key.
+const categoryProp = { type: 'string', minLength: 1, maxLength: 200 }
 
 // A rate ledger is a few hundred rows a year and a sheet is one row per rate.
 const SHEET_BODY_LIMIT = 2 * 1024 * 1024
@@ -160,7 +165,7 @@ export const adminFreightRoutes = async (app, { pool }) => {
             range: { type: 'string', minLength: 1, maxLength: 200 },
             wholesale_rate: { type: 'number', minimum: 0 },
             duty_class: { type: 'string', pattern: '^[A-Za-z]$' },
-            category: { type: 'string', enum: [...FREIGHT_CATEGORIES] },
+            category: categoryProp,
             supplier_id: { type: 'integer', minimum: 1 },
             on: { type: 'string', pattern: ISO_DAY },
             // The inputs that still have no source anywhere. Supplied by hand
@@ -265,7 +270,7 @@ export const adminFreightRoutes = async (app, { pool }) => {
           properties: {
             supplier_id: { type: 'integer', minimum: 1 },
             range_name: { type: 'string', maxLength: 200 },
-            category: { type: 'string', enum: [...FREIGHT_CATEGORIES] },
+            category: categoryProp,
             page: { type: 'integer', minimum: 1 },
             limit: { type: 'integer', minimum: 1, maximum: 500 },
           },
@@ -300,7 +305,7 @@ export const adminFreightRoutes = async (app, { pool }) => {
           properties: {
             supplier_id: { type: 'integer', minimum: 1 },
             range_name: { type: 'string', minLength: 1, maxLength: 200 },
-            category: { type: 'string', enum: [...FREIGHT_CATEGORIES] },
+            category: categoryProp,
             basis: { type: 'string', enum: [...FREIGHT_BASES] },
             rate: { type: 'number', minimum: 0 },
             unit: { type: 'string', enum: [...FREIGHT_UNITS] },

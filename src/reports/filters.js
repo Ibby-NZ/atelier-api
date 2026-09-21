@@ -76,13 +76,12 @@ export const ORDER_KINDS = Object.freeze([
   'manual',
 ])
 
-// `products.category` and `price_list_items.category` are ONE vocabulary
-// (migration 1786507200000 says so at length), and scripts/lib/price-template.js
-// is its registry — so this is derived, not retyped: a second copy is how "add
-// a category" turns into two decisions. It still plays the boundary-copy role
-// here (an unknown value is a 400 naming the filter, never a report matching
-// nothing), and test/admin-reports.test.js parses the LIVE
-// products_category_check to prove the registry has not drifted from the CHECK.
+// The SEEDED nine, kept for the report library's own preset filters. It is NOT
+// what `?category=` is validated against any more: since migration
+// 1791379200000 the vocabulary is `product_categories`, a table the office adds
+// to, so a filter pinned to this list would answer 400 for a category somebody
+// created this morning. The filter takes any slug instead — an unknown one
+// reports nothing, which is exactly what a category with no products does.
 export const PRODUCT_CATEGORIES = Object.freeze([...CATEGORIES])
 
 // `status` deliberately reuses the orders module's own frozen list rather than
@@ -229,7 +228,7 @@ const PARSERS = Object.freeze({
   brand_code: (value) => parseFreeText('brand_code', value),
   range: (value) => parseFreeText('range', value),
   product_type: (value) => parseEnum('product_type', value, PRODUCT_TYPES),
-  category: (value) => parseEnum('category', value, PRODUCT_CATEGORIES),
+  category: (value) => parseSlug('category', value),
   collection: (value) => parseSlug('collection', value),
   product: (value) => parseSlug('product', value),
   sku: (value) => parseSku('sku', value),

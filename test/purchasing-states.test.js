@@ -26,7 +26,7 @@ describe('the purchase-order machine', () => {
     // `full` and `part` are receipt states and must never appear here: a
     // purchase order closed short is a DECISION, and storing a derived "fully
     // received" beside it gives two answers to one question.
-    expect(PURCHASE_ORDER_STATUSES).toEqual(['draft', 'sent', 'closed', 'cancelled'])
+    expect(PURCHASE_ORDER_STATUSES).toEqual(['draft', 'sent', 'paid', 'closed', 'cancelled'])
     for (const derived of RECEIPT_STATES) {
       if (derived === 'none') continue
       expect(PURCHASE_ORDER_STATUSES).not.toContain(derived)
@@ -42,10 +42,14 @@ describe('the purchase-order machine', () => {
     }
   })
 
-  it('makes both terminal states dead ends', () => {
-    expect(ALLOWED_TRANSITIONS.closed).toEqual([])
+  it('makes cancelled a dead end, and lets paid and closed reach each other', () => {
+    // Paid before delivery still closes on the goods; closed then paid is the
+    // ordinary case. Neither is ever cancelled: money that has left is a
+    // credit note, a document nobody has stated.
+    expect(ALLOWED_TRANSITIONS.paid).toEqual(['closed'])
+    expect(ALLOWED_TRANSITIONS.closed).toEqual(['paid'])
     expect(ALLOWED_TRANSITIONS.cancelled).toEqual([])
-    expect(LIVE_PURCHASE_ORDER_STATUSES).toEqual(['draft', 'sent'])
+    expect(LIVE_PURCHASE_ORDER_STATUSES).toEqual(['draft', 'sent', 'paid', 'closed'])
   })
 
   it('derives SOURCE_STATUSES from the machine rather than restating it', () => {
@@ -55,7 +59,8 @@ describe('the purchase-order machine', () => {
       }
     }
     // Closing a draft is a cancellation with the wrong word on it.
-    expect(SOURCE_STATUSES.closed).toEqual(['sent'])
+    expect(SOURCE_STATUSES.closed).toEqual(['sent', 'paid'])
+    expect(SOURCE_STATUSES.paid).toEqual(['sent', 'closed'])
   })
 
   it('refuses an illegal move with a 409', () => {

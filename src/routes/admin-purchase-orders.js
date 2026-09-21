@@ -33,6 +33,7 @@ import {
   createPurchaseOrder,
   updatePurchaseOrder,
   sendPurchaseOrder,
+  payPurchaseOrder,
   closePurchaseOrder,
   cancelPurchaseOrder,
   allocatePurchaseOrderLine,
@@ -209,7 +210,7 @@ const receiptBodySchema = {
   },
 }
 
-export const adminPurchaseOrderRoutes = async (app, { pool }) => {
+export const adminPurchaseOrderRoutes = async (app, { pool, xero = null }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
   // Whether this login may see cost figures. Resolved per request from the row
@@ -310,17 +311,33 @@ export const adminPurchaseOrderRoutes = async (app, { pool }) => {
 
   for (const [verb, move] of [
     ['send', sendPurchaseOrder],
+    ['pay', payPurchaseOrder],
     ['close', closePurchaseOrder],
     ['cancel', cancelPurchaseOrder],
   ]) {
     app.post(
       `/admin/purchase-orders/:id/${verb}`,
       { preHandler: backoffice, schema: { params: idParamsSchema } },
-      async (request) => ({
-        purchase_order: await move(pool, request.params.id, {
-          finance: await financeFor(request),
-        }),
-      })
+      async (request) => {
+        const finance = await financeFor(request)
+        let purchase_order = await move(pool, request.params.id, { finance })
+        // Sending is the commitment, so the bill is raised in Xero here. The
+        // transition NEVER fails because of Xero (the `mark-paid` posture):
+        // a refusal — unpriced lines, Xero down, not connected — comes back as
+        // `xero_bill.reason` for the CRM to print, and the Xero screen's push
+        // button is the retry.
+        let xero_bill = null
+        if (verb === 'send' && xero) {
+          xero_bill = await xero
+            .pushPurchaseOrderBill(request.params.id, { finance })
+            .then((result) => {
+              purchase_order = result.purchase_order
+              return { raised: true, ...result.bill }
+            })
+            .catch((error) => ({ raised: false, reason: error.message }))
+        }
+        return { purchase_order, ...(xero_bill ? { xero_bill } : {}) }
+      }
     )
   }
 

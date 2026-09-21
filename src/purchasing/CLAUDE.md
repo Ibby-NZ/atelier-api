@@ -46,8 +46,11 @@ receipted against and closed. Four tables —
   (`po_email`, `agent`, `incoterm`, `currency`) carry the `users.email` argument: a wrong PO address
   means the order reaches nobody, and correcting the paper is not the same act as re-pointing the
   brand.
-- **`status` holds only what a person did — `draft | sent | closed | cancelled` — and `closed` is
-  NOT `full`.** A purchase order closed short because the house discontinued the balance is a
+- **`status` holds what a person did, or what the bank did — `draft | sent | paid | closed |
+  cancelled` — and `closed` is NOT `full`.** `paid` (22 Sep 2026, client asked) is reachable from
+  `sent` and `closed` and moves on to `closed` (a prepaid order's goods still arrive); the Xero bill
+  sync moves it, and `POST …/:id/pay` is the hand-keyed path. It is never cancelled — money that has
+  left is a credit note, a document nobody has stated. A purchase order closed short because the house discontinued the balance is a
   DECISION; `full` is arithmetic about a warehouse. Storing the second beside the first gives two
   answers to one question the first time they disagree, which is the ordinary case. The vocabulary
   is `purchase_orders_status_check`; the transitions are `src/purchasing/po-states.js`, because a
@@ -140,6 +143,15 @@ receipted against and closed. Four tables —
   office's own documentation rather than in a support ticket a year from now. A per-year reset
   would need the year in the key to stay unique, and `PO-000412` appearing twice in the ledger is
   worse than a number that keeps climbing.
+
+### The Xero bill
+
+- **`xero_bill_id` / `xero_bill_ref` / `xero_bill_status` / `xero_bill_paid_at`
+  are a MIRROR of Xero, beside `status` and never in it.** Send raises the bill
+  (`src/xero/CLAUDE.md`); the sync route copies Xero's own answer back, and a
+  `PAID` answer ALSO moves `status` to `paid` where the machine allows it
+  (`sent`/`closed` — never a draft). The mirror stays beside it so the Xero
+  bill number and its own status are readable whatever the office did next.
 
 ### Lifecycle
 

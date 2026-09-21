@@ -515,3 +515,78 @@ export const findScopedTierId = async (pool, supplierId, termsId, tierId) => {
   )
   return rows[0]?.id ?? null
 }
+
+// ---------------------------------------------------------------------------
+// The SUPPLIER-level rate (suppliers.default_discount)
+//
+// One net discount off list for every house this supplier invoices — the 9 Jul
+// rule's `discount_method = 'averaged'`, which stated the METHOD while the rate
+// itself lived only in the vendored snapshot. It sits on `suppliers`, not on
+// supplier_brand_terms, because that table is keyed on a brand: a supplier with
+// no linked house has nowhere to put a rate that applies to all of them.
+//
+// IT IS READ AND WRITTEN HERE, AND SERVED ONLY THROUGH THE FINANCE-GATED TERMS
+// ROUTES. The column is deliberately absent from SUPPLIER_UPDATE_COLUMNS in
+// admin-suppliers.js: the general supplier PATCH is open to any backoffice
+// login, and `backoffice` covers the showroom as well as the accounts desk. A
+// rate is cost data whichever table it sits in.
+//
+// Per-brand terms WIN over it — see discountInput in src/pricing/
+// pricing-parameters.js. Nothing anywhere adds the two together.
+// ---------------------------------------------------------------------------
+
+/**
+ * The supplier's default discount, as a fraction off list, or null when none is
+ * on file. Throws 404 when the supplier does not exist, so a route need not
+ * re-read the row to tell the two apart.
+ *
+ * @param {import('pg').Pool|import('pg').PoolClient} db
+ * @param {number} supplierId
+ * @returns {Promise<{ id: number, name: string, default_discount: number|null }>}
+ */
+export const getSupplierDefaultDiscount = async (db, supplierId) => {
+  const { rows } = await db.query(
+    `SELECT id, name, default_discount FROM suppliers WHERE id = $1`,
+    [supplierId]
+  )
+  if (!rows[0]) throw httpError(404, `Supplier ${supplierId} not found.`)
+  return Object.freeze({
+    id: rows[0].id,
+    name: rows[0].name,
+    // pg hands a scalar numeric back as a STRING, and Number(null) is 0 — which
+    // on a discount reads as "nothing off list" rather than "none recorded".
+    default_discount: rateOrNull(rows[0].default_discount),
+  })
+}
+
+/**
+ * Set or clear it. An explicit null clears the rate, which is not the same
+ * statement as 0 (Loro Piana's prices arrive already net — 0% off, recorded).
+ * The range is the database's, so a rate outside [0, 1) comes back 422 with the
+ * CHECK's own words rather than being pre-checked here.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} supplierId
+ * @param {number|null} discount
+ * @returns {Promise<{ id: number, name: string, default_discount: number|null }>}
+ */
+export const setSupplierDefaultDiscount = async (pool, supplierId, discount) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE suppliers SET default_discount = $2, updated_at = now()
+        WHERE id = $1 RETURNING id`,
+      [supplierId, discount ?? null]
+    )
+    if (rows.length === 0) throw httpError(404, `Supplier ${supplierId} not found.`)
+    return await getSupplierDefaultDiscount(pool, supplierId)
+  } catch (error) {
+    if (error?.code === '23514') {
+      throw httpError(
+        422,
+        'A supplier discount is a fraction off list: 0 or more and below 1. ' +
+          '1 would be a free metre.'
+      )
+    }
+    throw error
+  }
+}

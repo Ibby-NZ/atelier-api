@@ -187,6 +187,7 @@ describe('back-office supplier routes', () => {
       ['POST', '/admin/suppliers/1/restore', undefined],
       ['DELETE', '/admin/suppliers/1', undefined],
       ['GET', '/admin/suppliers/1/brand-terms', undefined],
+      ['PATCH', '/admin/suppliers/1/default-discount', { default_discount: 0.05 }],
       ['POST', '/admin/suppliers/1/brand-terms', { brand_id: 1 }],
       ['PATCH', '/admin/suppliers/1/brand-terms/1', { markup: 2 }],
       ['DELETE', '/admin/suppliers/1/brand-terms/1', undefined],
@@ -917,6 +918,7 @@ describe('back-office supplier routes', () => {
       // a login that may not SEE a cost may not SET one either.
       for (const [method, url, payload] of [
         ['GET', termsPath(supplierId), undefined],
+        ['PATCH', `/admin/suppliers/${supplierId}/default-discount`, { default_discount: 0.05 }],
         ['POST', termsPath(supplierId), { brand_id: brandId }],
         ['PATCH', termsPath(supplierId, termsId), { markup: 2 }],
         ['DELETE', termsPath(supplierId, termsId), undefined],
@@ -928,6 +930,138 @@ describe('back-office supplier routes', () => {
         expect(response.statusCode, `${method} ${url}`).toBe(403)
         expect(response.json().message).toMatch(/finance visibility/i)
       }
+    })
+  })
+
+  // Which houses a supplier invoices, asked from both ends. The link is one
+  // column (`brands.supplier_id`), and before this it could only be READ by
+  // expanding one supplier at a time: the houses list did not carry it and the
+  // supplier list did not count it, so "who invoices this house" and "has
+  // anyone linked this supplier" had no answer on screen.
+  describe('the houses a supplier invoices are findable from both ends', () => {
+    it('names the supplier on the houses list and counts the houses on the supplier list', async () => {
+      const supplierId = await insertSupplier(pool, 'linked')
+      const linkedId = await insertBrand(pool, 'linked-house', supplierId)
+      const looseId = await insertBrand(pool, 'loose-house', null)
+
+      const houses = await inject('GET', '/admin/brands', backofficeCookie)
+      expect(houses.statusCode).toBe(200)
+      const byId = new Map(houses.json().brands.map((row) => [row.id, row]))
+      expect(byId.get(linkedId)).toMatchObject({
+        supplier_id: supplierId,
+        supplier_name: `${PREFIX} linked`,
+      })
+      // An unlinked house says so rather than going quiet — 45 of them did.
+      expect(byId.get(looseId)).toMatchObject({ supplier_id: null, supplier_name: null })
+
+      const suppliers = await inject(
+        'GET',
+        `/admin/suppliers?q=${encodeURIComponent(`${PREFIX} linked`)}`,
+        backofficeCookie
+      )
+      expect(suppliers.json().suppliers[0]).toMatchObject({ id: supplierId, brand_count: 1 })
+    })
+
+    // "Who invoices Kieffer?" is the question, and Kieffer is a house. A search
+    // over supplier names and aliases alone answers "no such supplier" for the
+    // only word the office has in front of it.
+    it('finds a supplier by the name of a house it invoices', async () => {
+      const supplierId = await insertSupplier(pool, 'invoicer')
+      await insertBrand(pool, 'kieffer-ish', supplierId)
+
+      const response = await inject(
+        'GET',
+        `/admin/suppliers?q=${encodeURIComponent('kieffer-ish')}`,
+        backofficeCookie
+      )
+      expect(response.statusCode).toBe(200)
+      expect(response.json().suppliers.map((row) => row.id)).toEqual([supplierId])
+    })
+
+    it('counts no houses for a supplier nobody has linked', async () => {
+      await insertSupplier(pool, 'unlinked')
+      const response = await inject(
+        'GET',
+        `/admin/suppliers?q=${encodeURIComponent(`${PREFIX} unlinked`)}`,
+        backofficeCookie
+      )
+      expect(response.json().suppliers[0].brand_count).toBe(0)
+    })
+  })
+
+  // The supplier's own averaged rate. It lives on `suppliers` because a rate
+  // that applies to every house cannot be keyed on one brand — and it is served
+  // and written through the finance gate, never through PATCH
+  // /admin/suppliers/:id, because a rate is cost data wherever it sits.
+  describe('the supplier default discount', () => {
+    const discountPath = (supplierId) => `/admin/suppliers/${supplierId}/default-discount`
+
+    it('sets the rate and reads it back on the terms list', async () => {
+      const supplierId = await insertSupplier(pool, 'averaged')
+
+      const saved = await inject('PATCH', discountPath(supplierId), backofficeCookie, {
+        default_discount: 0.05,
+      })
+      expect(saved.statusCode).toBe(200)
+      expect(saved.json().supplier).toMatchObject({ id: supplierId, default_discount: 0.05 })
+
+      const list = await inject('GET', `/admin/suppliers/${supplierId}/brand-terms`, backofficeCookie)
+      expect(list.statusCode).toBe(200)
+      // A supplier with no per-house exceptions still has a rate; the list said
+      // "no terms" and nothing else before the column existed.
+      expect(list.json()).toMatchObject({ terms: [], default_discount: 0.05 })
+    })
+
+    it('keeps 0 distinct from none — prices already net is a recorded answer', async () => {
+      const supplierId = await insertSupplier(pool, 'net-inclusive')
+
+      const zero = await inject('PATCH', discountPath(supplierId), backofficeCookie, {
+        default_discount: 0,
+      })
+      expect(zero.json().supplier.default_discount).toBe(0)
+
+      const cleared = await inject('PATCH', discountPath(supplierId), backofficeCookie, {
+        default_discount: null,
+      })
+      expect(cleared.json().supplier.default_discount).toBeNull()
+    })
+
+    it('400s a rate that is not a fraction below 1', async () => {
+      const supplierId = await insertSupplier(pool, 'greedy')
+      for (const rate of [1, 1.5, -0.1]) {
+        const response = await inject('PATCH', discountPath(supplierId), backofficeCookie, {
+          default_discount: rate,
+        })
+        expect(response.statusCode, String(rate)).toBe(400)
+      }
+      const { rows } = await pool.query('SELECT default_discount FROM suppliers WHERE id = $1', [
+        supplierId,
+      ])
+      expect(rows[0].default_discount).toBeNull()
+    })
+
+    it('404s an unknown supplier', async () => {
+      const response = await inject('PATCH', discountPath(99999999), backofficeCookie, {
+        default_discount: 0.05,
+      })
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('stays off the general supplier PATCH, which any backoffice login may use', async () => {
+      const supplierId = await insertSupplier(pool, 'whitelist')
+
+      // Ajv strips an undeclared key rather than rejecting it (removeAdditional),
+      // so the tell is that nothing was written — not a 400.
+      const response = await inject('PATCH', `/admin/suppliers/${supplierId}`, backofficeCookie, {
+        agent: 'Mainfreight Air',
+        default_discount: 0.5,
+      })
+      expect(response.statusCode).toBe(200)
+      expect(response.json().supplier.default_discount).toBeUndefined()
+      const { rows } = await pool.query('SELECT default_discount FROM suppliers WHERE id = $1', [
+        supplierId,
+      ])
+      expect(rows[0].default_discount).toBeNull()
     })
   })
 

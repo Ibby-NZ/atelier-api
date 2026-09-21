@@ -26,6 +26,24 @@ const metaText = (value) => {
 // (a session created before shipping collection was switched on, or a replay of
 // an old event).
 const deliveryDetails = (session) => {
+  // Since Sept 2026 the store collects the address itself and the checkout
+  // endpoint writes it to metadata (ship_*), the same signed standing as the
+  // cart. Sessions from before that still carry what Stripe collected.
+  const m = session.metadata ?? {}
+  if (m.ship_line1) {
+    return {
+      shippingAddress: {
+        name: m.ship_name ?? null,
+        line1: m.ship_line1,
+        line2: m.ship_line2 || null,
+        city: m.ship_city ?? null,
+        state: null,
+        postal_code: m.ship_postal_code ?? null,
+        country: 'NZ',
+      },
+      contactPhone: m.ship_phone ?? null,
+    }
+  }
   const shipping =
     session.collected_information?.shipping_details ?? session.shipping_details ?? null
   const address = shipping?.address ?? null
@@ -52,13 +70,16 @@ const createPaidOrder = async (client, session) => {
   const cart = JSON.parse(session.metadata?.cart ?? '[]')
   const zone = session.metadata?.zone ?? null
   const shippingCents = Number(session.metadata?.shipping_cents ?? 0)
+  // Written by the checkout endpoint beside shipping_cents; absent on a
+  // session created before GST was charged, which then totals as it did.
+  const gstCents = Number(session.metadata?.gst_cents ?? 0)
 
   const lines = await resolveCartLines(client, cart, session.metadata?.trade === 'true')
   const subtotalCents = lines.reduce(
     (sum, line) => sum + line.unit_price_cents * line.qty,
     0
   )
-  const totalCents = subtotalCents + shippingCents
+  const totalCents = subtotalCents + shippingCents + gstCents
 
   // Logged-in checkouts carry the user id in client_reference_id; guests carry
   // an email Stripe collected. An order has one or the other, never both.
@@ -80,9 +101,9 @@ const createPaidOrder = async (client, session) => {
   const { rows } = await client.query(
     `INSERT INTO orders
        (user_id, guest_email, order_number, kind, status,
-        subtotal_cents, shipping_cents, total_cents, shipping_zone, stripe_session_id,
+        subtotal_cents, shipping_cents, gst_cents, total_cents, shipping_zone, stripe_session_id,
         shipping_address, contact_phone, notes, client_reference, customer_po_number)
-     VALUES ($1, $2, $3, 'checkout', 'paid', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     VALUES ($1, $2, $3, 'checkout', 'paid', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      RETURNING id, order_number, kind, user_id, guest_email, total_cents`,
     [
       userId,
@@ -90,6 +111,7 @@ const createPaidOrder = async (client, session) => {
       number,
       subtotalCents,
       shippingCents,
+      gstCents,
       totalCents,
       zone,
       session.id,

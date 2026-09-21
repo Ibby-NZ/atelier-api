@@ -18,6 +18,14 @@ import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
 import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
+// POST /checkout/session requires the store-collected delivery details (Sept 2026).
+const GATE_CUSTOMER = {
+  name: 'Gate Tester',
+  email: 'gate@example.test',
+  phone: '+6421000000',
+  address: { line1: '1 Gate Road', city: 'Auckland', postal_code: '1010' },
+}
+
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'gate-test'
 const TEST_DOMAIN = 'gate-test.example.com'
@@ -425,6 +433,7 @@ describe('trade-gated catalogue (brands.trade_only)', () => {
         const refused = await post(gated, '/checkout/session', {
           lines: [{ sku: CLOSED_GOOD_SKU, qty: 1 }],
           zone: 'gate-zone',
+          customer: GATE_CUSTOMER,
         })
         expect(refused.statusCode).toBe(422)
         expect(refused.json().message).toMatch(/No purchasable product for SKU/)
@@ -432,6 +441,7 @@ describe('trade-gated catalogue (brands.trade_only)', () => {
         const allowed = await post(gated, '/checkout/session', {
           lines: [{ sku: OPEN_GOOD_SKU, qty: 1 }],
           zone: 'gate-zone',
+          customer: GATE_CUSTOMER,
         })
         expect(allowed.statusCode).toBe(200)
       } finally {
@@ -544,6 +554,7 @@ describe('trade-gated catalogue (brands.trade_only)', () => {
         const response = await post(storeApp, '/checkout/session', {
           lines: [{ sku: OPEN_GOOD_SKU, qty: 1 }],
           zone: 'gate-zone',
+          customer: GATE_CUSTOMER,
         })
         expect(response.statusCode).toBe(422)
         expect(response.json().message).toBe(
@@ -556,6 +567,7 @@ describe('trade-gated catalogue (brands.trade_only)', () => {
       const allowed = await post(storeApp, '/checkout/session', {
         lines: [{ sku: OPEN_GOOD_SKU, qty: 1 }],
         zone: 'gate-zone',
+          customer: GATE_CUSTOMER,
       })
       expect(allowed.statusCode).toBe(200)
     })

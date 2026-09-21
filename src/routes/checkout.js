@@ -1,14 +1,44 @@
 import {
   createCheckoutSession,
   retrieveCheckoutSession,
+  getCheckoutPrefill,
 } from '../checkout/checkout.js'
 
-// Body: a non-empty cart of { sku, qty } plus the shipping zone. Prices are
-// never accepted from the client — the server resolves them from the DB.
+const TEXT = (max) => ({ type: 'string', minLength: 1, maxLength: max })
+const EMAIL_PATTERN = '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$'
+
+// The delivery details the store collects (Sept 2026). Lengths are bounded so
+// each fits a Stripe metadata value (500 chars); country is not accepted —
+// the zone tiers only price New Zealand.
+const customerSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['name', 'email', 'phone', 'address'],
+  properties: {
+    name: TEXT(200),
+    email: { type: 'string', pattern: EMAIL_PATTERN, maxLength: 254 },
+    phone: TEXT(50),
+    address: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['line1', 'city', 'postal_code'],
+      properties: {
+        line1: TEXT(200),
+        line2: { type: 'string', maxLength: 200 },
+        city: TEXT(100),
+        postal_code: TEXT(20),
+      },
+    },
+  },
+}
+
+// Body: a non-empty cart of { sku, qty } plus the shipping zone and the
+// customer's delivery details. Prices are never accepted from the client — the
+// server resolves them from the DB.
 const checkoutBodySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['lines', 'zone'],
+  required: ['lines', 'zone', 'customer'],
   properties: {
     zone: { type: 'string', minLength: 1, maxLength: 200 },
     // Optional, and free text: what the shopper wants the office to know, plus
@@ -19,6 +49,7 @@ const checkoutBodySchema = {
     notes: { type: 'string', maxLength: 500 },
     client_reference: { type: 'string', maxLength: 200 },
     customer_po_number: { type: 'string', maxLength: 200 },
+    customer: customerSchema,
     lines: {
       type: 'array',
       minItems: 1,
@@ -64,6 +95,7 @@ export const checkoutRoutes = async (app, { pool, stripe, storeBaseUrl }) => {
         {
           lines: request.body.lines,
           zone: request.body.zone,
+          customer: request.body.customer,
           user,
           notes: request.body.notes ?? null,
           clientReference: request.body.client_reference ?? null,
@@ -72,6 +104,13 @@ export const checkoutRoutes = async (app, { pool, stripe, storeBaseUrl }) => {
       )
       return { url, session_id }
     }
+  )
+
+  // Signed in only: the form's starting values. Guests get 401 and start blank.
+  app.get(
+    '/checkout/prefill',
+    { preHandler: app.guards.requireAuth },
+    async (request) => getCheckoutPrefill(pool, request.user)
   )
 
   // Public: the success page verifies the completed session and shows the order

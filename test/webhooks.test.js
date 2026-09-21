@@ -389,6 +389,45 @@ describe('POST /webhooks/stripe', () => {
     expect(await availabilityBySku(SKU.good)).toBe(10)
   })
 
+  it('prefers the delivery details the store collected (metadata) and records the GST charged', async () => {
+    const event = completedEvent(
+      `evt_${PREFIX}_meta`,
+      `cs_${PREFIX}_meta`,
+      [{ sku: SKU.good, qty: 1 }],
+      {
+        // Stripe-collected details present too: the signed metadata must win.
+        customer_details: { email: 'buyer@example.test', phone: '+6400000000' },
+        collected_information: {
+          shipping_details: { name: 'Wrong Person', address: { line1: 'Elsewhere', country: 'NZ' } },
+        },
+        metadata: {
+          gst_cents: '855', // (4500 + 1200) * 0.15
+          ship_name: 'Olivia Marlow',
+          ship_phone: '+6421555000',
+          ship_line1: '12 Parnell Road',
+          ship_line2: '',
+          ship_city: 'Auckland',
+          ship_postal_code: '1052',
+        },
+      }
+    )
+    expect((await post(event)).statusCode).toBe(200)
+
+    const [order] = await orderBySession(`cs_${PREFIX}_meta`)
+    expect(order.contact_phone).toBe('+6421555000')
+    expect(order.shipping_address).toEqual({
+      name: 'Olivia Marlow',
+      line1: '12 Parnell Road',
+      line2: null,
+      city: 'Auckland',
+      state: null,
+      postal_code: '1052',
+      country: 'NZ',
+    })
+    expect(order.gst_cents).toBe(855)
+    expect(order.total_cents).toBe(4500 + 1200 + 855)
+  })
+
   it('records non-checkout events without creating an order', async () => {
     const event = {
       id: `evt_${PREFIX}_5`,

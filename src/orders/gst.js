@@ -46,3 +46,13 @@ export const withGst = (order, basis) =>
   order && typeof order === 'object' && 'total_cents' in order
     ? { ...order, gst: gstFigures(order.total_cents, basis) }
     : order
+
+/**
+ * GST in whole cents on a GST-EXCLUSIVE amount — what the card checkout
+ * charges as its own Stripe line on goods plus freight (Sept 2026). The
+ * storefront mirrors this one line (src/lib/gst.js) so the figure the shopper
+ * sees is the figure Stripe takes; `gstFigures` above is the read-side view of
+ * a stored order and takes the Xero basis, this is the write side and the
+ * catalogue is exclusive by convention.
+ */
+export const gstCents = (exclusiveCents) => Math.round(Number(exclusiveCents) * GST_RATE)

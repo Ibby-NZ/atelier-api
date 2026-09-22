@@ -33,6 +33,7 @@ import { adminReserveRoutes } from './routes/admin-reserves.js'
 import { adminLegacyRoutes } from './routes/admin-legacy.js'
 import { adminXeroRoutes } from './routes/admin-xero.js'
 import { adminLegacyImportRoutes } from './routes/admin-legacy-import.js'
+import { adminLegacyMergeRoutes } from './routes/admin-legacy-merge.js'
 import { adminDynamicsArchiveRoutes } from './routes/admin-dynamics-archive.js'
 import { adminTradeAccountRoutes } from './routes/admin-trade-accounts.js'
 import { adminContactRoutes } from './routes/admin-contacts.js'
@@ -239,6 +240,10 @@ export const buildApp = ({
     // tables, director-only. Its own plugin scope: it parses application/gzip
     // as a Buffer and that parser must not leak onto any other route.
     api.register(adminLegacyImportRoutes, { pool })
+    // POST /admin/legacy/merge — the cutover merge (`npm run merge:legacy`)
+    // behind a request, director-only, so a bundle loaded through the CRM
+    // reaches the live tables without a deploy or a shell.
+    api.register(adminLegacyMergeRoutes, { pool })
     // /admin/dynamics/* — the whole D365 corpus for the CRM's Archive page,
     // every table and column, read-only.
     api.register(adminDynamicsArchiveRoutes, { pool })

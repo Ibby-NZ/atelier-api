@@ -242,11 +242,6 @@ export const XERO_INVOICE_STATUSES = Object.freeze([
 export const isDeadInXero = (status) => status === 'VOIDED' || status === 'DELETED'
 
 /**
- * A colourway row (joined to its product) as a Xero Item. Code is the SKU —
- * POST /Items upserts on Code, which is what makes the item sync idempotent
- * with no directory fetch.
- */
-/**
  * A Payment against a pushed invoice — what marks it PAID in Xero. `amount`
  * is the invoice's own AmountDue (read back from Xero, never recomputed here,
  * so rounding between our cents and Xero's tax lines can never leave one cent
@@ -260,6 +255,27 @@ export const paymentForInvoice = ({ invoiceId, accountCode, amount, now = () => 
   Amount: amount,
 })
 
+/**
+ * What the sync stores off a GET /Invoices/:id answer for a bill: Xero's own
+ * Status and the day it was fully paid (null until it is).
+ */
+export const billStateFrom = (invoice) => ({
+  status: invoice?.Status ?? null,
+  paidAt: invoice?.FullyPaidOnDate ? xeroDate(invoice.FullyPaidOnDate) : null,
+})
+
+// Xero's JSON dates are `/Date(1700000000000+0000)/`; ISO also accepted.
+const xeroDate = (value) => {
+  const ms = /\/Date\((\d+)/.exec(String(value))?.[1]
+  const date = ms ? new Date(Number(ms)) : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
+/**
+ * A colourway row (joined to its product) as a Xero Item. Code is the SKU —
+ * POST /Items upserts on Code, which is what makes the item sync idempotent
+ * with no directory fetch.
+ */
 export const itemForColourway = ({ sku, product_name, colourway_name }) => ({
   Code: truncate(sku, 30),
   Name: truncate(`${product_name} — ${colourway_name}`, 50),

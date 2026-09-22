@@ -115,7 +115,9 @@ const cleanup = async (pool) => {
     [`${PREFIX}-%`]
   )
   await pool.query(
-    `DELETE FROM purchase_orders WHERE supplier_id IN (SELECT id FROM suppliers WHERE slug LIKE $1)`,
+    `DELETE FROM purchase_orders
+      WHERE supplier_id IN (SELECT id FROM suppliers WHERE slug LIKE $1)
+         OR brand_id IN (SELECT id FROM brands WHERE slug LIKE $1)`,
     [`${PREFIX}-%`]
   )
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
@@ -829,80 +831,6 @@ describe('xero integration', () => {
     })
   })
 
-  describe('POST /admin/xero/purchase-orders/:id/bill', () => {
-    const raisePurchaseOrder = async ({ unitPrice = 48.25, send = true } = {}) => {
-      const { rows: brands } = await pool.query(`SELECT id FROM brands WHERE slug = $1`, [`${PREFIX}-house`])
-      const { rows: cws } = await pool.query(`SELECT id FROM colourways WHERE sku = $1`, [`${PREFIX}-SKU-1`])
-      const created = await inject('POST', '/admin/purchase-orders', backofficeCookie, {
-        brand_id: brands[0].id,
-        lines: [{ colourway_id: cws[0].id, qty_ordered: 12.5, ...(unitPrice == null ? {} : { unit_price: unitPrice }) }],
-      })
-      expect(created.statusCode).toBe(201)
-      const id = created.json().purchase_order.id
-      if (send) {
-        const sent = await inject('POST', `/admin/purchase-orders/${id}/send`, backofficeCookie)
-        expect(sent.statusCode).toBe(200)
-      }
-      return id
-    }
-
-    it('pushes a sent, priced purchase order as a DRAFT bill against the house', async () => {
-      fake.on('GET', 'Contacts', ({ query }) =>
-        query?.searchTerm === testEmail('orders')
-          ? { Contacts: [{ ContactID: 'sup-1', Name: 'Maison', EmailAddress: testEmail('orders') }] }
-          : { Contacts: [] }
-      )
-      fake.on('POST', 'Invoices', ({ body }) => ({
-        Invoices: [{ ...body.Invoices[0], InvoiceID: 'bill-1', InvoiceNumber: body.Invoices[0].InvoiceNumber, Status: 'DRAFT' }],
-      }))
-      const id = await raisePurchaseOrder()
-      const push = await inject('POST', `/admin/xero/purchase-orders/${id}/bill`, backofficeCookie)
-      expect(push.statusCode).toBe(200)
-      expect(push.json().bill).toMatchObject({ id: 'bill-1', status: 'DRAFT' })
-      expect(push.json()).not.toHaveProperty('purchase_order')
-
-      const posted = fake.calls.find((c) => c.method === 'POST' && c.path === 'Invoices')
-      expect(posted.idempotencyKey).toBe(`atelier-po-${id}`)
-      expect(posted.body.Invoices[0]).toMatchObject({
-        Type: 'ACCPAY',
-        Status: 'DRAFT',
-        Contact: { ContactID: 'sup-1' },
-        CurrencyCode: 'EUR',
-        LineItems: [{ Quantity: 12.5, UnitAmount: 48.25, AccountCode: '300' }],
-      })
-      expect(posted.body.Invoices[0].InvoiceNumber).toMatch(/^PO-/)
-
-      const { rows } = await pool.query(
-        `SELECT xero_bill_id, xero_bill_ref, xero_bill_status FROM purchase_orders WHERE id = $1`,
-        [id]
-      )
-      expect(rows[0]).toEqual({ xero_bill_id: 'bill-1', xero_bill_ref: posted.body.Invoices[0].InvoiceNumber, xero_bill_status: 'DRAFT' })
-      const { rows: suppliers } = await pool.query(`SELECT xero_contact_id FROM suppliers WHERE slug = $1`, [`${PREFIX}-maison`])
-      expect(suppliers[0].xero_contact_id).toBe('sup-1')
-
-      const detail = await inject('GET', `/admin/purchase-orders/${id}`, backofficeCookie)
-      expect(detail.json().purchase_order).toMatchObject({ xero_bill_id: 'bill-1', xero_bill_status: 'DRAFT' })
-
-      const again = await inject('POST', `/admin/xero/purchase-orders/${id}/bill`, backofficeCookie)
-      expect(again.statusCode).toBe(409)
-    })
-
-    it('refuses a draft, an unpriced order and a missing one', async () => {
-      const draft = await raisePurchaseOrder({ send: false })
-      const refusedDraft = await inject('POST', `/admin/xero/purchase-orders/${draft}/bill`, backofficeCookie)
-      expect(refusedDraft.statusCode).toBe(409)
-      expect(refusedDraft.json().message).toMatch(/send it to the house/)
-
-      const unpriced = await raisePurchaseOrder({ unitPrice: null })
-      const refusedUnpriced = await inject('POST', `/admin/xero/purchase-orders/${unpriced}/bill`, backofficeCookie)
-      expect(refusedUnpriced.statusCode).toBe(409)
-      expect(refusedUnpriced.json().message).toMatch(/Price every line/)
-
-      expect((await inject('POST', '/admin/xero/purchase-orders/999999/bill', backofficeCookie)).statusCode).toBe(404)
-      expect(fake.calls.filter((c) => c.method === 'POST' && c.path === 'Invoices')).toEqual([])
-    })
-  })
-
   describe('the pull: Xero → platform', () => {
     it('marks an order paid when Xero shows its invoice PAID, and stores every status', async () => {
       fake.on('POST', 'Invoices', ({ body }) => ({
@@ -1013,6 +941,183 @@ describe('xero integration', () => {
         { name: `${PREFIX} Maison`, po_email: testEmail('orders'), currency: 'EUR', xero_contact_id: 'sup-known' },
         { name: `${PREFIX} New Mill`, po_email: testEmail('mill'), currency: 'GBP', xero_contact_id: 'sup-new' },
       ])
+    })
+  })
+
+  describe('purchase orders as bills', () => {
+    // A priced draft purchase order addressed to the seeded house's supplier
+    // (supplier derived from the house, never sent).
+    const raisePricedPurchaseOrder = async () => {
+      const { rows: suppliers } = await pool.query('SELECT id FROM suppliers WHERE slug = $1', [
+        `${PREFIX}-maison`,
+      ])
+      const { rows: cw } = await pool.query('SELECT id FROM colourways WHERE sku = $1', [
+        `${PREFIX}-SKU-1`,
+      ])
+      const { rows: brands } = await pool.query('SELECT id FROM brands WHERE slug = $1', [
+        `${PREFIX}-house`,
+      ])
+      const created = await inject('POST', '/admin/purchase-orders', backofficeCookie, {
+        brand_id: brands[0].id,
+        lines: [{ colourway_id: cw[0].id, qty_ordered: 12, unit_price: 48.5 }],
+      })
+      expect(created.statusCode).toBe(201)
+      return { purchaseOrder: created.json().purchase_order, supplierId: suppliers[0].id }
+    }
+
+    const scriptBillCreate = () => {
+      fake.on('GET', 'Contacts', () => ({
+        Contacts: [{ ContactID: 'sup-1', Name: `${PREFIX} Maison`, EmailAddress: `orders@${DOMAIN}` }],
+      }))
+      fake.on('POST', 'Invoices', () => ({
+        Invoices: [{ InvoiceID: 'bill-uuid-1', InvoiceNumber: 'BILL-0007', Status: 'AUTHORISED' }],
+      }))
+    }
+
+    it('send raises the bill against the supplier and stores its identifiers', async () => {
+      scriptBillCreate()
+      const { purchaseOrder, supplierId } = await raisePricedPurchaseOrder()
+      const response = await inject(
+        'POST',
+        `/admin/purchase-orders/${purchaseOrder.id}/send`,
+        backofficeCookie,
+        {}
+      )
+      expect(response.statusCode).toBe(200)
+      const { purchase_order, xero_bill } = response.json()
+      expect(purchase_order.status).toBe('sent')
+      expect(xero_bill).toMatchObject({ raised: true, id: 'bill-uuid-1', number: 'BILL-0007' })
+      expect(purchase_order.xero_bill_id).toBe('bill-uuid-1')
+      expect(purchase_order.xero_bill_ref).toBe('BILL-0007')
+      expect(purchase_order.xero_bill_status).toBe('AUTHORISED')
+      expect(purchase_order.xero_bill_paid_at).toBeNull()
+
+      const { rows } = await pool.query('SELECT xero_contact_id FROM suppliers WHERE id = $1', [
+        supplierId,
+      ])
+      expect(rows[0].xero_contact_id).toBe('sup-1')
+
+      const post = fake.calls.find((c) => c.method === 'POST' && c.path === 'Invoices')
+      expect(post.idempotencyKey).toBe(`atelier-po-${purchaseOrder.id}`)
+      const sent = post.body.Invoices[0]
+      expect(sent.Type).toBe('ACCPAY')
+      expect(sent.Contact).toEqual({ ContactID: 'sup-1' })
+      expect(sent.CurrencyCode).toBe('EUR')
+      expect(sent.Reference).toBe(purchaseOrder.po_number)
+      expect(sent.LineItems[0]).toMatchObject({ Quantity: 12, UnitAmount: 48.5, AccountCode: '300' })
+    })
+
+    it('send still succeeds when the bill is refused, and says why', async () => {
+      const { purchaseOrder } = await raisePricedPurchaseOrder()
+      await inject('PATCH', `/admin/purchase-orders/${purchaseOrder.id}`, backofficeCookie, {
+        lines: [{ id: purchaseOrder.lines[0].id, unit_price: null }],
+      })
+      const response = await inject(
+        'POST',
+        `/admin/purchase-orders/${purchaseOrder.id}/send`,
+        backofficeCookie,
+        {}
+      )
+      expect(response.statusCode).toBe(200)
+      const { purchase_order, xero_bill } = response.json()
+      expect(purchase_order.status).toBe('sent')
+      expect(purchase_order.xero_bill_id).toBeNull()
+      expect(xero_bill.raised).toBe(false)
+      expect(xero_bill.reason).toMatch(/unpriced/)
+    })
+
+    it('a manual push 409s once the bill exists, and sync mirrors paid', async () => {
+      scriptBillCreate()
+      const { purchaseOrder } = await raisePricedPurchaseOrder()
+      const first = await inject(
+        'POST',
+        `/admin/xero/purchase-orders/${purchaseOrder.id}/bill`,
+        backofficeCookie,
+        {}
+      )
+      expect(first.statusCode).toBe(201)
+      const second = await inject(
+        'POST',
+        `/admin/xero/purchase-orders/${purchaseOrder.id}/bill`,
+        backofficeCookie,
+        {}
+      )
+      expect(second.statusCode).toBe(409)
+      expect(second.json().message).toContain('BILL-0007')
+
+      fake.on('GET', 'Invoices/bill-uuid-1', () => ({
+        Invoices: [
+          {
+            InvoiceID: 'bill-uuid-1',
+            InvoiceNumber: 'BILL-0007',
+            Status: 'PAID',
+            FullyPaidOnDate: '/Date(1790000000000+0000)/',
+          },
+        ],
+      }))
+      const synced = await inject(
+        'POST',
+        `/admin/xero/purchase-orders/${purchaseOrder.id}/bill/sync`,
+        backofficeCookie,
+        {}
+      )
+      expect(synced.statusCode).toBe(200)
+      const { bill, purchase_order } = synced.json()
+      expect(bill.status).toBe('PAID')
+      expect(purchase_order.xero_bill_status).toBe('PAID')
+      expect(purchase_order.xero_bill_paid_at).toBe(new Date(1790000000000).toISOString())
+      // Paid in Xero on a DRAFT (the manual push ran before Send) leaves the
+      // office's status alone: the machine has no draft → paid.
+      expect(purchase_order.status).toBe('draft')
+      expect(purchase_order.paid_at).toBeNull()
+    })
+
+    it('paid in Xero moves a sent order to paid, once', async () => {
+      scriptBillCreate()
+      const { purchaseOrder } = await raisePricedPurchaseOrder()
+      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/send`, backofficeCookie, {})
+      fake.on('GET', 'Invoices/bill-uuid-1', () => ({
+        Invoices: [{ InvoiceID: 'bill-uuid-1', InvoiceNumber: 'BILL-0007', Status: 'PAID', FullyPaidOnDate: '2026-09-20T00:00:00' }],
+      }))
+      const sync = () =>
+        inject('POST', `/admin/xero/purchase-orders/${purchaseOrder.id}/bill/sync`, backofficeCookie, {})
+      const first = await sync()
+      expect(first.statusCode).toBe(200)
+      expect(first.json().purchase_order.status).toBe('paid')
+      const paidAt = first.json().purchase_order.paid_at
+      expect(paidAt).toBeTruthy()
+      // A second sync is a no-op on the status and the stamp.
+      const second = await sync()
+      expect(second.statusCode).toBe(200)
+      expect(second.json().purchase_order.paid_at).toBe(paidAt)
+      // Still closes once the goods arrive.
+      const closed = await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/close`, backofficeCookie, {})
+      expect(closed.json().purchase_order.status).toBe('closed')
+      expect(closed.json().purchase_order.paid_at).toBe(paidAt)
+    })
+
+    it('pay is a verb of its own for an office without Xero, and refuses a draft', async () => {
+      const { purchaseOrder } = await raisePricedPurchaseOrder()
+      const draft = await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/pay`, backofficeCookie, {})
+      expect(draft.statusCode).toBe(409)
+      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/send`, backofficeCookie, {})
+      const paid = await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/pay`, backofficeCookie, {})
+      expect(paid.statusCode).toBe(200)
+      expect(paid.json().purchase_order.status).toBe('paid')
+    })
+
+    it('sync on an order with no bill is a non-event; a missing order is 404', async () => {
+      const { purchaseOrder } = await raisePricedPurchaseOrder()
+      const none = await inject(
+        'POST',
+        `/admin/xero/purchase-orders/${purchaseOrder.id}/bill/sync`,
+        backofficeCookie,
+        {}
+      )
+      expect(none.statusCode).toBe(200)
+      expect(none.json().synced).toBe(false)
+      const missing = await inject('POST', '/admin/xero/purchase-orders/999999/bill', backofficeCookie, {})
+      expect(missing.statusCode).toBe(404)
     })
   })
 })

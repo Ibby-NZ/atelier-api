@@ -12,7 +12,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
-import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
+import { cleanupTradeApplications, sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'acct-portal-test'
@@ -57,6 +57,7 @@ const cleanup = async (pool) => {
   await pool.query(`DELETE FROM legacy_cuttings WHERE source_file = $1`, [`${PREFIX}.xlsx`])
   await pool.query(`DELETE FROM legacy_accounts WHERE source_file = $1`, [`${PREFIX}.xlsx`])
   await pool.query(`DELETE FROM trade_applications WHERE business_name LIKE $1`, [`${PREFIX}%`])
+  await cleanupTradeApplications(pool, `${PREFIX}-%`)
   await pool.query(`DELETE FROM users WHERE email LIKE $1`, [`${PREFIX}-%`])
   await pool.query(`DELETE FROM brands WHERE slug LIKE $1`, [`${PREFIX}-%`])
 }
@@ -206,6 +207,15 @@ describe('trade client portal', () => {
     })
     expect(res.statusCode).toBe(201)
     await db.query(`UPDATE users SET trade_approved = true WHERE email = $1`, [email])
+    // The form raised its own company and granted the login to it (Sept
+    // 2026); these tests link the login to a Dynamics account themselves, so
+    // drop that row — the grant cascades with it.
+    await db.query(
+      `DELETE FROM trade_accounts WHERE id IN
+         (SELECT trade_account_id FROM trade_applications ta JOIN users u ON u.id = ta.user_id
+           WHERE u.email = $1)`,
+      [email]
+    )
     const login = await instance.inject({
       method: 'POST',
       url: '/auth/login',

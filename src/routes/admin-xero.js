@@ -32,6 +32,7 @@ import {
   XeroValidationError,
 } from '../xero/service.js'
 import { XeroHttpError } from '../xero/xero-http.js'
+import { loadReportAccess } from '../reports/access.js'
 
 const idParamsSchema = {
   type: 'object',
@@ -48,9 +49,12 @@ const invoiceBodySchema = {
   },
 }
 
-export const adminXeroRoutes = async (app, { xero, crmBaseUrl }) => {
+export const adminXeroRoutes = async (app, { pool, xero, crmBaseUrl }) => {
   const backoffice = app.guards.requireRole('backoffice')
   const director = app.guards.requireRole('director')
+  // The purchase order handed back is finance-gated like every purchasing read
+  // (see src/routes/admin-purchase-orders.js for why it is never request.user).
+  const financeFor = async (request) => (await loadReportAccess(pool, request.user)).finance
 
   const unconfigured = (reply) => {
     reply.code(503)
@@ -146,25 +150,6 @@ export const adminXeroRoutes = async (app, { xero, crmBaseUrl }) => {
     return answer(reply, async () => ({ result: await xero.pullStatuses() }))
   })
 
-  // A purchase order as a bill against the house's Xero contact. The answer
-  // names the bill and nothing of the cost: `getPurchaseOrder` on the CRM's
-  // side is finance-gated, this is not, so it carries no figures.
-  app.post(
-    '/admin/xero/purchase-orders/:id/bill',
-    { preHandler: backoffice, schema: { params: idParamsSchema } },
-    async (request, reply) => {
-      if (!xero) return unconfigured(reply)
-      return answer(reply, async () => {
-        const result = await xero.pushPurchaseOrderBill(request.params.id)
-        if (!result) {
-          reply.code(404)
-          return { error: 'Not Found', message: `No purchase order ${request.params.id}.` }
-        }
-        return result
-      })
-    }
-  )
-
   app.post(
     '/admin/xero/orders/:id/invoice',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: invoiceBodySchema } },
@@ -177,6 +162,48 @@ export const adminXeroRoutes = async (app, { xero, crmBaseUrl }) => {
         if (!result) {
           reply.code(404)
           return { error: 'Not Found', message: `No order ${request.params.id}.` }
+        }
+        return result
+      })
+    }
+  )
+
+  // A purchase order as a BILL against its supplier (ACCPAY). Normally raised
+  // by Send; this is the retry for a send whose bill Xero refused, and the
+  // manual path for an order sent before the integration existed.
+  app.post(
+    '/admin/xero/purchase-orders/:id/bill',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      if (!xero) return unconfigured(reply)
+      return answer(reply, async () => {
+        const result = await xero.pushPurchaseOrderBill(request.params.id, {
+          finance: await financeFor(request),
+        })
+        if (!result) {
+          reply.code(404)
+          return { error: 'Not Found', message: `No purchase order ${request.params.id}.` }
+        }
+        reply.code(201)
+        return result
+      })
+    }
+  )
+
+  // Mirror Xero's answer about the bill (status, paid date) onto the order.
+  // Polled by the CRM when it opens an order with a bill; no webhook.
+  app.post(
+    '/admin/xero/purchase-orders/:id/bill/sync',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      if (!xero) return unconfigured(reply)
+      return answer(reply, async () => {
+        const result = await xero.syncPurchaseOrderBill(request.params.id, {
+          finance: await financeFor(request),
+        })
+        if (!result) {
+          reply.code(404)
+          return { error: 'Not Found', message: `No purchase order ${request.params.id}.` }
         }
         return result
       })

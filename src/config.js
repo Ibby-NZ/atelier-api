@@ -22,9 +22,9 @@ const DEFAULT_XERO_SALES_ACCOUNT_CODE = '200'
 const DEFAULT_XERO_LINE_AMOUNT_TYPES = 'Exclusive'
 const DEFAULT_XERO_INVOICE_STATUS = 'AUTHORISED'
 const DEFAULT_XERO_INVOICE_DUE_DAYS = 30
-// Xero's stock "Purchases" expense account. A bill is DRAFT by default: a
-// purchase order is what we ORDERED, and the accountant approves the bill
-// once the house's own invoice arrives.
+// Xero's stock "Purchases" expense account — where a supplier bill's lines
+// post. A bill is DRAFT by default: a purchase order is what we ORDERED, and
+// the accountant approves the bill once the house's own invoice arrives.
 const DEFAULT_XERO_PURCHASES_ACCOUNT_CODE = '300'
 const DEFAULT_XERO_BILL_STATUS = 'DRAFT'
 const XERO_GRANT_TYPES = ['authorization_code', 'client_credentials']

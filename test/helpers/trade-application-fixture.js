@@ -34,3 +34,26 @@ export const sampleTradeApplication = (overrides = {}) => ({
   signature: 'Alex Designer',
   ...overrides,
 })
+
+/**
+ * Remove what a test's trade applications left behind, for every user whose
+ * email matches `emailLike` — the company each form raised (its contacts and
+ * login grant cascade) and the form itself. Call BEFORE deleting the users:
+ * both FKs are SET NULL, so deleting users first orphans the rows for ever.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {string} emailLike a SQL LIKE pattern, e.g. `%@test.example.com`
+ */
+export const cleanupTradeApplications = async (pool, emailLike) => {
+  await pool.query(
+    `DELETE FROM trade_accounts WHERE id IN
+       (SELECT trade_account_id FROM trade_applications
+         WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1))`,
+    [emailLike]
+  )
+  await pool.query(
+    `DELETE FROM trade_applications
+      WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
+    [emailLike]
+  )
+}

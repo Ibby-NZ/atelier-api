@@ -126,6 +126,12 @@ const buildWhere = ({ q, includeArchived }) => {
     // Aliases are searched too: the price lists spell one house several ways
     // ('JWALL', 'C&C MILANO'), and staff look a supplier up by whichever
     // spelling is in front of them.
+    //
+    // So are the HOUSE names. The question the office actually asks is "who
+    // invoices Kieffer" — and Kieffer is a brand, not a supplier, so a search
+    // over supplier names alone answers "no such supplier" for the only word
+    // they have. Archived houses count: one still points here, and that is
+    // still who invoices it.
     clauses.push(`(
       name ILIKE $${i} ESCAPE '\\'
       OR short_code ILIKE $${i} ESCAPE '\\'
@@ -135,6 +141,11 @@ const buildWhere = ({ q, includeArchived }) => {
         SELECT 1 FROM supplier_aliases
          WHERE supplier_aliases.supplier_id = suppliers.id
            AND supplier_aliases.alias ILIKE $${i} ESCAPE '\\'
+      )
+      OR EXISTS (
+        SELECT 1 FROM brands
+         WHERE brands.supplier_id = suppliers.id
+           AND brands.name ILIKE $${i} ESCAPE '\\'
       )
     )`)
   }
@@ -173,7 +184,9 @@ export const listSuppliers = async (
   // one definition. `suppliers` stays unaliased — SUPPLIER_COLUMNS is
   // unqualified, and the lateral projects only disjoint last_* names.
   const { rows } = await pool.query(
-    `SELECT ${SUPPLIER_COLUMNS}, last_contact.*
+    `SELECT ${SUPPLIER_COLUMNS}, last_contact.*,
+            (SELECT count(*)::int FROM brands WHERE brands.supplier_id = suppliers.id)
+              AS brand_count
      FROM suppliers
      LEFT JOIN LATERAL (
        SELECT contacted_on::text AS last_contacted_on,
@@ -194,6 +207,11 @@ export const listSuppliers = async (
   const suppliers = rows.map((row) =>
     Object.freeze({
       ...toSupplier(row),
+      // How many houses point here, archived ones included — the same rows the
+      // detail read lists and the same RESTRICT that refuses the delete. A
+      // supplier nobody has linked reads 0, which is the state the office has
+      // no other way to spot from the list.
+      brand_count: row.brand_count ?? 0,
       // Null means never contacted — the "gone quiet" glance the list exists for.
       last_contact:
         row.last_contacted_on == null

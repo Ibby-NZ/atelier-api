@@ -41,6 +41,7 @@ const httpError = (statusCode, message) =>
 export const PURCHASE_ORDER_STATUSES = Object.freeze([
   'draft',
   'sent',
+  'paid',
   'closed',
   'cancelled',
 ])
@@ -65,8 +66,14 @@ export const INITIAL_PURCHASE_ORDER_STATUS = 'draft'
  */
 export const ALLOWED_TRANSITIONS = Object.freeze({
   draft: Object.freeze(['sent', 'cancelled']),
-  sent: Object.freeze(['closed', 'cancelled']),
-  closed: Object.freeze([]),
+  sent: Object.freeze(['paid', 'closed', 'cancelled']),
+  // `paid` (22 Sep 2026) is the house having been paid — by hand, or mirrored
+  // from the Xero bill. Reachable from `sent` (pro-forma, before delivery) and
+  // from `closed` (paid after), and a prepaid order still CLOSES once its
+  // goods have arrived, so the two are not a one-way street. Never cancelled:
+  // money that has left is a credit note, and nobody has stated that document.
+  paid: Object.freeze(['closed']),
+  closed: Object.freeze(['paid']),
   cancelled: Object.freeze([]),
 })
 
@@ -83,6 +90,7 @@ export const ALLOWED_TRANSITIONS = Object.freeze({
 export const STATUS_STAMPS = Object.freeze({
   draft: null,
   sent: 'sent_at',
+  paid: 'paid_at',
   closed: 'closed_at',
   cancelled: 'cancelled_at',
 })

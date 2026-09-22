@@ -51,14 +51,17 @@ contact — `users`, `trade_accounts`, `suppliers` — each with its own
   always invoiced the company. Unfiled logins and guests still invoice as
   themselves. `trade_accounts.xero_contact_id` already carried the D365 ids
   for the merged roster, which is why the company path links first.
-- **A purchase order pushes as a DRAFT bill** (`XERO_BILL_STATUS`), only
-  once `sent`/`closed`, only with every line priced, numbered by our
-  `po_number` in BOTH `InvoiceNumber` and `Reference` — the accountant
-  overwrites the former with the house's own invoice number when it arrives,
-  and the latter keeps the link. `unit_price` is decimal dollars in the
-  house's currency (`CurrencyCode` rides along); no cents anywhere in
-  purchasing. The bill route answers `{ bill }` and NO purchase order, because
-  the PO read model is finance-gated and this route is not.
+- **A purchase order pushes as a DRAFT bill** (`XERO_BILL_STATUS`), raised
+  by Send and retried by hand; anything but `cancelled` is billable, only
+  with every line priced, numbered by our `po_number` in BOTH
+  `InvoiceNumber` and `Reference` — the accountant overwrites the former with
+  the house's own invoice number when it arrives, and the latter keeps the
+  link. The bill is dated the day the order went to the house. `unit_price`
+  is decimal dollars in the house's currency (`CurrencyCode` rides along); no
+  cents anywhere in purchasing. A bill Xero has VOIDED/DELETED re-opens the
+  push under `atelier-po-<id>-after-<deadId>`, the same rule as the invoice.
+  `pullStatuses` mirrors bills through the same `mirrorBillState` the
+  on-demand sync uses, so a PAID answer from either path moves the order.
 - **The pull never renames.** `pullContacts` refreshes email/phone/address
   by `COALESCE(xero, ours)` on rows already linked by id, links unlinked rows
   by email then exact name, and only then creates — a Xero customer becomes a
@@ -101,6 +104,23 @@ contact — `users`, `trade_accounts`, `suppliers` — each with its own
   checkout is born paid), where a failure is a `warning` on a push that
   succeeded. Unset account code = "recorded by hand", said in words, not an
   error.
+- **A purchase order becomes a BILL (ACCPAY) against its supplier when it is
+  SENT** (22 Sep 2026). `pushPurchaseOrderBill` mirrors the invoice push:
+  supplier contact matched (PO email, then name) before created and remembered
+  on `suppliers.xero_contact_id`; `Idempotency-Key atelier-po-<id>` at Xero
+  and `purchase_orders.xero_bill_id` here (409 on a second push); lines go
+  across in the SUPPLIER'S currency as `numeric(12,4)` with `CurrencyCode` set
+  (the org must have that currency enabled), against
+  `XERO_PURCHASES_ACCOUNT_CODE` (default 300); an unpriced line refuses. The
+  send route calls it and NEVER fails because of Xero — the answer travels as
+  `xero_bill: { raised, number | reason }`, the `mark-paid` posture — and
+  `POST /admin/xero/purchase-orders/:id/bill` is the retry. **"Paid" reaches
+  the platform by POLL, not webhook**: `POST …/bill/sync` re-reads the bill and
+  mirrors `Status` / `FullyPaidOnDate` onto `xero_bill_status` /
+  `xero_bill_paid_at`, and a `PAID` answer moves the order's own `status` to
+  `paid` through `payPurchaseOrder` where the machine allows it (sent/closed).
+  The CRM syncs when it opens an order whose bill is unsettled. Guarded by the "purchase orders as
+  bills" block of `test/admin-xero.test.js`.
 - `expires_at_ms` in the stored token set is OUR computed absolute expiry
   (minted-at + expires_in); Xero itself only sends the relative form.
 

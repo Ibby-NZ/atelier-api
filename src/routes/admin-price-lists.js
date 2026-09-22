@@ -29,7 +29,7 @@ import {
   MAX_LIMIT,
 } from '../pricing/admin-price-lists.js'
 import { getRateAsAt, listRateHistory, MAX_REASON_LENGTH } from '../pricing/price-history.js'
-import { CATEGORIES, UNITS, CURRENCIES, CLASS_LETTER } from '../../scripts/lib/price-template.js'
+import { UNITS, CURRENCIES, CLASS_LETTER } from '../../scripts/lib/price-template.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { requireFinance } from '../reports/access.js'
 
@@ -45,14 +45,17 @@ const REIMPORT_WARNING =
 // Derived from the shared vocabularies rather than re-typed: a hand-entered item
 // must be exactly as valid as an imported one, and these lists had already
 // drifted from the column CHECKs once.
-const CATEGORY_ENUM = [...CATEGORIES]
 const UNIT_ENUM = [...UNITS]
 const CURRENCY_ENUM = [...CURRENCIES]
 
 // Required-field shapes.
 const supplierProp = { type: 'string', minLength: 1, maxLength: 200 }
 const codeProp = { type: 'string', minLength: 1, maxLength: 200 }
-const categoryProp = { type: 'string', enum: CATEGORY_ENUM }
+// NOT an enum since migration 1791379200000: `price_list_items.category`
+// references `product_categories`, a table the office adds to, and an Ajv enum
+// is fixed at boot. An unknown value is a 422 from the foreign key, phrased by
+// admin-brands.js's REFERENCE_MESSAGES.
+const categoryProp = { type: 'string', minLength: 1, maxLength: 200 }
 const unitProp = { type: 'string', enum: UNIT_ENUM }
 const currencyProp = { type: 'string', enum: CURRENCY_ENUM }
 // numeric(12,4) CHECK wholesale_rate > 0 — reject <= 0 at the boundary.
@@ -95,7 +98,7 @@ const listQuerySchema = {
   additionalProperties: false,
   properties: {
     supplier: { type: 'string', maxLength: 200 },
-    category: { type: 'string', enum: CATEGORY_ENUM },
+    category: { type: 'string', minLength: 1, maxLength: 200 },
     q: { type: 'string', maxLength: 200 },
     include_archived: { type: 'boolean', default: false },
     page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },

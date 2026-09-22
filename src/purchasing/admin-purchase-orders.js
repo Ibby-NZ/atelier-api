@@ -132,6 +132,7 @@ const PO_COLUMNS = `po.id,
         po.po_email,
         po.status,
         po.sent_at,
+        po.paid_at,
         po.closed_at,
         po.cancelled_at,
         po.expected_at,
@@ -141,6 +142,7 @@ const PO_COLUMNS = `po.id,
         po.xero_bill_id,
         po.xero_bill_ref,
         po.xero_bill_status,
+        po.xero_bill_paid_at,
         po.created_at,
         po.updated_at`
 
@@ -283,18 +285,21 @@ const toPurchaseOrder = (row, lines, finance, invoice) =>
     po_email: row.po_email,
     status: row.status,
     sent_at: row.sent_at,
+    paid_at: row.paid_at,
     closed_at: row.closed_at,
     cancelled_at: row.cancelled_at,
     expected_at: row.expected_at,
     created_by: row.created_by,
     created_by_name: row.created_by_name ?? null,
     notes: row.notes,
-    // The Xero bill this purchase order was pushed as (id = duplicate gate,
-    // ref = the number on the screen, status = Xero's word at the last pull).
-    // Not money, so not finance-gated: which bill, not what it cost.
+    // The Xero BILL raised for this order (the buy-side twin of
+    // `orders.xero_invoice_id`), and Xero's own answer about it, mirrored by the
+    // sync. Beside `status`, never in it: whether the bill is paid is a fact
+    // about the bank, not a move a person made here.
     xero_bill_id: row.xero_bill_id ?? null,
     xero_bill_ref: row.xero_bill_ref ?? null,
     xero_bill_status: row.xero_bill_status ?? null,
+    xero_bill_paid_at: row.xero_bill_paid_at ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     // Which supplier invoice, if any, has already billed for this purchase
@@ -984,7 +989,7 @@ export const updatePurchaseOrder = (pool, id, patch, { finance = false } = {}) =
     pool,
     id,
     async (client, purchaseOrder) => {
-      requireStatus(purchaseOrder, ['draft', 'sent', 'closed'], 'edit')
+      requireStatus(purchaseOrder, ['draft', 'sent', 'paid', 'closed'], 'edit')
 
       const headerColumns = PURCHASE_ORDER_UPDATE_COLUMNS.filter((column) =>
         Object.hasOwn(patch, column)
@@ -1016,6 +1021,22 @@ const moveStatus = async (client, id, target) => {
     [id, target]
   )
 }
+
+/**
+ * The house has been paid — by hand, or mirrored from the Xero bill (the sync
+ * calls this when Xero answers PAID). Refused as a 409 where the machine does
+ * not allow it, so a draft cannot be "paid" and a paid order is not re-paid.
+ */
+export const payPurchaseOrder = (pool, id, { finance = false } = {}) =>
+  withPurchaseOrderTxn(
+    pool,
+    id,
+    async (client, purchaseOrder) => {
+      requireTransition(purchaseOrder, 'paid')
+      await moveStatus(client, id, 'paid')
+    },
+    { finance }
+  )
 
 /** Mark a draft as sent to the house. */
 export const sendPurchaseOrder = (pool, id, { finance = false } = {}) =>
@@ -1105,7 +1126,7 @@ export const allocatePurchaseOrderLine = async (
     pool,
     purchaseOrderId,
     async (client, purchaseOrder) => {
-      requireStatus(purchaseOrder, ['draft', 'sent'], 'allocate against')
+      requireStatus(purchaseOrder, ['draft', 'sent', 'paid'], 'allocate against')
       try {
         await insertAllocation(client, lineId, {
           orderLineId: input.order_line_id,

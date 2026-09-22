@@ -34,6 +34,8 @@ import {
   updateSupplierDiscountTier,
   getSupplierBrandTerms,
   findScopedTierId,
+  getSupplierDefaultDiscount,
+  setSupplierDefaultDiscount,
   DEFAULT_LIMIT as TERMS_DEFAULT_LIMIT,
   MAX_LIMIT as TERMS_MAX_LIMIT,
 } from '../suppliers/supplier-terms.js'
@@ -241,6 +243,18 @@ const termsBodyProps = {
   markup: nullableMarkupProp,
   indicative: { type: 'boolean' },
   note: { type: ['string', 'null'], maxLength: 2000 },
+}
+
+// The supplier's own net rate — one column on `suppliers`, the same fraction
+// off list every other rate here is. Its own body schema rather than a member
+// of `supplierProps`, because the general supplier PATCH is open to any
+// backoffice login and this one is finance-gated; `null` clears it, and that is
+// a different statement from 0 (prices that arrive already net).
+const defaultDiscountSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['default_discount'],
+  properties: { default_discount: nullableRateProp },
 }
 
 const createTermsSchema = {
@@ -522,12 +536,34 @@ export const adminSupplierRoutes = async (app, { pool }) => {
     },
     async (request) => {
       const { page, limit } = request.query
-      const { terms, total } = await pageSupplierBrandTerms(pool, request.params.id, {
-        page,
-        limit,
-      })
-      return { terms, meta: { total, page, limit } }
+      // The supplier's own rate rides along: it is what every house with no
+      // terms row of its own is discounted at, so a terms list read without it
+      // says "no discount" where the answer is "the supplier default".
+      const [{ terms, total }, supplier] = await Promise.all([
+        pageSupplierBrandTerms(pool, request.params.id, { page, limit }),
+        getSupplierDefaultDiscount(pool, request.params.id),
+      ])
+      return {
+        terms,
+        default_discount: supplier.default_discount,
+        meta: { total, page, limit },
+      }
     }
+  )
+
+  // The supplier-level rate. A PATCH of its own rather than a field on
+  // PATCH /admin/suppliers/:id, because that route is backoffice-wide and a
+  // discount is cost data — the same reason the terms routes are gated.
+  app.patch(
+    '/admin/suppliers/:id/default-discount',
+    { preHandler: financeStaff, schema: { params: idParamsSchema, body: defaultDiscountSchema } },
+    async (request) => ({
+      supplier: await setSupplierDefaultDiscount(
+        pool,
+        request.params.id,
+        request.body.default_discount
+      ),
+    })
   )
 
   // Every write below answers with the whole terms row in the read model's

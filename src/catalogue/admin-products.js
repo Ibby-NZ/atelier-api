@@ -28,11 +28,26 @@ import {
 const PRICE_COLUMNS = Object.freeze(['retail_price_cents', 'trade_price_cents'])
 
 // Colourways are the largest catalogue table (one row per SKU, ~19k designs
-// once the colour files land), so the standalone list is the only admin
-// catalogue read that pages. Same numbers as the price-list ledger.
+// once the colour files land), so the standalone list pages; the product list
+// pages too, because the CRM will not read a whole catalogue to show one
+// screen of it. Same numbers as the price-list ledger.
 export const DEFAULT_PAGE = 1
 export const DEFAULT_LIMIT = 50
 export const MAX_LIMIT = 200
+
+/**
+ * Clamp a caller's page/limit to what a query may run with. The route schema
+ * already defaults and caps them; this keeps the module safe for direct callers.
+ *
+ * @param {{ page?: number, limit?: number }} [options]
+ * @returns {{ page: number, limit: number, offset: number }}
+ */
+export const pageWindow = ({ page, limit } = {}) => {
+  const safePage = Number.isInteger(page) && page > 0 ? page : DEFAULT_PAGE
+  const safeLimit =
+    Number.isInteger(limit) && limit > 0 ? Math.min(limit, MAX_LIMIT) : DEFAULT_LIMIT
+  return { page: safePage, limit: safeLimit, offset: (safePage - 1) * safeLimit }
+}
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -273,19 +288,22 @@ const buildColourwayWhere = ({ productId, brandId, q, includeArchived }) => {
 // to be stringified on the way in (same rule as the seed).
 const serialiseTones = (tones) => (tones ? JSON.stringify(tones) : null)
 
-/**
- * Products, optionally narrowed to one brand. Unlike the public list this
- * includes hidden products (`show_on_website = false`) — that flag is the thing
- * staff come here to toggle.
- *
- * @param {import('pg').Pool} pool
- * @param {{ brandId?: number }} [filter]
- * @returns {Promise<object[]>}
- */
-export const listAdminProducts = async (
-  pool,
-  { brandId, includeArchived = false } = {}
-) => {
+// The figure a product is banded on: retail first (what the storefront shows a
+// shopper), the trade figure where there is no retail — a fabric from an
+// international house carries only the latter. Mirrors the CRM's
+// productPriceCents so a band filter and the band a row displays agree.
+const PRODUCT_PRICE_SQL = 'COALESCE(p.retail_price_cents, p.trade_price_cents)'
+
+const buildProductWhere = ({
+  brandId,
+  includeArchived,
+  q,
+  category,
+  uncategorised,
+  priceMinCents,
+  priceMaxCents,
+  unpriced,
+}) => {
   const clauses = []
   const params = []
   if (brandId) {
@@ -295,7 +313,72 @@ export const listAdminProducts = async (
   if (!includeArchived) {
     clauses.push('p.archived_at IS NULL')
   }
+  // "Uncategorised" is a flag, not `category=`: an empty query value cannot
+  // travel, and NULL is the only way a product has no category.
+  if (uncategorised) {
+    clauses.push('p.category IS NULL')
+  } else if (category) {
+    params.push(category)
+    clauses.push(`p.category = $${params.length}`)
+  }
+  const term = typeof q === 'string' ? q.trim() : ''
+  if (term) {
+    params.push(`%${escapeLike(term)}%`)
+    clauses.push(`p.name ILIKE $${params.length} ESCAPE '\\'`)
+  }
+  // "No price" is its own answer — the office uses it to find what still needs
+  // pricing — and a range never matches it, so the two are exclusive.
+  if (unpriced) {
+    clauses.push(`${PRODUCT_PRICE_SQL} IS NULL`)
+  } else {
+    if (Number.isInteger(priceMinCents)) {
+      params.push(priceMinCents)
+      clauses.push(`${PRODUCT_PRICE_SQL} >= $${params.length}`)
+    }
+    if (Number.isInteger(priceMaxCents)) {
+      params.push(priceMaxCents)
+      clauses.push(`${PRODUCT_PRICE_SQL} <= $${params.length}`)
+    }
+  }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+  return { where, params }
+}
+
+/**
+ * Filtered, paginated products. Unlike the public list this includes hidden
+ * products (`show_on_website = false`) — that flag is the thing staff come here
+ * to toggle. `q` is an ILIKE over the design name; the house is a filter, not a
+ * search term. Returns { items, total, maxPriceCents }: the route builds the
+ * meta envelope, and `maxPriceCents` (unfiltered) is the ceiling the CRM draws
+ * its price-band select from, since it can no longer read every row.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{
+ *   brandId?: number,
+ *   includeArchived?: boolean,
+ *   q?: string,
+ *   category?: string,
+ *   uncategorised?: boolean,
+ *   priceMinCents?: number,
+ *   priceMaxCents?: number,
+ *   unpriced?: boolean,
+ *   page?: number,
+ *   limit?: number,
+ * }} [options]
+ * @returns {Promise<{ items: object[], total: number, maxPriceCents: number|null }>}
+ */
+export const listAdminProducts = async (
+  pool,
+  { includeArchived = false, page, limit, ...filters } = {}
+) => {
+  const window = pageWindow({ page, limit })
+  const { where, params } = buildProductWhere({ includeArchived, ...filters })
+
+  const [countResult, ceilingResult] = await Promise.all([
+    pool.query(`SELECT count(*)::int AS total ${PRODUCT_FROM} ${where}`, params),
+    pool.query(`SELECT max(${PRODUCT_PRICE_SQL})::int AS ceiling FROM products p`),
+  ])
+
   const { rows } = await pool.query(
     `SELECT ${PRODUCT_COLUMNS},
             (SELECT COUNT(*) FROM colourways c
@@ -303,10 +386,41 @@ export const listAdminProducts = async (
               AS colourway_count
        ${PRODUCT_FROM}
        ${where}
-      ORDER BY b.name ASC, p.name ASC, p.id ASC`,
+      ORDER BY b.name ASC, p.name ASC, p.id ASC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, window.limit, window.offset]
+  )
+  return {
+    items: rows.map((row) => toProduct(row, { colourway_count: row.colourway_count })),
+    total: countResult.rows[0].total,
+    maxPriceCents: ceilingResult.rows[0].ceiling,
+  }
+}
+
+/**
+ * How many products sit in each category, under the same house/archived
+ * filters as the list — the Categories screen's rows. Vocabulary order is the
+ * CRM's to draw; this answers in count order with the uncategorised
+ * (`category: null`) last, so a house that is all one thing reads at a glance.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ brandId?: number, includeArchived?: boolean }} [options]
+ * @returns {Promise<Array<{ category: string|null, count: number }>>}
+ */
+export const countAdminProductsByCategory = async (
+  pool,
+  { brandId, includeArchived = false } = {}
+) => {
+  const { where, params } = buildProductWhere({ brandId, includeArchived })
+  const { rows } = await pool.query(
+    `SELECT p.category, count(*)::int AS count
+       ${PRODUCT_FROM}
+       ${where}
+      GROUP BY p.category
+      ORDER BY (p.category IS NULL) ASC, count DESC, p.category ASC`,
     params
   )
-  return rows.map((row) => toProduct(row, { colourway_count: row.colourway_count }))
+  return rows.map((row) => ({ category: row.category, count: row.count }))
 }
 
 /**
@@ -355,10 +469,7 @@ export const listAdminColourways = async (
   pool,
   { productId, brandId, q, includeArchived = false, page, limit } = {}
 ) => {
-  const safePage = Number.isInteger(page) && page > 0 ? page : DEFAULT_PAGE
-  const safeLimit =
-    Number.isInteger(limit) && limit > 0 ? Math.min(limit, MAX_LIMIT) : DEFAULT_LIMIT
-  const offset = (safePage - 1) * safeLimit
+  const { limit: safeLimit, offset } = pageWindow({ page, limit })
 
   const { where, params } = buildColourwayWhere({ productId, brandId, q, includeArchived })
 

@@ -174,6 +174,7 @@ describe('pricing parameters — the module and the resolver', () => {
   let supplierId
   let houseId // linked, with terms
   let bareId // linked, no terms
+  let averagedId // linked, no terms of its own — on the supplier's averaged rate
   let orphanId // no supplier
 
   beforeAll(async () => {
@@ -184,6 +185,7 @@ describe('pricing parameters — the module and the resolver', () => {
     supplierId = await insertSupplier(pool, 'module-supplier')
     houseId = await insertBrand(pool, 'module-house', supplierId)
     bareId = await insertBrand(pool, 'module-bare', supplierId)
+    averagedId = await insertBrand(pool, 'module-averaged', supplierId)
     orphanId = await insertBrand(pool, 'module-orphan', null)
     await insertTerms(pool, { supplierId, brandId: houseId, discount: 0.25, markup: 1.3 })
     await insertTerms(pool, { supplierId, brandId: bareId, chain: [0.4, 0.4] })
@@ -198,9 +200,10 @@ describe('pricing parameters — the module and the resolver', () => {
   beforeEach(async () => {
     await pool.query(
       `DELETE FROM supplier_pricing_parameters WHERE supplier_id = $1 OR brand_id = ANY($2::int[])`,
-      [supplierId, [houseId, bareId, orphanId]]
+      [supplierId, [houseId, bareId, averagedId, orphanId]]
     )
     await pool.query(`DELETE FROM fx_rates WHERE currency = $1`, [CURRENCY])
+    await pool.query(`UPDATE suppliers SET default_discount = NULL WHERE id = $1`, [supplierId])
   })
 
   it('exports the column whitelist the routes and the upsert both build from', () => {
@@ -265,6 +268,35 @@ describe('pricing parameters — the module and the resolver', () => {
     const chained = await resolveWaterfallInputs(pool, { brandId: bareId })
     expect(chained.inputs.discount_percent).toMatchObject({ value: 64, source: 'terms', detail: { shape: 'chain' } })
     expect(chained.inputs.retail_markup).toMatchObject({ value: null, source: 'missing' })
+  })
+
+  it('falls back to the supplier’s averaged rate where a house has no terms of its own', async () => {
+    await pool.query(`UPDATE suppliers SET default_discount = 0.05 WHERE id = $1`, [supplierId])
+
+    // The 9 Jul rule: one averaged rate for every house this supplier invoices.
+    // Before the column existed this resolved MISSING and the landed cost could
+    // not be previewed at all.
+    const averaged = await resolveWaterfallInputs(pool, { brandId: averagedId })
+    expect(averaged.inputs.discount_percent).toMatchObject({
+      value: 5,
+      source: 'supplier',
+      detail: { shape: 'supplier-default' },
+    })
+
+    // A house negotiated brand by brand keeps its own rate — the two are never
+    // added together (25%, not 30%).
+    const exception = await resolveWaterfallInputs(pool, { brandId: houseId })
+    expect(exception.inputs.discount_percent).toMatchObject({ value: 25, source: 'terms' })
+  })
+
+  it('keeps a supplier rate of 0 distinct from none — already-net prices are an answer', async () => {
+    await pool.query(`UPDATE suppliers SET default_discount = 0 WHERE id = $1`, [supplierId])
+    const net = await resolveWaterfallInputs(pool, { brandId: averagedId })
+    expect(net.inputs.discount_percent).toMatchObject({ value: 0, source: 'supplier' })
+
+    await pool.query(`UPDATE suppliers SET default_discount = NULL WHERE id = $1`, [supplierId])
+    const unset = await resolveWaterfallInputs(pool, { brandId: averagedId })
+    expect(unset.inputs.discount_percent).toMatchObject({ value: null, source: 'missing' })
   })
 
   it('takes freight from the ledger at supplier scope and the exchange rate from the supplier currency', async () => {

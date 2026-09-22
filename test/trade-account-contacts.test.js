@@ -287,4 +287,59 @@ describe('trade account contacts', () => {
     )
     expect(rows[0].total).toBe(0)
   })
+
+  // The Accounts screen absorbed the Clients tab (Sept 2026): a company's
+  // details are all editable on the row, and a login is added TO a company.
+  describe('the account as the one client record', () => {
+    it('renames a hand-raised company, never a Dynamics-linked one', async () => {
+      const raised = await inject('POST', '/admin/trade-accounts', { company_name: `${PREFIX} Typo Ltd` })
+      expect(raised.statusCode).toBe(201)
+      const raisedId = raised.json().trade_account.id
+      const linked = await bareCreate(GUID.other)
+      const linkedId = linked.json().trade_account.id
+
+      // Backoffice, like every other detail: a typo taken over the phone must
+      // not wait on a director.
+      const renamed = await inject('PATCH', `/admin/trade-accounts/${raisedId}`, { company_name: `${PREFIX} Fixed Ltd`, city: 'Auckland' })
+      expect(renamed.statusCode).toBe(200)
+      expect(renamed.json().trade_account).toMatchObject({ company_name: `${PREFIX} Fixed Ltd`, city: 'Auckland' })
+
+      const blank = await inject('PATCH', `/admin/trade-accounts/${raisedId}`, { company_name: '   ' })
+      expect(blank.statusCode).toBe(422)
+
+      const refused = await inject('PATCH', `/admin/trade-accounts/${linkedId}`, { company_name: 'Someone Else' })
+      expect(refused.statusCode).toBe(422)
+      expect(refused.json().message).toMatch(/Dynamics/)
+    })
+
+    it('POST /admin/users with trade_account_id grants the new login to the company', async () => {
+      const raised = await inject('POST', '/admin/trade-accounts', { company_name: `${PREFIX} With Login` })
+      const accountId = raised.json().trade_account.id
+
+      const created = await inject('POST', '/admin/users', {
+        email: `${PREFIX}-login@example.test`,
+        role: 'trade',
+        trade_account_id: accountId,
+      })
+      expect(created.statusCode).toBe(201)
+      const userId = created.json().user.id
+
+      const detail = await inject('GET', `/admin/trade-accounts/${accountId}`)
+      expect(detail.json().trade_account.users.map((u) => u.id)).toEqual([userId])
+
+      // An unapproved trade login puts the company on the review queue.
+      const pending = await inject('GET', `/admin/trade-accounts?pending=true&q=${encodeURIComponent(`${PREFIX} With Login`)}`)
+      expect(pending.json().trade_accounts.map((a) => a.id)).toEqual([accountId])
+
+      // An unknown company is a 422 and leaves no login behind.
+      const orphan = await inject('POST', '/admin/users', {
+        email: `${PREFIX}-orphan@example.test`,
+        role: 'trade',
+        trade_account_id: 999999999,
+      })
+      expect(orphan.statusCode).toBe(422)
+      const { rows } = await pool.query('SELECT 1 FROM users WHERE email = $1', [`${PREFIX}-orphan@example.test`])
+      expect(rows).toHaveLength(0)
+    })
+  })
 })

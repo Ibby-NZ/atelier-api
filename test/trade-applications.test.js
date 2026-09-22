@@ -19,7 +19,15 @@ const sessionCookieFrom = (response) => {
 }
 
 // Applications first: deleting the user would SET NULL user_id, orphaning them.
+// The company each application raised goes with it (contacts and the login
+// grant cascade off the company row).
 const cleanup = async (pool) => {
+  await pool.query(
+    `DELETE FROM trade_accounts
+      WHERE id IN (SELECT trade_account_id FROM trade_applications
+                    WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1))`,
+    [`%@${TEST_DOMAIN}`]
+  )
   await pool.query(
     `DELETE FROM trade_applications
       WHERE user_id IN (SELECT id FROM users WHERE email LIKE $1)`,
@@ -148,6 +156,49 @@ describe('trade applications', () => {
       })
     })
 
+    // The form raises the client company it asks for: the business on the
+    // roster, its two named people in the contact book, the login granted —
+    // so the office reviews the application on the account row itself.
+    it('raises the client account, files its two contacts and grants the login', async () => {
+      const response = await inject('POST', '/auth/trade-application', null, {
+        email: testEmail('raised'),
+        password: PASSWORD,
+        application: sampleTradeApplication(),
+      })
+      expect(response.statusCode).toBe(201)
+      const { user } = response.json()
+
+      const { rows: forms } = await pool.query(
+        'SELECT trade_account_id FROM trade_applications WHERE user_id = $1',
+        [user.id]
+      )
+      const accountId = forms[0].trade_account_id
+      expect(accountId).toEqual(expect.any(Number))
+
+      const list = await inject('GET', '/admin/trade-accounts?pending=true&q=raised@', backofficeCookie)
+      expect(list.statusCode).toBe(200)
+      const account = list.json().trade_accounts.find((a) => a.id === accountId)
+      expect(account).toMatchObject({
+        company_name: 'Studio Interiors Ltd',
+        customer_type: 'Trade',
+        legacy_account_guid: null,
+        trade_application_id: forms.length ? expect.any(Number) : null,
+        contact_count: 2,
+      })
+      expect(account.users).toEqual([
+        expect.objectContaining({ id: user.id, role: 'trade', trade_approved: false }),
+      ])
+
+      const detail = await inject('GET', `/admin/trade-accounts/${accountId}`, backofficeCookie)
+      const roles = detail.json().trade_account.contacts.map((c) => c.role).sort()
+      expect(roles).toEqual(['Accounts', 'Design'])
+
+      // Approving the login is what takes the account off the pending list.
+      await inject('PATCH', `/admin/users/${user.id}`, backofficeCookie, { trade_approved: true })
+      const after = await inject('GET', '/admin/trade-accounts?pending=true&q=raised@', backofficeCookie)
+      expect(after.json().trade_accounts.some((a) => a.id === accountId)).toBe(false)
+    })
+
     // Its own instance: the alert needs a mailer, and the shared app has none
     // (nor spare register/login bucket to lend).
     describe('the back-office alert', () => {
@@ -194,7 +245,7 @@ describe('trade applications', () => {
           replyTo: testEmail('alerted'),
           subject: 'New trade application to review: Studio Interiors Ltd',
         })
-        expect(sent[0].text).toContain(`${CRM}/#/clients/applicants`)
+        expect(sent[0].text).toContain(`${CRM}/#/clients/accounts?pending=true`)
         // The applicant is NOT mailed: the acceptance letter is their one letter.
         expect(sent.some((m) => m.to === testEmail('alerted'))).toBe(false)
       })

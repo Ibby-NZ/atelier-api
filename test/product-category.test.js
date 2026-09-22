@@ -206,7 +206,10 @@ describe('category on the catalogue', () => {
     expect(patched.json().product.category).toBeNull()
   })
 
-  it('refuses a category outside the vocabulary at the schema, not the database', async () => {
+  it('refuses a category that is not in product_categories, and says where to add it', async () => {
+    // A 400 from a schema enum until migration 1791379200000. The vocabulary is
+    // a table now, so the refusal comes from the column's foreign key — a 422 —
+    // and names the screen that fixes it rather than implying a migration.
     const response = await inject('POST', '/admin/products', backofficeCookie, {
       brand_id: brandId,
       name: 'Cat Axis Curtain',
@@ -214,7 +217,8 @@ describe('category on the catalogue', () => {
       currency: 'NZD',
       category: 'curtain',
     })
-    expect(response.statusCode).toBe(400)
+    expect(response.statusCode).toBe(422)
+    expect(response.json().message).toMatch(/Add it on Categories first/)
   })
 
   it('is independent of product_type — a fabric may be a towel', async () => {
@@ -264,11 +268,15 @@ describe('category on the catalogue', () => {
       expect(response.json().product.category).toBe('bed-linen')
     })
 
-    it('400s an unknown category rather than serving an empty grid', async () => {
-      // A word the database could not hold would otherwise match nothing and
-      // read exactly like a catalogue with nothing in it.
+    it('serves an empty grid for a category nothing carries', async () => {
+      // Was a 400 while the vocabulary was fixed at boot. Migration
+      // 1791379200000 made it a table the office adds to, so the filter cannot
+      // tell a word it has never heard of from one added since this process
+      // started — and refusing the second would break the storefront for every
+      // category the office creates.
       const response = await inject('GET', '/catalogue/products?category=curtain', null)
-      expect(response.statusCode).toBe(400)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().products).toEqual([])
     })
 
     it('accepts every value in the vocabulary', async () => {

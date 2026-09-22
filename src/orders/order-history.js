@@ -1,12 +1,10 @@
-// Order history + guest lookup (US-013, FR meeting 00:21:46).
+// Order history (US-013, FR meeting 00:21:46).
 //
-// Two read paths, both returning the same order shape (header + lines):
-//   - listUserOrders(pool, userId): every order owned by a logged-in user.
-//   - lookupOrder(pool, { orderNumber, email }): a single order matched by BOTH
-//     its order number and an email — either the guest_email it was placed with
-//     or the email of the user who placed it. Returns null when nothing matches
-//     (the route turns that into a 404), so an order is never leaked to someone
-//     who can't name both halves of the key.
+// One read path: listUserOrders(pool, userId) — every order owned by a
+// logged-in user, header + lines. The unauthenticated order_number + email
+// lookup that used to sit beside it is gone: it let anyone who knew (or
+// guessed) both halves read another client's order, and a logged-in client
+// already sees their orders under /account.
 //
 // Ownership is enforced in SQL, never in the handler: /orders/mine filters on
 // user_id, so one user can never read another user's orders.
@@ -150,31 +148,4 @@ export const listUserOrders = async (
       limit: safeLimit,
     },
   }
-}
-
-/**
- * A single order matched by order number AND email (guest email or the placing
- * user's email). Returns null when there is no exact match.
- *
- * @param {import('pg').Pool} pool
- * @param {{ orderNumber: string, email: string }} key
- * @returns {Promise<object|null>}
- */
-export const lookupOrder = async (pool, { orderNumber, email }) => {
-  const normalizedEmail = email.trim().toLowerCase()
-  const { rows } = await pool.query(
-    `SELECT ${ORDER_COLUMNS}
-       FROM orders o
-       LEFT JOIN users u ON u.id = o.user_id
-      WHERE o.order_number = $1
-        AND (lower(o.guest_email) = $2 OR lower(u.email) = $2)
-      LIMIT 1`,
-    [orderNumber, normalizedEmail]
-  )
-  const row = rows[0]
-  if (!row) {
-    return null
-  }
-  const linesByOrderId = await loadLinesByOrderId(pool, [row.id])
-  return toOrder(row, linesByOrderId)
 }

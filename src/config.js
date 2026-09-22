@@ -168,6 +168,19 @@ export const loadConfig = (env = process.env) => {
     smtpPass: env.SMTP_PASS ?? null,
     emailFrom: env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM,
     backofficeEmail: env.BACKOFFICE_EMAIL ?? DEFAULT_BACKOFFICE_EMAIL,
+    // THE TEST-DRIVE VALVE. Set it and EVERY letter — client, back office and
+    // SUPPLIER alike — is delivered to this one address instead of its real
+    // recipient, with the intended recipient written into the subject and the
+    // first line of the body. Unset, mail goes where it is addressed.
+    //
+    // It exists because purchasing and reserves write to people OUTSIDE the
+    // business: a purchase order goes to a fabric house, a reserve request asks
+    // a mill to hold stock. Those addresses are live commercial contacts, and a
+    // half-finished template reaching one is not a bug anybody can recall. The
+    // valve is the mailer's, not each route's, so it covers every send that
+    // exists today AND every send added later — there is no route that can opt
+    // out of it and no caller that has to remember it.
+    emailRedirectTo: env.EMAIL_REDIRECT_TO ?? null,
 
     // Newsletter (Mailchimp). null until all three are set; POST /newsletter
     // answers 503 meanwhile. MAILCHIMP_SERVER is the key's `-usNN` suffix.

@@ -12,12 +12,52 @@ const noopLog = { error: () => {}, info: () => {} }
  *   transport: { sendMail: (msg: object) => Promise<unknown> },
  *   from: string,
  *   backofficeEmail: string,
+ *   redirectTo?: string|null,
  *   log?: { error: Function, info: Function },
  * }} deps
  */
-export const createMailer = ({ transport, from, backofficeEmail, log = noopLog }) => {
+export const createMailer = ({
+  transport,
+  from,
+  backofficeEmail,
+  redirectTo = null,
+  log = noopLog,
+}) => {
   if (!transport) {
     throw new Error('createMailer requires a transport')
+  }
+
+  /**
+   * THE TEST-DRIVE VALVE (`EMAIL_REDIRECT_TO` → `config.emailRedirectTo`). With
+   * it set, NO letter reaches the address it names: every one is delivered to
+   * `redirectTo` instead, carrying the real recipient in the subject and in a
+   * banner above the body, so the reader can see who it was FOR.
+   *
+   * It lives HERE, in the one function every send already passes through,
+   * rather than in each route. Purchasing and reserves address people OUTSIDE
+   * the business — a purchase order goes to a fabric house, a reserve request
+   * asks a mill to hold stock — and those are live commercial contacts. A valve
+   * each caller has to remember to open is a valve that gets forgotten exactly
+   * once, and a half-finished template reaching a supplier is not recallable.
+   * Put here, it also covers every notification added later without being told.
+   *
+   * The rewrite builds a NEW message; the caller's object is never mutated.
+   */
+  const applyRedirect = (message) => {
+    if (!redirectTo || message.to === redirectTo) {
+      return message
+    }
+    return {
+      ...message,
+      to: redirectTo,
+      subject: `[to: ${message.to}] ${message.subject}`,
+      text: [
+        `— REDIRECTED — this letter was addressed to ${message.to}.`,
+        'EMAIL_REDIRECT_TO is set, so it was delivered here instead.',
+        '',
+        message.text,
+      ].join('\n'),
+    }
   }
 
   /**
@@ -50,14 +90,18 @@ export const createMailer = ({ transport, from, backofficeEmail, log = noopLog }
       // address carrying a line break is a header injection, so it is dropped
       // rather than handed to the transport.
       const safeReplyTo = replyTo && !/\s/.test(replyTo) ? replyTo : null
-      await transport.sendMail({
+      const outgoing = applyRedirect({
         from,
         to,
         subject: message.subject,
         text: message.text,
         ...(safeReplyTo ? { replyTo: safeReplyTo } : {}),
       })
-      log.info({ template: template ?? null, to }, 'transactional email sent')
+      await transport.sendMail(outgoing)
+      log.info(
+        { template: template ?? null, to: outgoing.to, addressed_to: to },
+        'transactional email sent'
+      )
       return { ok: true }
     } catch (error) {
       // Never rethrow — the caller (an order transition) must not fail because
@@ -73,5 +117,12 @@ export const createMailer = ({ transport, from, backofficeEmail, log = noopLog }
   // `delivers` is the transport's word on whether a letter reaches an inbox.
   // A transport that does not say (the tests' capture objects) is taken to
   // deliver: only the SMTP-less capture transport declares otherwise.
-  return Object.freeze({ send, backofficeEmail, delivers: transport.delivers !== false })
+  return Object.freeze({
+    send,
+    backofficeEmail,
+    delivers: transport.delivers !== false,
+    // Surfaced so a boot log can say the valve is open. Never read to decide
+    // WHETHER to send: a redirected letter is still a letter that was sent.
+    redirectTo,
+  })
 }

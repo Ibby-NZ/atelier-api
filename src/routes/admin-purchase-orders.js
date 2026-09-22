@@ -42,6 +42,11 @@ import { createReceipt } from '../purchasing/receipts.js'
 import { PURCHASE_ORDER_STATUSES } from '../purchasing/po-states.js'
 import { loadReportAccess } from '../reports/access.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
+import {
+  notifyPurchaseOrderSent,
+  notifyPurchaseOrderEnded,
+  notifyPurchaseOrderReceipt,
+} from '../email/purchasing-notifications.js'
 
 const MAX_LINES = 200
 
@@ -210,7 +215,7 @@ const receiptBodySchema = {
   },
 }
 
-export const adminPurchaseOrderRoutes = async (app, { pool, xero = null }) => {
+export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero = null }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
   // Whether this login may see cost figures. Resolved per request from the row
@@ -309,11 +314,24 @@ export const adminPurchaseOrderRoutes = async (app, { pool, xero = null }) => {
     })
   )
 
-  for (const [verb, move] of [
-    ['send', sendPurchaseOrder],
-    ['pay', payPurchaseOrder],
-    ['close', closePurchaseOrder],
-    ['cancel', cancelPurchaseOrder],
+  // The four moves, and the letters that hang off three of them. `send` writes
+  // to the house and copies the office; `close`/`cancel` write to the house
+  // alone (src/email/purchasing-notifications.js). `pay` mails nobody — it
+  // records a fact about the bank, not a change the house needs telling. A
+  // `draft` deliberately mails nobody — nothing has left the building until Send.
+  //
+  // **The notification re-reads the order with `finance: true`, whatever the
+  // staffer may see.** A purchase order without prices is not a purchase order,
+  // and the house quoted those prices in the first place; finance masking
+  // exists so a staffer without cost access does not read costs ON SCREEN, and
+  // this letter is composed server-side for the house and the one configured
+  // back-office address. The masked view still goes back in the RESPONSE, so
+  // nothing the caller receives changes.
+  for (const [verb, move, notify] of [
+    ['send', sendPurchaseOrder, notifyPurchaseOrderSent],
+    ['pay', payPurchaseOrder, null],
+    ['close', closePurchaseOrder, (m, po) => notifyPurchaseOrderEnded(m, po, 'closed')],
+    ['cancel', cancelPurchaseOrder, (m, po) => notifyPurchaseOrderEnded(m, po, 'cancelled')],
   ]) {
     app.post(
       `/admin/purchase-orders/:id/${verb}`,
@@ -335,6 +353,11 @@ export const adminPurchaseOrderRoutes = async (app, { pool, xero = null }) => {
               return { raised: true, ...result.bill }
             })
             .catch((error) => ({ raised: false, reason: error.message }))
+        }
+        // The letter goes after the Xero push so the re-read carries the bill
+        // ref if one was raised; the letter itself is unchanged either way.
+        if (mailer && notify) {
+          await notify(mailer, await getPurchaseOrder(pool, request.params.id, { finance: true }))
         }
         return { purchase_order, ...(xero_bill ? { xero_bill } : {}) }
       }
@@ -393,14 +416,16 @@ export const adminPurchaseOrderRoutes = async (app, { pool, xero = null }) => {
         request.body,
         { user: request.user }
       )
+      const purchase_order = await getPurchaseOrder(pool, purchase_order_id, {
+        finance: await financeFor(request),
+      })
+      // BACK OFFICE ONLY. The house knows what it shipped; what this alert
+      // carries is the discrepancy — an over-receipt is never clamped, and a
+      // mis-key is reversed with a negative qty. Both are conversations for
+      // inside the building.
+      await notifyPurchaseOrderReceipt(mailer, purchase_order, receipt)
       reply.code(201)
-      return {
-        receipt,
-        sample_register,
-        purchase_order: await getPurchaseOrder(pool, purchase_order_id, {
-          finance: await financeFor(request),
-        }),
-      }
+      return { receipt, sample_register, purchase_order }
     }
   )
 }

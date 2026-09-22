@@ -54,6 +54,10 @@ import {
   RESERVE_REPORT_CSV_CONTENT_TYPE,
 } from '../reserves/reserve-report.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
+import {
+  notifyReserveRequest,
+  notifyReserveLineTransition,
+} from '../email/reserve-notifications.js'
 
 const idParamsSchema = {
   type: 'object',
@@ -222,7 +226,7 @@ const notFound = (reply, what) => {
   return { error: 'Not Found', message: what }
 }
 
-export const adminReserveRoutes = async (app, { pool }) => {
+export const adminReserveRoutes = async (app, { pool, mailer = null }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
   app.get(
@@ -288,6 +292,11 @@ export const adminReserveRoutes = async (app, { pool }) => {
     { preHandler: backoffice, schema: { body: createSchema } },
     async (request, reply) => {
       const reserve = await createReserve(pool, request.body, { user: request.user })
+      // The houses are asked for exactly the lines THIS request raised —
+      // `request.body.lines`, not the docket's list, which next week will also
+      // hold lines those houses were asked for last week. One letter per house
+      // per kind; see src/email/reserve-notifications.js.
+      await notifyReserveRequest(mailer, pool, reserve, request.body.lines)
       reply.code(201)
       return { reserve }
     }
@@ -305,9 +314,14 @@ export const adminReserveRoutes = async (app, { pool }) => {
   app.post(
     '/admin/reserves/:id/lines',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: addLinesSchema } },
-    async (request) => ({
-      reserve: await addReserveLines(pool, request.params.id, request.body.lines),
-    })
+    async (request) => {
+      const reserve = await addReserveLines(pool, request.params.id, request.body.lines)
+      // Same rule as the create: only the lines this call added are asked for.
+      // A docket that grows when the client rings back is a NEW ask, and the
+      // lines already placed must not be re-requested.
+      await notifyReserveRequest(mailer, pool, reserve, request.body.lines)
+      return { reserve }
+    }
   )
 
   app.patch(
@@ -324,9 +338,20 @@ export const adminReserveRoutes = async (app, { pool }) => {
   app.post(
     '/admin/reserves/lines/:id/transition',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: transitionSchema } },
-    async (request) => ({
-      reserve: await transitionReserveLine(pool, request.params.id, request.body),
-    })
+    async (request) => {
+      const reserve = await transitionReserveLine(pool, request.params.id, request.body)
+      // ONLY `cancelled` writes to the house: confirmed is the house telling
+      // US, arrived is our warehouse, dispatched is our courier. A release is
+      // the one move that costs the house money if the letter never arrives.
+      await notifyReserveLineTransition(
+        mailer,
+        pool,
+        reserve,
+        request.params.id,
+        request.body.status
+      )
+      return { reserve }
+    }
   )
 
   // Refused unless the line is still `requested` or was `cancelled` — the

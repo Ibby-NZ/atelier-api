@@ -336,6 +336,254 @@ const TEMPLATES = Object.freeze({
       `Review it in the CRM: ${review_url}`,
     ].join('\n'),
   }),
+
+  // ---------------------------------------------------------------------------
+  // Purchasing and reserves — the letters that leave the building (W13/W24).
+  //
+  // THESE ARE THE FIRST TEMPLATES ADDRESSED TO SOMEONE WHO IS NOT A CLIENT OR
+  // THE OFFICE. Everything above goes to a person who asked Atelier for
+  // something; a purchase order goes to a fabric house and a reserve request
+  // asks a mill to hold stock, which is Atelier asking THEM. Two consequences
+  // worth keeping in mind before editing:
+  //   - the reader is a trade counterparty, so the register is businesslike and
+  //     the reference numbers come first — they file by them;
+  //   - there is no unsubscribe and no marketing content, ever. These are
+  //     transactional letters about a live commercial document.
+  //
+  // Every list (`lines_text`) arrives PRE-FORMATTED from the notifier, the
+  // `sample_request_received` precedent: a template does no arithmetic and no
+  // currency formatting for a supplier, because a stored override cannot do
+  // either and the two copies would drift.
+  // ---------------------------------------------------------------------------
+
+  // The purchase order itself, on `POST /admin/purchase-orders/:id/send`. The
+  // house's own reference (`supplier_code`) is inside `lines_text` where it
+  // exists: the number THEY quote back is the one they can act on.
+  purchase_order_sent: ({
+    po_number,
+    supplier_name,
+    incoterm,
+    currency,
+    expected_at,
+    lines_text,
+    total_text,
+    notes,
+  }) => ({
+    subject: `Purchase order ${po_number} — ${BRAND}`,
+    text: [
+      `Dear ${supplier_name},`,
+      '',
+      `Please find our purchase order ${po_number} below.`,
+      '',
+      lines_text ?? '',
+      '',
+      ...(total_text ? [`Order total: ${total_text}`, ''] : []),
+      ...(currency ? [`Currency: ${currency}`] : []),
+      ...(incoterm ? [`Incoterm: ${incoterm}`] : []),
+      ...(expected_at ? [`Required by: ${expected_at}`] : []),
+      '',
+      ...(notes ? ['Notes:', notes, ''] : []),
+      `Please confirm receipt of this order, along with your expected`,
+      `dispatch date. Quote ${po_number} on your invoice and packing list.`,
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // `close` is Atelier deciding it is finished with the order, INCLUDING short
+  // — which is exactly why the house is told rather than left to wonder about
+  // the balance. It never says "complete": a purchase order closed short is a
+  // decision, not a delivery (src/purchasing/po-states.js).
+  purchase_order_closed: ({ po_number, supplier_name, outstanding_text }) => ({
+    subject: `Purchase order ${po_number} closed — ${BRAND}`,
+    text: [
+      `Dear ${supplier_name},`,
+      '',
+      `We are closing our purchase order ${po_number}.`,
+      '',
+      ...(outstanding_text
+        ? [
+            'Any balance still outstanding on this order is no longer required:',
+            outstanding_text,
+            '',
+          ]
+        : []),
+      'Please do not ship any further goods against it. If anything is already',
+      'in transit, let us know and we will take it up with you directly.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  purchase_order_cancelled: ({ po_number, supplier_name }) => ({
+    subject: `Purchase order ${po_number} cancelled — ${BRAND}`,
+    text: [
+      `Dear ${supplier_name},`,
+      '',
+      `We are cancelling our purchase order ${po_number} in full.`,
+      '',
+      'Please do not ship any goods against it. If any part of this order has',
+      'already been dispatched, please contact us before invoicing.',
+      '',
+      'With apologies for the inconvenience.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // The office's copy of what actually went to the house — a record of the
+  // letter, not a nudge to do something. It carries `po_email` because the one
+  // question asked afterwards is which address it went to.
+  backoffice_purchase_order_sent: ({
+    po_number,
+    supplier_name,
+    brand_name,
+    po_email,
+    line_count,
+    qty_ordered,
+    expected_at,
+  }) => ({
+    subject: `Purchase order sent: ${po_number}`,
+    text: [
+      `Purchase order ${po_number} has been sent to the house.`,
+      '',
+      `House: ${supplier_name ?? '—'}`,
+      `Brand: ${brand_name ?? '—'}`,
+      `Sent to: ${po_email ?? 'NO ADDRESS ON FILE — nothing was emailed'}`,
+      `Lines: ${line_count}`,
+      `Quantity ordered: ${qty_ordered}`,
+      `Expected: ${expected_at ?? '—'}`,
+      '',
+      'Open it under Purchasing in the CRM.',
+    ].join('\n'),
+  }),
+
+  // Goods booked in. The office alert exists for the DISCREPANCY: an over-receipt
+  // is never clamped (src/purchasing/po-states.js), so the one that matters is
+  // the line that arrived over or short, and `receipt_state` is what says which.
+  backoffice_purchase_order_received: ({
+    po_number,
+    supplier_name,
+    sku,
+    product_name,
+    qty_text,
+    receipt_state,
+    order_receipt_state,
+    consignment_ref,
+  }) => ({
+    subject: `Goods received on ${po_number}: ${sku}`,
+    text: [
+      `A receipt has been booked against purchase order ${po_number}.`,
+      '',
+      `House: ${supplier_name ?? '—'}`,
+      `Line: ${sku} — ${product_name ?? '—'}`,
+      `Received: ${qty_text}`,
+      `This line: ${receipt_state}`,
+      `Whole order: ${order_receipt_state}`,
+      `Consignment: ${consignment_ref ?? '—'}`,
+      '',
+      'Open it under Purchasing in the CRM.',
+    ].join('\n'),
+  }),
+
+  // A reserve asks the house to HOLD stock it already has for a named client —
+  // it is not an order, and the letter must not read like one or a house will
+  // ship against it. `reserved_until` is the date the hold is wanted to, which
+  // is the whole point of the document.
+  supplier_reserve_request: ({ supplier_name, account_name, owner_name, lines_text }) => ({
+    subject: `Reserve request — ${BRAND}`,
+    text: [
+      `Dear ${supplier_name},`,
+      '',
+      'We would like to place the following on reserve for one of our clients.',
+      'This is a request to HOLD the stock — please do not ship against it.',
+      '',
+      lines_text ?? '',
+      '',
+      ...(account_name ? [`Our client reference: ${account_name}`, ''] : []),
+      'Please confirm the hold with your reserve reference and the date you can',
+      'hold it to, and we will come back to you with a firm order.',
+      '',
+      ...(owner_name ? [`Kind regards,`, owner_name, ''] : []),
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // A cutting is a physical sample the house posts — the CFA conversation the
+  // houses still speak (src/reserves/reserve-line-states.js). A separate letter
+  // from the reserve one because the ASK is different: send us cloth, versus
+  // hold cloth. One letter doing both is how a house sends neither.
+  supplier_cutting_request: ({ supplier_name, account_name, owner_name, lines_text }) => ({
+    subject: `Cutting request — ${BRAND}`,
+    text: [
+      `Dear ${supplier_name},`,
+      '',
+      'Please could you send us cuttings of the following:',
+      '',
+      lines_text ?? '',
+      '',
+      ...(account_name ? [`Our client reference: ${account_name}`, ''] : []),
+      'Please confirm what you are able to send and when we can expect it.',
+      '',
+      ...(owner_name ? [`Kind regards,`, owner_name, ''] : []),
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // Cancelling a reserve RELEASES the house's stock — it is the letter that
+  // costs them money if it never arrives, because cloth stays held against a
+  // client who walked away. Sent per line, since a cancellation is per line.
+  supplier_reserve_cancelled: ({
+    supplier_name,
+    kind_label,
+    lines_text,
+    reserve_number,
+    account_name,
+  }) => ({
+    subject: `Please release our ${kind_label ?? 'reserve'} — ${BRAND}`,
+    text: [
+      `Dear ${supplier_name},`,
+      '',
+      'We no longer need the following and would be grateful if you could',
+      'release it back into your stock:',
+      '',
+      lines_text ?? '',
+      '',
+      ...(reserve_number ? [`Your reference: ${reserve_number}`] : []),
+      ...(account_name ? [`Our client reference: ${account_name}`] : []),
+      '',
+      'With thanks for holding it for us.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // The office's copy. `supplier_email` is the actionable half: a reserve line's
+  // house is FREE TEXT typed on the docket, so it may match no supplier record
+  // and no letter can be sent — in which case this alert is the only thing that
+  // says the house was never actually asked.
+  backoffice_reserve_request: ({
+    kind_label,
+    supplier_name,
+    supplier_email,
+    account_name,
+    owner_name,
+    lines_text,
+  }) => ({
+    subject: `${kind_label ?? 'Reserve'} request sent: ${supplier_name ?? 'unknown house'}`,
+    text: [
+      `A ${(kind_label ?? 'reserve').toLowerCase()} request has been raised.`,
+      '',
+      `House: ${supplier_name ?? '—'}`,
+      `Sent to: ${supplier_email ?? 'NO SUPPLIER MATCH — nothing was emailed to the house'}`,
+      `Account: ${account_name ?? '—'}`,
+      `Raised by: ${owner_name ?? '—'}`,
+      '',
+      lines_text ?? '',
+      '',
+      'Open the docket under Reserves in the CRM.',
+    ].join('\n'),
+  }),
 })
 
 export const TEMPLATE_NAMES = Object.freeze(Object.keys(TEMPLATES))

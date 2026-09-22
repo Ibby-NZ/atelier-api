@@ -355,6 +355,31 @@ raised for two houses of one supplier is the ORDINARY case, not an edge one. Two
   duplicated) — a supplier invoice is a STRONGER disclosure than `unit_price`, being what a maison
   actually charged across a whole cycle with the freight and duty on top.
 
+### The statement (Sept 2026)
+
+`POST /admin/supplier-invoices/statement` asks a house for ONE invoice covering several purchase
+orders — the letter the office typed by hand until now. `src/purchasing/invoice-statements.js` holds
+it; the route takes the mailer, which is the only reason `adminSupplierInvoiceRoutes` receives one.
+
+- **It writes no invoice, and must not.** A bill that has not arrived has no number, date or total,
+  and those are facts only the house can state — a row invented for it would put a figure in the
+  ledger no paper supports. What IS written is one `supplier_contact_log` entry (method `email`,
+  `staff_user_id` from the SESSION), which is what the supplier list's Last-contact column reads.
+- **It is refused WHOLE, never narrowed.** The refusals are the attach's own, in the same words: a
+  **409** naming the bill that already covers one of the ticked orders, a **422** naming one raised
+  for another house. A letter that went out with an order silently dropped from it is worse than one
+  that did not go, because nothing on screen says so.
+- **A cancelled order IS refused here, and that is not a contradiction of the attach accepting
+  one.** Attaching a cancelled purchase order records what a house actually billed (the variance
+  then says so); ASKING a house to bill an order Atelier withdrew is the office making the mistake
+  itself.
+- **No address on file is a 422, not a no-op.** The purchase-order moves treat a null `po_email` as
+  "the office phones that house instead" and still move; here the letter IS the act, so there is
+  nothing left to succeed at. An unconfigured mailer is a **503** for the same reason.
+- **The letter carries costs and is not finance-masked** (the `notifyPurchaseOrderSent` rule: the
+  house quoted them). The RESPONSE carries no money at all — it is read by whichever staffer pressed
+  the button, and that reader may have no finance grant — so this module needs no finance flag.
+
 ### Lifecycle (W14)
 
 - **`supplier_invoice` is in the registry with one probe and `archivable: false`** — no `archived_at`

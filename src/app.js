@@ -218,8 +218,10 @@ export const buildApp = ({
     // /admin/supplier-invoices — one house's bill across a 2-4 week cycle, and
     // which purchase orders it covers. Back office only, every money figure on
     // it finance-gated, and the variance between the bill and what those orders
-    // said they would cost is reported and never written.
-    api.register(adminSupplierInvoiceRoutes, { pool })
+    // said they would cost is reported and never written. It takes the mailer for
+    // one route only: POST /admin/supplier-invoices/statement, the letter that
+    // asks a house to bill several purchase orders together.
+    api.register(adminSupplierInvoiceRoutes, { pool, mailer })
     // /admin/reserves — reserve & cutting dockets (account-first, lines with a
     // per-line status machine) and the per-supplier report jette closes a
     // shipment against. Back office only; replaces the D365 fulmar_reserve and

@@ -84,11 +84,15 @@ describe('email templates', () => {
         'supplier_cutting_request',
         'supplier_reserve_cancelled',
         'backoffice_reserve_request',
+        // The office asking a house for ONE bill covering several purchase
+        // orders, and the office's own copy of it (Sept 2026).
+        'supplier_invoice_request',
+        'backoffice_supplier_invoice_request',
       ])
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(26)
+    expect(TEMPLATE_NAMES).toHaveLength(28)
   })
 
   it('backoffice_new_trade_application names the business and links the CRM applicants tab', () => {

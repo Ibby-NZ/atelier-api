@@ -394,6 +394,74 @@ const TEMPLATES = Object.freeze({
   // — which is exactly why the house is told rather than left to wonder about
   // the balance. It never says "complete": a purchase order closed short is a
   // decision, not a delivery (src/purchasing/po-states.js).
+  // The office asking a house for ONE bill covering several purchase orders.
+  // W13 groups purchase orders by BRAND and a house sells several, so this is
+  // ordinary housekeeping rather than a chase — the wording asks, and never
+  // says the account is overdue, because nothing here knows that.
+  //
+  // It quotes what Atelier costed each order at, deliberately: the house set
+  // those prices, and a statement the house cannot reconcile against its own
+  // ledger earns a phone call instead of an invoice. `reply_to` is where the
+  // bill should come back to — the office's own address, passed in rather than
+  // hardcoded here.
+  supplier_invoice_request: ({
+    supplier_name,
+    lines_text,
+    purchase_order_count,
+    total_text,
+    reply_to,
+    notes,
+  }) => ({
+    subject: `Request for one consolidated invoice — ${BRAND}`,
+    text: [
+      `Dear ${supplier_name},`,
+      '',
+      `The purchase order${purchase_order_count === 1 ? '' : 's'} below ${
+        purchase_order_count === 1 ? 'is' : 'are'
+      } outstanding with you and ${purchase_order_count === 1 ? 'has' : 'have'} not yet`,
+      'been invoiced to us. Could we please have a single consolidated invoice',
+      'covering them.',
+      '',
+      lines_text ?? '',
+      '',
+      ...(total_text ? [`Our costed total for these orders: ${total_text}`, ''] : []),
+      'Please quote our purchase-order numbers on the invoice so we can match it,',
+      ...(reply_to ? [`and send it to ${reply_to}.`] : ['and send it to us by return.']),
+      '',
+      ...(notes ? ['Notes:', notes, ''] : []),
+      'If any of these orders has already been invoiced, please tell us which and',
+      'we will match it against the bill we hold.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // The office's copy. Its value is the audit line — which address the letter
+  // went to and which orders were named — so a statement sent twice, or sent
+  // to a stale address, is visible without opening the supplier record.
+  backoffice_supplier_invoice_request: ({
+    supplier_name,
+    po_email,
+    purchase_order_count,
+    lines_text,
+    total_text,
+    staff_name,
+  }) => ({
+    subject: `Invoice statement sent to ${supplier_name} — ${BRAND}`,
+    text: [
+      `A request for one consolidated invoice has gone to ${supplier_name}.`,
+      '',
+      `Sent to: ${po_email ?? 'NO ADDRESS ON FILE — nothing was emailed'}`,
+      `Requested by: ${staff_name ?? '—'}`,
+      `Purchase orders: ${purchase_order_count}`,
+      '',
+      lines_text ?? '',
+      '',
+      ...(total_text ? [`Costed total: ${total_text}`, ''] : []),
+      'The bill itself is keyed under Supplier invoices when it arrives.',
+    ].join('\n'),
+  }),
+
   purchase_order_closed: ({ po_number, supplier_name, outstanding_text }) => ({
     subject: `Purchase order ${po_number} closed — ${BRAND}`,
     text: [

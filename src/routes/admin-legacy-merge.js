@@ -33,7 +33,9 @@ const bodySchema = {
   },
 }
 
-export const adminLegacyMergeRoutes = async (app, { pool }) => {
+// `merge` is injectable so the one-at-a-time rule can be proven with a merge
+// the test holds open; production never passes it.
+export const adminLegacyMergeRoutes = async (app, { pool, merge = mergeLegacy }) => {
   const director = app.guards.requireRole('director')
 
   // The in-flight run, or null. Module state would outlive a test's app; plugin
@@ -50,7 +52,7 @@ export const adminLegacyMergeRoutes = async (app, { pool }) => {
       }
       const createHouses = request.body?.create_houses === true
       const startedAt = Date.now()
-      running = mergeLegacy(pool, { createHouses })
+      running = merge(pool, { createHouses })
       try {
         const summary = await running
         request.log.info(

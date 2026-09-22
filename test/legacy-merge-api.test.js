@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import Fastify from 'fastify'
 import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { adminLegacyMergeRoutes } from '../src/routes/admin-legacy-merge.js'
 
 // POST /admin/legacy/merge: the cutover merge behind an authenticated request,
 // for a server with no shell. The merge itself is proven by legacy-merge.test.js;
@@ -143,15 +145,103 @@ describe('POST /admin/legacy/merge', () => {
     )
     expect(rows[0].n).toBe(1)
   })
+})
 
-  it('refuses a second run while one is in flight with 409', async () => {
-    const [first, second] = await Promise.all([post({}, directorCookie), post({}, directorCookie)])
-    const codes = [first.statusCode, second.statusCode].sort()
-    expect(codes).toEqual([200, 409])
-    const refused = first.statusCode === 409 ? first : second
-    expect(refused.json().error).toMatch(/already running/)
-    // And the lock is released: the next run is welcome.
-    const third = await post({}, directorCookie)
-    expect(third.statusCode).toBe(200)
+// The one-at-a-time rule, proven with a merge the test holds open. Two real
+// requests raced through the full app are not a proof: over a small fixture the
+// first merge can finish before the second request reaches the lock, and CI
+// showed exactly that ([200, 200]). Here the plugin runs on a bare instance
+// with an open-door guard and a `merge` that resolves when told to.
+describe('POST /admin/legacy/merge runs one at a time', () => {
+  const SUMMARY = {
+    accounts: { created: 0, unnamed: 0 },
+    contacts: { created: 0, filed: 0, unfiled: 0, no_company: 0 },
+    reserves: { dockets: 0, lines: 0, declined: [] },
+    housesRaised: [],
+    catalogue: { items: 0, noHouse: 0, products: 0, colourways: 0, inventoryCreated: 0, unknownBrands: [], skips: [], conflicts: 0 },
+    stock: { matched: 0, stocked: 0, priced: 0, unmatchedHouse: 0 },
+  }
+
+  // light-my-request dispatches lazily — an inject() nobody awaits never
+  // starts — so a request that must be IN FLIGHT while the test does something
+  // else is adopted into a real promise here, which calls its then() at once.
+  const fire = (app, payload) =>
+    Promise.resolve(app.inject({ method: 'POST', url: '/admin/legacy/merge', payload }))
+
+  const bareApp = async (merge) => {
+    const app = Fastify({ logger: false })
+    app.decorate('guards', { requireRole: () => async () => {} })
+    await app.register(adminLegacyMergeRoutes, { pool: null, merge })
+    await app.ready()
+    return app
+  }
+
+  it('answers 409 while a run is in flight, then welcomes the next', async () => {
+    // One gate per merge call: the test learns when the run has STARTED and
+    // decides when it ends. Reusing one resolver across calls is the trap —
+    // releasing before the next call has begun resolves the old promise and
+    // leaves the new run open for ever.
+    const gates = []
+    const gate = () => {
+      let started
+      let release
+      const startedAt = new Promise((resolve) => { started = resolve })
+      const done = new Promise((resolve) => { release = resolve })
+      const opened = { started, release, startedAt, done }
+      gates.push(opened)
+      return opened
+    }
+    const calls = []
+    const merge = (_pool, opts) => {
+      calls.push(opts)
+      const opened = gates.shift()
+      opened.started()
+      return opened.done
+    }
+    const app = await bareApp(merge)
+    try {
+      const gateOne = gate()
+      const first = fire(app, { create_houses: true })
+      await gateOne.startedAt
+      const second = await fire(app, {})
+      expect(second.statusCode).toBe(409)
+      expect(second.json().error).toMatch(/already running/)
+      expect(calls).toHaveLength(1)
+
+      gateOne.release(SUMMARY)
+      const done = await first
+      expect(done.statusCode).toBe(200)
+      expect(done.json()).toMatchObject({ summary: SUMMARY, create_houses: true })
+
+      // The lock is released with the run, so the next run is welcome.
+      const gateTwo = gate()
+      const third = fire(app, {})
+      await gateTwo.startedAt
+      gateTwo.release(SUMMARY)
+      expect((await third).statusCode).toBe(200)
+      expect(calls).toHaveLength(2)
+      expect(calls[1]).toEqual({ createHouses: false })
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('returns the reason a run failed and releases the lock', async () => {
+    let attempts = 0
+    const merge = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('relation "legacy_accounts" does not exist')
+      return SUMMARY
+    }
+    const app = await bareApp(merge)
+    try {
+      const failed = await app.inject({ method: 'POST', url: '/admin/legacy/merge', payload: {} })
+      expect(failed.statusCode).toBe(500)
+      expect(failed.json().message).toMatch(/Legacy merge failed: relation "legacy_accounts" does not exist/)
+      const again = await app.inject({ method: 'POST', url: '/admin/legacy/merge', payload: {} })
+      expect(again.statusCode).toBe(200)
+    } finally {
+      await app.close()
+    }
   })
 })

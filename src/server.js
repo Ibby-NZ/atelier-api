@@ -6,6 +6,7 @@ import { createMailTransport } from './email/transport.js'
 import { createMailer } from './email/mailer.js'
 import { createXeroHttp } from './xero/xero-http.js'
 import { createXeroService } from './xero/service.js'
+import { notifyOrderTransition } from './email/notifications.js'
 
 const start = async () => {
   let config
@@ -42,6 +43,9 @@ const start = async () => {
           clientId: config.xero.clientId,
           clientSecret: config.xero.clientSecret,
         }),
+        // An invoice paid at the accountant's desk marks its order paid here
+        // — with the same letter the CRM's Mark paid button sends.
+        notifyOrderPaid: (order) => notifyOrderTransition(mailer, pool, order),
       })
     : null
   if (!xero) {
@@ -68,8 +72,23 @@ const start = async () => {
     },
   })
 
+  // The scheduled Xero → platform pull. Off (0) means the CRM's Pull buttons
+  // are the only trigger; a failure is logged and the next tick tries again,
+  // because a pull that throws must never take the API down with it.
+  const pullEvery = xero ? config.xero.pullIntervalMinutes : 0
+  const pullTimer = pullEvery
+    ? setInterval(() => {
+        xero
+          .pullAll()
+          .then((result) => app.log.info({ result }, 'xero pull'))
+          .catch((err) => app.log.error({ err }, 'xero pull failed'))
+      }, pullEvery * 60_000)
+    : null
+  pullTimer?.unref()
+
   const shutdown = async (signal) => {
     app.log.info({ signal }, 'shutting down')
+    if (pullTimer) clearInterval(pullTimer)
     await app.close()
     await pool.end()
     process.exit(0)

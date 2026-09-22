@@ -19,11 +19,14 @@ const MIN_COOKIE_SECRET_LENGTH = 32
 const DEFAULT_XERO_SCOPES =
   'openid profile email offline_access accounting.transactions accounting.contacts accounting.settings'
 const DEFAULT_XERO_SALES_ACCOUNT_CODE = '200'
-// Xero's stock "Purchases" account — where a supplier bill's lines post.
-const DEFAULT_XERO_PURCHASES_ACCOUNT_CODE = '300'
 const DEFAULT_XERO_LINE_AMOUNT_TYPES = 'Exclusive'
 const DEFAULT_XERO_INVOICE_STATUS = 'AUTHORISED'
 const DEFAULT_XERO_INVOICE_DUE_DAYS = 30
+// Xero's stock "Purchases" expense account — where a supplier bill's lines
+// post. A bill is DRAFT by default: a purchase order is what we ORDERED, and
+// the accountant approves the bill once the house's own invoice arrives.
+const DEFAULT_XERO_PURCHASES_ACCOUNT_CODE = '300'
+const DEFAULT_XERO_BILL_STATUS = 'DRAFT'
 const XERO_GRANT_TYPES = ['authorization_code', 'client_credentials']
 const XERO_LINE_AMOUNT_TYPES = ['Exclusive', 'Inclusive', 'NoTax']
 const XERO_INVOICE_STATUSES = ['DRAFT', 'AUTHORISED']
@@ -65,6 +68,14 @@ const parseXero = (env, port) => {
   if (!Number.isInteger(invoiceDueDays) || invoiceDueDays < 0) {
     throw new Error('XERO_INVOICE_DUE_DAYS must be a non-negative integer.')
   }
+  const billStatus = env.XERO_BILL_STATUS ?? DEFAULT_XERO_BILL_STATUS
+  if (!XERO_INVOICE_STATUSES.includes(billStatus)) {
+    throw new Error(`XERO_BILL_STATUS must be one of: ${XERO_INVOICE_STATUSES.join(', ')}.`)
+  }
+  const pullIntervalMinutes = Number(env.XERO_PULL_INTERVAL_MINUTES ?? 0)
+  if (!Number.isInteger(pullIntervalMinutes) || pullIntervalMinutes < 0) {
+    throw new Error('XERO_PULL_INTERVAL_MINUTES must be a non-negative integer.')
+  }
   return Object.freeze({
     clientId,
     clientSecret,
@@ -74,7 +85,6 @@ const parseXero = (env, port) => {
     redirectUri: env.XERO_REDIRECT_URI ?? `http://localhost:${port}/admin/xero/callback`,
     scopes: env.XERO_SCOPES ?? DEFAULT_XERO_SCOPES,
     salesAccountCode: env.XERO_SALES_ACCOUNT_CODE ?? DEFAULT_XERO_SALES_ACCOUNT_CODE,
-    purchasesAccountCode: env.XERO_PURCHASES_ACCOUNT_CODE ?? DEFAULT_XERO_PURCHASES_ACCOUNT_CODE,
     lineAmountTypes,
     invoiceStatus,
     invoiceDueDays,
@@ -83,6 +93,13 @@ const parseXero = (env, port) => {
     // revenue and cannot take one). Unset = invoices are pushed but never
     // marked paid from here; the mark-paid route says so in its answer.
     paymentAccountCode: env.XERO_PAYMENT_ACCOUNT_CODE ?? null,
+    // The expense account a purchase order's bill posts to, and the status
+    // it lands in (DRAFT until the house's invoice arrives, by default).
+    purchasesAccountCode: env.XERO_PURCHASES_ACCOUNT_CODE ?? DEFAULT_XERO_PURCHASES_ACCOUNT_CODE,
+    billStatus,
+    // Xero → platform pull cadence (contacts, invoice + bill statuses).
+    // 0 = manual only, from the CRM's Xero screen.
+    pullIntervalMinutes,
   })
 }
 

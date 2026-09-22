@@ -36,6 +36,89 @@ export const contactForUser = ({ name, email }) => ({
   ...(email ? { EmailAddress: email } : {}),
 })
 
+const phoneBlock = (phone) =>
+  phone ? { Phones: [{ PhoneType: 'DEFAULT', PhoneNumber: truncate(phone, 50) }] } : {}
+
+const addressBlock = ({ address, city, country }) =>
+  address || city || country
+    ? {
+        Addresses: [
+          {
+            AddressType: 'STREET',
+            ...(address ? { AddressLine1: truncate(address, 500) } : {}),
+            ...(city ? { City: truncate(city, 255) } : {}),
+            ...(country ? { Country: truncate(country, 50) } : {}),
+          },
+        ],
+      }
+    : {}
+
+/**
+ * A client company (trade_accounts row) as a Xero Contact. The company is
+ * the customer Xero invoices — the login is a person AT the company. The
+ * STREET address is what prints on the invoice.
+ */
+export const contactForTradeAccount = (account) => ({
+  Name: truncate(account.legacy_customer_name, 255),
+  ...(account.email ? { EmailAddress: account.email } : {}),
+  IsCustomer: true,
+  ...phoneBlock(account.phone),
+  ...addressBlock(account),
+})
+
+/**
+ * A supplier as a Xero Contact flagged IsSupplier, so Xero's own Suppliers
+ * list and purchases reports see it. `po_email` is the ordering address.
+ */
+export const contactForSupplier = (supplier) => ({
+  Name: truncate(supplier.name, 255),
+  ...(supplier.po_email ? { EmailAddress: supplier.po_email } : {}),
+  IsSupplier: true,
+  ...(supplier.currency ? { DefaultCurrency: supplier.currency } : {}),
+  ...phoneBlock(supplier.phone),
+  ...addressBlock(supplier),
+})
+
+const blankToNull = (value) => {
+  const s = String(value ?? '').trim()
+  return s ? s : null
+}
+
+/**
+ * A Xero Contact (full shape, not summaryOnly) as the platform's own contact
+ * fields — the pull direction. STREET address first, POBOX as fallback;
+ * DEFAULT phone first, any phone as fallback. Every field null when Xero
+ * holds nothing, so a caller can fill without blanking.
+ */
+export const contactDetailsFromXero = (contact) => {
+  const addresses = contact?.Addresses ?? []
+  const filled = (a) => a && (a.AddressLine1 || a.City)
+  const address =
+    addresses.find((a) => a?.AddressType === 'STREET' && filled(a)) ??
+    addresses.find((a) => a?.AddressType === 'POBOX' && filled(a)) ??
+    null
+  const phones = contact?.Phones ?? []
+  const phone =
+    phones.find((p) => p?.PhoneType === 'DEFAULT' && p.PhoneNumber) ??
+    phones.find((p) => p?.PhoneNumber) ??
+    null
+  const lines = [address?.AddressLine1, address?.AddressLine2, address?.AddressLine3, address?.AddressLine4]
+  return {
+    xero_contact_id: contact?.ContactID ?? null,
+    name: blankToNull(contact?.Name),
+    email: blankToNull(contact?.EmailAddress)?.toLowerCase() ?? null,
+    phone: phone
+      ? blankToNull([phone.PhoneCountryCode, phone.PhoneAreaCode, phone.PhoneNumber].filter(Boolean).join(' '))
+      : null,
+    address: blankToNull(lines.map(blankToNull).filter(Boolean).join(', ')),
+    city: blankToNull(address?.City),
+    country: blankToNull(address?.Country),
+    is_customer: contact?.IsCustomer === true,
+    is_supplier: contact?.IsSupplier === true,
+    currency: blankToNull(contact?.DefaultCurrency),
+  }
+}
+
 /**
  * One order line as a Xero invoice LineItem. The description leads with the
  * design and carries the SKU and any cut requirements — the invoice is what
@@ -108,10 +191,56 @@ export const invoiceForOrder = (
 }
 
 /**
- * A colourway row (joined to its product) as a Xero Item. Code is the SKU —
- * POST /Items upserts on Code, which is what makes the item sync idempotent
- * with no directory fetch.
+ * The ACCPAY bill for a purchase order (finance-shaped: lines carry
+ * `unit_price`, decimal dollars in the house's currency, NOT cents — see
+ * src/purchasing/CLAUDE.md). InvoiceNumber is OUR po_number so the bill is
+ * findable in Xero before the house's own invoice number replaces it; the
+ * Reference carries it too, because InvoiceNumber is the field the
+ * accountant overwrites. Date is the day it was sent to the house.
  */
+export const billForPurchaseOrder = (
+  purchaseOrder,
+  { contactId, accountCode, lineAmountTypes, status, dueDays, now = () => new Date() }
+) => {
+  const sent = purchaseOrder.sent_at ? new Date(purchaseOrder.sent_at) : now()
+  return {
+    Type: 'ACCPAY',
+    Contact: { ContactID: contactId },
+    LineItems: purchaseOrder.lines.map((line) => ({
+      Description: [
+        `${line.product_name} — ${line.colourway_name} (${line.sku})`,
+        line.is_sample ? 'Sample' : null,
+        line.supplier_code ? `Supplier code ${line.supplier_code}` : null,
+      ]
+        .filter(Boolean)
+        .join('. '),
+      Quantity: Number(line.qty_ordered),
+      UnitAmount: Number(Number(line.unit_price).toFixed(4)),
+      AccountCode: accountCode,
+    })),
+    Status: status,
+    LineAmountTypes: lineAmountTypes,
+    Date: isoDay(sent),
+    DueDate: isoDay(addDays(sent, dueDays)),
+    InvoiceNumber: purchaseOrder.po_number,
+    Reference: purchaseOrder.po_number,
+    ...(purchaseOrder.currency ? { CurrencyCode: purchaseOrder.currency } : {}),
+  }
+}
+
+/** Xero's own status words for an ACCREC/ACCPAY invoice, as the pull reads them. */
+export const XERO_INVOICE_STATUSES = Object.freeze([
+  'DRAFT',
+  'SUBMITTED',
+  'AUTHORISED',
+  'PAID',
+  'VOIDED',
+  'DELETED',
+])
+
+/** A pushed document whose Xero copy is dead — a fresh push is allowed. */
+export const isDeadInXero = (status) => status === 'VOIDED' || status === 'DELETED'
+
 /**
  * A Payment against a pushed invoice — what marks it PAID in Xero. `amount`
  * is the invoice's own AmountDue (read back from Xero, never recomputed here,
@@ -125,56 +254,6 @@ export const paymentForInvoice = ({ invoiceId, accountCode, amount, now = () => 
   Date: isoDay(now()),
   Amount: amount,
 })
-
-/**
- * A supplier as a Xero Contact payload — the house Atelier BUYS from, so it is
- * flagged as a supplier. Matched before created, like every contact.
- */
-export const contactForSupplier = ({ name, po_email }) => ({
-  Name: truncate(name, 255),
-  IsSupplier: true,
-  ...(po_email ? { EmailAddress: po_email } : {}),
-})
-
-/**
- * The ACCPAY (bill) payload for an admin-shaped purchase order — read with
- * `finance: true`, because a bill without prices is not a bill.
- *
- * - `unit_price` is `numeric(12,4)` in the SUPPLIER'S currency, not cents, so
- *   it goes across as-is and `CurrencyCode` is the order's snapshot currency
- *   (Xero converts at its own rate; the org must have that currency enabled).
- * - Reference is OUR PO number — what the supplier quotes on their invoice.
- * - The caller has already refused an unpriced line; a NULL here is a bug,
- *   not a zero, so it is not defaulted.
- */
-export const billForPurchaseOrder = (
-  purchaseOrder,
-  { contactId, accountCode, lineAmountTypes, status, dueDays, now = () => new Date() }
-) => {
-  const today = now()
-  return {
-    Type: 'ACCPAY',
-    Contact: { ContactID: contactId },
-    LineItems: purchaseOrder.lines.map((line) => ({
-      Description: [
-        `${line.product_name} — ${line.colourway_name} (${line.sku})`,
-        line.is_sample ? 'Sample' : null,
-        line.supplier_code ? `Supplier code ${line.supplier_code}` : null,
-      ]
-        .filter(Boolean)
-        .join('. '),
-      Quantity: Number(line.qty_ordered),
-      UnitAmount: Number(line.unit_price),
-      AccountCode: accountCode,
-    })),
-    Status: status,
-    LineAmountTypes: lineAmountTypes,
-    Date: isoDay(today),
-    DueDate: isoDay(addDays(today, dueDays)),
-    Reference: purchaseOrder.po_number,
-    ...(purchaseOrder.currency ? { CurrencyCode: purchaseOrder.currency } : {}),
-  }
-}
 
 /**
  * What the sync stores off a GET /Invoices/:id answer for a bill: Xero's own
@@ -192,6 +271,11 @@ const xeroDate = (value) => {
   return Number.isNaN(date.getTime()) ? null : date.toISOString()
 }
 
+/**
+ * A colourway row (joined to its product) as a Xero Item. Code is the SKU —
+ * POST /Items upserts on Code, which is what makes the item sync idempotent
+ * with no directory fetch.
+ */
 export const itemForColourway = ({ sku, product_name, colourway_name }) => ({
   Code: truncate(sku, 30),
   Name: truncate(`${product_name} — ${colourway_name}`, 50),
@@ -202,7 +286,11 @@ export const itemForColourway = ({ sku, product_name, colourway_name }) => ({
 export const pickInvoice = (body) => {
   const invoice = body?.Invoices?.[0]
   if (!invoice?.InvoiceID) return null
-  return { invoiceId: invoice.InvoiceID, invoiceNumber: invoice.InvoiceNumber ?? null }
+  return {
+    invoiceId: invoice.InvoiceID,
+    invoiceNumber: invoice.InvoiceNumber ?? null,
+    status: invoice.Status ?? null,
+  }
 }
 
 /** The created/updated contact id out of a POST /Contacts response body. */

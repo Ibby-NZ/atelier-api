@@ -25,11 +25,13 @@ const XERO_CONFIG = Object.freeze({
   redirectUri: 'http://localhost:3001/admin/xero/callback',
   scopes: 'openid offline_access accounting.transactions',
   salesAccountCode: '200',
-  purchasesAccountCode: '300',
   lineAmountTypes: 'Exclusive',
   invoiceStatus: 'AUTHORISED',
   invoiceDueDays: 30,
   paymentAccountCode: '090',
+  purchasesAccountCode: '300',
+  billStatus: 'DRAFT',
+  pullIntervalMinutes: 0,
 })
 
 // A scriptable stand-in for xero-http.js. `on(method, path, fn)` registers a
@@ -74,11 +76,16 @@ const sessionCookieFrom = (response) => {
 }
 
 const seedCatalogue = async (pool) => {
+  const { rows: suppliers } = await pool.query(
+    `INSERT INTO suppliers (name, slug, country, currency, po_email)
+     VALUES ($1, $2, 'Italy', 'EUR', $3) RETURNING id`,
+    [`${PREFIX} Maison`, `${PREFIX}-maison`, testEmail('orders')]
+  )
   const { rows: brands } = await pool.query(
-    `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story)
-     VALUES ($1, $2, 'New Zealand', 'NZD', false, false, 'A test house.')
+    `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, story, supplier_id)
+     VALUES ($1, $2, 'New Zealand', 'NZD', false, false, 'A test house.', $3)
      RETURNING id`,
-    ['Xero House', `${PREFIX}-house`]
+    ['Xero House', `${PREFIX}-house`, suppliers[0].id]
   )
   const { rows: products } = await pool.query(
     `INSERT INTO products (brand_id, name, slug, product_type, currency, show_on_website)
@@ -108,11 +115,14 @@ const cleanup = async (pool) => {
     [`${PREFIX}-%`]
   )
   await pool.query(
-    `DELETE FROM purchase_orders WHERE brand_id IN (SELECT id FROM brands WHERE slug LIKE $1)`,
+    `DELETE FROM purchase_orders
+      WHERE supplier_id IN (SELECT id FROM suppliers WHERE slug LIKE $1)
+         OR brand_id IN (SELECT id FROM brands WHERE slug LIKE $1)`,
     [`${PREFIX}-%`]
   )
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
-  await pool.query('DELETE FROM suppliers WHERE slug LIKE $1', [`${PREFIX}-%`])
+  await pool.query('DELETE FROM suppliers WHERE slug LIKE $1 OR name LIKE $2', [`${PREFIX}-%`, `${PREFIX} %`])
+  await pool.query('DELETE FROM trade_accounts WHERE legacy_customer_name LIKE $1', [`${PREFIX} %`])
   await pool.query('DELETE FROM xero_connection')
   await pool.query(`UPDATE users SET xero_contact_id = NULL WHERE email LIKE $1`, [`%@${DOMAIN}`])
 }
@@ -161,6 +171,19 @@ describe('xero integration', () => {
       lines: [{ id: lineId, unit_price_cents: unitPriceCents }],
     })
     return order.id
+  }
+
+  // The same order, raised at the desk: the public request route shares a
+  // 10-per-15-min bucket that the earlier suites spend.
+  const raisePricedOrder = async (unitPriceCents = 5000) => {
+    const { rows: cws } = await pool.query(`SELECT id FROM colourways WHERE sku = $1`, [`${PREFIX}-SKU-1`])
+    const { rows: users } = await pool.query(`SELECT id FROM users WHERE email = $1`, [testEmail('client')])
+    const created = await inject('POST', '/admin/orders', backofficeCookie, {
+      user_id: users[0].id,
+      lines: [{ colourway_id: cws[0].id, qty: 10, unit_price_cents: unitPriceCents }],
+    })
+    expect(created.statusCode).toBe(201)
+    return created.json().order.id
   }
 
   beforeAll(async () => {
@@ -703,17 +726,230 @@ describe('xero integration', () => {
     })
   })
 
-  describe('purchase orders as bills', () => {
-    // A supplier linked to the seeded house, and a priced draft purchase order
-    // addressed to it (supplier derived from the house, never sent).
-    const raisePricedPurchaseOrder = async () => {
-      const { rows: suppliers } = await pool.query(
-        `INSERT INTO suppliers (name, slug, currency, po_email) VALUES ($1, $2, 'EUR', $3) RETURNING id`,
-        [`${PREFIX} Maison`, `${PREFIX}-maison`, `orders@${DOMAIN}`]
+  describe('the company is the customer', () => {
+    it('invoices a login filed under a company as that company, and remembers it there', async () => {
+      const { rows: companies } = await pool.query(
+        `INSERT INTO trade_accounts (legacy_customer_name, email) VALUES ($1, $2) RETURNING id`,
+        [`${PREFIX} Zomia Ltd`, testEmail('accounts')]
       )
-      await pool.query('UPDATE brands SET supplier_id = $2 WHERE slug = $1', [
-        `${PREFIX}-house`,
-        suppliers[0].id,
+      const { rows: users } = await pool.query(`SELECT id FROM users WHERE email = $1`, [testEmail('client')])
+      await pool.query(
+        `INSERT INTO trade_account_users (trade_account_id, user_id) VALUES ($1, $2)`,
+        [companies[0].id, users[0].id]
+      )
+      fake.on('GET', 'Contacts', ({ query }) =>
+        query?.searchTerm === testEmail('accounts')
+          ? { Contacts: [{ ContactID: 'company-1', Name: 'Zomia', EmailAddress: testEmail('accounts') }] }
+          : { Contacts: [] }
+      )
+      fake.on('POST', 'Invoices', ({ body }) => ({
+        Invoices: [{ ...body.Invoices[0], InvoiceID: 'inv-co', InvoiceNumber: 'INV-CO', Status: 'AUTHORISED' }],
+      }))
+      try {
+        const orderId = await raisePricedOrder()
+        const push = await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+        expect(push.statusCode).toBe(200)
+        const posted = fake.calls.find((c) => c.method === 'POST' && c.path === 'Invoices')
+        expect(posted.body.Invoices[0].Contact).toEqual({ ContactID: 'company-1' })
+        const { rows } = await pool.query(`SELECT xero_contact_id FROM trade_accounts WHERE id = $1`, [companies[0].id])
+        expect(rows[0].xero_contact_id).toBe('company-1')
+        const { rows: person } = await pool.query(`SELECT xero_contact_id FROM users WHERE id = $1`, [users[0].id])
+        expect(person[0].xero_contact_id).toBeNull()
+        expect(push.json().order.xero_invoice_status).toBe('AUTHORISED')
+      } finally {
+        await pool.query(`DELETE FROM trade_account_users WHERE user_id = $1`, [users[0].id])
+      }
+    })
+
+    it('sync/contacts pushes companies and skips the people filed under them', async () => {
+      const { rows: companies } = await pool.query(
+        `INSERT INTO trade_accounts (legacy_customer_name, email, phone, address, city, country)
+         VALUES ($1, $2, '09 555', '1 Quay St', 'Auckland', 'New Zealand') RETURNING id`,
+        [`${PREFIX} Zomia Ltd`, testEmail('accounts')]
+      )
+      const { rows: users } = await pool.query(`SELECT id FROM users WHERE email = $1`, [testEmail('client')])
+      await pool.query(
+        `INSERT INTO trade_account_users (trade_account_id, user_id) VALUES ($1, $2)`,
+        [companies[0].id, users[0].id]
+      )
+      fake.on('GET', 'Contacts', () => ({ Contacts: [] }))
+      fake.on('POST', 'Contacts', ({ body }) => ({
+        Contacts: body.Contacts.map((c, i) => ({ ...c, ContactID: `co-${i}` })),
+      }))
+      try {
+        const response = await inject('POST', '/admin/xero/sync/contacts', backofficeCookie, {})
+        expect(response.statusCode).toBe(200)
+        expect(response.json().result.failed).toEqual([])
+        const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === 'Contacts')
+        const payloads = posts.flatMap((p) => p.body.Contacts)
+        const company = payloads.find((c) => c.Name === `${PREFIX} Zomia Ltd`)
+        expect(company).toMatchObject({
+          IsCustomer: true,
+          EmailAddress: testEmail('accounts'),
+          Addresses: [{ AddressType: 'STREET', AddressLine1: '1 Quay St', City: 'Auckland', Country: 'New Zealand' }],
+        })
+        expect(payloads.some((c) => c.EmailAddress === testEmail('client'))).toBe(false)
+        const { rows } = await pool.query(`SELECT xero_contact_id FROM trade_accounts WHERE id = $1`, [companies[0].id])
+        expect(rows[0].xero_contact_id).toMatch(/^co-/)
+      } finally {
+        await pool.query(`DELETE FROM trade_account_users WHERE user_id = $1`, [users[0].id])
+      }
+    })
+  })
+
+  describe('POST /admin/xero/sync/suppliers', () => {
+    it('links a house the directory knows by ordering email and creates the rest as suppliers', async () => {
+      await pool.query(
+        `INSERT INTO suppliers (name, slug, currency) VALUES ($1, $2, 'GBP')`,
+        [`${PREFIX} Unknown House`, `${PREFIX}-unknown`]
+      )
+      fake.on('GET', 'Contacts', ({ query }) =>
+        query?.page === '1'
+          ? { Contacts: [{ ContactID: 'sup-dir', Name: 'Maison (Xero name)', EmailAddress: testEmail('orders') }] }
+          : { Contacts: [] }
+      )
+      fake.on('POST', 'Contacts', ({ body }) => ({
+        Contacts: body.Contacts.map((c, i) => ({ ...c, ContactID: `sup-new-${i}` })),
+      }))
+      const response = await inject('POST', '/admin/xero/sync/suppliers', backofficeCookie, {})
+      expect(response.statusCode).toBe(200)
+      expect(response.json().result).toMatchObject({ linked: 1, created: 1, failed: [] })
+      const { rows } = await pool.query(
+        `SELECT slug, xero_contact_id FROM suppliers WHERE slug LIKE $1 ORDER BY slug`,
+        [`${PREFIX}-%`]
+      )
+      expect(rows).toEqual([
+        { slug: `${PREFIX}-maison`, xero_contact_id: 'sup-dir' },
+        { slug: `${PREFIX}-unknown`, xero_contact_id: 'sup-new-0' },
+      ])
+      const posted = fake.calls.find((c) => c.method === 'POST' && c.path === 'Contacts')
+      expect(posted.body.Contacts[0]).toEqual({
+        Name: `${PREFIX} Unknown House`,
+        IsSupplier: true,
+        DefaultCurrency: 'GBP',
+      })
+    })
+  })
+
+  describe('the pull: Xero → platform', () => {
+    it('marks an order paid when Xero shows its invoice PAID, and stores every status', async () => {
+      fake.on('POST', 'Invoices', ({ body }) => ({
+        Invoices: [{ ...body.Invoices[0], InvoiceID: 'inv-pull', InvoiceNumber: 'INV-PULL', Status: 'AUTHORISED' }],
+      }))
+      fake.on('POST', 'Contacts', ({ body }) => ({
+        Contacts: body.Contacts.map((c, i) => ({ ...c, ContactID: `pull-${i}` })),
+      }))
+      const orderId = await raisePricedOrder()
+      // The desk's order: push (which fills the ref), then confirm with it.
+      expect((await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})).statusCode).toBe(200)
+      const confirmed = await inject('POST', `/admin/orders/${orderId}/confirm`, backofficeCookie, {
+        xero_invoice_ref: 'INV-PULL',
+      })
+      expect(confirmed.statusCode).toBe(200)
+
+      fake.on('GET', 'Invoices', ({ query }) => ({
+        Invoices: (query?.IDs ?? '').split(',').filter(Boolean).map((id) =>
+          id === 'inv-pull' ? { InvoiceID: id, InvoiceNumber: 'INV-PULL', Status: 'PAID', AmountDue: 0 } : { InvoiceID: id, Status: 'AUTHORISED' }
+        ),
+      }))
+      const pull = await inject('POST', '/admin/xero/pull/statuses', backofficeCookie, {})
+      expect(pull.statusCode).toBe(200)
+      const { invoices } = pull.json().result
+      expect(invoices.orders_marked_paid).toEqual([{ id: orderId, order_number: expect.any(String) }])
+      expect(invoices.failed).toEqual([])
+      const order = (await inject('GET', `/admin/orders/${orderId}`, backofficeCookie)).json().order
+      expect(order).toMatchObject({ status: 'paid', xero_invoice_status: 'PAID' })
+
+      // Settled: the next pull does not ask Xero about it again.
+      fake.calls.length = 0
+      await inject('POST', '/admin/xero/pull/statuses', backofficeCookie, {})
+      expect(fake.calls.filter((c) => c.method === 'GET' && c.path === 'Invoices')).toEqual([])
+    })
+
+    it('a voided invoice re-opens the push, under a fresh idempotency key', async () => {
+      fake.on('POST', 'Invoices', ({ body }) => ({
+        Invoices: [{ ...body.Invoices[0], InvoiceID: `inv-${body.Invoices[0].Reference ?? 'x'}-${Date.now()}`, InvoiceNumber: 'INV-V', Status: 'AUTHORISED' }],
+      }))
+      const orderId = await raisePricedOrder()
+      const first = await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+      const firstId = first.json().invoice.id
+      fake.on('GET', 'Invoices', ({ query }) => ({
+        Invoices: (query?.IDs ?? '').split(',').filter(Boolean).map((id) => ({ InvoiceID: id, Status: 'VOIDED' })),
+      }))
+      await inject('POST', '/admin/xero/pull/statuses', backofficeCookie, {})
+      expect((await pool.query(`SELECT xero_invoice_status FROM orders WHERE id = $1`, [orderId])).rows[0].xero_invoice_status).toBe('VOIDED')
+
+      fake.calls.length = 0
+      const second = await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+      expect(second.statusCode).toBe(200)
+      expect(second.json().invoice.id).not.toBe(firstId)
+      const posted = fake.calls.find((c) => c.method === 'POST' && c.path === 'Invoices')
+      expect(posted.idempotencyKey).toBe(`atelier-order-${orderId}-after-${firstId}`)
+      expect(second.json().order.xero_invoice_status).toBe('AUTHORISED')
+    })
+
+    it('pull/contacts refreshes linked rows, links unlinked ones and creates the rest by flag', async () => {
+      const { rows: linked } = await pool.query(
+        `INSERT INTO trade_accounts (legacy_customer_name, xero_contact_id) VALUES ($1, 'co-linked') RETURNING id`,
+        [`${PREFIX} Linked Co`]
+      )
+      await pool.query(
+        `INSERT INTO trade_accounts (legacy_customer_name, email) VALUES ($1, $2)`,
+        [`${PREFIX} Unlinked Co`, testEmail('unlinked')]
+      )
+      fake.on('GET', 'Contacts', ({ query }) =>
+        query?.page === '1'
+          ? {
+              Contacts: [
+                { ContactID: 'co-linked', Name: 'Renamed In Xero', EmailAddress: testEmail('linked'), Phones: [{ PhoneType: 'DEFAULT', PhoneNumber: '021 1' }] },
+                { ContactID: 'co-unlinked', Name: 'Other Name', EmailAddress: testEmail('unlinked'), IsCustomer: true },
+                { ContactID: 'co-new', Name: `${PREFIX} Brand New Customer`, IsCustomer: true, Addresses: [{ AddressType: 'STREET', City: 'Wellington' }] },
+                { ContactID: 'sup-new', Name: `${PREFIX} New Mill`, IsSupplier: true, DefaultCurrency: 'GBP', EmailAddress: testEmail('mill') },
+                { ContactID: 'sup-known', Name: `${PREFIX} Maison`, IsSupplier: true },
+                { ContactID: 'nobody', Name: `${PREFIX} Nobody Yet` },
+                { ContactID: 'gone', Name: `${PREFIX} Archived`, ContactStatus: 'ARCHIVED', IsCustomer: true },
+              ],
+            }
+          : { Contacts: [] }
+      )
+      const pull = await inject('POST', '/admin/xero/pull/contacts', backofficeCookie, {})
+      expect(pull.statusCode).toBe(200)
+      expect(pull.json().result).toEqual({
+        seen: 6,
+        companies: { updated: 1, linked: 1, created: 1 },
+        suppliers: { updated: 0, linked: 1, created: 1 },
+        people: { updated: 0 },
+        skipped: 1,
+        failed: [],
+      })
+      const { rows: companies } = await pool.query(
+        `SELECT legacy_customer_name, email, phone, city, xero_contact_id FROM trade_accounts
+          WHERE legacy_customer_name LIKE $1 ORDER BY id`,
+        [`${PREFIX} %`]
+      )
+      expect(companies).toEqual([
+        { legacy_customer_name: `${PREFIX} Linked Co`, email: testEmail('linked'), phone: '021 1', city: null, xero_contact_id: 'co-linked' },
+        { legacy_customer_name: `${PREFIX} Unlinked Co`, email: testEmail('unlinked'), phone: null, city: null, xero_contact_id: 'co-unlinked' },
+        { legacy_customer_name: `${PREFIX} Brand New Customer`, email: null, phone: null, city: 'Wellington', xero_contact_id: 'co-new' },
+      ])
+      expect(linked[0].id).toBe(companies.length && (await pool.query(`SELECT id FROM trade_accounts WHERE xero_contact_id = 'co-linked'`)).rows[0].id)
+      const { rows: suppliers } = await pool.query(
+        `SELECT name, po_email, currency, xero_contact_id FROM suppliers WHERE name LIKE $1 ORDER BY id`,
+        [`${PREFIX} %`]
+      )
+      expect(suppliers).toEqual([
+        { name: `${PREFIX} Maison`, po_email: testEmail('orders'), currency: 'EUR', xero_contact_id: 'sup-known' },
+        { name: `${PREFIX} New Mill`, po_email: testEmail('mill'), currency: 'GBP', xero_contact_id: 'sup-new' },
+      ])
+    })
+  })
+
+  describe('purchase orders as bills', () => {
+    // A priced draft purchase order addressed to the seeded house's supplier
+    // (supplier derived from the house, never sent).
+    const raisePricedPurchaseOrder = async () => {
+      const { rows: suppliers } = await pool.query('SELECT id FROM suppliers WHERE slug = $1', [
+        `${PREFIX}-maison`,
       ])
       const { rows: cw } = await pool.query('SELECT id FROM colourways WHERE sku = $1', [
         `${PREFIX}-SKU-1`,

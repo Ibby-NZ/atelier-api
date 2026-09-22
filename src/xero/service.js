@@ -26,10 +26,12 @@
 // duplicate gate is orders.xero_invoice_id — set once, further pushes 409.
 
 import crypto from 'node:crypto'
-import { getAdminOrder } from '../orders/admin-orders.js'
-import { getPurchaseOrder, payPurchaseOrder } from '../purchasing/admin-purchase-orders.js'
+import { getAdminOrder, markOrderPaid } from '../orders/admin-orders.js'
 import { unpricedLineCount } from '../orders/order-states.js'
+import { getPurchaseOrder, payPurchaseOrder } from '../purchasing/admin-purchase-orders.js'
 import { SOURCE_STATUSES } from '../purchasing/po-states.js'
+import { createTradeAccount } from '../trade-accounts/admin-trade-accounts.js'
+import { createSupplier, getSupplier } from '../suppliers/admin-suppliers.js'
 import {
   loadConnection,
   saveTokenSet,
@@ -42,9 +44,12 @@ import { XeroHttpError, XERO_LOGIN_BASE, validationMessages } from './xero-http.
 import {
   billForPurchaseOrder,
   billStateFrom,
+  contactDetailsFromXero,
   contactForSupplier,
+  contactForTradeAccount,
   contactForUser,
   invoiceForOrder,
+  isDeadInXero,
   itemForColourway,
   paymentForInvoice,
   pickInvoice,
@@ -100,7 +105,16 @@ const paymentFailureReason = (error) =>
     ? validationMessages(error.body).join('; ') || `Xero answered ${error.status}.`
     : error?.message || 'Xero did not record the payment.'
 
-export const createXeroService = ({ pool, config, http, now = () => Date.now() }) => {
+export const createXeroService = ({
+  pool,
+  config,
+  http,
+  now = () => Date.now(),
+  // Called with the fresh order after the pull marks it paid — server.js
+  // wires the order-paid letter here so the scheduled pull writes the same
+  // letter the CRM's Mark paid button does.
+  notifyOrderPaid = async () => {},
+}) => {
   // client_credentials keeps its short-lived token in memory only: it can be
   // re-minted at will, so persisting it buys nothing and staleness bugs.
   let ccCache = null // { accessToken, expiresAtMs, tenantId, orgName }
@@ -256,35 +270,55 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
 
   // ---- contacts -------------------------------------------------------------
 
-  /** Every contact in the org, as {email -> id} and {name -> id} maps. */
-  const fetchContactDirectory = async () => {
-    const byEmail = new Map()
-    const byName = new Map()
-    const lower = (v) => String(v ?? '').trim().toLowerCase()
+  /**
+   * Every contact in the org. `full` fetches the whole shape (addresses,
+   * phones, flags) for the pull; the push only needs summaryOnly's name +
+   * email to match on.
+   */
+  const fetchAllContacts = async ({ full = false } = {}) => {
+    const all = []
     for (let page = 1; ; page += 1) {
       const body = await call('GET', 'Contacts', {
-        query: { summaryOnly: 'true', page: String(page), pageSize: String(CONTACT_PAGE_SIZE) },
+        query: {
+          ...(full ? {} : { summaryOnly: 'true' }),
+          page: String(page),
+          pageSize: String(CONTACT_PAGE_SIZE),
+        },
       })
       const contacts = body?.Contacts ?? []
-      for (const contact of contacts) {
-        if (contact.EmailAddress && !byEmail.has(lower(contact.EmailAddress))) {
-          byEmail.set(lower(contact.EmailAddress), contact.ContactID)
-        }
-        if (contact.Name && !byName.has(lower(contact.Name))) {
-          byName.set(lower(contact.Name), contact.ContactID)
-        }
-      }
+      all.push(...contacts)
       if (contacts.length < CONTACT_PAGE_SIZE) break
     }
-    return { byEmail, byName, lower }
+    return all
   }
 
-  const storeContactId = (userId, contactId) =>
-    pool.query(`UPDATE users SET xero_contact_id = $2 WHERE id = $1`, [userId, contactId])
+  const lower = (v) => String(v ?? '').trim().toLowerCase()
+
+  /** {email -> id} and {name -> id} maps over a contact list. */
+  const contactDirectory = (contacts) => {
+    const byEmail = new Map()
+    const byName = new Map()
+    for (const contact of contacts) {
+      if (contact.EmailAddress && !byEmail.has(lower(contact.EmailAddress))) {
+        byEmail.set(lower(contact.EmailAddress), contact.ContactID)
+      }
+      if (contact.Name && !byName.has(lower(contact.Name))) {
+        byName.set(lower(contact.Name), contact.ContactID)
+      }
+    }
+    return { byEmail, byName }
+  }
+
+  // The three tables that remember a Xero contact, one writer each. The
+  // table name is a code literal here, never a caller's string.
+  const storeContactIdIn = (table) => (rowId, contactId) =>
+    pool.query(`UPDATE ${table} SET xero_contact_id = $2 WHERE id = $1`, [rowId, contactId])
+  const storeContactId = storeContactIdIn('users')
+  const storeTradeAccountContactId = storeContactIdIn('trade_accounts')
+  const storeSupplierContactId = storeContactIdIn('suppliers')
 
   /** Create one contact, retrying a name collision with "Name (email)". */
-  const createContact = async (person) => {
-    const payload = contactForUser(person)
+  const createContact = async (payload, email) => {
     try {
       const body = await call('POST', 'Contacts', {
         body: { Contacts: [payload] },
@@ -296,41 +330,13 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
         error instanceof XeroHttpError &&
         error.status === 400 &&
         validationMessages(error.body).some((m) => /already assigned|must be unique/i.test(m))
-      if (!taken || !person.email) rethrowValidation(error)
+      if (!taken || !email) rethrowValidation(error)
       const body = await call('POST', 'Contacts', {
-        body: { Contacts: [{ ...payload, Name: `${payload.Name} (${person.email})` }] },
+        body: { Contacts: [{ ...payload, Name: `${payload.Name} (${email})` }] },
         query: { summarizeErrors: 'true' },
       }).catch(rethrowValidation)
       return pickContact(body)
     }
-  }
-
-  /**
-   * The Xero contact an order invoices as. Account orders link (and remember)
-   * users.xero_contact_id; guest orders match-or-create by their email but
-   * have no row to remember it on.
-   */
-  const ensureContactForOrder = async (order) => {
-    if (order.user_id) {
-      const { rows } = await pool.query(
-        `SELECT id, name, email, xero_contact_id FROM users WHERE id = $1`,
-        [order.user_id]
-      )
-      const user = rows[0]
-      if (!user) throw new XeroConflictError('The account this order belongs to no longer exists.')
-      if (user.xero_contact_id) return user.xero_contact_id
-      const found = await searchContact({ email: user.email, name: user.name })
-      const contactId = found ?? (await createContact({ name: user.name, email: user.email }))
-      await storeContactId(user.id, contactId)
-      return contactId
-    }
-    if (!order.guest_email) {
-      throw new XeroConflictError(
-        'This order has no account and no contact email — nobody to invoice.'
-      )
-    }
-    const found = await searchContact({ email: order.guest_email, name: order.guest_email })
-    return found ?? createContact({ name: order.guest_email, email: order.guest_email })
   }
 
   /** searchTerm covers name AND email; exact-match the result locally. */
@@ -343,55 +349,101 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     return matchContact(body?.Contacts ?? [], { email, name })
   }
 
-  /**
-   * The Xero contact a purchase order bills against — the SUPPLIER (who
-   * invoices Atelier), remembered on suppliers.xero_contact_id. Match by PO
-   * email then exact name before creating, the same rule clients follow:
-   * every maison Atelier buys from is already in Xero as a supplier.
-   */
-  const ensureContactForSupplier = async (supplierId) => {
-    const { rows } = await pool.query(
-      `SELECT id, name, po_email, xero_contact_id FROM suppliers WHERE id = $1`,
-      [supplierId]
-    )
-    const supplier = rows[0]
-    if (!supplier) throw new XeroConflictError('The supplier this order is addressed to no longer exists.')
-    if (supplier.xero_contact_id) return supplier.xero_contact_id
-    const found = await searchContact({ email: supplier.po_email, name: supplier.name })
-    let contactId = found
-    if (!contactId) {
-      const body = await call('POST', 'Contacts', {
-        body: { Contacts: [contactForSupplier(supplier)] },
-        query: { summarizeErrors: 'true' },
-      }).catch(rethrowValidation)
-      contactId = pickContact(body)
-    }
-    await pool.query(`UPDATE suppliers SET xero_contact_id = $2 WHERE id = $1`, [supplier.id, contactId])
+  /** Match-or-create one row's contact and remember it. */
+  const ensureContactFor = async ({ row, email, name, toPayload, store }) => {
+    if (row.xero_contact_id) return row.xero_contact_id
+    const found = await searchContact({ email, name })
+    const contactId = found ?? (await createContact(toPayload(row), email))
+    await store(row.id, contactId)
     return contactId
   }
 
-  const syncContacts = async () => {
-    const { rows: users } = await pool.query(
-      `SELECT id, name, email FROM users
-        WHERE role IN ('customer', 'trade')
-          AND archived_at IS NULL
-          AND xero_contact_id IS NULL
-        ORDER BY id`
+  /** The company a login belongs to, if any (trade_account_users is 1:1 on user). */
+  const tradeAccountForUser = async (userId) => {
+    const { rows } = await pool.query(
+      `SELECT ta.* FROM trade_accounts ta
+         JOIN trade_account_users tau ON tau.trade_account_id = ta.id
+        WHERE tau.user_id = $1 AND ta.archived_at IS NULL`,
+      [userId]
     )
-    if (users.length === 0) return { linked: 0, created: 0, failed: [] }
+    return rows[0] ?? null
+  }
 
-    const directory = await fetchContactDirectory()
+  /**
+   * The Xero contact an order invoices as: the client's COMPANY when the
+   * login is filed under one (that is who Xero has always invoiced), else the
+   * person; guest orders match-or-create by their email but have no row to
+   * remember it on.
+   */
+  const ensureContactForOrder = async (order) => {
+    if (order.user_id) {
+      const { rows } = await pool.query(
+        `SELECT id, name, email, xero_contact_id FROM users WHERE id = $1`,
+        [order.user_id]
+      )
+      const user = rows[0]
+      if (!user) throw new XeroConflictError('The account this order belongs to no longer exists.')
+      const company = await tradeAccountForUser(user.id)
+      if (company) {
+        return ensureContactFor({
+          row: company,
+          email: company.email,
+          name: company.legacy_customer_name,
+          toPayload: contactForTradeAccount,
+          store: storeTradeAccountContactId,
+        })
+      }
+      return ensureContactFor({
+        row: user,
+        email: user.email,
+        name: user.name,
+        toPayload: contactForUser,
+        store: storeContactId,
+      })
+    }
+    if (!order.guest_email) {
+      throw new XeroConflictError(
+        'This order has no account and no contact email — nobody to invoice.'
+      )
+    }
+    const found = await searchContact({ email: order.guest_email, name: order.guest_email })
+    return (
+      found ??
+      createContact(
+        contactForUser({ name: order.guest_email, email: order.guest_email }),
+        order.guest_email
+      )
+    )
+  }
+
+  /** The Xero contact a bill from this house is raised against. */
+  const ensureContactForSupplier = (supplier) =>
+    ensureContactFor({
+      row: supplier,
+      email: supplier.po_email,
+      name: supplier.name,
+      toPayload: contactForSupplier,
+      store: storeSupplierContactId,
+    })
+
+  /**
+   * Push one table's unlinked rows: link what the directory already holds
+   * (email, then exact name), create the rest in batches, remember every id.
+   * `rows` carry `id`, `email`, `name` for matching; `toPayload` shapes the
+   * create; `failed` entries are keyed by `key(row)`.
+   */
+  const pushContacts = async ({ rows, directory, toPayload, store, key }) => {
     const toCreate = []
     let linked = 0
-    for (const user of users) {
+    for (const row of rows) {
       const existing =
-        directory.byEmail.get(directory.lower(user.email)) ??
-        directory.byName.get(directory.lower(user.name))
+        (row.email ? directory.byEmail.get(lower(row.email)) : null) ??
+        directory.byName.get(lower(row.name))
       if (existing) {
-        await storeContactId(user.id, existing)
+        await store(row.id, existing)
         linked += 1
       } else {
-        toCreate.push(user)
+        toCreate.push(row)
       }
     }
 
@@ -404,13 +456,13 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
         // summarizeErrors=false answers per-element in request order, so one
         // bad row fails alone instead of sinking its whole batch.
         body = await call('POST', 'Contacts', {
-          body: { Contacts: batch.map(contactForUser) },
+          body: { Contacts: batch.map(toPayload) },
           query: { summarizeErrors: 'false' },
         })
       } catch (error) {
         const messages = validationMessages(error instanceof XeroHttpError ? error.body : null)
-        for (const user of batch) {
-          failed.push({ email: user.email, message: messages.join('; ') || 'batch refused' })
+        for (const row of batch) {
+          failed.push({ key: key(row), message: messages.join('; ') || 'batch refused' })
         }
         continue
       }
@@ -419,14 +471,210 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
         const answer = answers[j]
         const errors = (answer?.ValidationErrors ?? []).map((v) => v.Message).filter(Boolean)
         if (answer?.ContactID && errors.length === 0) {
-          await storeContactId(batch[j].id, answer.ContactID)
+          await store(batch[j].id, answer.ContactID)
           created += 1
         } else {
-          failed.push({ email: batch[j].email, message: errors.join('; ') || 'not created' })
+          failed.push({ key: key(batch[j]), message: errors.join('; ') || 'not created' })
         }
       }
     }
     return { linked, created, failed }
+  }
+
+  const sumResults = (results) => ({
+    linked: results.reduce((n, r) => n + r.linked, 0),
+    created: results.reduce((n, r) => n + r.created, 0),
+    failed: results.flatMap((r) => r.failed),
+  })
+
+  /**
+   * Customers → Xero: every unlinked client company, plus every unlinked
+   * client login that is NOT filed under a company (a person at a company
+   * invoices as the company, so they get no contact of their own).
+   */
+  const syncContacts = async () => {
+    const { rows: companies } = await pool.query(
+      `SELECT * FROM trade_accounts
+        WHERE archived_at IS NULL AND xero_contact_id IS NULL
+        ORDER BY id`
+    )
+    const { rows: people } = await pool.query(
+      `SELECT id, name, email FROM users u
+        WHERE role IN ('customer', 'trade')
+          AND archived_at IS NULL
+          AND xero_contact_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM trade_account_users tau WHERE tau.user_id = u.id)
+        ORDER BY id`
+    )
+    if (companies.length === 0 && people.length === 0) return { linked: 0, created: 0, failed: [] }
+
+    const directory = contactDirectory(await fetchAllContacts())
+    return sumResults([
+      await pushContacts({
+        rows: companies.map((c) => ({ ...c, name: c.legacy_customer_name })),
+        directory,
+        toPayload: contactForTradeAccount,
+        store: storeTradeAccountContactId,
+        key: (c) => c.legacy_customer_name,
+      }),
+      await pushContacts({
+        rows: people,
+        directory,
+        toPayload: contactForUser,
+        store: storeContactId,
+        key: (u) => u.email,
+      }),
+    ])
+  }
+
+  /** Suppliers → Xero contacts flagged IsSupplier. Match on po_email, then name. */
+  const syncSuppliers = async () => {
+    const { rows: suppliers } = await pool.query(
+      `SELECT * FROM suppliers
+        WHERE archived_at IS NULL AND xero_contact_id IS NULL
+        ORDER BY id`
+    )
+    if (suppliers.length === 0) return { linked: 0, created: 0, failed: [] }
+    const directory = contactDirectory(await fetchAllContacts())
+    return pushContacts({
+      rows: suppliers.map((s) => ({ ...s, email: s.po_email })),
+      directory,
+      toPayload: contactForSupplier,
+      store: storeSupplierContactId,
+      key: (s) => s.name,
+    })
+  }
+
+  /** Fill without blanking: COALESCE(Xero's value, ours). True when a row took it. */
+  const refreshCompany = async (details) => {
+    const { rowCount } = await pool.query(
+      `UPDATE trade_accounts
+          SET email = COALESCE($2, email), phone = COALESCE($3, phone),
+              address = COALESCE($4, address), city = COALESCE($5, city),
+              country = COALESCE($6, country), updated_at = now()
+        WHERE xero_contact_id = $1`,
+      [details.xero_contact_id, details.email, details.phone, details.address, details.city, details.country]
+    )
+    return rowCount > 0
+  }
+
+  const refreshSupplier = async (details) => {
+    const { rowCount } = await pool.query(
+      `UPDATE suppliers
+          SET po_email = COALESCE($2, po_email), phone = COALESCE($3, phone),
+              address = COALESCE($4, address), country = COALESCE($5, country),
+              currency = COALESCE($6, currency), updated_at = now()
+        WHERE xero_contact_id = $1`,
+      [details.xero_contact_id, details.email, details.phone, details.address, details.country, details.currency]
+    )
+    return rowCount > 0
+  }
+
+  const refreshPerson = async (details) => {
+    const { rowCount } = await pool.query(
+      `UPDATE users SET phone = COALESCE($2, phone) WHERE xero_contact_id = $1`,
+      [details.xero_contact_id, details.phone]
+    )
+    return rowCount > 0
+  }
+
+  /** An unlinked row of ours this contact is, by email then exact name. */
+  const findUnlinked = async (table, emailColumn, nameColumn, details) => {
+    // A null on either side matches nothing: `= NULL` is never true in SQL.
+    const { rows } = await pool.query(
+      `SELECT id FROM ${table}
+        WHERE xero_contact_id IS NULL AND archived_at IS NULL
+          AND (lower(${emailColumn}) = $1::text OR lower(${nameColumn}) = $2::text)
+        ORDER BY (lower(${emailColumn}) = $1::text) DESC NULLS LAST, id LIMIT 1`,
+      [lower(details.email) || null, lower(details.name) || null]
+    )
+    return rows[0]?.id ?? null
+  }
+
+  /** Where one pulled contact lands; the counters it bumps. False when nowhere. */
+  const placePulledContact = async (details, result) => {
+    // Already linked somewhere → refresh details there.
+    const refreshed = [
+      (await refreshCompany(details)) && (result.companies.updated += 1),
+      (await refreshSupplier(details)) && (result.suppliers.updated += 1),
+      (await refreshPerson(details)) && (result.people.updated += 1),
+    ].some(Boolean)
+    if (refreshed) return true
+
+    // Unlinked in Xero's eyes — link an unlinked row of ours before creating.
+    const companyId = await findUnlinked('trade_accounts', 'email', 'legacy_customer_name', details)
+    if (companyId) {
+      await storeTradeAccountContactId(companyId, details.xero_contact_id)
+      await refreshCompany(details)
+      result.companies.linked += 1
+    }
+    const supplierId = await findUnlinked('suppliers', 'po_email', 'name', details)
+    if (supplierId) {
+      await storeSupplierContactId(supplierId, details.xero_contact_id)
+      await refreshSupplier(details)
+      result.suppliers.linked += 1
+    }
+    if (companyId || supplierId) return true
+
+    if (!details.name) return false
+    if (details.is_customer) {
+      await createTradeAccount(pool, {
+        company_name: details.name,
+        email: details.email,
+        phone: details.phone,
+        address: details.address,
+        city: details.city,
+        country: details.country,
+        xero_contact_id: details.xero_contact_id,
+      })
+      result.companies.created += 1
+    }
+    if (details.is_supplier) {
+      const created = await createSupplier(pool, {
+        name: details.name,
+        po_email: details.email,
+        phone: details.phone,
+        address: details.address,
+        country: details.country,
+        currency: details.currency,
+      })
+      await storeSupplierContactId(created.id, details.xero_contact_id)
+      result.suppliers.created += 1
+    }
+    return details.is_customer || details.is_supplier
+  }
+
+  /**
+   * Xero → platform. Every ACTIVE Xero contact lands somewhere:
+   *   - already linked (by id, in any of the three tables) → details
+   *     refreshed from Xero where Xero holds a value. Names are NEVER changed
+   *     here — `trade_accounts.legacy_customer_name` is what the client
+   *     portal matches invoice history on.
+   *   - unlinked, matching an unlinked row by email or exact name → linked.
+   *   - unlinked, IsCustomer → a new client company; IsSupplier → a new
+   *     supplier; both → both. Neither (a contact nothing has been raised
+   *     against yet in Xero) → skipped and counted, not guessed at.
+   */
+  const pullContacts = async () => {
+    const contacts = await fetchAllContacts({ full: true })
+    const active = contacts.filter((c) => (c.ContactStatus ?? 'ACTIVE') === 'ACTIVE')
+    const result = {
+      seen: active.length,
+      companies: { updated: 0, linked: 0, created: 0 },
+      suppliers: { updated: 0, linked: 0, created: 0 },
+      people: { updated: 0 },
+      skipped: 0,
+      failed: [],
+    }
+    for (const contact of active) {
+      const details = contactDetailsFromXero(contact)
+      try {
+        if (!(await placePulledContact(details, result))) result.skipped += 1
+      } catch (error) {
+        result.failed.push({ key: details.name ?? details.xero_contact_id, message: error.message })
+      }
+    }
+    return result
   }
 
   // ---- items ----------------------------------------------------------------
@@ -476,7 +724,14 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     if (order.status === 'declined') {
       throw new XeroConflictError('A declined order is not invoiceable.')
     }
-    if (order.xero_invoice_id) {
+    // A pushed invoice is the duplicate gate — unless the last pull saw Xero
+    // void or delete it, in which case the office may push a corrected one.
+    // The dead id rides in the idempotency key so Xero does not hand the
+    // voided invoice back as "the same request".
+    const previous = order.xero_invoice_id && isDeadInXero(order.xero_invoice_status)
+      ? order.xero_invoice_id
+      : null
+    if (order.xero_invoice_id && !previous) {
       throw new XeroConflictError(
         `This order is already in Xero as ${order.xero_invoice_ref ?? order.xero_invoice_id}.`
       )
@@ -507,7 +762,7 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
       query: { summarizeErrors: 'true' },
       // The idempotency key makes a double-click or a retry return the SAME
       // invoice — Xero-side insurance on top of our xero_invoice_id gate.
-      idempotencyKey: `atelier-order-${orderId}`,
+      idempotencyKey: previous ? `atelier-order-${orderId}-after-${previous}` : `atelier-order-${orderId}`,
     }).catch(rethrowValidation)
 
     const invoice = pickInvoice(body)
@@ -518,9 +773,10 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     await pool.query(
       `UPDATE orders
           SET xero_invoice_id = $2,
-              xero_invoice_ref = COALESCE($3, xero_invoice_ref)
-        WHERE id = $1 AND xero_invoice_id IS NULL`,
-      [orderId, invoice.invoiceId, invoice.invoiceNumber]
+              xero_invoice_ref = COALESCE($3, xero_invoice_ref),
+              xero_invoice_status = $4
+        WHERE id = $1 AND xero_invoice_id IS NOT DISTINCT FROM $5`,
+      [orderId, invoice.invoiceId, invoice.invoiceNumber, invoice.status, previous]
     )
 
     let emailed = false
@@ -617,9 +873,12 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
    * Push a purchase order to Xero as an ACCPAY bill against its supplier.
    * Idempotent at both ends like the invoice push: `Idempotency-Key
    * atelier-po-<id>` at Xero, `purchase_orders.xero_bill_id` here (409 on a
-   * second push). Read with `finance: true` — a bill carries prices whoever
-   * pressed the button; the purchase order handed BACK is read with the
-   * caller's own grant, so a masked login stays masked.
+   * second push) — unless Xero has since VOIDED/DELETED that bill, in which
+   * case a fresh push is allowed under a fresh key. Every line must be priced:
+   * an unpriced line would reach Xero as a nil amount, and a bill is what the
+   * accountant pays against. Read with `finance: true` — a bill carries prices
+   * whoever pressed the button; the purchase order handed BACK is read with
+   * the caller's own grant, so a masked login stays masked.
    */
   const pushPurchaseOrderBill = async (purchaseOrderId, { finance = false } = {}) => {
     const order = await getPurchaseOrder(pool, purchaseOrderId, { finance: true })
@@ -627,10 +886,15 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     if (order.status === 'cancelled') {
       throw new XeroConflictError('A cancelled purchase order is not billable.')
     }
-    if (order.xero_bill_id) {
+    const previous =
+      order.xero_bill_id && isDeadInXero(order.xero_bill_status) ? order.xero_bill_id : null
+    if (order.xero_bill_id && !previous) {
       throw new XeroConflictError(
         `This purchase order is already in Xero as ${order.xero_bill_ref ?? order.xero_bill_id}.`
       )
+    }
+    if (order.lines.length === 0) {
+      throw new XeroConflictError('This purchase order has no lines to bill.')
     }
     if (order.unpriced_lines > 0) {
       throw new XeroConflictError(
@@ -641,19 +905,23 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
       throw new XeroConflictError('This purchase order names no supplier to bill against.')
     }
 
-    const contactId = await ensureContactForSupplier(order.supplier_id)
+    const supplier = await getSupplier(pool, order.supplier_id)
+    if (!supplier) throw new XeroConflictError('The house this purchase order is addressed to no longer exists.')
+    const contactId = await ensureContactForSupplier(supplier)
     const payload = billForPurchaseOrder(order, {
       contactId,
       accountCode: config.purchasesAccountCode,
       lineAmountTypes: config.lineAmountTypes,
-      status: config.invoiceStatus,
+      status: config.billStatus,
       dueDays: config.invoiceDueDays,
       now: () => new Date(now()),
     })
     const body = await call('POST', 'Invoices', {
       body: { Invoices: [payload] },
       query: { summarizeErrors: 'true' },
-      idempotencyKey: `atelier-po-${purchaseOrderId}`,
+      idempotencyKey: previous
+        ? `atelier-po-${purchaseOrderId}-after-${previous}`
+        : `atelier-po-${purchaseOrderId}`,
     }).catch(rethrowValidation)
     const bill = pickInvoice(body)
     if (!bill) throw new XeroValidationError('Xero answered without a bill — nothing stored.')
@@ -661,14 +929,37 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
 
     await pool.query(
       `UPDATE purchase_orders
-          SET xero_bill_id = $2, xero_bill_ref = $3, xero_bill_status = $4, xero_bill_paid_at = $5
-        WHERE id = $1 AND xero_bill_id IS NULL`,
-      [purchaseOrderId, bill.invoiceId, bill.invoiceNumber, state.status, state.paidAt]
+          SET xero_bill_id = $2, xero_bill_ref = $3, xero_bill_status = $4, xero_bill_paid_at = $5,
+              updated_at = now()
+        WHERE id = $1 AND xero_bill_id IS NOT DISTINCT FROM $6`,
+      [purchaseOrderId, bill.invoiceId, bill.invoiceNumber, state.status, state.paidAt, previous]
     )
     return {
       purchase_order: await getPurchaseOrder(pool, purchaseOrderId, { finance }),
       bill: { id: bill.invoiceId, number: bill.invoiceNumber, status: state.status },
     }
+  }
+
+  /**
+   * Store Xero's word for a bill on its purchase order (Status, the day it
+   * was fully paid, the number). Xero saying PAID moves the order's own status
+   * to `paid` where the machine allows it (sent or closed); a draft with a
+   * bill, or an order already paid, is left where it is — the mirror columns
+   * still say what Xero said. Shared by the on-demand sync and the pull.
+   */
+  const mirrorBillState = async (order, bill) => {
+    const state = billStateFrom(bill)
+    await pool.query(
+      `UPDATE purchase_orders
+          SET xero_bill_status = $2, xero_bill_paid_at = $3,
+              xero_bill_ref = COALESCE($4, xero_bill_ref), updated_at = now()
+        WHERE id = $1`,
+      [order.id, state.status, state.paidAt, bill.InvoiceNumber ?? null]
+    )
+    if (state.status === 'PAID' && SOURCE_STATUSES.paid.includes(order.status)) {
+      await payPurchaseOrder(pool, order.id)
+    }
+    return state
   }
 
   /**
@@ -684,27 +975,113 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     const read = await call('GET', `Invoices/${order.xero_bill_id}`, {}).catch(rethrowValidation)
     const bill = read?.Invoices?.[0] ?? null
     if (!bill) throw new XeroValidationError('Xero answered without the bill — nothing stored.')
-    const state = billStateFrom(bill)
-    await pool.query(
-      `UPDATE purchase_orders
-          SET xero_bill_status = $2, xero_bill_paid_at = $3,
-              xero_bill_ref = COALESCE($4, xero_bill_ref)
-        WHERE id = $1`,
-      [purchaseOrderId, state.status, state.paidAt, bill.InvoiceNumber ?? null]
-    )
-    // Xero saying PAID moves the order's own status to `paid`, where the
-    // machine allows it (sent or closed). A draft with a bill, or an order
-    // already paid, is left where it is — the mirror columns above still say
-    // what Xero said.
-    if (state.status === 'PAID' && SOURCE_STATUSES.paid.includes(order.status)) {
-      await payPurchaseOrder(pool, purchaseOrderId)
-    }
+    const state = await mirrorBillState(order, bill)
     return {
       synced: true,
       bill: { id: order.xero_bill_id, number: bill.InvoiceNumber ?? order.xero_bill_ref, status: state.status, paid_at: state.paidAt },
       purchase_order: await getPurchaseOrder(pool, purchaseOrderId, { finance }),
     }
   }
+
+  // ---- the pull: what Xero says about what we pushed -----------------------
+
+  const STATUS_BATCH = 40
+  const SETTLED = ['PAID', 'VOIDED', 'DELETED']
+
+  /** {InvoiceID -> {Status, InvoiceNumber}} for a set of ids, in batches. */
+  const fetchInvoiceStatuses = async (ids) => {
+    const out = new Map()
+    for (let i = 0; i < ids.length; i += STATUS_BATCH) {
+      const batch = ids.slice(i, i + STATUS_BATCH)
+      const body = await call('GET', 'Invoices', {
+        query: { IDs: batch.join(','), summaryOnly: 'true', pageSize: String(STATUS_BATCH) },
+      })
+      for (const invoice of body?.Invoices ?? []) {
+        if (invoice?.InvoiceID) out.set(invoice.InvoiceID, invoice)
+      }
+    }
+    return out
+  }
+
+  /**
+   * Xero → platform for invoices and bills. Reads the status of every pushed
+   * document that is not yet settled (PAID / VOIDED / DELETED are terminal)
+   * and stores Xero's word for it. An invoice Xero shows PAID marks its
+   * order paid here — the same transition the CRM's Mark paid button makes,
+   * with the same letter — so a payment recorded at the accountant's desk
+   * reaches the order desk without anyone re-keying it. An order that cannot
+   * take the transition (still `requested`) is reported, not forced.
+   */
+  const pullStatuses = async () => {
+    const result = {
+      invoices: { checked: 0, updated: 0, orders_marked_paid: [], failed: [] },
+      bills: { checked: 0, updated: 0, failed: [] },
+    }
+
+    const { rows: orders } = await pool.query(
+      `SELECT id, order_number, status, xero_invoice_id, xero_invoice_status FROM orders
+        WHERE xero_invoice_id IS NOT NULL
+          AND (xero_invoice_status IS NULL OR xero_invoice_status <> ALL($1::text[]))
+        ORDER BY id`,
+      [SETTLED]
+    )
+    result.invoices.checked = orders.length
+    const invoices = await fetchInvoiceStatuses(orders.map((o) => o.xero_invoice_id))
+    for (const order of orders) {
+      const invoice = invoices.get(order.xero_invoice_id)
+      const status = invoice?.Status ?? null
+      if (!status || status === order.xero_invoice_status) continue
+      await pool.query(
+        `UPDATE orders SET xero_invoice_status = $2, xero_invoice_ref = COALESCE($3, xero_invoice_ref) WHERE id = $1`,
+        [order.id, status, invoice.InvoiceNumber ?? null]
+      )
+      result.invoices.updated += 1
+      if (status !== 'PAID' || order.status !== 'confirmed') {
+        if (status === 'PAID' && order.status === 'requested') {
+          result.invoices.failed.push({
+            key: order.order_number,
+            message: 'paid in Xero but still awaiting confirmation here — confirm it, then mark it paid.',
+          })
+        }
+        continue
+      }
+      try {
+        const paid = await markOrderPaid(pool, order.id)
+        await notifyOrderPaid(paid)
+        result.invoices.orders_marked_paid.push({ id: order.id, order_number: order.order_number })
+      } catch (error) {
+        result.invoices.failed.push({ key: order.order_number, message: error.message })
+      }
+    }
+
+    const { rows: purchaseOrders } = await pool.query(
+      `SELECT id, po_number, status, xero_bill_id, xero_bill_status FROM purchase_orders
+        WHERE xero_bill_id IS NOT NULL
+          AND (xero_bill_status IS NULL OR xero_bill_status <> ALL($1::text[]))
+        ORDER BY id`,
+      [SETTLED]
+    )
+    result.bills.checked = purchaseOrders.length
+    const bills = await fetchInvoiceStatuses(purchaseOrders.map((po) => po.xero_bill_id))
+    for (const purchaseOrder of purchaseOrders) {
+      const bill = bills.get(purchaseOrder.xero_bill_id)
+      const status = bill?.Status ?? null
+      if (!status || status === purchaseOrder.xero_bill_status) continue
+      try {
+        await mirrorBillState(purchaseOrder, bill)
+        result.bills.updated += 1
+      } catch (error) {
+        result.bills.failed.push({ key: purchaseOrder.po_number, message: error.message })
+      }
+    }
+    return result
+  }
+
+  /** The whole Xero → platform direction in one call (the scheduled pull). */
+  const pullAll = async () => ({
+    contacts: await pullContacts(),
+    ...(await pullStatuses()),
+  })
 
   return {
     isConfigured: true,
@@ -714,10 +1091,14 @@ export const createXeroService = ({ pool, config, http, now = () => Date.now() }
     completeCallback,
     disconnect,
     syncContacts,
+    syncSuppliers,
     syncItems,
     pushOrderInvoice,
     recordOrderPayment,
     pushPurchaseOrderBill,
     syncPurchaseOrderBill,
+    pullContacts,
+    pullStatuses,
+    pullAll,
   }
 }

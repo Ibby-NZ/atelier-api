@@ -6,6 +6,11 @@
 // order confirm still takes a typed xero_invoice_ref, it just no longer has
 // to be typed, because the push fills it.
 //
+// TWO DIRECTIONS. /sync/* and the two document pushes are platform → Xero;
+// /pull/* is Xero → platform (contacts, and the status of every invoice and
+// bill we pushed). server.js runs the pull on a timer when
+// XERO_PULL_INTERVAL_MINUTES is set; these routes are the same calls by hand.
+//
 // WHO MAY DO WHAT: reading status and pushing/syncing is backoffice work
 // (director inherits). CONNECTING AND DISCONNECTING ARE DIRECTOR-ONLY — the
 // consent grants an external system access to the company's books, which is
@@ -122,9 +127,27 @@ export const adminXeroRoutes = async (app, { pool, xero, crmBaseUrl }) => {
     return answer(reply, async () => ({ result: await xero.syncContacts() }))
   })
 
+  app.post('/admin/xero/sync/suppliers', { preHandler: backoffice }, async (request, reply) => {
+    if (!xero) return unconfigured(reply)
+    return answer(reply, async () => ({ result: await xero.syncSuppliers() }))
+  })
+
   app.post('/admin/xero/sync/items', { preHandler: backoffice }, async (request, reply) => {
     if (!xero) return unconfigured(reply)
     return answer(reply, async () => ({ result: await xero.syncItems() }))
+  })
+
+  // The Xero → platform direction. Contacts (customers AND suppliers) land
+  // in the roster; invoice and bill statuses land on their documents, and a
+  // PAID invoice marks its order paid. The same call the scheduled pull makes.
+  app.post('/admin/xero/pull/contacts', { preHandler: backoffice }, async (request, reply) => {
+    if (!xero) return unconfigured(reply)
+    return answer(reply, async () => ({ result: await xero.pullContacts() }))
+  })
+
+  app.post('/admin/xero/pull/statuses', { preHandler: backoffice }, async (request, reply) => {
+    if (!xero) return unconfigured(reply)
+    return answer(reply, async () => ({ result: await xero.pullStatuses() }))
   })
 
   app.post(

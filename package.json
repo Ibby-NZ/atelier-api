@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "migrate": "node-pg-migrate --migrations-dir migrations --migration-file-language js up",
-    "migrate:down": "node-pg-migrate --migrations-dir migrations --migration-file-language js down",
+    "migrate": "node src/migrate.js up",
+    "migrate:down": "node src/migrate.js down",
     "migrate:create": "node-pg-migrate --migrations-dir migrations --migration-file-language js create",
     "seed": "node src/seed/run.js",
     "seed:staff": "node src/seed/seed-staff.js",

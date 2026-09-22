@@ -11,6 +11,7 @@ import {
   ADMIN_PANEL_LOGIN_PATH,
   ADMIN_PANEL_LOGOUT_PATH,
 } from './paths.js'
+import { pgConnectionConfig } from '../db.js'
 
 // buildAuthenticatedRouter from @adminjs/fastify registers @fastify/cookie
 // itself, which collides with the app's existing registration (decorators are
@@ -159,7 +160,7 @@ export const adminPanelPlugin = async (
 
   const databaseName = new URL(databaseUrl).pathname.replace(/^\//, '')
   const db = await new Adapter('postgresql', {
-    connectionString: databaseUrl,
+    ...pgConnectionConfig(databaseUrl),
     database: databaseName,
   }).init()
 

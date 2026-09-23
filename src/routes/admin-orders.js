@@ -127,6 +127,7 @@ const editBodySchema = {
     // non-empty.
     { required: ['discount_pct'] },
     { required: ['sales_rep_user_id'] },
+    { required: ['shipping_address'] },
   ],
   dependencies: discountDependencies,
   properties: {
@@ -187,6 +188,10 @@ const editBodySchema = {
     // declared here as well as in the module — Ajv's removeAdditional would
     // otherwise strip it silently and the rep would simply never arrive.
     sales_rep_user_id: { type: ['integer', 'null'], minimum: 1 },
+    // The delivery details, corrected on the order page (Edit delivery). Sent
+    // alone it is accepted until the order ships; null clears it. The same
+    // shape the create body and the storefront request take.
+    shipping_address: SHIPPING_ADDRESS_SCHEMA,
   },
 }
 

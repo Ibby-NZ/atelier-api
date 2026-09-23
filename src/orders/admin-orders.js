@@ -33,6 +33,9 @@ import { checkDiscountWrite } from './discounts.js'
 // The free-text search layer: pure, and the only place a filter value becomes
 // SQL. See src/orders/order-filters.js for why it is not src/reports/filters.js.
 import { buildOrderFilters } from './order-filters.js'
+// Who hears about a status change: the Emails list is stored one spelling per
+// address, by the same rule the notifier dedupes with at send time.
+import { uniqueEmails } from './notify-emails.js'
 
 // Paging for the order desk, in the shape src/pricing/admin-price-lists.js
 // established. MAX_LIMIT is spent as the route schema's `maximum`, so an
@@ -117,6 +120,8 @@ const ORDER_COLUMNS = `o.id,
         o.tracking_url,
         o.sales_rep_user_id,
         rep.name AS sales_rep_name,
+        CASE WHEN rep.archived_at IS NULL THEN rep.email END AS sales_rep_email,
+        o.notify_emails,
         o.notes,
         o.archived_at,
         o.created_at`
@@ -250,6 +255,15 @@ const toOrder = (row, lineRows) => {
     // a CRM-side lookup, so a rep who later leaves still displays.
     sales_rep_user_id: row.sales_rep_user_id ?? null,
     sales_rep_name: row.sales_rep_name ?? null,
+    // Where the rep's copy of each status letter goes. Null with nobody
+    // assigned, AND null for a rep whose login is archived: a person who has
+    // left must not keep receiving a client's orders, so the CRM's Emails
+    // section says the rep is not emailed rather than naming a dead inbox.
+    sales_rep_email: row.sales_rep_email ?? null,
+    // The extra addresses the office added to this order in the CRM's Emails
+    // section; every status letter goes to each of them as well as to the
+    // client and the rep (src/email/notifications.js notifyOrderTransition).
+    notify_emails: row.notify_emails ?? [],
     // The client's OWN two numbers (FR-115). `customer_po_number` is the PO the
     // CLIENT issued to us — never one of our purchase orders (W13).
     client_reference: row.client_reference ?? null,
@@ -508,9 +522,10 @@ const ORDER_HEADER_COLUMNS = Object.freeze([
   'client_reference',
   'customer_po_number',
   'sales_rep_user_id',
+  'notify_emails',
 ])
 
-// The two columns that are ANNOTATIONS rather than commercial terms. Neither
+// The columns that are ANNOTATIONS rather than commercial terms. Neither
 // moves money, stock or a reservation, so neither is gated on the order still
 // being editable — a client's PO number almost never arrives before the order
 // is raised, and on a paid order it is precisely the thing the office is trying
@@ -520,10 +535,14 @@ const ORDER_HEADER_COLUMNS = Object.freeze([
 // `sales_rep_user_id` joins them for the same reason: attribution moves no
 // money, stock or reservation, and back-filling WHO sold a shipped order is
 // exactly what the office wants to record after the fact.
+// `notify_emails` (who else hears about a status change) likewise moves no
+// money, stock or reservation, and "copy their accounts desk in" arrives at any
+// point in an order's life — most usefully before it ships.
 const ANNOTATION_COLUMNS = Object.freeze([
   'client_reference',
   'customer_po_number',
   'sales_rep_user_id',
+  'notify_emails',
 ])
 
 /** True when a patch touches nothing but those annotations. */
@@ -605,6 +624,7 @@ const applyOrderHeader = async (client, id, patch) => {
  *   price_type?: 'trade'|'retail',
  *   discount_pct?: number,
  *   discount_reason?: string|null,
+ *   notify_emails?: string[],
  * }} patch
  * @param {{ id: number, role: string }} [actor] request.user — the discount
  *   gate reads the role and the audit column records the id
@@ -703,7 +723,13 @@ export const editOrderLines = (pool, id, patch, actor) =>
     if (Object.hasOwn(patch, 'sales_rep_user_id')) {
       await assertSalesRep(client, patch.sales_rep_user_id)
     }
-    await applyOrderHeader(client, id, patch)
+    // The Emails list REPLACES what was there (the CRM sends the whole list on
+    // every add and remove) and is stored one spelling per address. The route
+    // schema has already refused a malformed address or too many.
+    const header = Object.hasOwn(patch, 'notify_emails')
+      ? { ...patch, notify_emails: uniqueEmails(patch.notify_emails) }
+      : patch
+    await applyOrderHeader(client, id, header)
     // The discount before the recompute, so the total the transaction commits
     // already reflects it. A discount is a commercial term, not an annotation:
     // it changes the invoice amount, so it sits behind the status guard above

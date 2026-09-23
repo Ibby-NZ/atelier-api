@@ -908,6 +908,151 @@ describe('back-office order management', () => {
       })
     })
 
+    // The order page's Edit delivery. Where the cloth goes changes after the
+    // money is settled as a matter of course — "send it to the upholsterer" —
+    // and the packing slip prints this address, so it stays editable until the
+    // order ships. Like notes, it is one key wide.
+    describe('delivery details', () => {
+      const advanceTo = async (id, ...verbs) => {
+        for (const verb of verbs) {
+          const response = await inject(
+            'POST',
+            `/admin/orders/${id}/${verb}`,
+            backofficeCookie,
+            { xero_invoice_ref: 'INV-DELIVERY' }
+          )
+          expect(response.statusCode).toBe(200)
+        }
+      }
+
+      const DELIVERY = {
+        name: ' Designers Collection ',
+        line1: 'c/o The Foundation',
+        line2: '8 George Street, Newmarket',
+        city: 'Auckland',
+        postal_code: '1023',
+        country: 'New Zealand',
+        phone: '09 307 7839',
+        instructions: 'Mark parcel: Lounge',
+      }
+
+      it('stores the address, the delivery phone and the instructions, trimmed', async () => {
+        const placed = await placeRequest(10)
+
+        const response = await patch(placed.id, { shipping_address: DELIVERY })
+
+        expect(response.statusCode).toBe(200)
+        expect(response.json().order.shipping_address).toEqual({
+          name: 'Designers Collection',
+          line1: 'c/o The Foundation',
+          line2: '8 George Street, Newmarket',
+          city: 'Auckland',
+          state: null,
+          postal_code: '1023',
+          country: 'New Zealand',
+          phone: '09 307 7839',
+          instructions: 'Mark parcel: Lounge',
+        })
+      })
+
+      it('is accepted on a paid order and leaves the money exactly as it was', async () => {
+        const placed = await placeRequest(10)
+        await advanceTo(placed.id, 'confirm', 'mark-paid')
+        const before = await orderFor(placed.id)
+
+        const response = await patch(placed.id, { shipping_address: DELIVERY })
+
+        expect(response.statusCode).toBe(200)
+        const after = response.json().order
+        expect(after.status).toBe('paid')
+        expect(after.shipping_address.line1).toBe('c/o The Foundation')
+        expect(after.subtotal_cents).toBe(before.subtotal_cents)
+        expect(after.total_cents).toBe(before.total_cents)
+        expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+      })
+
+      // Once shipped, the address is the record of where the order went.
+      it('is refused once the order has shipped, and writes nothing', async () => {
+        const placed = await placeRequest(10)
+        await patch(placed.id, { shipping_address: DELIVERY })
+        await advanceTo(placed.id, 'confirm', 'mark-paid', 'ship')
+
+        const response = await patch(placed.id, {
+          shipping_address: { ...DELIVERY, line1: '1 Somewhere Else' },
+        })
+
+        expect(response.statusCode).toBe(409)
+        expect((await orderFor(placed.id)).shipping_address.line1).toBe('c/o The Foundation')
+      })
+
+      it('clears the address with null (collected from the showroom)', async () => {
+        const placed = await placeRequest(10)
+        await patch(placed.id, { shipping_address: DELIVERY })
+
+        const response = await patch(placed.id, { shipping_address: null })
+
+        expect(response.statusCode).toBe(200)
+        expect(response.json().order.shipping_address).toBeNull()
+      })
+
+      // On the create paths an empty form is "no address"; here somebody pressed
+      // Save, so a delivery that names nowhere is a mistake to say out loud.
+      it('refuses an address that names neither a street nor a town', async () => {
+        const placed = await placeRequest(10)
+        await patch(placed.id, { shipping_address: DELIVERY })
+
+        const response = await patch(placed.id, {
+          shipping_address: { name: 'Designers Collection', phone: '09 307 7839', line1: ' ' },
+        })
+
+        expect(response.statusCode).toBe(422)
+        expect(response.json().message).toMatch(/street or a town/)
+        expect((await orderFor(placed.id)).shipping_address.line1).toBe('c/o The Foundation')
+      })
+
+      it('keeps the status guard when the address travels with anything else', async () => {
+        const placed = await placeRequest(10)
+        const order = await orderFor(placed.id)
+        await advanceTo(placed.id, 'confirm', 'mark-paid')
+
+        const response = await patch(placed.id, {
+          shipping_address: DELIVERY,
+          lines: [{ id: order.lines[0].id, unit_price_cents: 1 }],
+        })
+
+        expect(response.statusCode).toBe(409)
+        expect((await orderFor(placed.id)).shipping_address).toBeNull()
+      })
+
+      it('rides with an ordinary edit while the order is still being priced', async () => {
+        const placed = await placeRequest(10)
+        const order = await orderFor(placed.id)
+
+        const response = await patch(placed.id, {
+          shipping_address: DELIVERY,
+          lines: [{ id: order.lines[0].id, unit_price_cents: 2000 }],
+        })
+
+        expect(response.statusCode).toBe(200)
+        expect(response.json().order.shipping_address.city).toBe('Auckland')
+        expect(response.json().order.subtotal_cents).toBe(20000)
+      })
+    })
+
+    // What the packing slip prints under a design: the catalogue's own words.
+    it('carries each line\'s composition, width and size from the product', async () => {
+      const placed = await placeRequest(10)
+      await pool.query(
+        `UPDATE products SET composition = '100% Linen', width = '137 cm'
+          WHERE id = (SELECT product_id FROM colourways WHERE sku = $1)`,
+        [SKU.inStock]
+      )
+
+      const [line] = (await orderFor(placed.id)).lines
+
+      expect(line).toMatchObject({ composition: '100% Linen', width: '137 cm', size: null })
+    })
+
     it('rejects a line edit that says nothing but its id with 400', async () => {
       const placed = await placeRequest(10)
       const order = await orderFor(placed.id)

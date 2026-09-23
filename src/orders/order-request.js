@@ -118,11 +118,19 @@ const joinNotes = (...parts) => {
 // blanks fold to null, the key set is fixed to the webhook's shape.
 const ADDRESS_KEYS = ['name', 'line1', 'line2', 'city', 'state', 'postal_code', 'country']
 
+// Two delivery facts that are not part of Stripe's address and that the office
+// adds on the order desk: a phone for whoever receives the parcel (often not the
+// client — the upholsterer, the site), and an instruction for the packer and the
+// courier ("Mark parcel: Lounge"). Both print in the packing slip's Deliver-to
+// block. Stored only when given, so an address from the webhook or the
+// storefront keeps exactly the seven keys it always had.
+const DELIVERY_EXTRA_KEYS = ['phone', 'instructions']
+
 /**
- * The body schema for that same address, so the two routes that take one — the
- * storefront's request and the back office's manual order — cannot drift apart
- * from each other or from `addressOrNull` below. `null` is allowed: a request
- * is priced before it ships and plenty are collected.
+ * The body schema for that same address, so the routes that take one — the
+ * storefront's request, the back office's manual order and its edit — cannot
+ * drift apart from each other or from `addressOrNull` below. `null` is allowed:
+ * a request is priced before it ships and plenty are collected.
  */
 export const SHIPPING_ADDRESS_SCHEMA = Object.freeze({
   type: ['object', 'null'],
@@ -135,12 +143,18 @@ export const SHIPPING_ADDRESS_SCHEMA = Object.freeze({
     state: { type: ['string', 'null'], maxLength: 100 },
     postal_code: { type: ['string', 'null'], maxLength: 20 },
     country: { type: ['string', 'null'], maxLength: 100 },
+    phone: { type: ['string', 'null'], maxLength: 50 },
+    instructions: { type: ['string', 'null'], maxLength: 500 },
   },
 })
 
 export const addressOrNull = (input) => {
   if (!input || typeof input !== 'object') return null
   const address = Object.fromEntries(ADDRESS_KEYS.map((key) => [key, trimmedOrNull(input[key])]))
+  for (const key of DELIVERY_EXTRA_KEYS) {
+    const value = trimmedOrNull(input[key])
+    if (value) address[key] = value
+  }
   return address.line1 || address.city ? address : null
 }
 

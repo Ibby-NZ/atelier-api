@@ -131,6 +131,7 @@ const editBodySchema = {
     { required: ['discount_pct'] },
     { required: ['sales_rep_user_id'] },
     { required: ['notify_emails'] },
+    { required: ['shipping_address'] },
   ],
   dependencies: discountDependencies,
   properties: {
@@ -201,6 +202,10 @@ const editBodySchema = {
       maxItems: NOTIFY_EMAILS_MAX,
       items: { type: 'string', maxLength: 254, pattern: NOTIFY_EMAIL_PATTERN },
     },
+    // The delivery details, corrected on the order page (Edit delivery). Sent
+    // alone it is accepted until the order ships; null clears it. The same
+    // shape the create body and the storefront request take.
+    shipping_address: SHIPPING_ADDRESS_SCHEMA,
   },
 }
 

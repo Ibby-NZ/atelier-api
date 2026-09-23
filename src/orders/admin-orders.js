@@ -144,6 +144,9 @@ const loadLinesByOrderId = async (db, orderIds) => {
             p.id AS product_id,
             p.slug AS product_slug,
             p.name AS product_name,
+            p.composition,
+            p.width,
+            p.size,
             i.qty_available,
             i.qty_reserved,
             i.unit
@@ -203,6 +206,12 @@ const toLine = (row, state) => ({
   // never been stocked, exactly like `inventory` below. The customer shape
   // does not carry it — its lines have `product_type`, which decides the unit.
   unit: row.unit ?? null,
+  // What the cloth is, as the catalogue states it: the packing slip prints
+  // these under the design the way the D365 slip printed Contents and Width.
+  // Null wherever the product record has not been filled in.
+  composition: row.composition ?? null,
+  width: row.width ?? null,
+  size: row.size ?? null,
   unit_price_cents: row.unit_price_cents,
   cut_requirements: row.cut_requirements,
   colourway_id: row.colourway_id,
@@ -566,6 +575,42 @@ const isNotesOnly = (patch) => {
   return keys.length === 1 && keys[0] === 'notes'
 }
 
+// Where the cloth goes can change until it has gone. A client paying up front
+// and then asking for delivery to the upholsterer, or to site rather than the
+// office, is ordinary — and the packing slip is printed from this address, so an
+// order the office could not correct after payment shipped to the wrong place.
+// Like notes, it rides ALONE: a body that also touches lines, money or any other
+// header field is an ordinary edit and keeps the requested/confirmed guard.
+// Shipped is excluded because the address is then the record of where the order
+// went; declined, because nothing is going anywhere.
+const DELIVERY_EDIT_STATUSES = Object.freeze(['requested', 'confirmed', 'paid'])
+
+const isDeliveryOnly = (patch) => {
+  const keys = Object.keys(patch)
+  return keys.length === 1 && keys[0] === 'shipping_address'
+}
+
+// The same trimmer the storefront's request and the manual create store
+// through, so an edited address has the shape the other paths write. `null`
+// clears it (collected from the showroom). An address that names neither a
+// street nor a town is refused rather than silently stored as none: on those
+// paths an empty form means "no address", but here somebody pressed Save on a
+// delivery they meant to record.
+const applyShippingAddress = async (client, id, patch) => {
+  if (!Object.hasOwn(patch, 'shipping_address')) return
+  const address = addressOrNull(patch.shipping_address)
+  if (patch.shipping_address !== null && address === null) {
+    throw httpError(
+      422,
+      'A delivery address needs a street or a town/city. Clear every field to remove it instead.'
+    )
+  }
+  await client.query(`UPDATE orders SET shipping_address = $2 WHERE id = $1`, [
+    id,
+    address ? JSON.stringify(address) : null,
+  ])
+}
+
 // A rep must be a STAFF login (USER_SEGMENTS.staff) or null. Checked here —
 // once, for both write paths — so a bad id is a 422 naming the problem rather
 // than an FK 23503 surfacing as a 500, and a customer can never appear as the
@@ -602,10 +647,11 @@ const applyOrderHeader = async (client, id, patch) => {
  *
  * Only allowed while the order is still in the reservation phase
  * (requested/confirmed); later states have already converted or released the
- * reservation, and their money has been invoiced. The two exceptions are the
+ * reservation, and their money has been invoiced. The exceptions are the
  * ANNOTATION_COLUMNS and a patch carrying nothing but `notes`: neither moves
  * money, stock or a reservation, and both are written after the fact by
- * definition.
+ * definition. A patch carrying nothing but `shipping_address` is the third,
+ * open until the order ships (DELIVERY_EDIT_STATUSES).
  *
  * This is what turns a storefront request (every line priced at 0 by
  * `createOrderRequest`) into a sales order the office can invoice.
@@ -625,12 +671,21 @@ const applyOrderHeader = async (client, id, patch) => {
  *   discount_pct?: number,
  *   discount_reason?: string|null,
  *   notify_emails?: string[],
+ *   shipping_address?: object|null,
  * }} patch
  * @param {{ id: number, role: string }} [actor] request.user — the discount
  *   gate reads the role and the audit column records the id
  */
 export const editOrderLines = (pool, id, patch, actor) =>
   withOrderTxn(pool, id, async (client, order) => {
+    // A delivery change touches nothing else, so it skips the line checks and
+    // the money recompute below: on a paid card checkout the total is what
+    // Stripe charged, and a new address must not re-derive it.
+    if (isDeliveryOnly(patch)) {
+      requireStatus(order, DELIVERY_EDIT_STATUSES, 'change the delivery details of')
+      await applyShippingAddress(client, id, patch)
+      return
+    }
     if (!isAnnotationOnly(patch) && !isNotesOnly(patch)) {
       requireStatus(order, ['requested', 'confirmed'], 'edit')
     }
@@ -730,6 +785,7 @@ export const editOrderLines = (pool, id, patch, actor) =>
       ? { ...patch, notify_emails: uniqueEmails(patch.notify_emails) }
       : patch
     await applyOrderHeader(client, id, header)
+    await applyShippingAddress(client, id, patch)
     // The discount before the recompute, so the total the transaction commits
     // already reflects it. A discount is a commercial term, not an annotation:
     // it changes the invoice amount, so it sits behind the status guard above

@@ -64,6 +64,7 @@ export const adminLegacyMergeRoutes = async (app, { pool, merge = mergeLegacy })
             reserveLines: summary.reserves.lines,
             colourways: summary.catalogue.colourways,
             stocked: summary.stock.stocked,
+            categoriesFilled: summary.categories.filled,
           },
           'legacy merge applied'
         )

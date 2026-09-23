@@ -3,6 +3,8 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { withChangeContext } from '../src/pricing/price-history.js'
+import { CATEGORIES, categoryForItemType } from '../scripts/lib/price-template.js'
+import { REVIEWED_STOCK_ITEM_TYPES } from '../src/seed/data/reviewed-stock-item-types.js'
 import {
   cfaFor,
   mergeLegacy,
@@ -48,6 +50,27 @@ describe('the D365 → platform vocabulary', () => {
     expect(first.dispatched_at).toEqual(new Date('2025-10-06T00:00:00'))
     expect(dockets[0].lines[1]).toMatchObject({ kind: 'cutting', status: 'requested', cfa: null, dispatched_at: null })
     expect(declined).toEqual([{ guid: G(4), reason: 'no customer' }, { guid: G(5), reason: 'no product' }])
+  })
+
+  it('carries Atelier\'s reviewed workbook whole, every item type one the vocabulary has a word for', () => {
+    // The 381 rows of the 17 Aug 2026 workbook, keyed on distinct lower-case
+    // guids (pg hands a uuid back in lower case, and the merge keys on it).
+    expect(REVIEWED_STOCK_ITEM_TYPES).toHaveLength(381)
+    const guids = REVIEWED_STOCK_ITEM_TYPES.map(([guid]) => guid)
+    expect(new Set(guids).size).toBe(381)
+    for (const guid of guids) expect(guid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    // A reviewed type with no category would be a person's answer the merge
+    // silently drops, so every one must map, onto a value the table stores.
+    const byType = {}
+    for (const [, , itemType] of REVIEWED_STOCK_ITEM_TYPES) {
+      expect(CATEGORIES.has(categoryForItemType(itemType))).toBe(true)
+      byType[itemType] = (byType[itemType] ?? 0) + 1
+    }
+    // The workbook's own totals (migrations/1789651200000_category-vocabulary.js).
+    expect(byType).toEqual({
+      Fabrics: 242, Towels: 53, 'Bed Linen': 29, 'Throws/Blankets': 26,
+      Cushions: 14, Accessories: 14, Miscellaneous: 3,
+    })
   })
 
   it('turns a stock item into the colour importer\'s row', () => {
@@ -222,11 +245,48 @@ describe('mergeLegacy against the database', () => {
     expect((await ours('SELECT COUNT(*)::int AS n FROM reserve_requests WHERE account_name LIKE $1', [`${PREFIX}%`]))[0].n).toBe(2)
   })
 
+  it('fills a blank category from the reviewed item types, and never overwrites or guesses one', async () => {
+    // Charlotte is one product over two stock items (F3518-003 and -004).
+    const category = async () => (await ours(
+      `SELECT p.category FROM products p JOIN brands b ON b.id = p.brand_id WHERE b.name = $1 AND p.name = 'Charlotte'`,
+      [HOUSE]
+    )).map((row) => row.category)
+    const setCategory = (value) => pool.query(
+      'UPDATE products SET category = $1 WHERE brand_id = (SELECT id FROM brands WHERE name = $2)', [value, HOUSE]
+    )
+    const reviewed = (a, b) => [
+      [G(51), 'F3518-003 23PF', a],
+      [G(52), 'F3518-004 23PF', b],
+      // Reviewed, but not in this ledger: counted nowhere.
+      [G(59), 'GONE 23PF', 'Towels'],
+    ]
+    await setCategory(null)
+
+    // Both items say Bed Linen: the blank is filled with the derived category.
+    const first = await mergeLegacy(pool, { createHouses: true, reviewedItemTypes: reviewed('Bed Linen', 'Bed Linen') })
+    expect(first.categories).toEqual({ reviewed: 2, unplaced: 0, products: 1, filled: 1, kept: 0, split: 0, missing: 0 })
+    expect(await category()).toEqual(['bed-linen'])
+
+    // The office moves it in the CRM; the sheet is the older answer and loses.
+    await setCategory('towel')
+    const second = await mergeLegacy(pool, { createHouses: true, reviewedItemTypes: reviewed('Bed Linen', 'Bed Linen') })
+    expect(second.categories).toMatchObject({ products: 1, filled: 0, kept: 1 })
+    expect(await category()).toEqual(['towel'])
+
+    // Its two colourways disagree: which one the design is stays a person's call.
+    await setCategory(null)
+    const split = await mergeLegacy(pool, { createHouses: true, reviewedItemTypes: reviewed('Towels', 'Cushions') })
+    expect(split.categories).toMatchObject({ products: 1, filled: 0, split: 1 })
+    expect(await category()).toEqual([null])
+  })
+
   it('leaves a house it does not know alone unless told to raise it', async () => {
     await dropHouse()
-    const summary = await mergeLegacy(pool)
+    const summary = await mergeLegacy(pool, { reviewedItemTypes: [[G(51), 'F3518-003 23PF', 'Towels']] })
     expect(summary.housesRaised).toEqual([])
     expect(summary.catalogue.unknownBrands.map((b) => b.brand)).toContain(HOUSE)
     expect((await ours('SELECT COUNT(*)::int AS n FROM brands WHERE name = $1', [HOUSE]))[0].n).toBe(0)
+    // A reviewed item whose house is not in the catalogue lands on no product.
+    expect(summary.categories).toMatchObject({ reviewed: 1, unplaced: 1, products: 0, filled: 0 })
   })
 })

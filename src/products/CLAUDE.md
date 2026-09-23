@@ -162,6 +162,11 @@ from are in the D365 staging mirror, and `scripts/export-category-sheets.js` wri
   - Columns are matched **by name**, only `GUID` and `Item Type` are required, and only the FIRST
     worksheet is read — that is the `All …` tab, which carries every row; the house tabs after it are
     a view of the same rows and reading them too would count each correction twice.
+- **The same workbook fills `products.category` too**, through the cutover merge rather than a script:
+  its 381 rows are committed as `src/seed/data/reviewed-stock-item-types.js` and `landCategories`
+  (`src/legacy/merge.js`, see `src/legacy/CLAUDE.md`) derives each product's category from the reviewed
+  item type, fill-only, on every deploy and every Promote to live. The next corrected workbook adds rows
+  there — never the ledger's unreviewed types.
 - **A category typed against a D365 PRICE row still belongs in `d365_overrides.extras`** (the
   custom-field lane — `src/legacy/CLAUDE.md`), never in `patch`, which is keyed on D365 column names.
   Nothing reads the price workbook back yet.

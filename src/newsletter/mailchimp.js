@@ -1,4 +1,5 @@
-// Mailchimp audience sign-up for the storefront's footer form.
+// Mailchimp audience sign-up for the storefront's footer form, and for the
+// trade form's "happy to receive notifications from Mailchimp?" Yes.
 //
 // One call: PUT /lists/{id}/members/{subscriber_hash} with status_if_new
 // "pending" — Mailchimp then sends its own double opt-in mail and nothing here
@@ -47,12 +48,12 @@ export const memberRequest = (config, email) => ({
  * Add (or re-affirm) one address on the audience.
  * @param {{ server: string, audienceId: string, apiKey: string }} config
  * @param {string} email
- * @param {{ fetchImpl?: typeof fetch }} [deps]
+ * @param {{ fetchImpl?: typeof fetch, signal?: AbortSignal }} [deps]
  * @returns {Promise<{ status: string }>} Mailchimp's member status (pending|subscribed|…)
  */
-export const subscribe = async (config, email, { fetchImpl = fetch } = {}) => {
+export const subscribe = async (config, email, { fetchImpl = fetch, signal } = {}) => {
   const { url, init } = memberRequest(config, email)
-  const response = await fetchImpl(url, init)
+  const response = await fetchImpl(url, { ...init, signal })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
     // Mailchimp's error body: { title, status, detail }. Surface the title so
@@ -61,4 +62,32 @@ export const subscribe = async (config, email, { fetchImpl = fetch } = {}) => {
     throw new Error(`Mailchimp ${response.status} ${body.title ?? ''}: ${body.detail ?? ''}`.trim())
   }
   return { status: body.status }
+}
+
+// Long enough for a slow Mailchimp, short enough that an applicant is never
+// left watching a spinner for it.
+const SIDE_SIGN_UP_TIMEOUT_MS = 5000
+
+/**
+ * subscribe() as a side effect of something else that has already succeeded —
+ * the trade form's opt-in, after the account and form are committed. Never
+ * throws and never waits past SIDE_SIGN_UP_TIMEOUT_MS: unconfigured is a no-op,
+ * a refusal or timeout is logged and swallowed, because the application must
+ * not fail over its newsletter box.
+ *
+ * @param {{ server: string, audienceId: string, apiKey: string }|null} config
+ * @param {string} email
+ * @param {{ fetchImpl?: typeof fetch, log?: { error: Function } }} [deps]
+ * @returns {Promise<string|null>} Mailchimp's member status, or null when nobody was added
+ */
+export const subscribeQuietly = async (config, email, { fetchImpl = fetch, log } = {}) => {
+  if (!config) return null
+  try {
+    const signal = AbortSignal.timeout(SIDE_SIGN_UP_TIMEOUT_MS)
+    const { status } = await subscribe(config, email, { fetchImpl, signal })
+    return status
+  } catch (error) {
+    log?.error({ err: error }, 'newsletter: Mailchimp opt-in sign-up failed')
+    return null
+  }
 }

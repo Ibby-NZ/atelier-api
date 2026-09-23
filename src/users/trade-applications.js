@@ -293,6 +293,30 @@ export const getTradeApplication = async (pool, id) => {
   return rows[0] ? toTradeApplication(rows[0]) : null
 }
 
+/**
+ * The address to put on the newsletter audience after an application is saved,
+ * or null. "Are you happy to receive notifications from Mailchimp?" Yes is the
+ * footer's sign-up for the primary contact email, the address the form asks
+ * for directly under that question. On submission `before` is null; from the
+ * portal it is the stored row, and only a change to Yes or a new address signs
+ * up again — the portal PATCHes every field on each save, and re-PUTting an
+ * unchanged member every time would be noise. A No never unsubscribes: the
+ * person may have joined from the footer too, and Mailchimp's own unsubscribe
+ * link is how they leave.
+ *
+ * @param {object|null} before
+ * @param {object} after
+ * @returns {string|null}
+ */
+export const newsletterOptInAddress = (before, after) => {
+  const address = after?.mailchimp_opt_in === true ? trimToNull(after.primary_contact_email) : null
+  if (!address) return null
+  const unchanged =
+    before?.mailchimp_opt_in === true &&
+    trimToNull(before.primary_contact_email)?.toLowerCase() === address.toLowerCase()
+  return unchanged ? null : address
+}
+
 // ---- the client's own application (16 Sep 2026) -----------------------------
 //
 // A trade client edits their business details from the storefront portal.

@@ -36,7 +36,9 @@ import {
   APPLICATION_EDITABLE_COLUMNS,
   getTradeApplicationForUser,
   updateTradeApplicationForUser,
+  newsletterOptInAddress,
 } from '../users/trade-applications.js'
+import { subscribeQuietly } from '../newsletter/mailchimp.js'
 import {
   listTradePriceListBrands,
   getTradePriceList,
@@ -99,7 +101,7 @@ const TRADE_DETAILS_RATE_LIMIT = { max: 30, timeWindow: '15 minutes' }
 
 export const accountRoutes = async (
   app,
-  { pool, mailer = null, tradePriceListsEnabled = false }
+  { pool, mailer = null, newsletter = null, fetchImpl = fetch, tradePriceListsEnabled = false }
 ) => {
   const trade = app.guards.requireRole('trade')
 
@@ -136,10 +138,17 @@ export const accountRoutes = async (
     },
     async (request, reply) => {
       try {
+        // Read first so the newsletter sign-up below can tell a switch to Yes
+        // (or a new address) from a re-save of the whole form.
+        const before = await getTradeApplicationForUser(pool, request.user.id)
         const application = await updateTradeApplicationForUser(pool, request.user.id, request.body)
         if (!application) {
           reply.code(404)
           return { error: 'Not Found', message: 'No trade application is on file for this account.' }
+        }
+        const optInAddress = newsletterOptInAddress(before, application)
+        if (optInAddress) {
+          await subscribeQuietly(newsletter, optInAddress, { fetchImpl, log: request.log })
         }
         return { application }
       } catch (error) {

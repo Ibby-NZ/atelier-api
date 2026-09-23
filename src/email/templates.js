@@ -11,6 +11,11 @@
 //   order_invoiced          -> customer, when staff confirm + attach a Xero ref (W12 US-005)
 //   payment_received        -> customer, when staff mark the order paid (US-014)
 //   shipped                 -> customer, when staff ship the order (US-014)
+//   order_cancelled         -> customer, when staff cancel (decline) the order
+//
+// The four status letters (order_invoiced, payment_received, shipped,
+// order_cancelled) also go to the order's sales rep and to every address on the
+// order's Emails list — one letter each, see notifyOrderTransition.
 
 const BRAND = 'Atelier Textiles'
 
@@ -145,6 +150,23 @@ const TEMPLATES = Object.freeze({
       '',
       ...(tracking_url ? [`Track your parcel: ${tracking_url}`, ''] : []),
       'Thank you for choosing us.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // The back-office `decline` transition, which the CRM calls "Cancel order".
+  // Its confirmation has long told the office "the client is told"; until the
+  // status letters were widened to the rep and the order's own list (23 Sep
+  // 2026) nothing was actually sent, and this is the letter that makes the
+  // sentence true. No reason line: the office declines for reasons it tells the
+  // client in person, and a stored override cannot branch on one anyway.
+  order_cancelled: ({ order_number }) => ({
+    subject: `${BRAND}: order ${order_number} has been cancelled`,
+    text: [
+      `Order ${order_number} has been cancelled.`,
+      '',
+      'If you were not expecting this, please get in touch and we will help.',
       '',
       `— ${BRAND}`,
     ].join('\n'),

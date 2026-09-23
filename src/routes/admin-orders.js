@@ -28,6 +28,9 @@ import { SHIPPING_ADDRESS_SCHEMA } from '../orders/order-request.js'
 import { ORDER_KINDS } from '../reports/filters.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { notifyOrderTransition, notifyOrderCreated } from '../email/notifications.js'
+// Who else hears about a status change — the shape and count rules, shared with
+// the edit path and mirrored by the CRM.
+import { NOTIFY_EMAILS_MAX, NOTIFY_EMAIL_PATTERN } from '../orders/notify-emails.js'
 
 // A shape check, not the whitelist: src/orders/order-filters.js decides which
 // filters exist and what a value may be (an unknown name is ignored, an unusable
@@ -127,6 +130,7 @@ const editBodySchema = {
     // non-empty.
     { required: ['discount_pct'] },
     { required: ['sales_rep_user_id'] },
+    { required: ['notify_emails'] },
     { required: ['shipping_address'] },
   ],
   dependencies: discountDependencies,
@@ -188,6 +192,16 @@ const editBodySchema = {
     // declared here as well as in the module — Ajv's removeAdditional would
     // otherwise strip it silently and the rep would simply never arrive.
     sales_rep_user_id: { type: ['integer', 'null'], minimum: 1 },
+    // The order's Emails list: extra people who get every status letter. The
+    // WHOLE list, replacing what was stored — `[]` clears it, so no null. A
+    // malformed address is a 400 here rather than a letter that bounces later;
+    // the module folds case/space duplicates. Declared here as well as in the
+    // module for the removeAdditional reason above.
+    notify_emails: {
+      type: 'array',
+      maxItems: NOTIFY_EMAILS_MAX,
+      items: { type: 'string', maxLength: 254, pattern: NOTIFY_EMAIL_PATTERN },
+    },
     // The delivery details, corrected on the order page (Edit delivery). Sent
     // alone it is accepted until the order ships; null clears it. The same
     // shape the create body and the storefront request take.
@@ -435,6 +449,10 @@ export const adminOrderRoutes = async (
     { preHandler: backoffice, schema: { params: idParamsSchema } },
     async (request) => {
       const order = await declineOrder(pool, request.params.id)
+      // The cancellation letter (order_cancelled), to the same people as every
+      // other status change. The CRM's confirmation has always promised the
+      // office "the client is told".
+      await notifyOrderTransition(mailer, pool, order)
       return { order }
     }
   )

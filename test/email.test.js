@@ -50,6 +50,8 @@ describe('email templates', () => {
         'order_invoiced',
         'payment_received',
         'shipped',
+        // The decline transition's letter ("Cancel order" in the CRM).
+        'order_cancelled',
         'contact_received',
         'backoffice_new_contact',
         // The trade portal's invoice-copy request (both halves).
@@ -92,7 +94,7 @@ describe('email templates', () => {
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(28)
+    expect(TEMPLATE_NAMES).toHaveLength(29)
   })
 
   it('backoffice_new_trade_application names the business and links the CRM applicants tab', () => {
@@ -177,6 +179,13 @@ describe('email templates', () => {
       'REQ-7'
     )
     expect(renderTemplate('shipped', { order_number: 'REQ-7' }).text).toContain('REQ-7')
+  })
+
+  it('order_cancelled names the order and says it is cancelled', () => {
+    const { subject, text } = renderTemplate('order_cancelled', { order_number: 'SO-12' })
+    expect(subject).toContain('SO-12')
+    expect(subject).toContain('cancelled')
+    expect(text).toContain('Order SO-12 has been cancelled.')
   })
 
   it('throws on an unknown template name', () => {
@@ -341,14 +350,16 @@ describe('notifications', () => {
     expect(transport.sent[0].text).toContain('$50.00 NZD')
   })
 
-  it('notifyOrderTransition maps confirmed/paid/shipped to templates and skips others', async () => {
+  it('notifyOrderTransition maps every status an order moves to onto a letter', async () => {
     const db = { query: async () => ({ rows: [] }) }
     const cases = [
-      { status: 'confirmed', to: 'buyer@test.example' },
-      { status: 'paid', to: 'buyer@test.example' },
-      { status: 'shipped', to: 'buyer@test.example' },
+      { status: 'confirmed', subject: 'invoice for order REQ-8' },
+      { status: 'paid', subject: 'payment received for order REQ-8' },
+      { status: 'shipped', subject: 'order REQ-8 has shipped' },
+      // "Cancel order" in the CRM — it used to send nothing (23 Sep 2026).
+      { status: 'declined', subject: 'order REQ-8 has been cancelled' },
     ]
-    for (const { status } of cases) {
+    for (const { status, subject } of cases) {
       const { transport, mailer } = buildMailer()
       await notifyOrderTransition(mailer, db, {
         order_number: 'REQ-8',
@@ -359,15 +370,102 @@ describe('notifications', () => {
       })
       expect(transport.sent).toHaveLength(1)
       expect(transport.sent[0].to).toBe('buyer@test.example')
+      expect(transport.sent[0].subject).toContain(subject)
     }
 
+    // `requested` is the status an order is CREATED in; creation has its own
+    // letter (notifyOrderCreated), so there is no transition to announce.
     const { transport, mailer } = buildMailer()
     await notifyOrderTransition(mailer, db, {
       order_number: 'REQ-8',
-      status: 'declined',
+      status: 'requested',
       guest_email: 'buyer@test.example',
     })
     expect(transport.sent).toHaveLength(0)
+  })
+
+  // 23 Sep 2026: "when the status changes on a sales order, an email is sent to
+  // the client and to the sales rep", plus the addresses added on the order.
+  it('notifyOrderTransition sends the same letter to the client, the rep and every added address', async () => {
+    const { transport, mailer } = buildMailer()
+    const db = { query: async () => ({ rows: [] }) }
+    await notifyOrderTransition(mailer, db, {
+      order_number: 'SO-77',
+      status: 'shipped',
+      tracking_url: 'https://track.example/77',
+      guest_email: 'client@test.example',
+      user_id: null,
+      sales_rep_email: 'rep@atelier.example',
+      notify_emails: ['accounts@client.example', 'pa@client.example'],
+    })
+    expect(transport.sent.map((m) => m.to)).toEqual([
+      'client@test.example',
+      'rep@atelier.example',
+      'accounts@client.example',
+      'pa@client.example',
+    ])
+    // The same letter, not a variant per recipient — and never a CC: each
+    // address sees only its own.
+    const [first, ...rest] = transport.sent
+    for (const message of rest) {
+      expect(message.subject).toBe(first.subject)
+      expect(message.text).toBe(first.text)
+    }
+    expect(first.text).toContain('https://track.example/77')
+    for (const message of transport.sent) {
+      expect(message.cc).toBeUndefined()
+      expect(message.bcc).toBeUndefined()
+    }
+  })
+
+  it('notifyOrderTransition sends each address once, whatever its case', async () => {
+    const { transport, mailer } = buildMailer()
+    const db = { query: async () => ({ rows: [] }) }
+    await notifyOrderTransition(mailer, db, {
+      order_number: 'SO-78',
+      status: 'paid',
+      guest_email: 'Owner@Studio.example',
+      // The rep bought for their own studio: they are the client too.
+      sales_rep_email: 'owner@studio.example',
+      notify_emails: ['OWNER@studio.example', 'accounts@studio.example'],
+    })
+    expect(transport.sent.map((m) => m.to)).toEqual([
+      'Owner@Studio.example',
+      'accounts@studio.example',
+    ])
+  })
+
+  it('notifyOrderTransition still tells the rep and the list when the client has no address', async () => {
+    const { transport, mailer } = buildMailer()
+    const db = { query: async () => ({ rows: [] }) }
+    await notifyOrderTransition(mailer, db, {
+      order_number: 'SO-79',
+      status: 'confirmed',
+      xero_invoice_ref: 'INV-79',
+      guest_email: null,
+      user_id: null,
+      sales_rep_email: 'rep@atelier.example',
+      notify_emails: ['accounts@client.example'],
+    })
+    expect(transport.sent.map((m) => m.to)).toEqual([
+      'rep@atelier.example',
+      'accounts@client.example',
+    ])
+    expect(transport.sent[0].text).toContain('INV-79')
+  })
+
+  it('notifyOrderTransition with no rep and no list is the client alone, as before', async () => {
+    const { transport, mailer } = buildMailer()
+    const db = { query: async () => ({ rows: [{ email: 'member@test.example' }] }) }
+    await notifyOrderTransition(mailer, db, {
+      order_number: 'SO-80',
+      status: 'paid',
+      guest_email: null,
+      user_id: 9,
+      sales_rep_email: null,
+      notify_emails: [],
+    })
+    expect(transport.sent.map((m) => m.to)).toEqual(['member@test.example'])
   })
 
   // W12 US-005: the client's confirmation is sent when the order is CREATED, and
@@ -648,5 +746,148 @@ describe('order-request trigger wiring', () => {
     const staff = transport.sent.find((m) => m.to === BACKOFFICE)
     expect(client.subject).toContain(orderNumber)
     expect(staff.subject).toContain(orderNumber)
+  })
+
+  // --- status letters: client + sales rep + the order's Emails list ---------
+  // (23 Sep 2026). The office keys the order with a rep, adds addresses on the
+  // order page, and every status change reaches all of them.
+
+  const keyOrder = async (extra = {}) => {
+    const { rows } = await pool.query('SELECT id FROM colourways WHERE sku = $1', [SKU])
+    const response = await app.inject({
+      method: 'POST',
+      url: '/admin/orders',
+      headers: { cookie: backofficeCookie },
+      payload: {
+        contact: { name: 'Walk In', email: 'walkin@email-test.example' },
+        lines: [{ colourway_id: rows[0].id, qty: 2, unit_price_cents: 9900 }],
+        ...extra,
+      },
+    })
+    expect(response.statusCode).toBe(201)
+    return response.json().order
+  }
+  const staffId = async () =>
+    (await pool.query('SELECT id FROM users WHERE email = $1', [STAFF_EMAIL])).rows[0].id
+  const patchOrder = (id, payload) =>
+    app.inject({
+      method: 'PATCH',
+      url: `/admin/orders/${id}`,
+      headers: { cookie: backofficeCookie },
+      payload,
+    })
+  const move = (id, action, payload = {}) =>
+    app.inject({
+      method: 'POST',
+      url: `/admin/orders/${id}/${action}`,
+      headers: { cookie: backofficeCookie },
+      payload,
+    })
+
+  it('a status change reaches the client, the sales rep and every added address — once each', async () => {
+    const order = await keyOrder({ sales_rep_user_id: await staffId() })
+    // The admin order says who the rep's copy goes to.
+    expect(order.sales_rep_email).toBe(STAFF_EMAIL)
+    expect(order.notify_emails).toEqual([])
+
+    const saved = await patchOrder(order.id, {
+      notify_emails: [
+        'Accounts@Client.email-test.example',
+        // The same address again in another case: stored once, first spelling.
+        'accounts@client.email-test.example',
+        'pa@client.email-test.example',
+        // Already the client's: stored, but the client still gets ONE letter.
+        'walkin@email-test.example',
+      ],
+    })
+    expect(saved.statusCode).toBe(200)
+    expect(saved.json().order.notify_emails).toEqual([
+      'Accounts@Client.email-test.example',
+      'pa@client.email-test.example',
+      'walkin@email-test.example',
+    ])
+
+    transport.sent.length = 0
+    const confirmed = await move(order.id, 'confirm', { xero_invoice_ref: 'INV-EMAIL-1' })
+    expect(confirmed.statusCode).toBe(200)
+    expect(transport.sent.map((m) => m.to)).toEqual([
+      'walkin@email-test.example',
+      STAFF_EMAIL,
+      'Accounts@Client.email-test.example',
+      'pa@client.email-test.example',
+    ])
+    for (const message of transport.sent) {
+      expect(message.subject).toContain(order.order_number)
+      expect(message.text).toContain('INV-EMAIL-1')
+    }
+  })
+
+  it('cancelling an order now sends a letter, to the same people', async () => {
+    const order = await keyOrder({ sales_rep_user_id: await staffId() })
+    await patchOrder(order.id, { notify_emails: ['pa@client.email-test.example'] })
+    transport.sent.length = 0
+
+    const declined = await move(order.id, 'decline')
+    expect(declined.statusCode).toBe(200)
+    expect(transport.sent.map((m) => m.to)).toEqual([
+      'walkin@email-test.example',
+      STAFF_EMAIL,
+      'pa@client.email-test.example',
+    ])
+    expect(transport.sent[0].subject).toContain(`order ${order.order_number} has been cancelled`)
+  })
+
+  it('the Emails list is an annotation: it saves on a shipped order', async () => {
+    const order = await keyOrder()
+    expect((await move(order.id, 'confirm', { xero_invoice_ref: 'INV-EMAIL-2' })).statusCode).toBe(200)
+    expect((await move(order.id, 'mark-paid')).statusCode).toBe(200)
+    expect((await move(order.id, 'ship')).statusCode).toBe(200)
+
+    const saved = await patchOrder(order.id, { notify_emails: ['late@client.email-test.example'] })
+    expect(saved.statusCode).toBe(200)
+    expect(saved.json().order.notify_emails).toEqual(['late@client.email-test.example'])
+
+    // `[]` clears it — there is no null.
+    const cleared = await patchOrder(order.id, { notify_emails: [] })
+    expect(cleared.statusCode).toBe(200)
+    expect(cleared.json().order.notify_emails).toEqual([])
+    expect((await patchOrder(order.id, { notify_emails: null })).statusCode).toBe(400)
+  })
+
+  it('refuses a malformed address or too many, before anything is stored', async () => {
+    const order = await keyOrder()
+    for (const bad of ['not-an-address', 'two words@client.example', 'line\nbreak@client.example']) {
+      const response = await patchOrder(order.id, { notify_emails: [bad] })
+      expect(response.statusCode, bad).toBe(400)
+    }
+    const tooMany = Array.from({ length: 11 }, (_, i) => `person${i}@client.email-test.example`)
+    expect((await patchOrder(order.id, { notify_emails: tooMany })).statusCode).toBe(400)
+
+    const { rows } = await pool.query('SELECT notify_emails FROM orders WHERE id = $1', [order.id])
+    expect(rows[0].notify_emails).toEqual([])
+  })
+
+  it('an archived rep is not emailed: the order stops naming their inbox', async () => {
+    const GONE = 'gone-rep@email-test.example'
+    await pool.query('DELETE FROM users WHERE email = $1', [GONE])
+    const { rows } = await pool.query(
+      `INSERT INTO users (email, password_hash, role) VALUES ($1, 'x', 'backoffice') RETURNING id`,
+      [GONE]
+    )
+    try {
+      const order = await keyOrder({ sales_rep_user_id: rows[0].id })
+      expect(order.sales_rep_email).toBe(GONE)
+
+      await pool.query('UPDATE users SET archived_at = now() WHERE id = $1', [rows[0].id])
+      transport.sent.length = 0
+      const confirmed = await move(order.id, 'confirm', { xero_invoice_ref: 'INV-EMAIL-3' })
+      expect(confirmed.json().order.sales_rep_email).toBeNull()
+      // Still the seller of record — reports keep them — just no longer mailed.
+      expect(confirmed.json().order.sales_rep_user_id).toBe(rows[0].id)
+      expect(transport.sent.map((m) => m.to)).toEqual(['walkin@email-test.example'])
+    } finally {
+      // The order goes with the SKU fixture; the rep FK is SET NULL.
+      await pool.query('DELETE FROM users WHERE id = $1', [rows[0].id])
+    }
   })
 })

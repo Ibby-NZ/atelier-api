@@ -125,6 +125,7 @@ describe('POST /admin/legacy/merge', () => {
       housesRaised: [],
       catalogue: { items: expect.any(Number), colourways: expect.any(Number) },
       stock: { matched: expect.any(Number), stocked: expect.any(Number) },
+      categories: { reviewed: expect.any(Number), filled: expect.any(Number) },
     })
     // No assertion on `accounts.created`: legacy-merge.test.js runs the same
     // merge against the same database in parallel and may have landed this
@@ -160,6 +161,7 @@ describe('POST /admin/legacy/merge runs one at a time', () => {
     housesRaised: [],
     catalogue: { items: 0, noHouse: 0, products: 0, colourways: 0, inventoryCreated: 0, unknownBrands: [], skips: [], conflicts: 0 },
     stock: { matched: 0, stocked: 0, priced: 0, unmatchedHouse: 0 },
+    categories: { reviewed: 0, unplaced: 0, products: 0, filled: 0, kept: 0, split: 0, missing: 0 },
   }
 
   // light-my-request dispatches lazily — an inject() nobody awaits never

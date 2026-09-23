@@ -38,6 +38,12 @@ const main = async () => {
     list('  houses not in the catalogue (items skipped)', s.catalogue.unknownBrands, (b) => `${b.brand}: ${b.rows}`)
     list('  skipped', s.catalogue.skips, (k) => `${k.reason}: ${k.rows}`)
     console.log(`Stock      — ${s.stock.matched} item(s) matched a colourway; ${s.stock.stocked} quantity(ies) set, ${s.stock.priced} product price(s) filled`)
+    console.log(
+      `Categories — ${s.categories.reviewed} reviewed item(s) on ${s.categories.products} product(s); `
+      + `${s.categories.filled} filled, ${s.categories.kept} already set differently (kept), `
+      + `${s.categories.split} split between categories and ${s.categories.missing} naming a deleted category (left blank), `
+      + `${s.categories.unplaced} item(s) on no product`
+    )
     console.log('Legacy merge complete.')
   } finally {
     await pool.end()

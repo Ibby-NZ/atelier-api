@@ -19,7 +19,10 @@
 //                                         (through the colour-file importer, so
 //                                         a code the supplier files already
 //                                         landed refreshes in place), then the
-//                                         D365 on-hand figure onto its stock row
+//                                         D365 on-hand figure onto its stock row,
+//                                         and a blank product category filled
+//                                         where Atelier has reviewed the item's
+//                                         type (landCategories)
 //
 // FOUR THINGS ARE NOT, and the reasons are structural rather than unfinished:
 // sales orders / invoices and purchase orders / invoices export HEADER-ONLY (no
@@ -44,8 +47,10 @@
 
 import { importColourways } from '../seed/colourways-import.js'
 import { slugify } from '../seed/slugify.js'
+import { REVIEWED_STOCK_ITEM_TYPES } from '../seed/data/reviewed-stock-item-types.js'
 import { CFA_STATES } from '../reserves/reserve-line-states.js'
 import { withChangeContext } from '../pricing/price-history.js'
+import { categoryForItemType } from '../../scripts/lib/price-template.js'
 
 // D365's CFA words, onto the platform's vocabulary (carried over unchanged in
 // meaning — the houses still speak it). Anything else, including blank, is null.
@@ -352,25 +357,39 @@ const raiseHouses = async (client, items) => {
 
 const cents = (value) => (value == null ? null : Math.round(Number(value) * 100))
 
+const brandsBySlug = async (pool) => {
+  const { rows: brands } = await pool.query('SELECT id, name, slug FROM brands')
+  return new Map(brands.map((brand) => [brand.slug, brand]))
+}
+
+const houseOf = (item, bySlug) => bySlug.get(slugify(blankToNull(item.range_name) ?? ''))
+
+// The SKU an item's colourway carries, derived exactly as the importer derived
+// it, or null where the design or the colour code slugs to nothing. The stock
+// and the category fills both match on it, so it is spelled once.
+const skuFor = (item, brand) => {
+  const row = stockItemAsColourwayRow(item, 0)
+  const design = slugify(row.design)
+  const colour = slugify(row.colour_code)
+  return design && colour ? `${brand.slug}-${design}-${colour}`.toUpperCase() : null
+}
+
 // The on-hand figure onto the colourway's stock row, and a price onto a
 // product that has none. Matching is by SKU, derived exactly as the importer
 // derived it, through the catalogue's own brand row.
 const landStock = async (pool, items) => {
-  const { rows: brands } = await pool.query('SELECT id, name, slug FROM brands')
-  const bySlug = new Map(brands.map((brand) => [brand.slug, brand]))
+  const bySlug = await brandsBySlug(pool)
   const skus = []
   const qty = []
   const trade = []
   const retail = []
   let unmatchedHouse = 0
   for (const item of items) {
-    const brand = bySlug.get(slugify(blankToNull(item.range_name) ?? ''))
+    const brand = houseOf(item, bySlug)
     if (!brand) { unmatchedHouse += 1; continue }
-    const row = stockItemAsColourwayRow(item, 0)
-    const design = slugify(row.design)
-    const colour = slugify(row.colour_code)
-    if (!design || !colour) continue
-    skus.push(`${brand.slug}-${design}-${colour}`.toUpperCase())
+    const sku = skuFor(item, brand)
+    if (!sku) continue
+    skus.push(sku)
     qty.push(Number(item.stock_on_hand ?? 0))
     const nzd = String(item.currency ?? '').toLowerCase().includes('new zealand')
     trade.push(nzd ? cents(item.trade_price) : null)
@@ -404,13 +423,86 @@ const landStock = async (pool, items) => {
   })
 }
 
+// A category onto each product a REVIEWED stock item became, fill-only.
+//
+// The reviewed item types are a person's answer
+// (src/seed/data/reviewed-stock-item-types.js), so they may fill a blank
+// `products.category`; they never overwrite one, because a category set in the
+// CRM is a later answer than the workbook — the posture of the price fill
+// above and of the seed's COALESCE. A product whose reviewed items disagree
+// (one colourway Towels, another Bed Linen) is left blank and counted as
+// `split`: which one the design is, is a person's call, not MIN()'s. A
+// category the office has since deleted is left blank too (`missing`), since
+// the foreign key would refuse it and take the rest of the fill down with it.
+//
+// One statement: the data-modifying CTE and the counts beside it read the same
+// snapshot, so `kept` is measured on the rows as they were before the fill.
+const landCategories = async (pool, items, reviewedItemTypes) => {
+  const reviewed = new Map(
+    reviewedItemTypes.map(([guid, , itemType]) => [String(guid).toLowerCase(), itemType])
+  )
+  const bySlug = await brandsBySlug(pool)
+  const skus = []
+  const categories = []
+  let seen = 0
+  for (const item of items) {
+    const itemType = reviewed.get(String(item.guid).toLowerCase())
+    if (itemType === undefined) continue
+    seen += 1
+    const category = categoryForItemType(itemType)
+    const brand = houseOf(item, bySlug)
+    const sku = category && brand ? skuFor(item, brand) : null
+    if (!sku) continue
+    skus.push(sku)
+    categories.push(category)
+  }
+  const { rows: [counts] } = await pool.query(
+    `WITH stated AS (
+       SELECT c.product_id, s.category
+         FROM unnest($1::text[], $2::text[]) AS s(sku, category)
+         JOIN colourways c ON c.sku = s.sku
+     ), answer AS (
+       SELECT product_id, MIN(category) AS category, COUNT(DISTINCT category) AS answers
+         FROM stated GROUP BY product_id
+     ), filled AS (
+       UPDATE products p
+          SET category = a.category
+         FROM answer a
+        WHERE p.id = a.product_id
+          AND a.answers = 1
+          AND p.category IS NULL
+          AND EXISTS (SELECT 1 FROM product_categories v WHERE v.slug = a.category)
+       RETURNING p.id
+     )
+     SELECT (SELECT COUNT(*) FROM stated)::int AS placed,
+            (SELECT COUNT(*) FROM answer)::int AS products,
+            (SELECT COUNT(*) FROM filled)::int AS filled,
+            (SELECT COUNT(*) FROM answer a JOIN products p ON p.id = a.product_id
+              WHERE a.answers = 1 AND p.category <> a.category)::int AS kept,
+            (SELECT COUNT(*) FROM answer WHERE answers > 1)::int AS split,
+            (SELECT COUNT(*) FROM answer a JOIN products p ON p.id = a.product_id
+              WHERE a.answers = 1 AND p.category IS NULL
+                AND NOT EXISTS (SELECT 1 FROM product_categories v WHERE v.slug = a.category))::int AS missing`,
+    [skus, categories]
+  )
+  const { placed, ...rest } = counts
+  // `unplaced`: reviewed items in this ledger that landed on no product — their
+  // house is not in the catalogue, or no colourway carries their SKU.
+  return { reviewed: seen, unplaced: seen - placed, ...rest }
+}
+
 // ---------------------------------------------------------------------------
 
 /**
  * @param {import('pg').Pool} pool
- * @param {{ createHouses?: boolean }} [opts]
+ * @param {{ createHouses?: boolean, reviewedItemTypes?: ReadonlyArray<[string, string, string]> }} [opts]
+ *   `reviewedItemTypes` is `[guid, item code, item type]` rows; the committed
+ *   REVIEWED_STOCK_ITEM_TYPES unless a test hands in its own.
  */
-export const mergeLegacy = async (pool, { createHouses = false } = {}) => {
+export const mergeLegacy = async (
+  pool,
+  { createHouses = false, reviewedItemTypes = REVIEWED_STOCK_ITEM_TYPES } = {}
+) => {
   const client = await pool.connect()
   let summary
   try {
@@ -437,6 +529,7 @@ export const mergeLegacy = async (pool, { createHouses = false } = {}) => {
   const filed = summary.items.filter((item) => blankToNull(item.range_name) !== null)
   const catalogue = await importColourways(pool, filed.map(stockItemAsColourwayRow))
   const stock = await landStock(pool, filed)
+  const categories = await landCategories(pool, filed, reviewedItemTypes)
 
   return Object.freeze({
     accounts: summary.accounts,
@@ -454,5 +547,6 @@ export const mergeLegacy = async (pool, { createHouses = false } = {}) => {
       conflicts: catalogue.conflicts.length,
     },
     stock,
+    categories,
   })
 }

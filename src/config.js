@@ -183,7 +183,8 @@ export const loadConfig = (env = process.env) => {
     emailRedirectTo: env.EMAIL_REDIRECT_TO ?? null,
 
     // Newsletter (Mailchimp). null until all three are set; POST /newsletter
-    // answers 503 meanwhile. MAILCHIMP_SERVER is the key's `-usNN` suffix.
+    // answers 503 meanwhile and the trade form's opt-in is not acted on.
+    // MAILCHIMP_SERVER is the key's `-usNN` suffix.
     newsletter:
       env.MAILCHIMP_API_KEY && env.MAILCHIMP_SERVER && env.MAILCHIMP_AUDIENCE_ID
         ? {

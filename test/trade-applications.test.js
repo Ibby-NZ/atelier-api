@@ -4,7 +4,11 @@ import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
 import { createMailer } from '../src/email/mailer.js'
-import { validateTradeApplication } from '../src/users/trade-applications.js'
+import {
+  validateTradeApplication,
+  newsletterOptInAddress,
+} from '../src/users/trade-applications.js'
+import { memberRequest } from '../src/newsletter/mailchimp.js'
 import { sampleTradeApplication } from './helpers/trade-application-fixture.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
@@ -71,6 +75,29 @@ describe('validateTradeApplication', () => {
     const fields = validateTradeApplication(application).map((e) => e.field)
     expect(fields).toContain('application.mailchimp_opt_in')
     expect(fields).toContain('application.cash_account_acceptable')
+  })
+})
+
+describe('newsletterOptInAddress', () => {
+  const yes = sampleTradeApplication({ primary_contact_email: ' hello@studio.example.com ' })
+  const no = sampleTradeApplication({ mailchimp_opt_in: false })
+
+  it('a Yes on submission signs up the trimmed primary contact email', () => {
+    expect(newsletterOptInAddress(null, yes)).toBe('hello@studio.example.com')
+  })
+
+  it('a No signs nobody up', () => {
+    expect(newsletterOptInAddress(null, no)).toBeNull()
+    expect(newsletterOptInAddress(yes, no)).toBeNull()
+  })
+
+  it('from the portal: a switch to Yes or a new address signs up, a re-save does not', () => {
+    expect(newsletterOptInAddress(no, yes)).toBe('hello@studio.example.com')
+    expect(newsletterOptInAddress(yes, { ...yes })).toBeNull()
+    expect(newsletterOptInAddress(yes, { ...yes, primary_contact_email: 'HELLO@studio.example.com' })).toBeNull()
+    expect(newsletterOptInAddress(yes, { ...yes, primary_contact_email: 'new@studio.example.com' })).toBe(
+      'new@studio.example.com'
+    )
   })
 })
 
@@ -269,6 +296,100 @@ describe('trade applications', () => {
           testEmail('bot'),
         ])
         expect(rows).toHaveLength(0)
+      })
+    })
+
+    // "Happy to receive notifications from Mailchimp?" Yes = the footer's
+    // sign-up. Its own instance: it needs Mailchimp config and a fake fetch,
+    // and its own register bucket.
+    describe('the Mailchimp opt-in', () => {
+      const NEWSLETTER = { apiKey: 'abc123-us21', server: 'us21', audienceId: 'list9' }
+      let optInApp
+      let calls
+      let mailchimpStatus
+
+      const apply = (local, overrides) =>
+        optInApp.inject({
+          method: 'POST',
+          url: '/auth/trade-application',
+          payload: {
+            email: testEmail(local),
+            password: PASSWORD,
+            application: sampleTradeApplication(overrides),
+          },
+        })
+
+      beforeAll(async () => {
+        calls = []
+        const newsletterFetch = async (url, init) => {
+          calls.push({ url, init })
+          return {
+            ok: mailchimpStatus < 400,
+            status: mailchimpStatus,
+            json: async () => (mailchimpStatus < 400 ? { status: 'pending' } : { title: 'Invalid Resource' }),
+          }
+        }
+        optInApp = buildApp({
+          pool,
+          cookieSecret: TEST_COOKIE_SECRET,
+          newsletter: NEWSLETTER,
+          newsletterFetch,
+          logger: false,
+        })
+        await optInApp.ready()
+      })
+
+      afterAll(async () => {
+        await optInApp.close()
+      })
+
+      it('a Yes puts the primary contact email on the footer audience', async () => {
+        calls.length = 0
+        mailchimpStatus = 200
+        const response = await apply('opted-in', { primary_contact_email: 'news@trade-app-test.example.com' })
+        expect(response.statusCode).toBe(201)
+        expect(calls).toHaveLength(1)
+        const expected = memberRequest(NEWSLETTER, 'news@trade-app-test.example.com')
+        expect(calls[0].url).toBe(expected.url)
+        expect(JSON.parse(calls[0].init.body)).toEqual(JSON.parse(expected.init.body))
+      })
+
+      it('a No signs nobody up', async () => {
+        calls.length = 0
+        mailchimpStatus = 200
+        const response = await apply('opted-out', { mailchimp_opt_in: false })
+        expect(response.statusCode).toBe(201)
+        expect(calls).toHaveLength(0)
+      })
+
+      it('a Mailchimp refusal does not fail the application', async () => {
+        calls.length = 0
+        mailchimpStatus = 400
+        const response = await apply('refused')
+        expect(response.statusCode).toBe(201)
+        expect(calls).toHaveLength(1)
+        const { rows } = await pool.query(
+          `SELECT 1 FROM trade_applications ta JOIN users u ON u.id = ta.user_id WHERE u.email = $1`,
+          [testEmail('refused')]
+        )
+        expect(rows).toHaveLength(1)
+      })
+
+      it('a filled honeypot calls nobody', async () => {
+        calls.length = 0
+        mailchimpStatus = 200
+        const response = await optInApp.inject({
+          method: 'POST',
+          url: '/auth/trade-application',
+          payload: {
+            website: 'http://spam.example',
+            email: testEmail('bot-optin'),
+            password: PASSWORD,
+            application: sampleTradeApplication(),
+          },
+        })
+        expect(response.statusCode).toBe(201)
+        expect(calls).toHaveLength(0)
       })
     })
 

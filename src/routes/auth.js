@@ -28,7 +28,9 @@ import { buildUpdate } from '../catalogue/admin-brands.js'
 import {
   validateTradeApplication,
   submitTradeApplication,
+  newsletterOptInAddress,
 } from '../users/trade-applications.js'
+import { subscribeQuietly } from '../newsletter/mailchimp.js'
 
 const LOGIN_RATE_LIMIT_MAX = 10
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000
@@ -218,7 +220,14 @@ const createAccount = async ({ pool, reply, body, role }) => {
 
 export const authRoutes = async (
   app,
-  { pool, mailer = null, storeBaseUrl = 'http://localhost:4321', crmBaseUrl = 'http://localhost:5273' }
+  {
+    pool,
+    mailer = null,
+    newsletter = null,
+    fetchImpl = fetch,
+    storeBaseUrl = 'http://localhost:4321',
+    crmBaseUrl = 'http://localhost:5273',
+  }
 ) => {
   app.post(
     '/auth/register',
@@ -263,6 +272,13 @@ export const authRoutes = async (
         // The office learns of the application by mail; the applicant does
         // not — their one letter is the acceptance on approval.
         await notifyTradeApplicationReceived(mailer, { user, application, crmBaseUrl })
+        // A Yes to the Mailchimp question is the footer's newsletter sign-up
+        // for the primary contact email: Mailchimp mails its own double opt-in
+        // confirmation. Swallowed on failure — the application already stands.
+        const optInAddress = newsletterOptInAddress(null, application)
+        if (optInAddress) {
+          await subscribeQuietly(newsletter, optInAddress, { fetchImpl, log: request.log })
+        }
         // Deliberately NO session cookie: the account cannot sign in until the
         // back office approves the application (login answers 403 "pending").
         reply.code(201)

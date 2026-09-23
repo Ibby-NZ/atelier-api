@@ -51,8 +51,10 @@ export const buildApp = ({
   crmBaseUrl = 'http://localhost:5273',
   mailer = null,
   // Mailchimp audience config (src/config.js `newsletter`). null = POST
-  // /newsletter answers 503.
+  // /newsletter answers 503 and a trade form's opt-in signs nobody up.
   newsletter = null,
+  // The fetch Mailchimp is called through; tests inject a fake.
+  newsletterFetch = fetch,
   // The Xero service (src/xero/service.js). null = not configured; the
   // /admin/xero routes answer 503, same posture as checkout without Stripe.
   xero = null,
@@ -133,7 +135,14 @@ export const buildApp = ({
   })
 
   app.register(async (api) => {
-    api.register(authRoutes, { pool, mailer, storeBaseUrl, crmBaseUrl })
+    api.register(authRoutes, {
+      pool,
+      mailer,
+      newsletter,
+      fetchImpl: newsletterFetch,
+      storeBaseUrl,
+      crmBaseUrl,
+    })
     api.register(catalogueRoutes, { pool })
     api.register(shippingRoutes, { pool })
     api.register(checkoutRoutes, { pool, stripe, storeBaseUrl })
@@ -143,7 +152,13 @@ export const buildApp = ({
     // /account/* — the approved-trade client portal (dashboard, sample history,
     // invoice record, price lists). requireRole('trade') throughout: staff are
     // excluded exactly as they are from trade pricing.
-    api.register(accountRoutes, { pool, mailer, tradePriceListsEnabled })
+    api.register(accountRoutes, {
+      pool,
+      mailer,
+      newsletter,
+      fetchImpl: newsletterFetch,
+      tradePriceListsEnabled,
+    })
     // /admin/orders — called by the storefront's AdminOrders island, so it needs
     // the same CORS allowance. Unrelated to the AdminJS panel below.
     api.register(adminOrderRoutes, { pool, mailer, lineAmountTypes, xero })
@@ -251,7 +266,7 @@ export const buildApp = ({
     // storefront contact form posts here; both need the storefront CORS scope.
     api.register(contactRoutes, { pool, mailer })
     // POST /newsletter (public) — the footer sign-up, forwarded to Mailchimp.
-    api.register(newsletterRoutes, { newsletter })
+    api.register(newsletterRoutes, { newsletter, fetchImpl: newsletterFetch })
 
     api.get('/health', async (request, reply) => {
       try {

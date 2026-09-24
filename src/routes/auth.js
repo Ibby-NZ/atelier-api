@@ -227,6 +227,9 @@ export const authRoutes = async (
     fetchImpl = fetch,
     storeBaseUrl = 'http://localhost:4321',
     crmBaseUrl = 'http://localhost:5273',
+    // Who approves a new trade application (config TRADE_APPROVER_EMAIL);
+    // null sends the alert to the back-office address instead.
+    tradeApproverEmail = null,
   }
 ) => {
   app.post(
@@ -263,15 +266,21 @@ export const authRoutes = async (
 
       const passwordHash = await hashPassword(password)
       try {
-        const user = await submitTradeApplication(pool, {
+        const { user, tradeAccountId } = await submitTradeApplication(pool, {
           email,
           passwordHash,
           name,
           application,
         })
-        // The office learns of the application by mail; the applicant does
-        // not — their one letter is the acceptance on approval.
-        await notifyTradeApplicationReceived(mailer, { user, application, crmBaseUrl })
+        // The approver learns of the application by mail; the applicant does
+        // not — their one letter is the approval or the refusal.
+        await notifyTradeApplicationReceived(mailer, {
+          to: tradeApproverEmail,
+          user,
+          application,
+          tradeAccountId,
+          crmBaseUrl,
+        })
         // A Yes to the Mailchimp question is the footer's newsletter sign-up
         // for the primary contact email: Mailchimp mails its own double opt-in
         // confirmation. Swallowed on failure — the application already stands.

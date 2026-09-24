@@ -31,7 +31,7 @@ const PG_UNIQUE_VIOLATION = '23505'
 // `can_view_finance` is here rather than in PUBLIC_USER_COLUMNS because it is a
 // staff permission the back office edits — a client's own /auth/me has no use
 // for it. (Reporting derives its access from it; see the whitelist note below.)
-const USER_READ_COLUMNS = `${PUBLIC_USER_COLUMNS}, created_at, archived_at, can_view_finance`
+const USER_READ_COLUMNS = `${PUBLIC_USER_COLUMNS}, created_at, archived_at, can_view_finance, trade_first_approved_at`
 
 // Only these columns are ever writable via updateUser. password_hash stays with
 // the auth endpoints (a reset is a password flow, not a field edit) and
@@ -85,6 +85,9 @@ const toUser = (row) =>
     created_at: row.created_at,
     archived_at: row.archived_at,
     can_view_finance: row.can_view_finance,
+    // The approver's approval of a pending trade login; the final approval
+    // (trade_approved) waits on it. See src/trade-accounts/review.js.
+    trade_first_approved_at: row.trade_first_approved_at ?? null,
   })
 
 /**
@@ -278,6 +281,12 @@ export const updateUser = async (pool, id, input) => {
       : demoted
 
   const { sets, params } = buildUpdate(patch, USER_UPDATE_COLUMNS)
+  // A login whose approval goes (revoked, or a role move off trade) is reviewed
+  // from the start again: the approver's first approval goes with it. Written
+  // as a literal, never from the body — no caller sets this column directly.
+  if (patch.trade_approved === false) {
+    sets.push('trade_first_approved_at = NULL')
+  }
   let rows
   try {
     ;({ rows } = await pool.query(

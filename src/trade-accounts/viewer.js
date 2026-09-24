@@ -58,9 +58,16 @@ export const VIEWER_CTE = `SELECT ta.id AS trade_account_id,
 /** The predicate every scoped read uses to match a legacy row to the viewer. */
 export const VIEWER_MATCH = `lower(btrim(v.customer_name))`
 
+// The account manager is the account OWNER (24 Sep 2026, client: "they should
+// be the same thing") — the staff login picked in the CRM — by name and work
+// email. Never the owner's `users.phone`: that is whatever the person typed on
+// their own login, not a number chosen for clients. The old text columns
+// (carried over from Dynamics) are the fallback while nobody is picked.
 const ACCOUNT_MANAGER_COLUMNS = `ta.account_manager_name,
         ta.account_manager_email,
-        ta.account_manager_phone`
+        ta.account_manager_phone,
+        owner.name AS owner_name,
+        owner.email AS owner_email`
 
 /**
  * The signed-in user's trade account, or null when they have no link.
@@ -89,6 +96,7 @@ export const loadViewerTradeAccount = async (pool, userId) => {
             ${ACCOUNT_MANAGER_COLUMNS}
        FROM trade_account_users tau
        JOIN trade_accounts ta ON ta.id = tau.trade_account_id
+       LEFT JOIN users owner ON owner.id = ta.account_owner_id AND owner.archived_at IS NULL
       WHERE tau.user_id = $1`,
     [userId]
   )
@@ -112,6 +120,9 @@ export const loadViewerTradeAccount = async (pool, userId) => {
 // the storefront branches on (it shows the generic showroom block instead), and
 // `{ name: null, … }` would read as one that exists with no name.
 const toAccountManager = (row) => {
+  if (row.owner_email) {
+    return { name: row.owner_name ?? null, email: row.owner_email, phone: null }
+  }
   if (!row.account_manager_name && !row.account_manager_email && !row.account_manager_phone) {
     return null
   }

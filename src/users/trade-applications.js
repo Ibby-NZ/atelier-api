@@ -173,18 +173,26 @@ const applicationValues = (userId, a) => [
   a.signature.trim(),
 ]
 
-const APPLICATION_READ_COLUMNS = ['id', ...APPLICATION_INSERT_COLUMNS, 'trade_account_id', 'created_at']
+const APPLICATION_READ_COLUMNS = [
+  'id',
+  ...APPLICATION_INSERT_COLUMNS,
+  'trade_account_id',
+  'created_at',
+  'declined_at',
+  'decline_reason',
+]
   .map((column) => `ta.${column}`)
   .join(', ')
 
 /**
  * Create the trade account AND store the application in one transaction: a
  * duplicate email (409) leaves no orphan application, and a failed insert
- * leaves no account without a form. Returns the public user row for the 201.
+ * leaves no account without a form. Returns the public user row for the 201
+ * and the id of the company it raised (the approver's alert links it).
  *
  * @param {import('pg').Pool} pool
  * @param {{ email: string, passwordHash: string, name?: string|null, application: object }} input
- * @returns {Promise<object>} public user row
+ * @returns {Promise<{ user: object, tradeAccountId: number }>}
  */
 export const submitTradeApplication = async (pool, { email, passwordHash, name, application }) => {
   const client = await pool.connect()
@@ -211,7 +219,7 @@ export const submitTradeApplication = async (pool, { email, passwordHash, name, 
     )
 
     await client.query('COMMIT')
-    return user
+    return { user, tradeAccountId }
   } catch (error) {
     await client.query('ROLLBACK')
     if (error.code === PG_UNIQUE_VIOLATION) {
@@ -244,6 +252,9 @@ const toTradeApplication = (row) => {
   }
   application.trade_account_id = row.trade_account_id ?? null
   application.created_at = row.created_at
+  // The refusal letter's record (POST /admin/users/:id/decline).
+  application.declined_at = row.declined_at ?? null
+  application.decline_reason = row.decline_reason ?? null
   application.user =
     userId == null
       ? null

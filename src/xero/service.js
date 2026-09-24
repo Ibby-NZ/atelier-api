@@ -431,6 +431,35 @@ export const createXeroService = ({
     })
 
   /**
+   * One client company as a Xero contact — matched (email, then exact name)
+   * before it is created, and remembered on `trade_accounts.xero_contact_id`.
+   * An approved trade application calls it, and the CRM's "Add to Xero" is the
+   * retry. Returns the contact id; null for an unknown company.
+   */
+  const ensureTradeAccountContact = async (accountId) => {
+    const { rows } = await pool.query(`SELECT * FROM trade_accounts WHERE id = $1`, [accountId])
+    const company = rows[0]
+    if (!company) return null
+    return ensureContactFor({
+      row: company,
+      email: company.email,
+      name: company.legacy_customer_name,
+      toPayload: contactForTradeAccount,
+      store: storeTradeAccountContactId,
+    })
+  }
+
+  /**
+   * Archive (`ARCHIVED`) or reactivate (`ACTIVE`) a contact in Xero — a client
+   * who has cancelled is archived there as well as here.
+   */
+  const setContactStatus = async (contactId, status) => {
+    await call('POST', `Contacts/${encodeURIComponent(contactId)}`, {
+      body: { Contacts: [{ ContactID: contactId, ContactStatus: status }] },
+    }).catch(rethrowValidation)
+  }
+
+  /**
    * Push one table's unlinked rows: link what the directory already holds
    * (email, then exact name), create the rest in batches, remember every id.
    * `rows` carry `id`, `email`, `name` for matching; `toPayload` shapes the
@@ -1118,6 +1147,8 @@ export const createXeroService = ({
     syncContacts,
     syncSuppliers,
     syncItems,
+    ensureTradeAccountContact,
+    setContactStatus,
     pushOrderInvoice,
     recordOrderPayment,
     pushPurchaseOrderBill,

@@ -24,7 +24,10 @@ automatically when working in this directory.
 ## Two directions
 
 Platform → Xero: `/sync/contacts` (client companies + unfiled logins),
-`/sync/suppliers`, `/sync/items`, `/orders/:id/invoice` (ACCREC),
+`/sync/suppliers`, `/sync/items`, one company on demand
+(`ensureTradeAccountContact` — trade approval and the CRM's Add to Xero) and
+its archive/reactivate (`setContactStatus`, a client's cancellation — see
+`src/trade-accounts/CLAUDE.md`), `/orders/:id/invoice` (ACCREC),
 `/purchase-orders/:id/bill` (ACCPAY). Xero → platform: `/pull/contacts` and
 `/pull/statuses`; `pullAll()` is both, and `server.js` runs it every
 `XERO_PULL_INTERVAL_MINUTES` (0 = buttons only). Three tables remember a

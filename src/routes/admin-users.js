@@ -24,7 +24,19 @@ import {
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { MIN_PASSWORD_LENGTH } from '../auth/passwords.js'
 import { issueResetTokenFor, resetUrlFor, RESET_TOKEN_TTL_MINUTES } from '../auth/password-reset.js'
-import { notifyPasswordReset, notifyTradeApproved } from '../email/notifications.js'
+import {
+  notifyPasswordReset,
+  notifyTradeAccountToReview,
+  notifyTradeApproved,
+  notifyTradeDeclined,
+} from '../email/notifications.js'
+import {
+  companyForLogin,
+  declineTradeLogin,
+  firstApproveTradeLogin,
+  linkCompanyToXero,
+  mayReview,
+} from '../trade-accounts/review.js'
 
 // The valid stored roles (matches the users_role_check constraint). Shared by the
 // list filter and the patch/create body so an unknown role is a 400 by schema.
@@ -36,6 +48,16 @@ const EMAIL_PATTERN = '^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$'
 // When the office creates an account without setting a password, it lands on this
 // temp password (the same one seed-staff uses); the person changes it on first login.
 const DEFAULT_TEMP_PASSWORD = 'AtelierTemp2026!'
+
+// The reason is what the applicant reads in the refusal letter, so it is
+// required and must say something.
+const declineBodySchema = {
+  type: 'object',
+  required: ['reason'],
+  properties: {
+    reason: { type: 'string', minLength: 1, maxLength: 2000 },
+  },
+}
 
 const createBodySchema = {
   type: 'object',
@@ -121,9 +143,23 @@ const notFound = (reply, id) => {
 
 export const adminUsersRoutes = async (
   app,
-  { pool, mailer = null, storeBaseUrl = 'http://localhost:4321', crmBaseUrl = 'http://localhost:5273' }
+  {
+    pool,
+    mailer = null,
+    xero = null,
+    storeBaseUrl = 'http://localhost:4321',
+    crmBaseUrl = 'http://localhost:5273',
+    // The two review steps' owners (config); null = any back-office login.
+    tradeApproverEmail = null,
+    tradeAccountsEmail = null,
+  }
 ) => {
   const backoffice = app.guards.requireRole('backoffice')
+
+  const notReviewer = (reply, reviewerEmail, step) => {
+    reply.code(403)
+    return { error: 'Forbidden', message: `Only ${reviewerEmail} can ${step}.` }
+  }
 
   app.get(
     '/admin/users',
@@ -185,10 +221,87 @@ export const adminUsersRoutes = async (
       // approving alongside a role change off trade (which clears the flag),
       // sends nothing. `before` null falls through to updateUser's own 404.
       const before = await getUser(pool, request.params.id)
-      const user = await updateUser(pool, request.params.id, request.body)
-      if (before && !before.trade_approved && user.trade_approved && user.role === 'trade') {
-        await notifyTradeApproved(mailer, pool, user)
+      // The FINAL approval of a trade login is the accounts desk's, and only
+      // after the approver has approved (POST /admin/users/:id/approve). A
+      // promotion to trade approved in the same body is the same flip, so it
+      // waits for the approver too. Revoking stays open to the back office.
+      const approving =
+        before &&
+        !before.trade_approved &&
+        request.body.trade_approved === true &&
+        (request.body.role ?? before.role) === 'trade'
+      if (approving) {
+        if (!mayReview(request.user, tradeAccountsEmail)) {
+          return notReviewer(reply, tradeAccountsEmail, 'give the final approval of a trade account')
+        }
+        if (!before.trade_first_approved_at) {
+          reply.code(422)
+          return {
+            error: 'Unprocessable Entity',
+            message: 'This trade application has to be approved by the approver first.',
+          }
+        }
       }
+      const user = await updateUser(pool, request.params.id, request.body)
+      if (!(approving && user.trade_approved && user.role === 'trade')) {
+        return { user }
+      }
+      // The final approval: the client's acceptance letter, then the company
+      // into Xero (matched before created; never fails the approval — the
+      // answer rides back for the CRM to print, and Add to Xero retries).
+      await notifyTradeApproved(mailer, pool, user)
+      const account = await companyForLogin(pool, user.id)
+      const xeroContact = account
+        ? await linkCompanyToXero(xero, account.id)
+        : { linked: false, reason: 'This login is not filed under a client company.' }
+      return { user, xero_contact: xeroContact }
+    }
+  )
+
+  // The approver's approval of a trade application — the first of the two.
+  // Grants nothing yet; the accounts desk is emailed to give the final one.
+  app.post(
+    '/admin/users/:id/approve',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      if (!mayReview(request.user, tradeApproverEmail)) {
+        return notReviewer(reply, tradeApproverEmail, 'approve or decline a trade application')
+      }
+      if (!(await firstApproveTradeLogin(pool, request.params.id))) {
+        return notFound(reply, request.params.id)
+      }
+      const user = await getUser(pool, request.params.id)
+      await notifyTradeAccountToReview(mailer, {
+        to: tradeAccountsEmail,
+        user,
+        account: await companyForLogin(pool, user.id),
+        approvedBy: request.user.name || request.user.email,
+        crmBaseUrl,
+      })
+      return { user }
+    }
+  )
+
+  // Decline a trade application: the login is archived (Restore undoes it),
+  // the reason is kept on the form, and the applicant is emailed the reason.
+  app.post(
+    '/admin/users/:id/decline',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: declineBodySchema } },
+    async (request, reply) => {
+      if (!mayReview(request.user, tradeApproverEmail)) {
+        return notReviewer(reply, tradeApproverEmail, 'approve or decline a trade application')
+      }
+      const reason = request.body.reason.trim()
+      if (!reason) {
+        reply.code(422)
+        return { error: 'Unprocessable Entity', message: 'Give the applicant a reason.' }
+      }
+      const declined = await declineTradeLogin(pool, request.params.id, reason)
+      if (!declined) {
+        return notFound(reply, request.params.id)
+      }
+      const user = await getUser(pool, request.params.id)
+      await notifyTradeDeclined(mailer, pool, { user, businessName: declined.businessName, reason })
       return { user }
     }
   )

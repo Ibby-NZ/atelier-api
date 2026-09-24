@@ -147,6 +147,7 @@ const loadLinesByOrderId = async (db, orderIds) => {
             p.composition,
             p.width,
             p.size,
+            p.description,
             i.qty_available,
             i.qty_reserved,
             i.unit
@@ -212,6 +213,7 @@ const toLine = (row, state) => ({
   composition: row.composition ?? null,
   width: row.width ?? null,
   size: row.size ?? null,
+  description: row.description ?? null,
   unit_price_cents: row.unit_price_cents,
   cut_requirements: row.cut_requirements,
   colourway_id: row.colourway_id,

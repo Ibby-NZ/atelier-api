@@ -33,20 +33,28 @@ import {
   backOrderRaisedOrders,
   createPurchaseOrder,
   updatePurchaseOrder,
-  sendPurchaseOrder,
-  payPurchaseOrder,
-  closePurchaseOrder,
-  cancelPurchaseOrder,
+  setPurchaseOrderStatus,
   allocatePurchaseOrderLine,
 } from '../purchasing/admin-purchase-orders.js'
 import { createReceipt } from '../purchasing/receipts.js'
-import { PURCHASE_ORDER_STATUSES } from '../purchasing/po-states.js'
+import { PURCHASE_ORDER_STATUSES, canTransition } from '../purchasing/po-states.js'
+import {
+  MAX_BULK_SIZE,
+  sendBulkOrder,
+  getBulkOrder,
+  listBulkOrders,
+} from '../purchasing/bulk-orders.js'
+import { NOTIFY_EMAILS_MAX, NOTIFY_EMAIL_PATTERN } from '../orders/notify-emails.js'
 import { loadReportAccess } from '../reports/access.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import {
   notifyPurchaseOrderSent,
+  notifyPurchaseOrderPaid,
   notifyPurchaseOrderEnded,
   notifyPurchaseOrderReceipt,
+  notifyBulkOrderSent,
+  purchaseOrderStatusTemplate,
+  sendPurchaseOrderLetter,
 } from '../email/purchasing-notifications.js'
 import { notifyOrderTransition } from '../email/notifications.js'
 
@@ -82,7 +90,20 @@ const listQuerySchema = {
   properties: {
     supplier_id: { type: 'integer', minimum: 1 },
     brand_id: { type: 'integer', minimum: 1 },
-    status: { type: 'string', enum: [...PURCHASE_ORDER_STATUSES] },
+    // One status, or a SET of them (repeated params — the dashboard's goods-
+    // on-the-way tile means three at once). The orders list's anyOf posture:
+    // declaring only `string` would 400 the array form.
+    status: {
+      anyOf: [
+        { type: 'string', enum: [...PURCHASE_ORDER_STATUSES] },
+        {
+          type: 'array',
+          minItems: 1,
+          maxItems: PURCHASE_ORDER_STATUSES.length,
+          items: { type: 'string', enum: [...PURCHASE_ORDER_STATUSES] },
+        },
+      ],
+    },
     from: dateProp,
     to: dateProp,
     page: { type: 'integer', minimum: 1, default: DEFAULT_PAGE },
@@ -165,8 +186,16 @@ const patchBodySchema = {
     { required: ['incoterm'] },
     { required: ['currency'] },
     { required: ['lines'] },
+    { required: ['notify_emails'] },
   ],
   properties: {
+    // The purchase order's Emails list (24 Sep 2026), the WHOLE list replacing
+    // what was stored — the sales order's shape and limits, from the same leaf.
+    notify_emails: {
+      type: 'array',
+      maxItems: NOTIFY_EMAILS_MAX,
+      items: { type: 'string', maxLength: 254, pattern: NOTIFY_EMAIL_PATTERN },
+    },
     expected_at: timestampProp,
     notes: nullableText,
     po_email: nullableShort,
@@ -340,55 +369,208 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
     })
   )
 
-  // The four moves, and the letters that hang off three of them. `send` writes
-  // to the house and copies the office; `close`/`cancel` write to the house
-  // alone (src/email/purchasing-notifications.js). `pay` mails nobody — it
-  // records a fact about the bank, not a change the house needs telling. A
-  // `draft` deliberately mails nobody — nothing has left the building until Send.
+  // Raise the purchase order's bill in Xero — Send PO's second half. NEVER
+  // fails the move (the paid posture): a refusal — unpriced lines, Xero down,
+  // not connected — comes back as `reason` for the CRM to print, and the Xero
+  // screen's push button is the retry.
+  const raiseBill = (id, finance) =>
+    xero
+      .pushPurchaseOrderBill(id, { finance })
+      .then((result) => ({ bill: { raised: true, ...result.bill }, purchase_order: result.purchase_order }))
+      .catch((error) => ({ bill: { raised: false, reason: error.message }, purchase_order: null }))
+
+  // The letter each move sends the house (and the purchase order's Emails
+  // list): Send PO the purchase order itself, paid a release note, completed
+  // only when SHORT, cancelled always. The others — awaiting delivery,
+  // received — are the office's own bookkeeping.
+  const LETTERS = Object.freeze({
+    pending_payment: notifyPurchaseOrderSent,
+    paid: notifyPurchaseOrderPaid,
+    completed: (m, po) => notifyPurchaseOrderEnded(m, po, 'completed'),
+    cancelled: (m, po) => notifyPurchaseOrderEnded(m, po, 'cancelled'),
+  })
+
+  // Every move a purchase order makes (24 Sep 2026): Draft → Pending payment
+  // (Send PO) → Paid / Awaiting delivery → Received → Completed, or Cancelled.
+  // The machine in src/purchasing/po-states.js answers 409.
   //
-  // **The notification re-reads the order with `finance: true`, whatever the
-  // staffer may see.** A purchase order without prices is not a purchase order,
-  // and the house quoted those prices in the first place; finance masking
-  // exists so a staffer without cost access does not read costs ON SCREEN, and
-  // this letter is composed server-side for the house and the one configured
-  // back-office address. The masked view still goes back in the RESPONSE, so
-  // nothing the caller receives changes.
-  for (const [verb, move, notify] of [
-    ['send', sendPurchaseOrder, notifyPurchaseOrderSent],
-    ['pay', payPurchaseOrder, null],
-    ['close', closePurchaseOrder, (m, po) => notifyPurchaseOrderEnded(m, po, 'closed')],
-    ['cancel', cancelPurchaseOrder, (m, po) => notifyPurchaseOrderEnded(m, po, 'cancelled')],
-  ]) {
-    app.post(
-      `/admin/purchase-orders/:id/${verb}`,
-      { preHandler: backoffice, schema: { params: idParamsSchema } },
-      async (request) => {
-        const finance = await financeFor(request)
-        let purchase_order = await move(pool, request.params.id, { finance })
-        // Sending is the commitment, so the bill is raised in Xero here. The
-        // transition NEVER fails because of Xero (the `mark-paid` posture):
-        // a refusal — unpriced lines, Xero down, not connected — comes back as
-        // `xero_bill.reason` for the CRM to print, and the Xero screen's push
-        // button is the retry.
-        let xero_bill = null
-        if (verb === 'send' && xero) {
-          xero_bill = await xero
-            .pushPurchaseOrderBill(request.params.id, { finance })
-            .then((result) => {
-              purchase_order = result.purchase_order
-              return { raised: true, ...result.bill }
-            })
-            .catch((error) => ({ raised: false, reason: error.message }))
-        }
-        // The letter goes after the Xero push so the re-read carries the bill
-        // ref if one was raised; the letter itself is unchanged either way.
-        if (mailer && notify) {
-          await notify(mailer, await getPurchaseOrder(pool, request.params.id, { finance: true }))
-        }
-        return { purchase_order, ...(xero_bill ? { xero_bill } : {}) }
+  // **The letter re-reads the order with `finance: true`, whatever the staffer
+  // may see.** A purchase order without prices is not a purchase order, and the
+  // house quoted those prices in the first place; finance masking exists so a
+  // staffer without cost access does not read costs ON SCREEN, and this letter
+  // is composed server-side for the house. The masked view still goes back in
+  // the RESPONSE, so nothing the caller receives changes.
+  app.post(
+    '/admin/purchase-orders/:id/status',
+    {
+      preHandler: backoffice,
+      schema: {
+        params: idParamsSchema,
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['status'],
+          properties: { status: { type: 'string', enum: [...PURCHASE_ORDER_STATUSES] } },
+        },
+      },
+    },
+    async (request) => {
+      const finance = await financeFor(request)
+      const target = request.body.status
+      let purchase_order = await setPurchaseOrderStatus(pool, request.params.id, target, { finance })
+      let xero_bill = null
+      if (target === 'pending_payment' && xero) {
+        const raised = await raiseBill(request.params.id, finance)
+        if (raised.purchase_order) purchase_order = raised.purchase_order
+        xero_bill = raised.bill
       }
-    )
-  }
+      // After the Xero push, so the re-read carries the bill ref if one was
+      // raised; the letter itself is unchanged either way.
+      const letter = LETTERS[target]
+      if (mailer && letter) {
+        await letter(mailer, await getPurchaseOrder(pool, request.params.id, { finance: true }))
+      }
+      return { purchase_order, ...(xero_bill ? { xero_bill } : {}) }
+    }
+  )
+
+  // The Emails panel's letters, sent NOW (24 Sep 2026: "purchase orders should
+  // also have email function like sales order"): `details` is the purchase
+  // order itself, `status` re-sends the letter for where it stands — to the
+  // house and the Emails list. The letter IS the act, so it refuses rather than
+  // no-ops (the sales order's rule): 503 with no delivering mailer, 409 on a
+  // draft (Send PO is what first sends it), 422 at a status with no letter,
+  // 502 when every address failed.
+  app.post(
+    '/admin/purchase-orders/:id/email',
+    {
+      preHandler: backoffice,
+      schema: {
+        params: idParamsSchema,
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['letter'],
+          properties: { letter: { type: 'string', enum: ['details', 'status'] } },
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!mailer?.delivers) {
+        reply.code(503)
+        return {
+          error: 'Service Unavailable',
+          message: 'Email is not configured on this server (SMTP_HOST is unset), so nothing was sent.',
+        }
+      }
+      const purchaseOrder = await getPurchaseOrder(pool, request.params.id, { finance: true })
+      if (!purchaseOrder) {
+        reply.code(404)
+        return { error: 'Not Found', message: `Purchase order ${request.params.id} not found.` }
+      }
+      if (purchaseOrder.status === 'draft') {
+        reply.code(409)
+        return {
+          error: 'Conflict',
+          message: `${purchaseOrder.po_number} is still a draft — Send PO is what emails it to the house.`,
+        }
+      }
+      const { letter } = request.body
+      if (letter === 'status' && !purchaseOrderStatusTemplate(purchaseOrder)) {
+        reply.code(422)
+        return {
+          error: 'Unprocessable Entity',
+          message: `${purchaseOrder.po_number} is ${purchaseOrder.status.replaceAll('_', ' ')} — the house is sent no letter for that status.`,
+        }
+      }
+      const { template, sent, failed } = await sendPurchaseOrderLetter(mailer, purchaseOrder, letter)
+      if (sent.length === 0) {
+        reply.code(failed.length ? 502 : 422)
+        return {
+          error: failed.length ? 'Bad Gateway' : 'Unprocessable Entity',
+          message: failed.length
+            ? `The letter could not be sent to ${failed.join(', ')}.`
+            : `${purchaseOrder.po_number} has nobody to email — add the house's PO email, or an address under Emails.`,
+          template,
+          sent,
+          failed,
+        }
+      }
+      return { template, sent, failed }
+    }
+  )
+
+  // ---- Bulk orders: one letter to a house for several purchase orders ------
+  // (24 Sep 2026; src/purchasing/bulk-orders.js). Static paths, so they win
+  // over `/admin/purchase-orders/:id`.
+  app.get('/admin/purchase-orders/bulk', { preHandler: backoffice }, async () => ({
+    bulk_orders: await listBulkOrders(pool),
+  }))
+
+  app.get(
+    '/admin/purchase-orders/bulk/:id',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      const bulk_order = await getBulkOrder(pool, request.params.id, {
+        finance: await financeFor(request),
+      })
+      if (!bulk_order) {
+        reply.code(404)
+        return { error: 'Not Found', message: `Bulk order ${request.params.id} not found.` }
+      }
+      return { bulk_order }
+    }
+  )
+
+  // Send the chosen drafts of ONE supplier as a bulk order: every member moves
+  // to Pending payment in one transaction, then each member's Xero bill is
+  // raised and ONE combined letter goes to the house (+ every member's Emails
+  // list, + the office's copy). 201.
+  app.post(
+    '/admin/purchase-orders/bulk',
+    {
+      preHandler: backoffice,
+      schema: {
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['purchase_order_ids'],
+          properties: {
+            purchase_order_ids: {
+              type: 'array',
+              minItems: 1,
+              maxItems: MAX_BULK_SIZE,
+              items: { type: 'integer', minimum: 1 },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const finance = await financeFor(request)
+      const bulkId = await sendBulkOrder(pool, {
+        purchaseOrderIds: request.body.purchase_order_ids,
+        user: request.user,
+      })
+      const xero_bills = []
+      if (xero) {
+        const { purchase_orders: members } = await getBulkOrder(pool, bulkId, { finance: true })
+        for (const member of members) {
+          xero_bills.push({ po_number: member.po_number, ...(await raiseBill(member.id, finance)).bill })
+        }
+      }
+      // Read after the bills, so the letter and the answer carry each bill ref.
+      const bulk = await getBulkOrder(pool, bulkId, { finance: true })
+      if (mailer) {
+        await notifyBulkOrderSent(mailer, bulk, bulk.purchase_orders)
+      }
+      reply.code(201)
+      return {
+        bulk_order: finance ? bulk : await getBulkOrder(pool, bulkId, { finance }),
+        ...(xero ? { xero_bills } : {}),
+      }
+    }
+  )
 
   // Hard delete, refused once anything hangs off the order (FR-147). The
   // registry entry holds the probes, so this handler is one line — and
@@ -443,9 +625,19 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
         request.body,
         { user: request.user }
       )
-      const purchase_order = await getPurchaseOrder(pool, purchase_order_id, {
-        finance: await financeFor(request),
-      })
+      const finance = await financeFor(request)
+      let purchase_order = await getPurchaseOrder(pool, purchase_order_id, { finance })
+      // The last line booked in full moves the order to Received (24 Sep 2026),
+      // where the machine allows it; a reversal moves nothing back — the
+      // receipt state beside the status still says what is on the shelf.
+      if (
+        ['full', 'over'].includes(purchase_order.receipt_state) &&
+        canTransition(purchase_order.status, 'received')
+      ) {
+        purchase_order = await setPurchaseOrderStatus(pool, purchase_order_id, 'received', {
+          finance,
+        })
+      }
       // BACK OFFICE ONLY. The house knows what it shipped; what this alert
       // carries is the discrepancy — an over-receipt is never clamped, and a
       // mis-key is reversed with a negative qty. Both are conversations for

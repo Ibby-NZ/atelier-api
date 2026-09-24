@@ -14,11 +14,14 @@
 //
 // TWO VOCABULARIES LIVE HERE AND THEY MUST NEVER BE MERGED.
 //
-// `status` is WHAT A PERSON DID: draft, sent, closed, cancelled. Nothing else.
+// `status` is WHAT A PERSON DID (24 Sep 2026: draft, pending_payment, paid,
+// awaiting_delivery, received, completed, cancelled) — with two moves the
+// platform makes for them: the Xero bill paid moves an order to `paid`, and the
+// last line booked in full moves it to `received`.
 // The receipt state is WHAT ARRIVED: none, part, full, over — arithmetic over
 // the append-only receipt ledger, computed at read time and stored nowhere.
 //
-// **`closed` is not `full`.** A purchase order closed short because the house
+// **`completed` is not `full`.** A purchase order completed short because the house
 // discontinued the balance is a decision somebody made; a purchase order that is
 // `full` is a fact about a warehouse. Storing the second as a status gives two
 // answers to one question the first time they disagree, which is the ordinary
@@ -40,9 +43,11 @@ const httpError = (statusCode, message) =>
  */
 export const PURCHASE_ORDER_STATUSES = Object.freeze([
   'draft',
-  'sent',
+  'pending_payment',
   'paid',
-  'closed',
+  'awaiting_delivery',
+  'received',
+  'completed',
   'cancelled',
 ])
 
@@ -50,32 +55,31 @@ export const PURCHASE_ORDER_STATUSES = Object.freeze([
 export const INITIAL_PURCHASE_ORDER_STATUS = 'draft'
 
 /**
- * The legal moves, keyed by the state being moved FROM.
+ * The legal moves, keyed by the state being moved FROM (24 Sep 2026).
  *
- * The spine is short because a purchase order only has three things that happen
- * to it: it is written, it is sent to the house, and it is finished with.
- * `cancelled` is reachable from both live states — a draft nobody sent and an
- * order the house could not fill are both abandoned the same way — and both
- * terminal states are dead ends. A cancelled order is re-raised as a new one
- * rather than resurrected, which is what keeps the three stamps honest: a live
- * row carrying `cancelled_at` would make every one of them a lie.
- *
- * `closed` is only reachable from `sent`, deliberately. Closing a draft is not a
- * decision about a supplier's delivery, it is a cancellation with the wrong
- * word on it, and the two must stay distinguishable in the ledger.
+ * `draft → pending_payment` is **Send PO**: the purchase order goes to the
+ * house and its bill is raised in Xero, so from then on it is waiting to be
+ * paid. Goods may arrive before the house is paid (a supplier on account), so
+ * `received` is reachable before `paid` and `received → paid` closes that gap;
+ * `awaiting_delivery` is the house confirmed and the goods are on their way.
+ * `completed` is the office finishing with it — full, or SHORT by decision,
+ * which is why it is not the receipt state `full`. `cancelled` is reachable
+ * only before money has left (draft, pending_payment): money that has left is
+ * a credit note, and nobody has stated that document. Both terminal states are
+ * dead ends — a cancelled order is re-raised, never resurrected.
  */
 export const ALLOWED_TRANSITIONS = Object.freeze({
-  draft: Object.freeze(['sent', 'cancelled']),
-  sent: Object.freeze(['paid', 'closed', 'cancelled']),
-  // `paid` (22 Sep 2026) is the house having been paid — by hand, or mirrored
-  // from the Xero bill. Reachable from `sent` (pro-forma, before delivery) and
-  // from `closed` (paid after), and a prepaid order still CLOSES once its
-  // goods have arrived, so the two are not a one-way street. Never cancelled:
-  // money that has left is a credit note, and nobody has stated that document.
-  paid: Object.freeze(['closed']),
-  closed: Object.freeze(['paid']),
+  draft: Object.freeze(['pending_payment', 'cancelled']),
+  pending_payment: Object.freeze(['paid', 'awaiting_delivery', 'received', 'cancelled']),
+  paid: Object.freeze(['awaiting_delivery', 'received', 'completed']),
+  awaiting_delivery: Object.freeze(['paid', 'received', 'completed']),
+  received: Object.freeze(['paid', 'completed']),
+  completed: Object.freeze([]),
   cancelled: Object.freeze([]),
 })
+
+/** Whether the machine allows `from → to`. */
+export const canTransition = (from, to) => (ALLOWED_TRANSITIONS[from] ?? []).includes(to)
 
 /**
  * The column each state stamps when it is reached. `draft` has none — it is the
@@ -89,9 +93,13 @@ export const ALLOWED_TRANSITIONS = Object.freeze({
  */
 export const STATUS_STAMPS = Object.freeze({
   draft: null,
-  sent: 'sent_at',
+  // The send moment keeps its column; `completed` keeps `closed_at` for the
+  // same reason — renaming them would be a migration for a word.
+  pending_payment: 'sent_at',
   paid: 'paid_at',
-  closed: 'closed_at',
+  awaiting_delivery: 'awaiting_delivery_at',
+  received: 'received_at',
+  completed: 'closed_at',
   cancelled: 'cancelled_at',
 })
 

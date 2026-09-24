@@ -70,6 +70,8 @@ import { RESERVING_KINDS, HELD_STATUSES, canTransition } from '../orders/order-s
 // are the same as a move made by hand.
 import { setOrderStatus } from '../orders/admin-orders.js'
 import { planPurchaseOrders } from './po-plan.js'
+import { priceLineFromCatalogue } from './po-pricing.js'
+import { uniqueEmails } from '../orders/notify-emails.js'
 import { loadReceiptsByLineId } from './receipts.js'
 import { supplierForBrand } from '../suppliers/brand-suppliers.js'
 // W14. The dependency runs ONE WAY — `supplier-invoices.js` imports nothing
@@ -78,6 +80,7 @@ import { supplierForBrand } from '../suppliers/brand-suppliers.js'
 // direction.
 import { loadInvoiceStateByPurchaseOrderId } from './supplier-invoices.js'
 import {
+  PURCHASE_ORDER_STATUSES,
   STATUS_STAMPS,
   receiptState,
   rollUpReceiptState,
@@ -96,6 +99,16 @@ export const MAX_LIMIT = 200
 // the correct trade — a gap in a purchase-order number is not a missing purchase
 // order, and the sequence does not reset per year.
 const PO_NUMBER = `'PO-' || lpad(nextval('purchase_orders_number_seq')::text, 6, '0')`
+
+// Every status but cancelled may still be corrected — a cancelled order is a
+// closed document. Allocation (stock bought first, a client found afterwards)
+// stays open until the office has finished with the order.
+const EDITABLE_STATUSES = Object.freeze(
+  PURCHASE_ORDER_STATUSES.filter((status) => status !== 'cancelled')
+)
+const ALLOCATABLE_STATUSES = Object.freeze(
+  PURCHASE_ORDER_STATUSES.filter((status) => !['completed', 'cancelled'].includes(status))
+)
 
 const OPEN_ALLOCATION_UNIQUE = 'purchase_order_line_allocations_open_unique'
 
@@ -125,7 +138,8 @@ const round2 = (value) => Math.round(value * 100) / 100
 // document, and a screen listing purchase orders needs the house's name.
 const PO_FROM = `purchase_orders po
        JOIN brands b ON b.id = po.brand_id
-       LEFT JOIN users u ON u.id = po.created_by`
+       LEFT JOIN users u ON u.id = po.created_by
+       LEFT JOIN purchase_order_bulks pb ON pb.id = po.bulk_order_id`
 
 const PO_COLUMNS = `po.id,
         po.po_number,
@@ -141,8 +155,13 @@ const PO_COLUMNS = `po.id,
         po.status,
         po.sent_at,
         po.paid_at,
+        po.awaiting_delivery_at,
+        po.received_at,
         po.closed_at,
         po.cancelled_at,
+        po.notify_emails,
+        po.bulk_order_id,
+        pb.bulk_number,
         po.expected_at,
         po.created_by,
         u.name AS created_by_name,
@@ -163,6 +182,7 @@ const LINE_COLUMNS = `l.id,
         l.colourway_id,
         l.qty_ordered,
         l.unit_price,
+        l.freight_per_unit,
         l.is_sample,
         l.sample_barcode,
         l.supplier_code,
@@ -251,6 +271,11 @@ const toLine = (row, allocations, receipts, finance) => {
   if (finance) {
     line.unit_price = unitPrice
     line.line_cost = unitPrice === null ? null : round2(ordered * unitPrice)
+    // The freight estimate, NZ$ per unit, from the house's freight rate when
+    // the line was priced. A cost like the price, so gated like it.
+    const freight = numeric(row.freight_per_unit)
+    line.freight_per_unit = freight
+    line.freight_cost = freight === null ? null : round2(ordered * freight)
   }
   return Object.freeze(line)
 }
@@ -273,6 +298,13 @@ const summarise = (lines, finance) => {
     summary.unpriced_lines = unpriced
     summary.total_cost =
       unpriced > 0 ? null : round2(costs.reduce((sum, cost) => sum + cost, 0))
+    // NZ$, beside the supplier-currency total and never added to it. Absent
+    // (null) while any goods line has no freight estimate, the same rule.
+    const freights = lines.filter((line) => !line.is_sample).map((line) => line.freight_cost)
+    summary.total_freight =
+      freights.length === 0 || freights.some((cost) => cost === null)
+        ? null
+        : round2(freights.reduce((sum, cost) => sum + cost, 0))
   }
   return summary
 }
@@ -294,9 +326,18 @@ const toPurchaseOrder = (row, lines, finance, invoice) =>
     status: row.status,
     sent_at: row.sent_at,
     paid_at: row.paid_at,
+    awaiting_delivery_at: row.awaiting_delivery_at ?? null,
+    received_at: row.received_at ?? null,
     closed_at: row.closed_at,
     cancelled_at: row.cancelled_at,
     expected_at: row.expected_at,
+    // Extra addresses that receive every letter about this purchase order,
+    // the sales order's Emails-list rule.
+    notify_emails: row.notify_emails ?? [],
+    // The bulk order it went to the house in, if it did (the Bulk orders tab).
+    bulk_order: row.bulk_order_id
+      ? Object.freeze({ id: row.bulk_order_id, bulk_number: row.bulk_number })
+      : null,
     created_by: row.created_by,
     created_by_name: row.created_by_name ?? null,
     notes: row.notes,
@@ -349,9 +390,14 @@ const loadLinesByPurchaseOrderId = async (db, purchaseOrderIds, finance, { withR
 
 // Filter names are trusted column references; every VALUE flows through a $n
 // placeholder. Shape copied from `buildWhere` in admin-price-lists.js.
-const buildWhere = ({ supplierId, brandId, status, from, to }) => {
+const buildWhere = ({ supplierId, brandId, status, from, to, bulkOrderId }) => {
   const clauses = []
   const params = []
+  // The members of one bulk order (src/purchasing/bulk-orders.js).
+  if (bulkOrderId) {
+    params.push(bulkOrderId)
+    clauses.push(`po.bulk_order_id = $${params.length}`)
+  }
   if (supplierId) {
     params.push(supplierId)
     clauses.push(`po.supplier_id = $${params.length}`)
@@ -360,9 +406,10 @@ const buildWhere = ({ supplierId, brandId, status, from, to }) => {
     params.push(brandId)
     clauses.push(`po.brand_id = $${params.length}`)
   }
-  if (status) {
-    params.push(status)
-    clauses.push(`po.status = $${params.length}`)
+  // One status, or a set of them (the dashboard's goods-on-the-way tile).
+  if (Array.isArray(status) ? status.length > 0 : status) {
+    params.push(Array.isArray(status) ? status : [status])
+    clauses.push(`po.status = ANY($${params.length}::text[])`)
   }
   if (from) {
     params.push(from)
@@ -721,19 +768,27 @@ const insertPurchaseOrderHeader = async (client, group, user) => {
 }
 
 const insertLine = async (client, purchaseOrderId, line) => {
+  // A goods line is priced from the catalogue — wholesale less the supplier's
+  // discount, plus the freight estimate (./po-pricing.js) — unless a price was
+  // typed. A sample line is keyed by hand and carries no freight: samples are
+  // not stock.
+  const catalogue =
+    line.is_sample === true
+      ? { unit_price: null, freight_per_unit: null }
+      : await priceLineFromCatalogue(client, { purchaseOrderId, colourwayId: line.colourway_id })
   const { rows } = await client.query(
     `INSERT INTO purchase_order_lines
        (purchase_order_id, colourway_id, qty_ordered, unit_price, is_sample,
-        sample_barcode, supplier_code, notes)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        sample_barcode, supplier_code, notes, freight_per_unit)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING id`,
     [
       purchaseOrderId,
       line.colourway_id,
       line.qty_ordered,
-      // NULL, never 0. Nothing in this schema can derive a purchase price for a
-      // colourway, and `Number(null)` is 0 — a zero purchase price reads as free.
-      line.unit_price ?? null,
+      // NULL, never 0, where neither a typed price nor the catalogue says:
+      // `Number(null)` is 0, and a zero purchase price reads as free.
+      line.unit_price ?? catalogue.unit_price ?? null,
       // The derivation's planner produces no `is_sample` at all, which is what
       // keeps a derived line a goods line BY CONSTRUCTION: a sample is added by
       // hand to a purchase order, never derived from demand.
@@ -741,6 +796,7 @@ const insertLine = async (client, purchaseOrderId, line) => {
       line.sample_barcode ?? null,
       line.supplier_code ?? null,
       line.notes ?? null,
+      catalogue.freight_per_unit ?? null,
     ]
   )
   return rows[0].id
@@ -981,6 +1037,9 @@ export const PURCHASE_ORDER_UPDATE_COLUMNS = Object.freeze([
   'agent',
   'incoterm',
   'currency',
+  // The purchase order's Emails list (24 Sep 2026), REPLACED whole on every
+  // save like the sales order's. Stored one spelling per address.
+  'notify_emails',
 ])
 
 // What a line PATCH may write. `colourway_id` is absent: a line naming the wrong
@@ -1061,13 +1120,26 @@ export const updatePurchaseOrder = (pool, id, patch, { finance = false } = {}) =
     pool,
     id,
     async (client, purchaseOrder) => {
-      requireStatus(purchaseOrder, ['draft', 'sent', 'paid', 'closed'], 'edit')
+      requireStatus(purchaseOrder, EDITABLE_STATUSES, 'edit')
+      // Everyone on the Emails list gets the purchase order's letters, and they
+      // carry its prices: the list is no way round finance masking.
+      if (!finance && Object.hasOwn(patch, 'notify_emails')) {
+        throw httpError(
+          403,
+          'Only staff who can see costs can change who else receives this purchase order — its letters carry prices.'
+        )
+      }
 
       const headerColumns = PURCHASE_ORDER_UPDATE_COLUMNS.filter((column) =>
         Object.hasOwn(patch, column)
       )
       if (headerColumns.length > 0) {
-        const { sets, params } = buildUpdate(patch, PURCHASE_ORDER_UPDATE_COLUMNS)
+        // The Emails list is stored one spelling per address — the sales
+        // order's rule, from the same leaf (src/orders/notify-emails.js).
+        const header = Object.hasOwn(patch, 'notify_emails')
+          ? { ...patch, notify_emails: uniqueEmails(patch.notify_emails) }
+          : patch
+        const { sets, params } = buildUpdate(header, PURCHASE_ORDER_UPDATE_COLUMNS)
         await client.query(
           `UPDATE purchase_orders SET ${sets.join(', ')}, updated_at = now()
             WHERE id = $${params.length + 1}`,
@@ -1095,79 +1167,60 @@ const moveStatus = async (client, id, target) => {
 }
 
 /**
- * The house has been paid — by hand, or mirrored from the Xero bill (the sync
- * calls this when Xero answers PAID). Refused as a 409 where the machine does
- * not allow it, so a draft cannot be "paid" and a paid order is not re-paid.
- */
-export const payPurchaseOrder = (pool, id, { finance = false } = {}) =>
-  withPurchaseOrderTxn(
-    pool,
-    id,
-    async (client, purchaseOrder) => {
-      requireTransition(purchaseOrder, 'paid')
-      await moveStatus(client, id, 'paid')
-    },
-    { finance }
-  )
-
-/** Mark a draft as sent to the house. */
-export const sendPurchaseOrder = (pool, id, { finance = false } = {}) =>
-  withPurchaseOrderTxn(
-    pool,
-    id,
-    async (client, purchaseOrder) => {
-      requireTransition(purchaseOrder, 'sent')
-      await moveStatus(client, id, 'sent')
-    },
-    { finance }
-  )
-
-/**
- * Close a sent purchase order — including SHORT, which is the whole reason this
- * is a decision rather than arithmetic. The allocations are NOT released: the
- * goods that did arrive were bought against those sales orders, and handing the
- * demand back would have the next derivation buy it a second time.
- */
-export const closePurchaseOrder = (pool, id, { finance = false } = {}) =>
-  withPurchaseOrderTxn(
-    pool,
-    id,
-    async (client, purchaseOrder) => {
-      requireTransition(purchaseOrder, 'closed')
-      await moveStatus(client, id, 'closed')
-    },
-    { finance }
-  )
-
-/**
- * Cancel a purchase order and RELEASE its allocations back to the order desk.
+ * Move a purchase order to `target` — THE one transition (24 Sep 2026). The
+ * CRM's buttons, the Xero bill sync (paid) and the receipt that completes the
+ * last line (received) all come through here, so the machine in po-states.js
+ * answers every one the same way (409 for a move it does not list).
  *
- * The release is a stamp, not a delete: the allocation row is the record that
- * this sales-order line was once on this purchase order, and destroying it would
- * leave the cancellation looking like it never covered anything. Stamping
- * `released_at` drops the row out of `purchase_order_line_allocations_open_unique`,
- * which is precisely why that index has to be partial — otherwise a line
- * cancelled by mistake could never be ordered from anybody again.
+ * Cancelling RELEASES the allocations back to the order desk. The release is a
+ * stamp, not a delete: the allocation row is the record that this sales-order
+ * line was once on this purchase order, and destroying it would leave the
+ * cancellation looking like it never covered anything. Stamping `released_at`
+ * drops the row out of `purchase_order_line_allocations_open_unique`, which is
+ * precisely why that index has to be partial — otherwise a line cancelled by
+ * mistake could never be ordered from anybody again.
+ *
+ * Completing does NOT release them, including short: the goods that did arrive
+ * were bought against those sales orders, and handing the demand back would
+ * have the next derivation buy it a second time.
+ *
+ * The letters and the Xero bill hang off the ROUTE, not this function, so the
+ * Xero sync's own `paid` move writes to nobody.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number} id
+ * @param {string} target one of PURCHASE_ORDER_STATUSES
+ * @param {{ finance?: boolean }} [options]
  */
-export const cancelPurchaseOrder = (pool, id, { finance = false } = {}) =>
+export const setPurchaseOrderStatus = (pool, id, target, { finance = false } = {}) =>
   withPurchaseOrderTxn(
     pool,
     id,
     async (client, purchaseOrder) => {
-      requireTransition(purchaseOrder, 'cancelled')
-      await client.query(
-        `UPDATE purchase_order_line_allocations a
-            SET released_at = now()
-           FROM purchase_order_lines l
-          WHERE l.id = a.purchase_order_line_id
-            AND l.purchase_order_id = $1
-            AND a.released_at IS NULL`,
-        [id]
-      )
-      await moveStatus(client, id, 'cancelled')
+      requireTransition(purchaseOrder, target)
+      if (target === 'cancelled') {
+        await client.query(
+          `UPDATE purchase_order_line_allocations a
+              SET released_at = now()
+             FROM purchase_order_lines l
+            WHERE l.id = a.purchase_order_line_id
+              AND l.purchase_order_id = $1
+              AND a.released_at IS NULL`,
+          [id]
+        )
+      }
+      await moveStatus(client, id, target)
     },
     { finance }
   )
+
+/**
+ * The house has been paid — mirrored from the Xero bill (the sync calls this
+ * when Xero answers PAID). Kept as its own name because the Xero service
+ * imports it; it is `setPurchaseOrderStatus` and nothing else.
+ */
+export const payPurchaseOrder = (pool, id, options = {}) =>
+  setPurchaseOrderStatus(pool, id, 'paid', options)
 
 /**
  * Allocate part of a purchase-order line to a sales-order line by hand — the
@@ -1198,7 +1251,7 @@ export const allocatePurchaseOrderLine = async (
     pool,
     purchaseOrderId,
     async (client, purchaseOrder) => {
-      requireStatus(purchaseOrder, ['draft', 'sent', 'paid'], 'allocate against')
+      requireStatus(purchaseOrder, ALLOCATABLE_STATUSES, 'allocate against')
       try {
         await insertAllocation(client, lineId, {
           orderLineId: input.order_line_id,

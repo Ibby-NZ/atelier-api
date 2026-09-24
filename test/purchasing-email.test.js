@@ -53,6 +53,12 @@ const cleanupFixtures = async (pool) => {
     `DELETE FROM purchase_orders WHERE brand_id IN (SELECT id FROM brands WHERE slug LIKE $1)`,
     [`${PREFIX}-%`]
   )
+  // Bulk orders are RESTRICT from their supplier and hold nothing once their
+  // purchase orders are gone.
+  await pool.query(
+    `DELETE FROM purchase_order_bulks WHERE supplier_id IN (SELECT id FROM suppliers WHERE slug LIKE $1)`,
+    [`${PREFIX}-%`]
+  )
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
   await pool.query('DELETE FROM suppliers WHERE slug LIKE $1', [`${PREFIX}-%`])
 }
@@ -166,7 +172,7 @@ describe('purchase-order notifications', () => {
   it('sends the order to the house and a copy to the back office on send', async () => {
     const order = await createOrder()
 
-    const response = await inject('POST', `/admin/purchase-orders/${order.id}/send`)
+    const response = await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'pending_payment' })
     expect(response.statusCode).toBe(200)
 
     expect(to(PO_EMAIL)).toHaveLength(1)
@@ -193,7 +199,7 @@ describe('purchase-order notifications', () => {
       `staff@${DOMAIN}`,
     ])
 
-    const response = await inject('POST', `/admin/purchase-orders/${order.id}/send`)
+    const response = await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'pending_payment' })
     expect(response.statusCode).toBe(200)
     expect(response.json().purchase_order.lines[0].unit_price).toBeUndefined()
     expect(to(PO_EMAIL)[0].text).toContain('42.50')
@@ -204,12 +210,38 @@ describe('purchase-order notifications', () => {
     )
   })
 
-  it('tells the house to stop on close, naming the balance it is dropping', async () => {
+  // So the Emails list is no way round the masking: whoever is on it gets
+  // those priced letters, so only a staffer who can see costs may change it.
+  it('refuses the Emails list to a staffer who cannot see costs', async () => {
     const order = await createOrder()
-    await inject('POST', `/admin/purchase-orders/${order.id}/send`)
+    await pool.query(`UPDATE users SET role = 'backoffice', can_view_finance = false WHERE email = $1`, [
+      `staff@${DOMAIN}`,
+    ])
+    try {
+      const response = await inject('PATCH', `/admin/purchase-orders/${order.id}`, {
+        notify_emails: ['me@po-mail-test.example.com'],
+      })
+      expect(response.statusCode).toBe(403)
+      expect(response.json().message).toContain('see costs')
+      const { rows } = await pool.query(`SELECT notify_emails FROM purchase_orders WHERE id = $1`, [order.id])
+      expect(rows[0].notify_emails).toEqual([])
+      // The rest of the purchase order is theirs to edit as before.
+      const other = await inject('PATCH', `/admin/purchase-orders/${order.id}`, { notes: 'Rush' })
+      expect(other.statusCode).toBe(200)
+    } finally {
+      await pool.query(`UPDATE users SET role = 'director', can_view_finance = true WHERE email = $1`, [
+        `staff@${DOMAIN}`,
+      ])
+    }
+  })
+
+  it('tells the house to stop on a short completion, naming the balance it is dropping', async () => {
+    const order = await createOrder()
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'pending_payment' })
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'paid' })
     transport.sent.length = 0
 
-    const response = await inject('POST', `/admin/purchase-orders/${order.id}/close`)
+    const response = await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'completed' })
     expect(response.statusCode).toBe(200)
 
     expect(to(PO_EMAIL)).toHaveLength(1)
@@ -225,7 +257,7 @@ describe('purchase-order notifications', () => {
     const order = await createOrder()
     transport.sent.length = 0
 
-    const response = await inject('POST', `/admin/purchase-orders/${order.id}/cancel`)
+    const response = await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'cancelled' })
     expect(response.statusCode).toBe(200)
 
     expect(to(PO_EMAIL)).toHaveLength(1)
@@ -239,9 +271,9 @@ describe('purchase-order notifications', () => {
     await pool.query('UPDATE suppliers SET po_email = NULL WHERE slug = $1', [`${PREFIX}-house`])
     const order = await createOrder()
 
-    const response = await inject('POST', `/admin/purchase-orders/${order.id}/send`)
+    const response = await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'pending_payment' })
     expect(response.statusCode).toBe(200)
-    expect(response.json().purchase_order.status).toBe('sent')
+    expect(response.json().purchase_order.status).toBe('pending_payment')
 
     expect(to(PO_EMAIL)).toHaveLength(0)
     expect(to(BACKOFFICE)).toHaveLength(1)
@@ -250,7 +282,7 @@ describe('purchase-order notifications', () => {
 
   it('alerts the office on a receipt — and never the house', async () => {
     const order = await createOrder()
-    await inject('POST', `/admin/purchase-orders/${order.id}/send`)
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'pending_payment' })
     transport.sent.length = 0
 
     const response = await inject(
@@ -282,7 +314,8 @@ describe('purchase-order notifications', () => {
       expect(created.statusCode).toBe(201)
       const sent = await bare.inject({
         method: 'POST',
-        url: `/admin/purchase-orders/${created.json().purchase_order.id}/send`,
+        url: `/admin/purchase-orders/${created.json().purchase_order.id}/status`,
+        payload: { status: 'pending_payment' },
         headers: { cookie: staffCookie },
       })
       expect(sent.statusCode).toBe(200)
@@ -290,5 +323,127 @@ describe('purchase-order notifications', () => {
     } finally {
       await bare.close()
     }
+  })
+
+  // 24 Sep 2026: the purchase order's own Emails list, the sales order's rule.
+  it('sends every letter to the house to the purchase order\'s Emails list too', async () => {
+    const order = await createOrder()
+    const patched = await inject('PATCH', `/admin/purchase-orders/${order.id}`, {
+      // One spelling per address: a case variant is the same inbox.
+      notify_emails: ['accounts@po-mail-test.example.com', 'ACCOUNTS@po-mail-test.example.com'],
+    })
+    expect(patched.json().purchase_order.notify_emails).toEqual(['accounts@po-mail-test.example.com'])
+
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'pending_payment' })
+    expect(to(PO_EMAIL).map((m) => m.subject)).toEqual([expect.stringContaining(order.po_number)])
+    expect(to('accounts@po-mail-test.example.com')).toHaveLength(1)
+
+    transport.sent.length = 0
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'paid' })
+    expect(to(PO_EMAIL)[0].subject).toContain('paid')
+    expect(to('accounts@po-mail-test.example.com')[0].subject).toContain('paid')
+    // Awaiting delivery and received are the office's own bookkeeping.
+    transport.sent.length = 0
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'awaiting_delivery' })
+    expect(transport.sent).toHaveLength(0)
+  })
+
+  it('completes in full without writing to the house — there is no balance to drop', async () => {
+    const order = await createOrder()
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'pending_payment' })
+    await inject('POST', `/admin/purchase-order-lines/${order.lines[0].id}/receipts`, { qty: 40 })
+    transport.sent.length = 0
+    const completed = await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'completed' })
+    expect(completed.statusCode).toBe(200)
+    expect(to(PO_EMAIL)).toHaveLength(0)
+  })
+
+  // The Emails panel's buttons: the purchase order itself, or the letter for
+  // where it stands — "email function like sales order".
+  it('re-sends the purchase order or its status letter from the Emails panel', async () => {
+    const order = await createOrder()
+    const early = await inject('POST', `/admin/purchase-orders/${order.id}/email`, { letter: 'details' })
+    expect(early.statusCode).toBe(409)
+
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'pending_payment' })
+    transport.sent.length = 0
+    const details = await inject('POST', `/admin/purchase-orders/${order.id}/email`, { letter: 'details' })
+    expect(details.statusCode).toBe(200)
+    expect(details.json()).toEqual({ template: 'purchase_order_sent', sent: [PO_EMAIL], failed: [] })
+    expect(to(PO_EMAIL)[0].text).toContain('42.50')
+
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'awaiting_delivery' })
+    const none = await inject('POST', `/admin/purchase-orders/${order.id}/email`, { letter: 'status' })
+    expect(none.statusCode).toBe(422)
+  })
+
+  // The Bulk orders tab: ONE letter to a house for several purchase orders.
+  describe('bulk orders', () => {
+    const bulk = (ids) => inject('POST', '/admin/purchase-orders/bulk', { purchase_order_ids: ids })
+
+    it('sends several drafts to their house as ONE letter, each under its own PO number', async () => {
+      const first = await createOrder()
+      const second = await createOrder({ unitPrice: 10 })
+      transport.sent.length = 0
+
+      const response = await bulk([first.id, second.id])
+      expect(response.statusCode).toBe(201)
+      const { bulk_order: bulkOrder } = response.json()
+      expect(bulkOrder.bulk_number).toMatch(/^BULK-\d{6}$/)
+      expect(bulkOrder.purchase_orders.map((po) => po.status)).toEqual(['pending_payment', 'pending_payment'])
+      expect(bulkOrder.purchase_orders.every((po) => po.bulk_order.id === bulkOrder.id)).toBe(true)
+      // Members read upward, in the order they were raised.
+      expect(bulkOrder.purchase_orders.map((po) => po.po_number)).toEqual([first.po_number, second.po_number])
+
+      const [letter] = to(PO_EMAIL)
+      expect(to(PO_EMAIL)).toHaveLength(1)
+      expect(letter.subject).toContain(`${bulkOrder.bulk_number} (${first.po_number}, ${second.po_number})`)
+      expect(letter.text).toContain(first.po_number)
+      expect(letter.text).toContain(second.po_number)
+      // The office's record is the same letter.
+      expect(to(BACKOFFICE)[0].subject).toBe(letter.subject)
+
+      const read = await inject('GET', `/admin/purchase-orders/bulk/${bulkOrder.id}`)
+      expect(read.json().bulk_order.purchase_orders).toHaveLength(2)
+      const list = await inject('GET', '/admin/purchase-orders/bulk')
+      expect(list.json().bulk_orders[0]).toMatchObject({
+        bulk_number: bulkOrder.bulk_number,
+        po_numbers: [first.po_number, second.po_number],
+      })
+    })
+
+    it('refuses a purchase order that has already gone to the house, and sends nothing', async () => {
+      const first = await createOrder()
+      const second = await createOrder()
+      await inject('POST', `/admin/purchase-orders/${second.id}/status`, { status: 'pending_payment' })
+      transport.sent.length = 0
+
+      const response = await bulk([first.id, second.id])
+      expect(response.statusCode).toBe(409)
+      expect(response.json().message).toContain(second.po_number)
+      expect(transport.sent).toHaveLength(0)
+      const { rows } = await pool.query(`SELECT status, bulk_order_id FROM purchase_orders WHERE id = $1`, [first.id])
+      expect(rows[0]).toEqual({ status: 'draft', bulk_order_id: null })
+    })
+
+    it('refuses to mix suppliers in one bulk', async () => {
+      const first = await createOrder()
+      const { rows: suppliers } = await pool.query(
+        `INSERT INTO suppliers (name, slug, currency, po_email) VALUES ($1, $2, 'GBP', 'other@po-mail-test.example.com') RETURNING id`,
+        [`${PREFIX} Other`, `${PREFIX}-other`]
+      )
+      const { rows: brands } = await pool.query(
+        `INSERT INTO brands (name, slug, country, currency, is_international, trade_only, supplier_id)
+         VALUES ($1, $2, 'UK', 'GBP', true, false, $3) RETURNING id`,
+        [`${PREFIX} other brand`, `${PREFIX}-other-brand`, suppliers[0].id]
+      )
+      const other = await inject('POST', '/admin/purchase-orders', {
+        brand_id: brands[0].id,
+        lines: [{ colourway_id: colourwayId, qty_ordered: 5 }],
+      })
+      const response = await bulk([first.id, other.json().purchase_order.id])
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toMatch(/ONE supplier/)
+    })
   })
 })

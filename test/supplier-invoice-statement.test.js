@@ -286,7 +286,7 @@ describe('the consolidated-invoice statement', () => {
 
   it('refuses a cancelled order — a house will not bill for one Atelier withdrew', async () => {
     const order = await createOrder()
-    await inject('POST', `/admin/purchase-orders/${order.id}/cancel`)
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'cancelled' })
     transport.sent.length = 0
 
     const response = await inject('POST', '/admin/supplier-invoices/statement', {

@@ -33,6 +33,10 @@ import { listPurchaseOrders } from '../purchasing/admin-purchase-orders.js'
 // screens page.
 const LIST_LIMIT = 5
 
+// Goods on their way in: sent to the house and not yet received (24 Sep 2026,
+// the purchase-order statuses). Was the single `sent`.
+const INBOUND_STATUSES = Object.freeze(['pending_payment', 'paid', 'awaiting_delivery'])
+
 // The first of the current month, in this process's local day — the same
 // YYYY-MM-DD vocabulary the report filters speak, echoed back as
 // `sales_mtd.from` so the CRM's drill link covers exactly the tile's window.
@@ -73,7 +77,7 @@ export const buildDashboard = async (pool, { finance = false } = {}) => {
       // constant the reservation model keys on, never retyped.
       [[...HELD_STATUSES]]
     ),
-    listPurchaseOrders(pool, { status: 'sent', limit: LIST_LIMIT, finance }),
+    listPurchaseOrders(pool, { status: [...INBOUND_STATUSES], limit: LIST_LIMIT, finance }),
     listAdminOrders(pool, { limit: LIST_LIMIT }),
   ])
 
@@ -97,7 +101,7 @@ export const buildDashboard = async (pool, { finance = false } = {}) => {
     }),
     inbound: Object.freeze({
       count: inbound.total,
-      status: 'sent',
+      statuses: INBOUND_STATUSES,
       purchase_orders: inbound.purchase_orders,
     }),
     recent_orders: recent.orders,

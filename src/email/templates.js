@@ -254,6 +254,20 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
+  // The office confirmed the goods for an order have arrived (24 Sep 2026: the
+  // Bulk order's receive screen, "to confirm stock availability for client
+  // email"). To the client, the rep and the order's Emails list.
+  order_stock_arrived: ({ order_number }) => ({
+    subject: `${BRAND}: your fabric for order ${order_number} has arrived`,
+    text: [
+      `Good news — the goods for order ${order_number} have arrived and are in stock.`,
+      '',
+      'We will be in touch to arrange delivery.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
   // The SET LETTER behind an overdue-sample reminder (W20-US-007). The client
   // asked for "a set letter, but the option to edit it", and this is the set
   // one: `email_templates` overrides it without a deploy
@@ -582,6 +596,52 @@ const TEMPLATES = Object.freeze({
         : []),
       'Please do not ship any further goods against it. If anything is already',
       'in transit, let us know and we will take it up with you directly.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // The house has been paid (24 Sep 2026), so it can release the goods — the
+  // move to `paid` from the purchase order's Status.
+  purchase_order_paid: ({ po_number, supplier_name, total_text }) => ({
+    subject: `Purchase order ${po_number} paid — ${BRAND}`,
+    text: [
+      `Dear ${supplier_name},`,
+      '',
+      `We have paid for our purchase order ${po_number}${total_text ? ` (${total_text})` : ''}.`,
+      '',
+      'Please release the goods and let us know the dispatch date and tracking.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // ONE letter covering several purchase orders to one house — the Bulk
+  // orders tab (24 Sep 2026). Each order keeps its own PO number and lines, so
+  // the house can ship and invoice against each; `orders_text` is built by
+  // notifyBulkOrderSent. The office gets the same letter as its record.
+  purchase_order_bulk_sent: ({
+    bulk_number,
+    supplier_name,
+    po_numbers,
+    orders_text,
+    incoterm,
+    currency,
+  }) => ({
+    subject: `Order ${bulk_number} (${po_numbers}) — ${BRAND}`,
+    text: [
+      `Dear ${supplier_name},`,
+      '',
+      `Please find our order ${bulk_number} below. It covers our purchase orders`,
+      `${po_numbers}.`,
+      '',
+      orders_text ?? '',
+      '',
+      ...(currency ? [`Currency: ${currency}`] : []),
+      ...(incoterm ? [`Incoterm: ${incoterm}`] : []),
+      '',
+      'Please confirm receipt along with your expected dispatch date, and quote',
+      'each PO number on your invoices and packing lists.',
       '',
       `— ${BRAND}`,
     ].join('\n'),

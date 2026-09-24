@@ -258,6 +258,32 @@ export const notifyQuoteAnswered = async (mailer, db, order, { accepted, reason 
 }
 
 /**
+ * The goods for an order have arrived and are in stock (24 Sep 2026) — the
+ * office confirmed it from a purchase order's receive screen, "to confirm stock
+ * availability for client email". To everyone a status letter goes to
+ * (orderLetterRecipients). Resolves to who it reached; never throws.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ query: Function }} db
+ * @param {object} order the admin order shape
+ * @returns {Promise<{ sent: string[], failed: string[] }>}
+ */
+export const notifyStockArrived = async (mailer, db, order) => {
+  const sent = []
+  const failed = []
+  if (!mailer) return { sent, failed }
+  for (const to of await orderLetterRecipients(mailer, db, order)) {
+    const { ok } = await mailer.send({
+      template: 'order_stock_arrived',
+      to,
+      data: { order_number: order.order_number },
+    })
+    ;(ok ? sent : failed).push(to)
+  }
+  return { sent, failed }
+}
+
+/**
  * A new storefront contact enquiry: acknowledge to the sender and alert the back
  * office. No-op when mailer is null; never throws (mailer.send swallows errors),
  * so a mail problem can't fail the enquiry submission.

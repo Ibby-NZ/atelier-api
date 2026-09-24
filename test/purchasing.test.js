@@ -66,6 +66,11 @@ const cleanupFixtures = async (pool) => {
     [`${PREFIX}-%`]
   )
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
+  // Freight rates are RESTRICT from their supplier.
+  await pool.query(
+    `DELETE FROM supplier_freight_rates WHERE supplier_id IN (SELECT id FROM suppliers WHERE slug LIKE $1)`,
+    [`${PREFIX}-%`]
+  )
   await pool.query('DELETE FROM suppliers WHERE slug LIKE $1', [`${PREFIX}-%`])
 }
 
@@ -209,9 +214,11 @@ describe('W13 purchase orders', () => {
       ['POST', '/admin/purchase-orders/generate', {}],
       ['GET', '/admin/purchase-orders/1', undefined],
       ['PATCH', '/admin/purchase-orders/1', { notes: 'x' }],
-      ['POST', '/admin/purchase-orders/1/send', undefined],
-      ['POST', '/admin/purchase-orders/1/close', undefined],
-      ['POST', '/admin/purchase-orders/1/cancel', undefined],
+      ['POST', '/admin/purchase-orders/1/status', { status: 'paid' }],
+      ['POST', '/admin/purchase-orders/1/email', { letter: 'details' }],
+      ['GET', '/admin/purchase-orders/bulk', undefined],
+      ['GET', '/admin/purchase-orders/bulk/1', undefined],
+      ['POST', '/admin/purchase-orders/bulk', { purchase_order_ids: [1] }],
       ['DELETE', '/admin/purchase-orders/1', undefined],
       ['POST', '/admin/purchase-order-lines/1/allocations', { order_line_id: 1, qty: 1 }],
       ['POST', '/admin/purchase-order-lines/1/receipts', { qty: 1 }],
@@ -674,6 +681,46 @@ describe('W13 purchase orders', () => {
         testEmail('staff'),
       ])
     })
+
+    // 24 Sep 2026: "purchase orders should use wholesale price ... supplier
+    // freight rates and supplier discounts". The pricing engine's own steps.
+    it('prices a line from the wholesale rate less the supplier\'s discount, with its freight', async () => {
+      await pool.query(
+        `UPDATE products SET wholesale_rate = 50
+          WHERE id = (SELECT product_id FROM colourways WHERE id = $1)`,
+        [fixtures.colourwayIds[SKU.alpha]]
+      )
+      // A fraction off list on the supplier row: 40%.
+      await pool.query(`UPDATE suppliers SET default_discount = 0.4 WHERE id = $1`, [fixtures.supplierId])
+      await pool.query(
+        `INSERT INTO supplier_freight_rates (supplier_id, basis, rate, unit, effective_from)
+         VALUES ($1, 'dollar', 3.25, 'metre', '2026-01-01')`,
+        [fixtures.supplierId]
+      )
+      await placeOrder(SKU.alpha, 10)
+      await pool.query(`UPDATE users SET can_view_finance = true WHERE email = $1`, [
+        testEmail('staff'),
+      ])
+      const response = await generate({ brand_ids: [fixtures.brandIds.alpha] })
+      const [purchaseOrder] = response.json().purchase_orders
+      expect(purchaseOrder.lines[0]).toMatchObject({
+        unit_price: 30,
+        line_cost: 300,
+        freight_per_unit: 3.25,
+        freight_cost: 32.5,
+      })
+      expect(purchaseOrder.total_freight).toBe(32.5)
+
+      // A typed price is the override; the freight estimate still comes along.
+      const typed = await inject('POST', '/admin/purchase-orders', staffCookie, {
+        brand_id: fixtures.brandIds.alpha,
+        lines: [{ colourway_id: fixtures.colourwayIds[SKU.alpha], qty_ordered: 2, unit_price: 27.5 }],
+      })
+      expect(typed.json().purchase_order.lines[0]).toMatchObject({ unit_price: 27.5, freight_per_unit: 3.25 })
+      await pool.query(`UPDATE users SET can_view_finance = false WHERE email = $1`, [
+        testEmail('staff'),
+      ])
+    })
   })
 
   describe('SUM(allocations.qty) <= qty_ordered', () => {
@@ -754,26 +801,47 @@ describe('W13 purchase orders', () => {
 
       const closeEarly = await inject(
         'POST',
-        `/admin/purchase-orders/${purchaseOrder.id}/close`,
-        staffCookie
+        `/admin/purchase-orders/${purchaseOrder.id}/status`,
+        staffCookie,
+        { status: 'completed' }
       )
       expect(closeEarly.statusCode).toBe(409)
 
       const sent = await inject(
         'POST',
-        `/admin/purchase-orders/${purchaseOrder.id}/send`,
-        staffCookie
+        `/admin/purchase-orders/${purchaseOrder.id}/status`,
+        staffCookie,
+        { status: 'pending_payment' }
       )
-      expect(sent.json().purchase_order.status).toBe('sent')
+      expect(sent.json().purchase_order.status).toBe('pending_payment')
       expect(sent.json().purchase_order.sent_at).not.toBeNull()
+
+      // Pending payment cannot complete: the house is paid, or the goods
+      // arrive, first.
+      const tooSoon = await inject(
+        'POST',
+        `/admin/purchase-orders/${purchaseOrder.id}/status`,
+        staffCookie,
+        { status: 'completed' }
+      )
+      expect(tooSoon.statusCode).toBe(409)
+      const paid = await inject(
+        'POST',
+        `/admin/purchase-orders/${purchaseOrder.id}/status`,
+        staffCookie,
+        { status: 'paid' }
+      )
+      expect(paid.json().purchase_order.paid_at).not.toBeNull()
 
       const closed = await inject(
         'POST',
-        `/admin/purchase-orders/${purchaseOrder.id}/close`,
-        staffCookie
+        `/admin/purchase-orders/${purchaseOrder.id}/status`,
+        staffCookie,
+        { status: 'completed' }
       )
-      expect(closed.json().purchase_order.status).toBe('closed')
-      // `closed` is a DECISION, not arithmetic: nothing was received.
+      expect(closed.json().purchase_order.status).toBe('completed')
+      expect(closed.json().purchase_order.closed_at).not.toBeNull()
+      // `completed` is a DECISION, not arithmetic: nothing was received.
       expect(closed.json().purchase_order.receipt_state).toBe('none')
     })
 
@@ -781,8 +849,9 @@ describe('W13 purchase orders', () => {
       const purchaseOrder = await raise()
       const cancelled = await inject(
         'POST',
-        `/admin/purchase-orders/${purchaseOrder.id}/cancel`,
-        staffCookie
+        `/admin/purchase-orders/${purchaseOrder.id}/status`,
+        staffCookie,
+        { status: 'cancelled' }
       )
       expect(cancelled.json().purchase_order.status).toBe('cancelled')
       expect(cancelled.json().purchase_order.lines[0].allocated_qty).toBe(0)
@@ -794,15 +863,18 @@ describe('W13 purchase orders', () => {
       expect(again.json().purchase_orders).toHaveLength(1)
     })
 
-    it('close does NOT release the allocations', async () => {
+    it('completing does NOT release the allocations', async () => {
       // The goods that did arrive were bought against those sales orders;
       // handing the demand back would have the next derivation buy it twice.
       const purchaseOrder = await raise()
-      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/send`, staffCookie)
+      for (const status of ['pending_payment', 'paid']) {
+        await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/status`, staffCookie, { status })
+      }
       const closed = await inject(
         'POST',
-        `/admin/purchase-orders/${purchaseOrder.id}/close`,
-        staffCookie
+        `/admin/purchase-orders/${purchaseOrder.id}/status`,
+        staffCookie,
+        { status: 'completed' }
       )
       expect(closed.json().purchase_order.lines[0].allocated_qty).toBe(25)
       const again = await generate({ brand_ids: [fixtures.brandIds.alpha] })
@@ -893,7 +965,7 @@ describe('W13 purchase orders', () => {
     })
 
     it('refuses a receipt against a cancelled purchase order', async () => {
-      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/cancel`, staffCookie)
+      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/status`, staffCookie, { status: 'cancelled' })
       const response = await receipt({ qty: 10 })
       expect(response.statusCode).toBe(409)
     })
@@ -956,7 +1028,7 @@ describe('W13 purchase orders', () => {
         lines: [{ colourway_id: fixtures.colourwayIds[sku], qty_ordered: qty }],
       })
       const purchaseOrder = created.json().purchase_order
-      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/send`, staffCookie)
+      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/status`, staffCookie, { status: 'pending_payment' })
       return purchaseOrder
     }
     const receive = (lineId, qty) =>
@@ -979,6 +1051,15 @@ describe('W13 purchase orders', () => {
       // The ledger's reversal takes it back off the shelf.
       expect((await receive(purchaseOrder.lines[0].id, -40)).statusCode).toBe(201)
       expect(await stockOf(SKU.alpha)).toEqual(before)
+    })
+
+    it('moves the purchase order to received when its last line is booked in full', async () => {
+      const purchaseOrder = await sentOrderFor(SKU.alpha, 40)
+      const part = await receive(purchaseOrder.lines[0].id, 15)
+      expect(part.json().purchase_order.status).toBe('pending_payment')
+      const rest = await receive(purchaseOrder.lines[0].id, 25)
+      expect(rest.json().purchase_order).toMatchObject({ status: 'received', receipt_state: 'full' })
+      expect(rest.json().purchase_order.received_at).not.toBeNull()
     })
 
     it('refuses a reversal that would take stock below zero, and books nothing', async () => {
@@ -1016,6 +1097,38 @@ describe('W13 purchase orders', () => {
         [fixtures.colourwayIds[SKU.alphaTwo]]
       )
       expect(rows[0]).toEqual({ qty_available: '10.00', qty_reserved: '7.00', unit: 'metres' })
+    })
+  })
+
+  // The receive screen's per-sales-order button (24 Sep 2026): "confirm stock
+  // availability for client email".
+  describe('confirming stock has arrived for a sales order', () => {
+    const arrived = (orderId, note) =>
+      inject('POST', `/admin/orders/${orderId}/stock-arrived`, staffCookie, note ? { note } : {})
+
+    it('moves a back-ordered order on to processing, with the arrival on its timeline', async () => {
+      const { orderId } = await placeOrder(SKU.alpha, 5)
+      await pool.query(`UPDATE orders SET status = 'back_order' WHERE id = $1`, [orderId])
+
+      const response = await arrived(orderId, 'Stock arrived on PO-000123.')
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.status).toBe('processing')
+      expect(response.json().email).toEqual({ sent: [], failed: [] })
+      const { rows } = await pool.query(
+        `SELECT from_status, to_status, note FROM order_events WHERE order_id = $1`,
+        [orderId]
+      )
+      expect(rows).toEqual([
+        { from_status: 'back_order', to_status: 'processing', note: 'Stock arrived on PO-000123.' },
+      ])
+    })
+
+    it('moves nothing at any other status, and still answers', async () => {
+      const { orderId } = await placeOrder(SKU.alpha, 5)
+      const response = await arrived(orderId)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.status).toBe('pending_payment')
+      expect((await inject('POST', '/admin/orders/99999999/stock-arrived', staffCookie, {})).statusCode).toBe(404)
     })
   })
 
@@ -1102,8 +1215,9 @@ describe('W13 purchase orders', () => {
       const generated = await generate({ brand_ids: [fixtures.brandIds.alpha] })
       await inject(
         'POST',
-        `/admin/purchase-orders/${generated.json().purchase_orders[0].id}/cancel`,
-        staffCookie
+        `/admin/purchase-orders/${generated.json().purchase_orders[0].id}/status`,
+        staffCookie,
+        { status: 'cancelled' }
       )
       const response = await inject('DELETE', `/admin/orders/${orderId}`, staffCookie)
       expect(response.statusCode).toBe(409)

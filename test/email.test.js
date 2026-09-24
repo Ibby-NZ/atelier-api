@@ -98,11 +98,17 @@ describe('email templates', () => {
         'quote_sent',
         'order_back_ordered',
         'backoffice_quote_answered',
+        // The purchase-order lifecycle (24 Sep 2026): the house told it has
+        // been paid, ONE letter for a bulk order of several purchase orders,
+        // and the client told their goods have arrived.
+        'purchase_order_paid',
+        'purchase_order_bulk_sent',
+        'order_stock_arrived',
       ])
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(33)
+    expect(TEMPLATE_NAMES).toHaveLength(36)
   })
 
   it('backoffice_new_trade_application names the business and links the CRM applicants tab', () => {

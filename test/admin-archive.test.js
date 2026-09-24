@@ -191,17 +191,17 @@ describe('soft archive / restore', () => {
     // A live order-request (still holding a reservation).
     const { rows: live } = await pool.query(
       `INSERT INTO orders (order_number, kind, status)
-       VALUES ($1, 'order_request', 'requested') RETURNING id`,
+       VALUES ($1, 'order_request', 'quote_requested') RETURNING id`,
       [`${PREFIX}-LIVE`]
     )
     const liveId = live[0].id
     const blocked = await inject('POST', `/admin/orders/${liveId}/archive`, backofficeCookie)
     expect(blocked.statusCode).toBe(409)
 
-    // A declined (terminal) order archives fine.
+    // A cancelled (terminal) order archives fine.
     const { rows: dead } = await pool.query(
       `INSERT INTO orders (order_number, kind, status)
-       VALUES ($1, 'order_request', 'declined') RETURNING id`,
+       VALUES ($1, 'order_request', 'cancelled') RETURNING id`,
       [`${PREFIX}-DEAD`]
     )
     const deadId = dead[0].id

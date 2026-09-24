@@ -8,16 +8,20 @@
 //   backoffice_new_request  -> staff, whenever ANY path creates an order (W12 US-004)
 //   checkout_receipt        -> customer, after a paid Stripe checkout (US-011)
 //   order_confirmed         -> customer, when the order is CREATED (W12 US-005)
-//   order_invoiced          -> customer, when staff confirm + attach a Xero ref (W12 US-005)
-//   payment_received        -> customer, when staff mark the order paid (US-014)
+//   quote_sent              -> customer, when staff send the quote (links /quote)
+//   order_back_ordered      -> customer, when the order goes on back order
+//   order_invoiced          -> customer, when the order moves to pending_payment
+//   payment_received        -> customer, when the order is marked paid (US-014)
 //   shipped                 -> customer, when staff ship the order (US-014)
-//   order_cancelled         -> customer, when staff cancel (decline) the order
+//   order_cancelled         -> customer, when staff cancel the order
 //   order_details           -> customer, when staff press "Email order details"
+//   backoffice_quote_answered -> staff + rep, when the client accepts/rejects
 //
-// The four status letters (order_invoiced, payment_received, shipped,
-// order_cancelled) also go to the order's sales rep, to every address on the
-// order's Emails list and to the standing copy (ORDER_COPY_EMAIL) — one letter
-// each, see orderLetterRecipients. order_details goes to the same people.
+// The six status letters (quote_sent, order_back_ordered, order_invoiced,
+// payment_received, shipped, order_cancelled) also go to the order's sales rep,
+// to every address on the order's Emails list and to the standing copy
+// (ORDER_COPY_EMAIL) — one letter each, see orderLetterRecipients.
+// order_details goes to the same people.
 
 const BRAND = 'Atelier Textiles'
 
@@ -111,10 +115,11 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
-  // The back-office `confirm` transition: stock and cutting have been checked
-  // and the invoice has been raised in Xero. A message of its OWN (FR-121) —
-  // reusing order_confirmed here would send the client the same mail twice and
-  // tell them nothing new the second time.
+  // The move to `pending_payment`: stock and cutting have been checked and the
+  // invoice has been raised in Xero (by hand, or by "Create in Xero", which
+  // makes the move itself). A message of its OWN (FR-121) — reusing
+  // order_confirmed here would send the client the same mail twice and tell
+  // them nothing new the second time.
   order_invoiced: ({ order_number, xero_invoice_ref }) => ({
     subject: `${BRAND}: invoice for order ${order_number}`,
     text: [
@@ -157,12 +162,12 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
-  // The back-office `decline` transition, which the CRM calls "Cancel order".
-  // Its confirmation has long told the office "the client is told"; until the
-  // status letters were widened to the rep and the order's own list (23 Sep
-  // 2026) nothing was actually sent, and this is the letter that makes the
-  // sentence true. No reason line: the office declines for reasons it tells the
-  // client in person, and a stored override cannot branch on one anyway.
+  // The move to `cancelled`. The CRM's confirmation has long told the office
+  // "the client is told"; until the status letters were widened to the rep and
+  // the order's own list (23 Sep 2026) nothing was actually sent, and this is
+  // the letter that makes the sentence true. No reason line: the office cancels
+  // for reasons it tells the client in person, and a stored override cannot
+  // branch on one anyway.
   order_cancelled: ({ order_number }) => ({
     subject: `${BRAND}: order ${order_number} has been cancelled`,
     text: [
@@ -171,6 +176,48 @@ const TEMPLATES = Object.freeze({
       'If you were not expecting this, please get in touch and we will help.',
       '',
       `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // The quote going out (24 Sep 2026). `quote_url` is the signed link the
+  // client answers it from, guest or not (src/orders/quote-links.js); read the
+  // way `shipped` reads `tracking_url`, so the CRM's Letters editor shows
+  // `{{ quote_url }}`. It is always present on the real path — the spread only
+  // keeps a dangling line out if a caller ever sends the letter without one.
+  quote_sent: ({ order_number, quote_url }) => ({
+    subject: `${BRAND}: your quote for ${order_number} is ready`,
+    text: [
+      `Your quote for ${order_number} is ready.`,
+      '',
+      ...(quote_url ? ['Review it, then accept or reject it here:', quote_url, ''] : []),
+      'If anything needs changing, reject it with a note and we will re-quote.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // The move to `back_order` — by hand, or when the office raises a purchase
+  // order from the sales order.
+  order_back_ordered: ({ order_number }) => ({
+    subject: `${BRAND}: order ${order_number} is on back order`,
+    text: [
+      `Order ${order_number} is on back order with the house.`,
+      '',
+      'We will confirm a lead time as soon as we have it.',
+      '',
+      `— ${BRAND}`,
+    ].join('\n'),
+  }),
+
+  // The client answered a quote from the storefront. To the office's one
+  // address and the order's rep — the client did it, so they get nothing.
+  backoffice_quote_answered: ({ order_number, answer, reason }) => ({
+    subject: `Quote ${answer}: ${order_number}`,
+    text: [
+      `The client has ${answer} the quote for ${order_number}.`,
+      '',
+      ...(reason ? [`Reason: ${reason}`, ''] : []),
+      'Open the order in the back office to take it from here.',
     ].join('\n'),
   }),
 

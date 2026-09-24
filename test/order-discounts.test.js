@@ -245,10 +245,11 @@ describe('order discounts (Rebecca-R2)', () => {
 
     it('refuses a discount on a paid order like any other commercial term', async () => {
       const order = await placeOrder()
-      await inject('POST', `/admin/orders/${order.id}/confirm`, backofficeCookie, {
+      await inject('POST', `/admin/orders/${order.id}/status`, backofficeCookie, {
+        status: 'pending_payment',
         xero_invoice_ref: 'INV-DISC',
       })
-      await inject('POST', `/admin/orders/${order.id}/mark-paid`, backofficeCookie)
+      await inject('POST', `/admin/orders/${order.id}/status`, backofficeCookie, { status: 'paid' })
 
       const response = await patch(order.id, directorCookie, {
         discount_pct: 7.5,

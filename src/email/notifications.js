@@ -8,23 +8,28 @@ import { resolveOrderRecipient } from './recipients.js'
 import { renderStoredTemplate } from './template-store.js'
 import { uniqueEmails } from '../orders/notify-emails.js'
 
-// Admin status -> the template announcing that transition (US-014). Every
-// status an order can MOVE to is here; `requested` is absent because an order
-// is created in it, and creation has its own letter (notifyOrderCreated).
+// Status -> the letter announcing a move INTO it (US-014, widened by the
+// 24 Sep 2026 lifecycle overhaul). A status absent here sends nothing:
+// `quote_requested` is the creation status (notifyOrderCreated has its own
+// letter), `quote_accepted` / `quote_rejected` are the client's own doing (the
+// office hears via notifyQuoteAnswered), and `processing`, `completed` and
+// `refunded` are the office's bookkeeping — Xero sends the credit note.
 //
-// `confirmed` maps to `order_invoiced`, NOT to `order_confirmed`: the client's
-// confirmation now goes out when the order is CREATED (US-005, FR-120), so
-// confirming has to say something of its own or it re-sends a mail the client
+// `pending_payment` maps to `order_invoiced`, NOT to `order_confirmed`: the
+// client's confirmation goes out when the order is CREATED (US-005, FR-120), so
+// the invoice has to say something of its own or it re-sends a mail the client
 // already has (FR-121). Two events, two messages.
 //
-// `declined` joined on 23 Sep 2026 ("when the status changes on a sales order,
-// an email is sent"): it is the CRM's "Cancel order", whose confirmation
-// already promised the office that the client is told.
+// `cancelled` joined on 23 Sep 2026 ("when the status changes on a sales
+// order, an email is sent"): it is the CRM's "Cancel order", whose
+// confirmation already promised the office that the client is told.
 export const TRANSITION_TEMPLATES = Object.freeze({
-  confirmed: 'order_invoiced',
+  quote_sent: 'quote_sent',
+  back_order: 'order_back_ordered',
+  pending_payment: 'order_invoiced',
   paid: 'payment_received',
   shipped: 'shipped',
-  declined: 'order_cancelled',
+  cancelled: 'order_cancelled',
 })
 
 /**
@@ -180,9 +185,9 @@ export const notifyCheckoutReceipt = async (mailer, db, order) => {
 }
 
 /**
- * Announce a back-office status change (confirmed/paid/shipped/declined) —
- * US-014, widened on 23 Sep 2026 to everyone the order names. Any other status
- * is a no-op.
+ * Announce a status change (see TRANSITION_TEMPLATES for which statuses have a
+ * letter) — US-014, widened on 23 Sep 2026 to everyone the order names. Any
+ * other status is a no-op.
  *
  * The SAME letter goes to the client, the order's sales rep, every address on
  * the order's Emails list and the standing copy — see orderLetterRecipients.
@@ -195,16 +200,21 @@ export const notifyCheckoutReceipt = async (mailer, db, order) => {
  * no longer silences the rest: the rep still hears the order moved.
  *
  * Every caller hands over the ADMIN order shape (`getAdminOrder`: the CRM's
- * confirm / mark-paid / ship / decline routes, and the Xero pull's mark-paid),
- * which is what carries the rep and the list. The back-office alert on
- * CREATION is a different letter with a different rule — one address, never a
- * per-salesperson list (sendBackofficeAlert) — and is untouched by this.
+ * status route, the purchase-order generator's back order, and both Xero
+ * directions), which is what carries the rep and the list. The back-office
+ * alert on CREATION is a different letter with a different rule — one address,
+ * never a per-salesperson list (sendBackofficeAlert) — and is untouched by this.
+ *
+ * `extra` is spread into the template data for what the order row cannot carry
+ * — the `quote_url` a `quote_sent` letter links, which exists only in the
+ * route that issued it.
  *
  * @param {import('./mailer.js').Mailer|null} mailer
  * @param {{ query: Function }} db
  * @param {{ order_number: string, status: string, xero_invoice_ref?: string|null, tracking_url?: string|null, guest_email?: string|null, user_id?: number|null, sales_rep_email?: string|null, notify_emails?: string[] }} order
+ * @param {{ quote_url?: string|null }} [extra]
  */
-export const notifyOrderTransition = async (mailer, db, order) => {
+export const notifyOrderTransition = async (mailer, db, order, extra = {}) => {
   if (!mailer) {
     return
   }
@@ -213,11 +223,37 @@ export const notifyOrderTransition = async (mailer, db, order) => {
     return
   }
   const recipients = await orderLetterRecipients(mailer, db, order)
-  const data = statusLetterData(order)
+  const data = { ...statusLetterData(order), ...extra }
   // In turn, not in parallel: `send` never throws, so one bad address cannot
   // stop the rest, and a relay is kinder to a short queue than a burst.
   for (const to of recipients) {
     await mailer.send({ template, to, data })
+  }
+}
+
+/**
+ * The client answered a quote from the storefront (accept, or reject with a
+ * reason): tell the office's one address and the order's rep. Reply-To is the
+ * client, the back-office-alert rule, so answering from the inbox reaches them.
+ * The client gets nothing — they just did it.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ query: Function }} db
+ * @param {{ order_number: string, guest_email?: string|null, user_id?: number|null, sales_rep_email?: string|null }} order
+ * @param {{ accepted: boolean, reason?: string|null }} answer
+ */
+export const notifyQuoteAnswered = async (mailer, db, order, { accepted, reason = null }) => {
+  if (!mailer) {
+    return
+  }
+  const client = await resolveOrderRecipient(db, order)
+  const data = {
+    order_number: order.order_number,
+    answer: accepted ? 'accepted' : 'rejected',
+    reason: accepted ? null : reason,
+  }
+  for (const to of uniqueEmails([mailer.backofficeEmail, order.sales_rep_email])) {
+    await mailer.send({ template: 'backoffice_quote_answered', to, replyTo: client, data })
   }
 }
 

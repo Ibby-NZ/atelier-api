@@ -192,7 +192,7 @@ describe('GET /admin/dashboard', () => {
       99900
     )
     await insertLine(
-      await insertOrder('declined', 'checkout', 'declined', thisMonth),
+      await insertOrder('cancelled', 'checkout', 'cancelled', thisMonth),
       colourwayId,
       1,
       70000
@@ -205,7 +205,7 @@ describe('GET /admin/dashboard', () => {
     )
     // Held but unpaid: counts toward open orders, not toward MTD sales.
     await insertLine(
-      await insertOrder('requested', 'order_request', 'requested', thisMonth),
+      await insertOrder('quote_requested', 'order_request', 'quote_requested', thisMonth),
       colourwayId,
       1,
       0

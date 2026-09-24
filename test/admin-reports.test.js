@@ -402,9 +402,9 @@ const insertFixture = async (db) => {
   await line(shipped, loose, '3.00', 0)
 
   // Neither of these is a sale under the default population.
-  const requested = await order('REQ', 'order_request', 'requested', '2026-03-17 12:00:00')
+  const requested = await order('REQ', 'order_request', 'quote_requested', '2026-03-17 12:00:00')
   await line(requested, design, '5.00', 0)
-  const declined = await order('DEC', 'order_request', 'declined', '2026-03-17 12:00:00')
+  const declined = await order('DEC', 'order_request', 'cancelled', '2026-03-17 12:00:00')
   await line(declined, design, '9.00', 0)
 
   // Paid, but the back office took it out of its own lists.
@@ -469,9 +469,9 @@ describe('W5-US-004 — the revenue scope against real orders', () => {
     })
 
     // Overridable, and by replacement: intersecting with the default would
-    // answer status=requested with zero rows, which reads as "no trade".
+    // answer status=quote_requested with zero rows, which reads as "no trade".
     it('is replaced, not narrowed, by a status filter', async () => {
-      const lines = await listRevenueLines(pool, scoped({ status: 'requested' }))
+      const lines = await listRevenueLines(pool, scoped({ status: 'quote_requested' }))
 
       expect(numbersOf(lines)).toEqual([`${ORDER_PREFIX}-REQ`])
     })
@@ -886,7 +886,7 @@ describe('W5-US-005 — product performance by house and design', () => {
     })
 
     it('replaces the default population with a status filter', async () => {
-      const { rows } = (await get('&status=requested')).json()
+      const { rows } = (await get('&status=quote_requested')).json()
 
       expect(rows.map((row) => row.qty)).toEqual([5])
     })
@@ -1458,24 +1458,25 @@ describe('W5-US-007 — stock and not-invoiced', () => {
       [CLIENT_EMAIL, CLIENT_NAME]
     )
 
-    // Confirmed AND invoiced: the one order the queue must not show.
+    // Invoiced (pending payment, with a reference): the one order the queue must not show.
     await orderWithLines(
       'INVD',
       'order_request',
-      'confirmed',
+      'pending_payment',
       '2026-03-10 09:00:00',
       { invoiceRef: 'XERO-4471' },
       [[fixture.design, '1.00']]
     )
-    // Confirmed, no reference — the queue's oldest entry.
-    await orderWithLines('BAK', 'backorder_request', 'confirmed', '2026-03-12 09:00:00', {}, [
+    // Pending payment, no reference — the queue's oldest entry.
+    await orderWithLines('BAK', 'backorder_request', 'pending_payment', '2026-03-12 09:00:00', {}, [
       [fixture.design, '2.00'],
     ])
-    // Placed by an account rather than a guest, and spanning both units.
+    // Placed by an account rather than a guest, and spanning both units. An
+    // ACCEPTED quote: the first status that is awaiting an invoice.
     await orderWithLines(
       'ACC',
       'order_request',
-      'requested',
+      'quote_accepted',
       '2026-03-14 09:00:00',
       { userId: clientRows[0].id },
       [
@@ -1665,12 +1666,12 @@ describe('W5-US-007 — stock and not-invoiced', () => {
       expect(report.report).toBe('not-invoiced')
       expect(report.title).toBe(NOT_INVOICED_TITLE)
       expect(report.columns).toEqual(NOT_INVOICED_COLUMNS.map((column) => ({ ...column })))
+      // REQ is a quote nobody has accepted: not awaiting an invoice yet.
       expect(orderNumbersOf(report)).toEqual([
         `${ORDER_PREFIX}-BAK`,
         `${ORDER_PREFIX}-ACC`,
         `${ORDER_PREFIX}-ACC`,
         `${ORDER_PREFIX}-SHP`,
-        `${ORDER_PREFIX}-REQ`,
       ])
     })
 
@@ -1681,12 +1682,12 @@ describe('W5-US-007 — stock and not-invoiced', () => {
     })
 
     // A card checkout is paid at Stripe and is never invoiced through this
-    // platform; a declined order is awaiting nothing; an archived one is out of
+    // platform; a cancelled order is awaiting nothing; an archived one is out of
     // the office's own lists.
-    it('leaves out card checkouts, declined orders and archived ones', async () => {
+    it('leaves out card checkouts, unaccepted quotes, cancelled orders and archived ones', async () => {
       const numbers = orderNumbersOf(await payloadOf(QUEUE_PATH))
 
-      for (const suffix of ['CHK', 'OTH', 'ARC', 'DEC']) {
+      for (const suffix of ['CHK', 'OTH', 'ARC', 'DEC', 'REQ']) {
         expect(numbers).not.toContain(`${ORDER_PREFIX}-${suffix}`)
       }
     })
@@ -1709,10 +1710,10 @@ describe('W5-US-007 — stock and not-invoiced', () => {
 
     // The lifecycle window is a default, and a status filter replaces it.
     it('narrows to one stage through the shared filter layer', async () => {
-      const report = await payloadOf(QUEUE_PATH, '&status=confirmed')
+      const report = await payloadOf(QUEUE_PATH, '&status=pending_payment')
 
       expect(orderNumbersOf(report)).toEqual([`${ORDER_PREFIX}-BAK`])
-      expect([...report.meta.statuses]).toEqual(['confirmed'])
+      expect([...report.meta.statuses]).toEqual(['pending_payment'])
     })
 
     it('names the account that placed the order, and the guest email otherwise', async () => {
@@ -1729,7 +1730,7 @@ describe('W5-US-007 — stock and not-invoiced', () => {
       const line = report.rows.find((row) => row.order_number === `${ORDER_PREFIX}-BAK`)
 
       expect(line).toMatchObject({
-        status: 'confirmed',
+        status: 'pending_payment',
         kind: 'backorder_request',
         brand_name: `${PREFIX} House`,
         product_name: `${PREFIX} Design`,
@@ -1746,9 +1747,9 @@ describe('W5-US-007 — stock and not-invoiced', () => {
     it('counts the lines that carry no price, and states no value anywhere', async () => {
       const report = await payloadOf(QUEUE_PATH)
 
-      expect(report.meta.lines).toBe(5)
-      expect(report.meta.unpriced_lines).toBe(5)
-      expect(report.meta.orders).toBe(4)
+      expect(report.meta.lines).toBe(4)
+      expect(report.meta.unpriced_lines).toBe(4)
+      expect(report.meta.orders).toBe(3)
       expect(JSON.stringify(report)).not.toContain('value_cents')
     })
 
@@ -1760,7 +1761,7 @@ describe('W5-US-007 — stock and not-invoiced', () => {
 
       expect(mixed.meta.mixed_units).toBe(true)
       expect(mixed.totals).toEqual({ order_number: 'All orders', product_name: 'All lines' })
-      expect(fabric.totals).toMatchObject({ product_type: 'fabric', qty: 11 })
+      expect(fabric.totals).toMatchObject({ product_type: 'fabric', qty: 6 })
       expect(fabric.totals.on_hand).toBeUndefined()
     })
 
@@ -2206,7 +2207,7 @@ describe('Userback 8287873 — the orders behind the numbers', () => {
       for (const suffix of ['ARC', 'REQ', 'DEC']) {
         expect(orderNumbersOf(report)).not.toContain(`${ORDER_PREFIX}-${suffix}`)
       }
-      expect(report.meta.statuses).toEqual(['paid', 'shipped'])
+      expect(report.meta.statuses).toEqual(['paid', 'shipped', 'completed'])
     })
   })
 
@@ -2238,10 +2239,10 @@ describe('Userback 8287873 — the orders behind the numbers', () => {
     // A status filter REPLACES the default population rather than narrowing it,
     // so asking for requested orders answers with the one that was requested.
     it('replaces the default population with a status filter', async () => {
-      const report = await payloadOf('&status=requested')
+      const report = await payloadOf('&status=quote_requested')
 
       expect(orderNumbersOf(report)).toEqual([`${ORDER_PREFIX}-REQ`])
-      expect(report.meta.statuses).toEqual(['requested'])
+      expect(report.meta.statuses).toEqual(['quote_requested'])
     })
 
     it('honours the date range, last day included', async () => {

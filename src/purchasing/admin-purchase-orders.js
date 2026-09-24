@@ -62,7 +62,11 @@ import { buildUpdate } from '../catalogue/admin-brands.js'
 // already decremented, so it is not demand to buy against), and `HELD_STATUSES`
 // is where that demand is still live. A local copy of either is how the
 // derivation and the reservation model start disagreeing about what is owed.
-import { RESERVING_KINDS, HELD_STATUSES } from '../orders/order-states.js'
+import { RESERVING_KINDS, HELD_STATUSES, canTransition } from '../orders/order-states.js'
+// A purchase order raised FROM a sales order moves that order to back_order —
+// through the one transition, so the machine, the audit row and the letter
+// are the same as a move made by hand.
+import { setOrderStatus } from '../orders/admin-orders.js'
 import { planPurchaseOrders } from './po-plan.js'
 import { loadReceiptsByLineId } from './receipts.js'
 import { supplierForBrand } from '../suppliers/brand-suppliers.js'
@@ -623,7 +627,9 @@ const describeExistingCover = async (db, orderLineIds) => {
 // The candidate predicate. `RESERVING_KINDS` and `HELD_STATUSES` are IMPORTED —
 // a card checkout is excluded by construction (it is not a reserving kind: it
 // arrived paid with stock already decremented, so it is not demand to buy
-// against), and `shipped`/`declined` have already been settled.
+// against), and shipped/completed/cancelled/refunded have already been settled.
+// A quote still at `quote_requested` IS a candidate: the office may raise the
+// purchase order before quoting, whatever the stock says.
 //
 // The `NOT EXISTS` is what makes the DRY RUN honest. It is NOT the anti-double-
 // order guard: it reads rows a concurrent transaction is about to write, which
@@ -662,15 +668,25 @@ const CANDIDATE_SQL = `SELECT ol.id AS order_line_id,
  * exactly what `generatePurchaseOrders` would write — same function, so the
  * screen and the act cannot disagree about what was grouped.
  *
+ * `orderIds` narrows the run to named sales orders — the order page's "Create
+ * purchase order" — beside or instead of `brandIds`.
+ *
  * @param {{ query: Function }} db
- * @param {{ brandIds?: number[]|null }} [options]
+ * @param {{ brandIds?: number[]|null, orderIds?: number[]|null }} [options]
  */
-export const planPurchaseOrdersFromOrders = async (db, { brandIds = null } = {}) => {
+export const planPurchaseOrdersFromOrders = async (
+  db,
+  { brandIds = null, orderIds = null } = {}
+) => {
   const params = [[...RESERVING_KINDS], [...HELD_STATUSES]]
   let filter = ''
   if (Array.isArray(brandIds) && brandIds.length > 0) {
     params.push(brandIds)
-    filter = ` AND b.id = ANY($${params.length}::int[])`
+    filter += ` AND b.id = ANY($${params.length}::int[])`
+  }
+  if (Array.isArray(orderIds) && orderIds.length > 0) {
+    params.push(orderIds)
+    filter += ` AND o.id = ANY($${params.length}::int[])`
   }
   const { rows } = await db.query(
     `${CANDIDATE_SQL}${filter} ORDER BY b.name, c.sku, ol.id`,
@@ -753,14 +769,14 @@ const rethrowSampleBarcodeCheck = (error) => {
  * ordered from by reading the ledger.
  *
  * @param {import('pg').Pool} pool
- * @param {{ brandIds?: number[]|null, user?: object|null, finance?: boolean }} [options]
+ * @param {{ brandIds?: number[]|null, orderIds?: number[]|null, user?: object|null, finance?: boolean }} [options]
  * @returns {Promise<{ purchase_orders: object[], blocked: ReadonlyArray<object>, candidate_lines: number }>}
  */
 export const generatePurchaseOrders = async (
   pool,
-  { brandIds = null, user = null, finance = false } = {}
+  { brandIds = null, orderIds = null, user = null, finance = false } = {}
 ) => {
-  const plan = await planPurchaseOrdersFromOrders(pool, { brandIds })
+  const plan = await planPurchaseOrdersFromOrders(pool, { brandIds, orderIds })
 
   // A brand named EXPLICITLY by the caller and carrying no supplier is a 422
   // naming it (FR-133): the caller asked for that house and there is no house to
@@ -812,6 +828,51 @@ export const generatePurchaseOrders = async (
     purchaseOrders.push(await getPurchaseOrder(pool, id, { finance }))
   }
   return { purchase_orders: purchaseOrders, blocked: plan.blocked, candidate_lines: plan.candidate_lines }
+}
+
+/**
+ * Move the sales orders a run raised purchase orders for onto `back_order`
+ * (24 Sep 2026: the order page's "Create purchase order"). Only an order the
+ * machine lets move is moved; one that cannot — a paid order, one already on
+ * back order — keeps its status and is reported in `notMoved`, because the
+ * purchase order itself was still right to raise. Runs after the generate
+ * committed: the purchase orders stand whether or not an order moves.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {object[]} purchaseOrders the generate's `purchase_orders`
+ * @param {{ actor: { kind: string, userId?: number|null } }} options
+ * @returns {Promise<{ moved: object[], notMoved: Array<{ order_number: string, status: string }> }>}
+ */
+export const backOrderRaisedOrders = async (pool, purchaseOrders, { actor }) => {
+  const orderIds = [
+    ...new Set(
+      purchaseOrders.flatMap((po) =>
+        (po.lines ?? []).flatMap((line) => (line.allocations ?? []).map((a) => a.order_id))
+      )
+    ),
+  ]
+  const moved = []
+  const notMoved = []
+  for (const orderId of orderIds) {
+    const { rows } = await pool.query(`SELECT order_number, status FROM orders WHERE id = $1`, [
+      orderId,
+    ])
+    const order = rows[0]
+    if (!order) continue
+    if (!canTransition(order.status, 'back_order')) {
+      notMoved.push({ order_number: order.order_number, status: order.status })
+      continue
+    }
+    try {
+      moved.push(await setOrderStatus(pool, orderId, 'back_order', { actor }))
+    } catch (error) {
+      // Somebody moved it between the read and the transaction: report it as
+      // it now stands rather than fail a run whose purchase orders exist.
+      if (error?.statusCode !== 409) throw error
+      notMoved.push({ order_number: order.order_number, status: order.status })
+    }
+  }
+  return { moved, notMoved }
 }
 
 // ---------------------------------------------------------------------------

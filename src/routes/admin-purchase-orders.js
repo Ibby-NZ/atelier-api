@@ -30,6 +30,7 @@ import {
   getPurchaseOrder,
   planPurchaseOrdersFromOrders,
   generatePurchaseOrders,
+  backOrderRaisedOrders,
   createPurchaseOrder,
   updatePurchaseOrder,
   sendPurchaseOrder,
@@ -47,6 +48,7 @@ import {
   notifyPurchaseOrderEnded,
   notifyPurchaseOrderReceipt,
 } from '../email/purchasing-notifications.js'
+import { notifyOrderTransition } from '../email/notifications.js'
 
 const MAX_LINES = 200
 
@@ -134,6 +136,14 @@ const brandIdsSchema = {
   additionalProperties: false,
   properties: {
     brand_ids: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 100,
+      items: { type: 'integer', minimum: 1 },
+    },
+    // Named sales orders — the order page's "Create purchase order". Narrows
+    // the run to their lines; on generate each is moved to back_order.
+    order_ids: {
       type: 'array',
       minItems: 1,
       maxItems: 100,
@@ -254,6 +264,7 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
     async (request) => {
       const plan = await planPurchaseOrdersFromOrders(pool, {
         brandIds: request.body?.brand_ids ?? null,
+        orderIds: request.body?.order_ids ?? null,
       })
       return { plan }
     }
@@ -261,17 +272,30 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
 
   // The same grouping, written. 201 because it creates documents; `blocked`
   // travels beside them so the screen can say what it could not raise.
+  //
+  // Raised FROM named sales orders (`order_ids`), each order that got a
+  // purchase order moves to back_order, with its letter; one the machine will
+  // not move (paid, say) keeps its status and is listed in `not_moved`.
   app.post(
     '/admin/purchase-orders/generate',
     { preHandler: backoffice, schema: { body: brandIdsSchema } },
     async (request, reply) => {
+      const orderIds = request.body?.order_ids ?? null
       const result = await generatePurchaseOrders(pool, {
         brandIds: request.body?.brand_ids ?? null,
+        orderIds,
         user: request.user,
         finance: await financeFor(request),
       })
       reply.code(201)
-      return result
+      if (!orderIds) return result
+      const { moved, notMoved } = await backOrderRaisedOrders(pool, result.purchase_orders, {
+        actor: { kind: 'staff', userId: request.user.id },
+      })
+      for (const order of moved) {
+        await notifyOrderTransition(mailer, pool, order)
+      }
+      return { ...result, not_moved: notMoved }
     }
   )
 

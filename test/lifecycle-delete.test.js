@@ -238,7 +238,7 @@ describe('deleteOrExplain against the database', () => {
     const colourwayId = await seedColourway(pool, productId)
     await seedInventory(pool, colourwayId, 12, 0)
     const { rows: orders } = await pool.query(
-      `INSERT INTO orders (order_number, kind, status) VALUES ($1, 'order_request', 'requested')
+      `INSERT INTO orders (order_number, kind, status) VALUES ($1, 'order_request', 'quote_requested')
        RETURNING id`,
       [`${PREFIX}-ORD`]
     )
@@ -433,7 +433,7 @@ describe('deleteOrExplain transaction shape', () => {
   // refusal never writes), before the DELETE (so the lines it reads still exist),
   // inside the same transaction (so a later failure takes it back).
   it('runs beforeDelete after the guard and the probes, and before the DELETE', async () => {
-    const pool = stubPool({ rowState: { kind: 'order_request', status: 'requested' } })
+    const pool = stubPool({ rowState: { kind: 'order_request', status: 'quote_requested' } })
 
     expect((await deleteOrExplain(pool, 'order', 12)).deleted).toBe(true)
 
@@ -460,10 +460,10 @@ describe('deleteOrExplain transaction shape', () => {
     expect(pool.log).toContain('ROLLBACK')
   })
 
-  // A shipped order converted its reservation and a declined one released it, so
+  // A shipped order converted its reservation and a cancelled one released it, so
   // releasing again would hand the same stock back twice.
-  it('deletes a declined order without re-releasing its reservation', async () => {
-    const pool = stubPool({ rowState: { kind: 'order_request', status: 'declined' } })
+  it('deletes a cancelled order without re-releasing its reservation', async () => {
+    const pool = stubPool({ rowState: { kind: 'order_request', status: 'cancelled' } })
 
     expect((await deleteOrExplain(pool, 'order', 12)).deleted).toBe(true)
     expect(pool.log.some((sql) => sql.includes('UPDATE inventory'))).toBe(false)

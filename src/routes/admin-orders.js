@@ -13,12 +13,11 @@ import {
   getAdminOrder,
   createManualOrder,
   editOrderLines,
-  confirmOrder,
-  markOrderPaid,
-  shipOrder,
-  declineOrder,
+  setOrderStatus,
   setOrderArchived,
 } from '../orders/admin-orders.js'
+// The link a `quote_sent` letter carries, issued AFTER the move commits.
+import { issueQuoteToken, quoteUrlFor } from '../orders/quote-links.js'
 import { parseOrderFilters } from '../orders/order-filters.js'
 // The delivery address's shape lives beside the trimmer that stores it, so this
 // route and the storefront's request route cannot drift apart on it.
@@ -28,7 +27,7 @@ import { SHIPPING_ADDRESS_SCHEMA } from '../orders/order-request.js'
 import { ORDER_KINDS } from '../reports/filters.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { notifyOrderTransition, notifyOrderCreated } from '../email/notifications.js'
-import { ORDER_LETTERS, sendOrderLetter } from '../email/order-letters.js'
+import { ORDER_LETTERS, currentStatusTemplate, sendOrderLetter } from '../email/order-letters.js'
 import { unpricedLineCount } from '../orders/order-states.js'
 // Who else hears about a status change — the shape and count rules, shared with
 // the edit path and mirrored by the CRM.
@@ -45,7 +44,7 @@ const listQuerySchema = {
   additionalProperties: false,
   properties: {
     // A single status, or a SET of them (repeated params — the dashboard's
-    // Open tile means requested+confirmed+paid at once). Same anyOf posture as
+    // Open tile means every held status at once). Same anyOf posture as
     // `brand` in admin-reports.js: declaring only `string` would 400 the array
     // form before the handler ever saw it.
     status: {
@@ -274,39 +273,40 @@ const emailBodySchema = {
   },
 }
 
-const confirmBodySchema = {
+// One route moves an order to any status (24 Sep 2026); the machine in
+// src/orders/order-states.js decides which moves are legal (409) and which need
+// every line priced (422). `note` lands on the audit row.
+//
+// `tracking_url` is OPTIONAL — the office hand-delivers plenty of orders — and
+// `https?://` is its whole validation, in the schema, so a bad value is
+// Fastify's own 400. It has to be validated somewhere: the shipped letter puts
+// the string in a client's inbox as a link, and `javascript:…` or a bare
+// `nzpost.co.nz` is either dangerous or simply broken. The empty alternative is
+// the header-field rule (FR-127): a text input sends `''` when a person types
+// nothing, which means "hand delivered", and the handler folds it to null.
+// `xero_invoice_ref` is optional too: "Create in Xero" fills it, and a
+// hand-raised invoice's number may be typed here.
+const statusBodySchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['xero_invoice_ref'],
+  required: ['status'],
   properties: {
-    xero_invoice_ref: { type: 'string', minLength: 1, maxLength: 200 },
-  },
-}
-
-// Shipping takes an OPTIONAL courier link — the office hand-delivers plenty of
-// orders, and the ship transition must not start demanding one. The type is
-// `['object','null']` rather than `'object'` because Fastify validates a
-// body-less POST as null: declaring only `object` would 400 every ship the CRM
-// sends today.
-//
-// `https?://` is the whole validation and it lives in the schema, so a bad
-// value is Fastify's own 400 rather than a hand-rolled one. It has to be
-// validated somewhere: the shipped letter puts this string in a client's inbox
-// as a link, and `javascript:…` or a bare `nzpost.co.nz` is either dangerous or
-// simply broken. The empty alternative is the header-field rule again (FR-127):
-// a text input sends `''` when a person types nothing, and that means "hand
-// delivered", not "bad URL" — the handler folds it to null.
-const shipBodySchema = {
-  type: ['object', 'null'],
-  additionalProperties: false,
-  properties: {
+    status: { type: 'string', enum: [...ORDER_STATUSES] },
+    note: { type: ['string', 'null'], maxLength: 2000 },
     tracking_url: { type: 'string', maxLength: 500, pattern: '^(https?://.*)?$' },
+    xero_invoice_ref: { type: ['string', 'null'], maxLength: 200 },
   },
 }
 
 export const adminOrderRoutes = async (
   app,
-  { pool, mailer = null, lineAmountTypes = 'Exclusive', xero = null }
+  {
+    pool,
+    mailer = null,
+    lineAmountTypes = 'Exclusive',
+    xero = null,
+    storeBaseUrl = 'http://localhost:4321',
+  }
 ) => {
   const backoffice = app.guards.requireRole('backoffice')
 
@@ -357,7 +357,8 @@ export const adminOrderRoutes = async (
 
   // A sales order the back office keys itself — a phone call, a walk-in, a
   // bespoke enquiry. It lands in the same queue as a storefront request, in
-  // 'requested', holding a reservation, and drives the same lifecycle from there.
+  // 'quote_requested', holding a reservation, and drives the same lifecycle
+  // from there.
   app.post(
     '/admin/orders',
     { preHandler: backoffice, schema: { body: createBodySchema } },
@@ -409,29 +410,33 @@ export const adminOrderRoutes = async (
     }
   )
 
+  // Every status move the office makes. The machine answers 409/422; the
+  // letter for the new status goes to the client, the rep and the Emails list
+  // (notifyOrderTransition — a no-op for a status with no letter).
   app.post(
-    '/admin/orders/:id/confirm',
+    '/admin/orders/:id/status',
     {
       preHandler: backoffice,
-      schema: { params: idParamsSchema, body: confirmBodySchema },
+      schema: { params: idParamsSchema, body: statusBodySchema },
     },
     async (request) => {
-      const order = await confirmOrder(
-        pool,
-        request.params.id,
-        request.body.xero_invoice_ref
-      )
-      await notifyOrderTransition(mailer, pool, order)
-      return { order }
-    }
-  )
-
-  app.post(
-    '/admin/orders/:id/mark-paid',
-    { preHandler: backoffice, schema: { params: idParamsSchema } },
-    async (request) => {
-      const order = await markOrderPaid(pool, request.params.id)
-      await notifyOrderTransition(mailer, pool, order)
+      const to = request.body.status
+      const order = await setOrderStatus(pool, request.params.id, to, {
+        actor: { kind: 'staff', userId: request.user.id },
+        note: request.body.note ?? null,
+        // `|| null`, not `?? null`: '' is the CRM's "left blank", and a stored
+        // '' is an absence every `IS NULL` read misses (FR-127).
+        trackingUrl: request.body.tracking_url || null,
+        xeroInvoiceRef: request.body.xero_invoice_ref || null,
+      })
+      // A quote going out carries the link the client answers it from. Issued
+      // after the move commits (withOrderTxn returns only the order), and
+      // rotated on every send so a re-quote retires the old link.
+      const quoteUrl =
+        to === 'quote_sent'
+          ? quoteUrlFor({ token: await issueQuoteToken(pool, order.id), storeBaseUrl })
+          : null
+      await notifyOrderTransition(mailer, pool, order, { quote_url: quoteUrl })
       // The invoice in Xero follows the order: marking it paid here records
       // the payment there (client feedback, 16 Sep 2026 — "xero invoice should
       // be marked as paid when the order is paid"). Never fails the
@@ -439,45 +444,14 @@ export const adminOrderRoutes = async (
       // back as `xero_payment.reason` for the CRM to print beside the toast.
       // Absent when Xero is not configured, so an un-integrated deployment's
       // answer is unchanged.
-      const xeroPayment = xero
-        ? await xero.recordOrderPayment(order.id).catch((error) => ({
-            recorded: false,
-            reason: error?.message || 'Xero did not record the payment.',
-          }))
-        : null
+      const xeroPayment =
+        to === 'paid' && xero
+          ? await xero.recordOrderPayment(order.id).catch((error) => ({
+              recorded: false,
+              reason: error?.message || 'Xero did not record the payment.',
+            }))
+          : null
       return { order, ...(xeroPayment ? { xero_payment: xeroPayment } : {}) }
-    }
-  )
-
-  app.post(
-    '/admin/orders/:id/ship',
-    {
-      preHandler: backoffice,
-      schema: { params: idParamsSchema, body: shipBodySchema },
-    },
-    async (request) => {
-      const order = await shipOrder(pool, request.params.id, {
-        // `|| null`, not `?? null`: '' is the CRM's "left blank", and a stored
-        // '' is an absence every `IS NULL` read misses (FR-127).
-        trackingUrl: request.body?.tracking_url || null,
-      })
-      // The shipped letter carries the link (src/email/templates.js) — which is
-      // why the URL is written before this line, not alongside it.
-      await notifyOrderTransition(mailer, pool, order)
-      return { order }
-    }
-  )
-
-  app.post(
-    '/admin/orders/:id/decline',
-    { preHandler: backoffice, schema: { params: idParamsSchema } },
-    async (request) => {
-      const order = await declineOrder(pool, request.params.id)
-      // The cancellation letter (order_cancelled), to the same people as every
-      // other status change. The CRM's confirmation has always promised the
-      // office "the client is told".
-      await notifyOrderTransition(mailer, pool, order)
-      return { order }
     }
   )
 
@@ -490,8 +464,9 @@ export const adminOrderRoutes = async (
   // Unlike a transition, the letter IS the act, so it refuses rather than
   // no-ops (the supplier-statement rule): 503 with no delivering mailer, 422
   // for order details while a line is still at $0.00 (a request arrives
-  // unpriced, and a client reading "$0.00" reads a price), and 502 when every
-  // address failed. The answer names who it reached and who it did not.
+  // unpriced, and a client reading "$0.00" reads a price), 422 for a resend at
+  // a status with no letter of its own, and 502 when every address failed.
+  // The answer names who it reached and who it did not.
   app.post(
     '/admin/orders/:id/email',
     {
@@ -520,7 +495,27 @@ export const adminOrderRoutes = async (
           message: `Price every line before you email the order details — ${unpriced} line${unpriced === 1 ? ' is' : 's are'} still at $0.00.`,
         }
       }
-      const result = await sendOrderLetter(mailer, pool, withGst(order, lineAmountTypes), letter)
+      if (letter === 'status' && !currentStatusTemplate(order)) {
+        reply.code(422)
+        return {
+          error: 'Unprocessable Entity',
+          message: `${order.order_number} is ${order.status.replaceAll('_', ' ')} — there is no letter for that status to re-send.`,
+        }
+      }
+      // A re-sent quote needs its accept/reject link, and only the old token's
+      // hash is kept, so it carries a fresh one — which retires the link in the
+      // earlier letter, the rotate-on-every-send rule of the status route.
+      const extra =
+        letter === 'status' && order.status === 'quote_sent'
+          ? { quote_url: quoteUrlFor({ token: await issueQuoteToken(pool, order.id), storeBaseUrl }) }
+          : {}
+      const result = await sendOrderLetter(
+        mailer,
+        pool,
+        withGst(order, lineAmountTypes),
+        letter,
+        extra
+      )
       if (result.sent.length === 0) {
         // Nobody reached: every address failed, or the order names nobody and
         // the standing copy is switched off.
@@ -538,8 +533,9 @@ export const adminOrderRoutes = async (
   )
 
   // Archive / restore. Archiving tidies a finished order out of the queue; it is
-  // a soft delete (sets archived_at) and reversible. A reserving order must be
-  // shipped or declined first (else 409) so no live reservation is stranded.
+  // a soft delete (sets archived_at) and reversible. A reserving order must
+  // have settled its reservation first — shipped, completed, cancelled or
+  // refunded (else 409) — so no live reservation is stranded.
   app.post(
     '/admin/orders/:id/archive',
     { preHandler: backoffice, schema: { params: idParamsSchema } },
@@ -552,7 +548,7 @@ export const adminOrderRoutes = async (
   )
 
   // Hard delete, for an order that is not yet a financial record: a mis-keyed
-  // sales order, a request nobody priced, a declined one. The registry entry
+  // sales order, a request nobody priced, a cancelled one. The registry entry
   // holds the rule (`orderGuard`) and the reservation release (`beforeDelete`),
   // so this handler is one line — and `'order'` is a single-quoted literal,
   // never a path parameter, because the registry is not an authorisation

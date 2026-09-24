@@ -81,7 +81,7 @@ const APPLICATION_FIXTURE = Object.freeze({
 const insertOrder = async (pool, userId, suffix) => {
   await pool.query(
     `INSERT INTO orders (order_number, kind, status, user_id)
-          VALUES ($1, 'order_request', 'requested', $2)`,
+          VALUES ($1, 'order_request', 'quote_requested', $2)`,
     [`${FIXTURE_TAG}-${suffix}`, userId]
   )
 }

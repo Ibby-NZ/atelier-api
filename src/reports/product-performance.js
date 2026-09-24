@@ -148,8 +148,9 @@ export const PRODUCT_PERFORMANCE_CLIENT_COLUMNS = defineColumns([
 
 // Where the demand sits in the lifecycle. This grain is the one that does NOT
 // default to the paid/shipped population: its whole question is how much is
-// requested, confirmed, paid, shipped and declined, so it declares every
-// status as its default — a `status` filter still replaces it like any other.
+// quoted, back-ordered, invoiced, paid, shipped or cancelled, so it declares
+// every status as its default — a `status` filter still replaces it like any
+// other.
 export const PRODUCT_PERFORMANCE_STATUS_COLUMNS = defineColumns([
   { key: 'status', label: 'Status' },
   { key: 'kind', label: 'Kind' },

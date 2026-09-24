@@ -235,7 +235,7 @@ describe('W21-US-001 — products.product_range and brands.brand_code', () => {
       expect(cleared.product_range).toBeNull()
     })
 
-    it('takes both on create, blanks stored as NULL', async () => {
+    it('takes both on create; a blank code is NULL and a blank range is the house', async () => {
       const brand = await createBrand(pool, {
         name: `${PREFIX} created house`,
         currency: 'NZD',
@@ -250,7 +250,7 @@ describe('W21-US-001 — products.product_range and brands.brand_code', () => {
         currency: 'NZD',
         product_range: '   ',
       })
-      expect(product.product_range).toBeNull()
+      expect(product.product_range).toBe(`${PREFIX} created house`)
     })
 
     // Ajv's removeAdditional STRIPS an unlisted body key rather than 400ing it,

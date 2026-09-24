@@ -75,10 +75,10 @@ const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/
 /** Today as an ISO day, in the server's own timezone — the resolver's default. */
 export const today = () => new Date().toISOString().slice(0, 10)
 
-// Exactly one scope, which is this schema declining to answer F1 rather than
-// supporting both grains. A caller states WHICH grain it is asking at; nothing
-// here picks between a supplier rate and a range rate, because choosing is the
-// decision that is out with the client.
+// Exactly one scope. A caller states WHICH grain it is asking at; nothing here
+// picks between a supplier rate and a range rate. The client answered F1 in
+// Sept 2026 — freight is per HOUSE — so the waterfall asks the house's range
+// scope first and the supplier second (src/pricing/pricing-parameters.js).
 const scopeOf = ({ supplier_id: supplierId = null, range_name: rangeName = null }) => {
   const range = typeof rangeName === 'string' && rangeName.trim() !== '' ? rangeName.trim() : null
   const supplier = Number.isInteger(supplierId) ? supplierId : null
@@ -238,6 +238,32 @@ export const validateFreightRate = (input = {}, vocabulary = FREIGHT_CATEGORIES)
 }
 
 /**
+ * The range names, of those given, that name no catalogued house. A range rate
+ * is keyed on the HOUSE's name (the waterfall looks it up by `brands.name`), so
+ * a misspelt one would be accepted and then never match anything — refused
+ * here instead, case-insensitively as the resolver matches. Archived houses
+ * count: a rate for a house being wound down is still a rate.
+ *
+ * @param {{ query: Function }} db
+ * @param {string[]} names
+ * @returns {Promise<string[]>}
+ */
+export const unknownHouses = async (db, names) => {
+  const wanted = [...new Set(names.filter(Boolean).map((name) => name.trim()))]
+  if (wanted.length === 0) return []
+  const { rows } = await db.query(
+    `SELECT lower(name) AS key FROM brands WHERE lower(name) = ANY($1::text[])`,
+    [wanted.map((name) => name.toLowerCase())]
+  )
+  const known = new Set(rows.map((row) => row.key))
+  return wanted.filter((name) => !known.has(name.toLowerCase()))
+}
+
+/** The one sentence both the form and the sheet refuse an unknown house with. */
+export const unknownHouseMessage = (name) =>
+  `"${name}" is not a house. A range rate is keyed on the house's name exactly as the Houses screen spells it.`
+
+/**
  * Append a rate. Never an overwrite: a duplicate scope + category + date is a
  * 409 telling the caller to date the correction, not a silent replacement of
  * the figure last year's landed costs were built on.
@@ -252,6 +278,9 @@ export const createFreightRate = async (db, input) => {
   const problem = validateFreightRate(input, await categorySlugs(db))
   if (problem) throw httpError(422, problem)
   const scope = scopeOf(input)
+  if (scope.rangeName && (await unknownHouses(db, [scope.rangeName])).length > 0) {
+    throw httpError(422, unknownHouseMessage(scope.rangeName))
+  }
 
   try {
     const { rows } = await db.query(

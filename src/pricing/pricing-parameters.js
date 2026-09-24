@@ -280,11 +280,12 @@ const dutyInput = (dutyClass, house, supplierDefaults) => {
 }
 
 const freightInput = async (db, { supplierId, brandName, category, on }) => {
-  // Supplier scope first; the ledger can also carry a rate under a range name,
-  // and a house's name is the range name Dynamics used for it.
+  // The HOUSE's own rate first — freight is set per house (a range rate keyed
+  // on the house's name, which is also the range name Dynamics used) — then
+  // the supplier-wide rate for houses that have none of their own.
   const scopes = [
-    ...(supplierId ? [{ supplier_id: supplierId }] : []),
     { range_name: brandName },
+    ...(supplierId ? [{ supplier_id: supplierId }] : []),
   ]
   for (const scope of scopes) {
     const found = await resolveFreightRate(db, { ...scope, category, on })

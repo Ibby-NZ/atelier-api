@@ -307,6 +307,22 @@ describe('pricing parameters — the module and the resolver', () => {
     expect(inputs.fx_rate).toMatchObject({ value: 0.5, source: 'fx', detail: { currency: CURRENCY } })
   })
 
+  it("takes the house's own freight rate ahead of the supplier-wide one", async () => {
+    await pool.query(
+      `INSERT INTO supplier_freight_rates (range_name, basis, rate, unit, effective_from)
+       VALUES ($1, 'dollar', 45, 'roll', '2020-01-01')`,
+      [`${PREFIX} module-house`.toUpperCase()]
+    )
+    try {
+      const { inputs } = await resolveWaterfallInputs(pool, { brandId: houseId })
+      expect(inputs.freight).toMatchObject({ value: 45, detail: { unit: 'roll', scope: 'range' } })
+    } finally {
+      await pool.query(`DELETE FROM supplier_freight_rates WHERE lower(range_name) = lower($1)`, [
+        `${PREFIX} module-house`,
+      ])
+    }
+  })
+
   it('a house with no supplier has no freight, no rate and no supplier defaults, and says so', async () => {
     const resolved = await resolveWaterfallInputs(pool, { brandId: orphanId })
     expect(resolved.supplier).toBe(null)

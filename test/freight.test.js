@@ -68,6 +68,16 @@ const stageOption = (pool, values) =>
     ]
   )
 
+// A range rate is keyed on a HOUSE's name and a name no house carries is
+// refused, so the range fixtures are catalogued first.
+const insertHouses = (pool, names) =>
+  pool.query(
+    `INSERT INTO brands (name, slug, currency)
+     SELECT name, $2 || '-house-' || ord, 'NZD' FROM unnest($1::text[]) WITH ORDINALITY AS h(name, ord)
+     ON CONFLICT DO NOTHING`,
+    [names, PREFIX]
+  )
+
 const cleanup = async (pool) => {
   // Rates first: `supplier_id` is RESTRICT, so the supplier delete 23503s
   // inside the cleanup otherwise — the same order `brands` before `suppliers`
@@ -78,6 +88,7 @@ const cleanup = async (pool) => {
       WHERE supplier_id IN (SELECT id FROM suppliers WHERE slug LIKE $1)`,
     [`${PREFIX}-%`]
   )
+  await pool.query(`DELETE FROM brands WHERE slug LIKE $1`, [`${PREFIX}-%`])
   await pool.query(`DELETE FROM suppliers WHERE slug LIKE $1`, [`${PREFIX}-%`])
   await pool.query(`DELETE FROM legacy_tracking_options WHERE source_file = $1`, [`${PREFIX}.xlsx`])
   await pool.query(`DELETE FROM users WHERE email LIKE $1`, [`${PREFIX}-%`])
@@ -576,6 +587,7 @@ describe('W16-US-005 — the freight rate resolver', () => {
       [`${PREFIX} resolver`, `${PREFIX}-resolver`]
     )
     supplierId = rows[0].id
+    await insertHouses(pool, [`${PREFIX} PIERRE FREY`])
   })
 
   afterAll(async () => {
@@ -661,6 +673,17 @@ describe('W16-US-005 — the freight rate resolver', () => {
       (await resolveFreightRate(pool, { supplier_id: supplierId, category: 'fabric', on: '2026-06-01' }))
         .rate.rate
     ).toBe(30)
+  })
+
+  it('refuses a range rate for a name no house carries', async () => {
+    await expect(
+      createFreightRate(pool, {
+        range_name: `${PREFIX} NOBODY`,
+        rate: 28,
+        unit: 'metre',
+        effective_from: '2025-01-01',
+      })
+    ).rejects.toMatchObject({ statusCode: 422, message: expect.stringMatching(/is not a house/) })
   })
 
   it('resolves a range scope by spelling, case-insensitively', async () => {
@@ -782,6 +805,7 @@ describe('W16-US-009 — the rate CSV round trip', () => {
       [`${PREFIX} sheet`, `${PREFIX}-sheet`]
     )
     supplierId = rows[0].id
+    await insertHouses(pool, [`${PREFIX} A`, `${PREFIX} B`, `${PREFIX} C`])
   })
 
   afterAll(async () => {
@@ -856,6 +880,21 @@ describe('W16-US-009 — the rate CSV round trip', () => {
     expect(report.errors[0].message).toMatch(/must state its unit/)
     expect(report.errors[1].message).toMatch(/not a Supplier ID/)
     expect(report.errors[2].message).toMatch(/not a date/)
+  })
+
+  it('refuses a row whose range names no house, by line, and applies nothing', async () => {
+    const file = sheet([
+      line({ range: `${PREFIX} a`, rate: '30', unit: 'metre', from: '2026-01-01' }),
+      line({ range: `${PREFIX} Nowhere`, rate: '30', unit: 'metre', from: '2026-01-01' }),
+    ])
+    const report = await validateFreightRateSheet(pool, file)
+    expect(report.errors).toEqual([{ row: 3, message: expect.stringMatching(/Nowhere" is not a house/) }])
+    expect((await applyFreightRateSheet(pool, file)).applied).toBe(0)
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS total FROM supplier_freight_rates WHERE range_name LIKE $1`,
+      [`${PREFIX}%`]
+    )
+    expect(rows[0].total).toBe(0)
   })
 
   it('accepts the d/m/Y an Excel on a New Zealand desk writes back', async () => {

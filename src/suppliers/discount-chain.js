@@ -47,23 +47,26 @@ export const applyDiscountChain = (price, chain = []) => {
 
 /**
  * The chain a terms row resolves to, in the precedence the seed snapshot's
- * `resolveDiscount` established: a compounded chain, then the tier matching the
- * line's category (falling back to the tier flagged `is_fallback`), then the
- * flat per-brand rate. The database keeps the first two mutually exclusive with
+ * `resolveDiscount` established: a compounded chain, then the tier staff picked
+ * for the product (`tierId`, migration 1791638400000), then the tier matching
+ * the line's category (falling back to the tier flagged `is_fallback`), then
+ * the flat per-brand rate. The database keeps the first two mutually exclusive with
  * the third; this is what picks between a chain and a tier set.
  *
  * @param {{ discount?: number|string|null, discount_chain?: Array<number|string> }} terms
  * @param {Array<{ label: string, pct: number|string, is_fallback?: boolean }>} [tiers]
  * @param {string|null} [category]
+ * @param {number|null} [tierId] the product's chosen tier; ignored unless it is one of `tiers`
  * @returns {{ chain: Array<number|string>, source: 'chain'|'tier'|'flat'|'none', label: string|null }}
  */
-export const resolveTermsChain = (terms, tiers = [], category = null) => {
+export const resolveTermsChain = (terms, tiers = [], category = null, tierId = null) => {
   const chain = terms?.discount_chain || []
   if (chain.length > 0) return { chain: [...chain], source: 'chain', label: null }
 
   if (tiers.length > 0) {
     const wanted = String(category || '').trim().toLowerCase()
     const tier =
+      (tierId != null && tiers.find((t) => t.id === tierId)) ||
       (wanted && tiers.find((t) => t.label.trim().toLowerCase() === wanted)) ||
       tiers.find((t) => t.is_fallback) ||
       null

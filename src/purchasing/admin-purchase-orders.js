@@ -10,13 +10,14 @@
 // The invariants this file is responsible for, each as the rule it is enforced
 // as rather than as a preference:
 //
-//   1. `supplier_id` IS DERIVED FROM `brands.supplier_id` AND IS NEVER ACCEPTED
-//      FROM A CLIENT. No route schema names it, no whitelist contains it, and
-//      both write paths read it off the brand. There is nothing a CHECK could
-//      catch here — every supplier id is a valid supplier id — so a client-chosen
-//      value produces a well-formed purchase order addressed to the wrong house
-//      and the first anyone hears of it is the wrong house shipping the goods.
-//      A brand with a NULL supplier is a **422 naming the brand**.
+//   1. `supplier_id` COMES FROM THE HOUSE AND IS NEVER TRUSTED FROM A CLIENT.
+//      A manual create may NAME one of the house's suppliers (main or
+//      additional, migration 1791638400000) and anything else is a 422; absent,
+//      and on plan/generate, it is the main `brands.supplier_id`. There is
+//      nothing a CHECK could catch here — every supplier id is a valid supplier
+//      id — so an unchecked value produces a well-formed purchase order
+//      addressed to the wrong house. A brand with no supplier is a **422 naming
+//      the brand**.
 //
 //   2. THE ANTI-DOUBLE-ORDER GUARANTEE IS A DATABASE INDEX, NOT THIS FILE.
 //      `purchase_order_line_allocations_open_unique` is a partial unique index
@@ -68,6 +69,7 @@ import { RESERVING_KINDS, HELD_STATUSES, canTransition } from '../orders/order-s
 import { setOrderStatus } from '../orders/admin-orders.js'
 import { planPurchaseOrders } from './po-plan.js'
 import { loadReceiptsByLineId } from './receipts.js'
+import { supplierForBrand } from '../suppliers/brand-suppliers.js'
 // W14. The dependency runs ONE WAY — `supplier-invoices.js` imports nothing
 // from here — so a purchase order can say which bill it is on without the two
 // modules forming a cycle. Same rule `receipts.js` states in the other
@@ -878,36 +880,43 @@ export const backOrderRaisedOrders = async (pool, purchaseOrders, { actor }) => 
 // ---------------------------------------------------------------------------
 
 // The supplier, derived. This is the whole of invariant one and it is the ONLY
-// place either write path gets a supplier id from.
-const resolveBrandSupplier = async (db, brandId) => {
-  const { rows } = await db.query(
-    `SELECT b.id, b.name, b.supplier_id, s.name AS supplier_name,
-            s.currency, s.agent, s.incoterm, s.po_email
-       FROM brands b
-       LEFT JOIN suppliers s ON s.id = b.supplier_id
-      WHERE b.id = $1`,
-    [brandId]
-  )
+// place either write path gets a supplier id from. A house may have several
+// suppliers (migration 1791638400000): the caller may NAME one, but only one
+// that invoices the house — `supplierForBrand` refuses any other with a 422 —
+// and naming none means the main supplier.
+const resolveBrandSupplier = async (db, brandId, supplierId = null) => {
+  const { rows } = await db.query('SELECT id, name FROM brands WHERE id = $1', [brandId])
   const brand = rows[0]
   if (!brand) {
     throw httpError(422, `House ${brandId} does not exist.`)
   }
-  if (brand.supplier_id == null) {
+  const supplier = await supplierForBrand(db, brandId, supplierId)
+  if (!supplier) {
     throw httpError(
       422,
       `"${brand.name}" has no supplier linked, so there is no house to address a ` +
         'purchase order to. Link one on the house record first.'
     )
   }
-  return brand
+  return {
+    id: brand.id,
+    name: brand.name,
+    supplier_id: supplier.id,
+    supplier_name: supplier.name,
+    currency: supplier.currency,
+    agent: supplier.agent,
+    incoterm: supplier.incoterm,
+    po_email: supplier.po_email,
+  }
 }
 
 /**
  * Raise a purchase order by hand — a stock buy, or an order placed for a reason
- * no sales order records. `supplier_id` is NOT a parameter and never will be.
+ * no sales order records. `supplier_id` is optional and must be one of the
+ * house's suppliers; absent means the house's main supplier.
  *
  * @param {import('pg').Pool} pool
- * @param {{ brand_id: number, lines: Array<object>, expected_at?: string|null, notes?: string|null }} input
+ * @param {{ brand_id: number, supplier_id?: number|null, lines: Array<object>, expected_at?: string|null, notes?: string|null }} input
  * @param {{ user?: object|null, finance?: boolean }} [ctx]
  */
 export const createPurchaseOrder = async (
@@ -915,7 +924,7 @@ export const createPurchaseOrder = async (
   input,
   { user = null, finance = false } = {}
 ) => {
-  const brand = await resolveBrandSupplier(pool, input.brand_id)
+  const brand = await resolveBrandSupplier(pool, input.brand_id, input.supplier_id ?? null)
   const client = await pool.connect()
   let purchaseOrderId
   try {

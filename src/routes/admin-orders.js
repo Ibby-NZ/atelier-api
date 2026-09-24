@@ -27,6 +27,8 @@ import { SHIPPING_ADDRESS_SCHEMA } from '../orders/order-request.js'
 import { ORDER_KINDS } from '../reports/filters.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { notifyOrderTransition, notifyOrderCreated } from '../email/notifications.js'
+import { ORDER_LETTERS, currentStatusTemplate, sendOrderLetter } from '../email/order-letters.js'
+import { unpricedLineCount } from '../orders/order-states.js'
 // Who else hears about a status change — the shape and count rules, shared with
 // the edit path and mirrored by the CRM.
 import { NOTIFY_EMAILS_MAX, NOTIFY_EMAIL_PATTERN } from '../orders/notify-emails.js'
@@ -259,6 +261,18 @@ const createBodySchema = {
   },
 }
 
+// The order page's Send buttons: the whole order, or the letter for where it
+// stands now. Required and closed — a body naming neither is a 400, never a
+// guess at which letter the office meant.
+const emailBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['letter'],
+  properties: {
+    letter: { type: 'string', enum: ORDER_LETTERS },
+  },
+}
+
 // One route moves an order to any status (24 Sep 2026); the machine in
 // src/orders/order-states.js decides which moves are legal (409) and which need
 // every line priced (422). `note` lands on the audit row.
@@ -307,7 +321,17 @@ export const adminOrderRoutes = async (
       return { ...payload, orders: payload.orders.map((order) => withGst(order, lineAmountTypes)) }
     }
     if (payload.order) {
-      return { ...payload, order: withGst(payload.order, lineAmountTypes) }
+      return {
+        ...payload,
+        order: {
+          ...withGst(payload.order, lineAmountTypes),
+          // Who is copied on every letter about the order whoever else it
+          // names (ORDER_COPY_EMAIL), so the CRM's Emails panel lists them from
+          // the configured address rather than a copy of it. A deployment
+          // setting, not an order column — hence here and not in the shape.
+          order_copy_email: mailer?.orderCopyEmail ?? null,
+        },
+      }
     }
     return payload
   })
@@ -428,6 +452,83 @@ export const adminOrderRoutes = async (
             }))
           : null
       return { order, ...(xeroPayment ? { xero_payment: xeroPayment } : {}) }
+    }
+  )
+
+  // Send a letter about the order NOW, from the CRM order page's Emails panel
+  // (24 Sep 2026): `details` is the whole order — lines, totals on the invoice's
+  // GST basis, delivery — and `status` re-sends the letter for where it stands.
+  // Both go to everyone the order names plus the standing copy
+  // (src/email/order-letters.js). Any status, archived included: nothing moves.
+  //
+  // Unlike a transition, the letter IS the act, so it refuses rather than
+  // no-ops (the supplier-statement rule): 503 with no delivering mailer, 422
+  // for order details while a line is still at $0.00 (a request arrives
+  // unpriced, and a client reading "$0.00" reads a price), 422 for a resend at
+  // a status with no letter of its own, and 502 when every address failed.
+  // The answer names who it reached and who it did not.
+  app.post(
+    '/admin/orders/:id/email',
+    {
+      preHandler: backoffice,
+      schema: { params: idParamsSchema, body: emailBodySchema },
+    },
+    async (request, reply) => {
+      if (!mailer?.delivers) {
+        reply.code(503)
+        return {
+          error: 'Service Unavailable',
+          message: 'Email is not configured on this server (SMTP_HOST is unset), so nothing was sent.',
+        }
+      }
+      const order = await getAdminOrder(pool, request.params.id)
+      if (!order) {
+        reply.code(404)
+        return { error: 'Not Found', message: `Order ${request.params.id} not found.` }
+      }
+      const { letter } = request.body
+      const unpriced = letter === 'details' ? unpricedLineCount(order.lines) : 0
+      if (unpriced > 0) {
+        reply.code(422)
+        return {
+          error: 'Unprocessable Entity',
+          message: `Price every line before you email the order details — ${unpriced} line${unpriced === 1 ? ' is' : 's are'} still at $0.00.`,
+        }
+      }
+      if (letter === 'status' && !currentStatusTemplate(order)) {
+        reply.code(422)
+        return {
+          error: 'Unprocessable Entity',
+          message: `${order.order_number} is ${order.status.replaceAll('_', ' ')} — there is no letter for that status to re-send.`,
+        }
+      }
+      // A re-sent quote needs its accept/reject link, and only the old token's
+      // hash is kept, so it carries a fresh one — which retires the link in the
+      // earlier letter, the rotate-on-every-send rule of the status route.
+      const extra =
+        letter === 'status' && order.status === 'quote_sent'
+          ? { quote_url: quoteUrlFor({ token: await issueQuoteToken(pool, order.id), storeBaseUrl }) }
+          : {}
+      const result = await sendOrderLetter(
+        mailer,
+        pool,
+        withGst(order, lineAmountTypes),
+        letter,
+        extra
+      )
+      if (result.sent.length === 0) {
+        // Nobody reached: every address failed, or the order names nobody and
+        // the standing copy is switched off.
+        reply.code(result.failed.length ? 502 : 422)
+        return {
+          error: result.failed.length ? 'Bad Gateway' : 'Unprocessable Entity',
+          message: result.failed.length
+            ? `The letter could not be sent to ${result.failed.join(', ')}.`
+            : `${order.order_number} has nobody to email — add an address under Emails.`,
+          ...result,
+        }
+      }
+      return result
     }
   )
 

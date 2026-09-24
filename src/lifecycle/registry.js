@@ -638,7 +638,9 @@ export const LIFECYCLE_ENTITIES = defineEntities({
     ],
   },
 
-  // Nothing references a tier, so there is no probe to write. It is registered
+  // Only `product_discount_tiers` references a tier, and it CASCADEs (a
+  // product whose tier goes falls back to category matching), so there is no
+  // probe to write. It is registered
   // rather than deleted with a bare statement so the DELETE route answers the
   // same envelope every other one does, and so the 404 comes from the same place.
   supplier_discount_tier: {

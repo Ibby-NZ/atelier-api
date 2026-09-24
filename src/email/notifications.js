@@ -19,13 +19,59 @@ import { uniqueEmails } from '../orders/notify-emails.js'
 // client's confirmation goes out when the order is CREATED (US-005, FR-120), so
 // the invoice has to say something of its own or it re-sends a mail the client
 // already has (FR-121). Two events, two messages.
-const TRANSITION_TEMPLATES = Object.freeze({
+//
+// `cancelled` joined on 23 Sep 2026 ("when the status changes on a sales
+// order, an email is sent"): it is the CRM's "Cancel order", whose
+// confirmation already promised the office that the client is told.
+export const TRANSITION_TEMPLATES = Object.freeze({
   quote_sent: 'quote_sent',
   back_order: 'order_back_ordered',
   pending_payment: 'order_invoiced',
   paid: 'payment_received',
   shipped: 'shipped',
   cancelled: 'order_cancelled',
+})
+
+/**
+ * Everyone a letter about a sales order goes to, one address each, in order:
+ *   - the client (`resolveOrderRecipient`: the guest's address, else the
+ *     account's);
+ *   - the order's sales rep (`sales_rep_email` on the admin order shape — null
+ *     when nobody is assigned, and null for a rep whose login is archived,
+ *     because a person who has left must not keep receiving a client's orders);
+ *   - every address on the order's Emails list (`notify_emails`, added in the
+ *     CRM on the order page);
+ *   - the standing copy, `mailer.orderCopyEmail` (ORDER_COPY_EMAIL, default
+ *     jenettec@atelier.co.nz — 24 Sep 2026, "make sure she is always in the
+ *     loop"). Last, and deduped like the rest, so if she is also the rep she
+ *     gets one letter.
+ *
+ * Shared by the status letters (notifyOrderTransition) and the order page's
+ * on-demand sends (order-letters.js), so both reach the same people.
+ *
+ * @param {import('./mailer.js').Mailer} mailer
+ * @param {{ query: Function }} db
+ * @param {{ guest_email?: string|null, user_id?: number|null, sales_rep_email?: string|null, notify_emails?: string[] }} order
+ * @returns {Promise<string[]>}
+ */
+export const orderLetterRecipients = async (mailer, db, order) =>
+  uniqueEmails([
+    await resolveOrderRecipient(db, order),
+    order.sales_rep_email,
+    ...(order.notify_emails ?? []),
+    mailer.orderCopyEmail,
+  ])
+
+/**
+ * The fields every status letter reads. `tracking_url` is the courier link the
+ * office typed at `ship`: null on every other status, and null for a
+ * hand-delivered order, where the shipped template drops its line rather than
+ * print an empty one.
+ */
+export const statusLetterData = (order) => ({
+  order_number: order.order_number,
+  xero_invoice_ref: order.xero_invoice_ref ?? null,
+  tracking_url: order.tracking_url ?? null,
 })
 
 // The back office's alert that an order exists, whichever path created it
@@ -143,14 +189,8 @@ export const notifyCheckoutReceipt = async (mailer, db, order) => {
  * letter) — US-014, widened on 23 Sep 2026 to everyone the order names. Any
  * other status is a no-op.
  *
- * The SAME letter goes to:
- *   - the client (`resolveOrderRecipient`: the guest's address, else the
- *     account's);
- *   - the order's sales rep (`sales_rep_email` on the admin order shape — null
- *     when nobody is assigned, and null for a rep whose login is archived,
- *     because a person who has left must not keep receiving a client's orders);
- *   - every address on the order's Emails list (`notify_emails`, added in the
- *     CRM on the order page).
+ * The SAME letter goes to the client, the order's sales rep, every address on
+ * the order's Emails list and the standing copy — see orderLetterRecipients.
  *
  * **One letter per address, each address once** (`uniqueEmails`, so a rep who
  * is also the client gets one). Separate letters rather than one with CC: the
@@ -182,20 +222,8 @@ export const notifyOrderTransition = async (mailer, db, order, extra = {}) => {
   if (!template) {
     return
   }
-  const recipients = uniqueEmails([
-    await resolveOrderRecipient(db, order),
-    order.sales_rep_email,
-    ...(order.notify_emails ?? []),
-  ])
-  const data = {
-    order_number: order.order_number,
-    xero_invoice_ref: order.xero_invoice_ref ?? null,
-    // The courier link the office typed at `ship`. Null on every other
-    // transition, and null for a hand-delivered order; the shipped template
-    // drops its line rather than printing an empty one.
-    tracking_url: order.tracking_url ?? null,
-    ...extra,
-  }
+  const recipients = await orderLetterRecipients(mailer, db, order)
+  const data = { ...statusLetterData(order), ...extra }
   // In turn, not in parallel: `send` never throws, so one bad address cannot
   // stop the rest, and a relay is kinder to a short queue than a burst.
   for (const to of recipients) {

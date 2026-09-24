@@ -27,6 +27,8 @@
 
 import { chainMultiplier, resolveTermsChain } from '../suppliers/discount-chain.js'
 import { getBrandTerms } from '../suppliers/supplier-terms.js'
+import { supplierForBrand } from '../suppliers/brand-suppliers.js'
+import { getProductTierId } from '../suppliers/product-tiers.js'
 import { resolveFreightRate } from './freight-rates.js'
 import { computeWaterfall } from './waterfall.js'
 
@@ -232,11 +234,8 @@ const pickParameter = (column, house, supplierDefaults) => {
 
 const loadBrand = async (db, brandId) => {
   const { rows } = await db.query(
-    `SELECT b.id, b.name, b.slug, b.currency AS brand_currency, b.supplier_id,
-            s.name AS supplier_name, s.currency AS supplier_currency,
-            s.default_discount AS supplier_default_discount
+    `SELECT b.id, b.name, b.slug, b.currency AS brand_currency
        FROM brands b
-       LEFT JOIN suppliers s ON s.id = b.supplier_id
       WHERE b.id = $1 AND b.archived_at IS NULL`,
     [brandId]
   )
@@ -248,8 +247,8 @@ const loadBrand = async (db, brandId) => {
 // the precedence every other parameter here follows, and the one the 9 Jul rule
 // describes: a supplier is rated by one averaged discount UNLESS it was
 // excluded and handled brand by brand. The two are never added together.
-const discountInput = (terms, category, supplierDefault) => {
-  const resolved = terms ? resolveTermsChain(terms, terms.tiers, category) : null
+const discountInput = (terms, category, supplierDefault, tierId) => {
+  const resolved = terms ? resolveTermsChain(terms, terms.tiers, category, tierId) : null
   if (resolved && resolved.source !== 'none') {
     // A chain is multiplicative; the waterfall takes the one net percentage.
     const percent = round3((1 - chainMultiplier(resolved.chain)) * 100)
@@ -304,28 +303,38 @@ const freightInput = async (db, { supplierId, brandName, category, on }) => {
  * Every waterfall input for one house, each with its source.
  *
  * @param {{ query: Function }} db
- * @param {{ brandId: number, category?: string|null, dutyClass?: string|null, on?: string|null }} query
+ * `supplierId` picks which of the house's suppliers to price through (main when
+ * absent, 422 when it does not invoice the house); `productId` brings in the
+ * discount tier staff chose for that product (422 when it is another house's).
+ *
+ * @param {{ brandId: number, supplierId?: number|null, productId?: number|null,
+ *           category?: string|null, dutyClass?: string|null, on?: string|null }} query
  */
-export const resolveWaterfallInputs = async (db, { brandId, category = null, dutyClass = null, on = null }) => {
+export const resolveWaterfallInputs = async (
+  db,
+  { brandId, supplierId = null, productId = null, category = null, dutyClass = null, on = null }
+) => {
   const brand = await loadBrand(db, brandId)
-  const [house, supplierDefaults, terms] = [
+  const supplier = await supplierForBrand(db, brand.id, supplierId)
+  const [house, supplierDefaults, terms, tierId] = [
     await getBrandParameters(db, brand.id),
-    brand.supplier_id ? await getSupplierParameters(db, brand.supplier_id) : null,
+    supplier ? await getSupplierParameters(db, supplier.id) : null,
     await getBrandTerms(db, brand.id),
+    productId ? await getProductTierId(db, productId, brand.id) : null,
   ]
   // The supplier's INVOICING currency is what the price list is quoted in; the
   // house's own currency is the seed's stand-in where no supplier is linked.
-  const currency = brand.supplier_currency ?? brand.brand_currency ?? null
+  const currency = supplier?.currency ?? brand.brand_currency ?? null
   const fx = currency ? await getFxRate(db, currency) : null
   const freight = await freightInput(db, {
-    supplierId: brand.supplier_id,
+    supplierId: supplier?.id ?? null,
     brandName: brand.name,
     category,
     on,
   })
 
   const inputs = Object.freeze({
-    discount_percent: discountInput(terms, category, brand.supplier_default_discount),
+    discount_percent: discountInput(terms, category, supplier?.default_discount ?? null, tierId),
     fx_rate: fx
       ? input(fx.rate, 'fx', { currency, set_on: fx.set_on })
       : input(null, 'missing', { reason: currency ? `no rate set for ${currency}` : 'no currency on the house or its supplier' }),
@@ -339,10 +348,11 @@ export const resolveWaterfallInputs = async (db, { brandId, category = null, dut
   })
 
   return Object.freeze({
-    brand: Object.freeze({ id: brand.id, name: brand.name, slug: brand.slug, supplier_id: brand.supplier_id }),
-    supplier: brand.supplier_id
-      ? Object.freeze({ id: brand.supplier_id, name: brand.supplier_name, currency: brand.supplier_currency })
+    brand: Object.freeze({ id: brand.id, name: brand.name, slug: brand.slug, supplier_id: supplier?.id ?? null }),
+    supplier: supplier
+      ? Object.freeze({ id: supplier.id, name: supplier.name, currency: supplier.currency })
       : null,
+    product_tier_id: tierId,
     currency,
     parameters: Object.freeze({ house, supplier: supplierDefaults }),
     inputs,
@@ -374,11 +384,15 @@ const applyOverrides = (inputs, overrides = {}) => {
  * mode — and never touch a row.
  *
  * @param {{ query: Function }} db
- * @param {{ brandId: number, wholesaleRate: number, category?: string|null,
+ * @param {{ brandId: number, wholesaleRate: number, supplierId?: number|null,
+ *           productId?: number|null, category?: string|null,
  *           dutyClass?: string|null, on?: string|null, overrides?: object }} query
  */
-export const previewWaterfall = async (db, { brandId, wholesaleRate, category = null, dutyClass = null, on = null, overrides = {} }) => {
-  const resolved = await resolveWaterfallInputs(db, { brandId, category, dutyClass, on })
+export const previewWaterfall = async (
+  db,
+  { brandId, wholesaleRate, supplierId = null, productId = null, category = null, dutyClass = null, on = null, overrides = {} }
+) => {
+  const resolved = await resolveWaterfallInputs(db, { brandId, supplierId, productId, category, dutyClass, on })
   const inputs = applyOverrides(resolved.inputs, overrides)
   const waterfall = computeWaterfall({
     wholesale_rate: wholesaleRate,

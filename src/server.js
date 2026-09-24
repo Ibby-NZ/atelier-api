@@ -30,6 +30,7 @@ const start = async () => {
     transport: createMailTransport(config),
     from: config.emailFrom,
     backofficeEmail: config.backofficeEmail,
+    orderCopyEmail: config.orderCopyEmail,
     redirectTo: config.emailRedirectTo,
     log: { info: () => {}, error: (details, message) => console.error(message, details) },
   })

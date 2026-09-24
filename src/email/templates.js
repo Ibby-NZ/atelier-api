@@ -14,12 +14,14 @@
 //   payment_received        -> customer, when the order is marked paid (US-014)
 //   shipped                 -> customer, when staff ship the order (US-014)
 //   order_cancelled         -> customer, when staff cancel the order
+//   order_details           -> customer, when staff press "Email order details"
 //   backoffice_quote_answered -> staff + rep, when the client accepts/rejects
 //
 // The six status letters (quote_sent, order_back_ordered, order_invoiced,
-// payment_received, shipped, order_cancelled) also go to the order's sales rep
-// and to every address on the order's Emails list — one letter each, see
-// notifyOrderTransition.
+// payment_received, shipped, order_cancelled) also go to the order's sales rep,
+// to every address on the order's Emails list and to the standing copy
+// (ORDER_COPY_EMAIL) — one letter each, see orderLetterRecipients.
+// order_details goes to the same people.
 
 const BRAND = 'Atelier Textiles'
 
@@ -216,6 +218,39 @@ const TEMPLATES = Object.freeze({
       '',
       ...(reason ? [`Reason: ${reason}`, ''] : []),
       'Open the order in the back office to take it from here.',
+    ].join('\n'),
+  }),
+
+  // The whole order, sent on demand from the CRM order page's "Email order
+  // details" (24 Sep 2026) — no status change behind it. Every block arrives
+  // PRE-FORMATTED from the notifier (orderDetailsData), the lines_text
+  // precedent: a stored override cannot do arithmetic or currency, so the code
+  // copy must not either. The client's own two numbers come first where they
+  // exist — they file by them — and the delivery block drops out rather than
+  // printing "Deliver to:" over nothing.
+  order_details: ({
+    order_number,
+    client_reference,
+    customer_po_number,
+    lines_text,
+    totals_text,
+    delivery_text,
+  }) => ({
+    subject: `${BRAND}: details of order ${order_number}`,
+    text: [
+      `Here are the details of your order ${order_number}.`,
+      '',
+      ...(client_reference ? [`Your reference: ${client_reference}`] : []),
+      ...(customer_po_number ? [`Your PO number: ${customer_po_number}`] : []),
+      ...(client_reference || customer_po_number ? [''] : []),
+      lines_text ?? '',
+      '',
+      totals_text ?? '',
+      '',
+      ...(delivery_text ? ['Deliver to:', delivery_text, ''] : []),
+      'If anything here is not right, please get in touch and we will put it right.',
+      '',
+      `— ${BRAND}`,
     ].join('\n'),
   }),
 

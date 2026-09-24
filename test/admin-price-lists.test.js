@@ -355,6 +355,45 @@ describe('back-office price-list management', () => {
       expect(item.archived_at).toBeNull()
     })
 
+    it('links the rate to the supplier its name (or an alias) names, and leaves an unknown one unlinked', async () => {
+      const { rows } = await pool.query(
+        `INSERT INTO suppliers (name, slug) VALUES ($1, $2) RETURNING id`,
+        [`${PREFIX}Linked`, 'pltest-linked']
+      )
+      const supplierId = rows[0].id
+      await pool.query(`INSERT INTO supplier_aliases (supplier_id, alias) VALUES ($1, $2)`, [
+        supplierId,
+        `${PREFIX}Linked Paris`,
+      ])
+      try {
+        const post = (supplier, code) =>
+          inject('POST', '/admin/price-list-items', backofficeCookie, {
+            supplier,
+            product_range: 'Linked House',
+            category: 'fabric',
+            code,
+            unit: 'metre',
+            wholesale_rate: 30,
+            currency: 'EUR',
+          })
+        const byName = await post(`  ${PREFIX}linked `, 'PLT-LINK-1')
+        const byAlias = await post(`${PREFIX}Linked Paris`, 'PLT-LINK-2')
+        const unknown = await post(`${PREFIX}Nobody`, 'PLT-LINK-3')
+        const linkOf = async (response) =>
+          (
+            await pool.query('SELECT supplier_id FROM price_list_items WHERE id = $1', [
+              response.json().item.id,
+            ])
+          ).rows[0].supplier_id
+        expect(await linkOf(byName)).toBe(supplierId)
+        expect(await linkOf(byAlias)).toBe(supplierId)
+        expect(await linkOf(unknown)).toBeNull()
+      } finally {
+        await pool.query(`DELETE FROM price_list_items WHERE code LIKE 'PLT-LINK-%'`)
+        await pool.query('DELETE FROM suppliers WHERE id = $1', [supplierId])
+      }
+    })
+
     it('rejects a duplicate (supplier, category, code) with 409', async () => {
       const response = await inject('POST', '/admin/price-list-items', backofficeCookie, {
         supplier: `${PREFIX}Alpha`,

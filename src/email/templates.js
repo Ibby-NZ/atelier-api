@@ -329,6 +329,28 @@ const TEMPLATES = Object.freeze({
     ].join('\n'),
   }),
 
+  // The refusal, sent when the approver declines an application
+  // (`POST /admin/users/:id/decline` -> notifyTradeDeclined) with the reason
+  // she typed, which is the whole point of the letter. Store-backed like the
+  // acceptance, so the CRM Letters screen words it; `name` arrives resolved.
+  trade_application_declined: ({ name, business_name, reason }) => ({
+    subject: `${BRAND}: your trade account application`,
+    text: [
+      `Dear ${name},`,
+      '',
+      `Thank you for applying for a trade account with ${BRAND} on behalf of ${business_name}.`,
+      'Unfortunately we are unable to approve your application at this time, for the',
+      'following reason:',
+      '',
+      reason,
+      '',
+      "If you have any questions, please don't hesitate to call us on 0800 ATELIER or",
+      'email sales@atelier.co.nz',
+      '',
+      'The Atelier Team',
+    ].join('\n'),
+  }),
+
   // Acknowledgement to whoever submitted the storefront contact form.
   contact_received: ({ name }) => ({
     subject: `${BRAND}: thank you for your enquiry`,
@@ -417,8 +439,8 @@ const TEMPLATES = Object.freeze({
 
   // Alert to the back office that a trade application is waiting for review
   // (POST /auth/trade-application -> notifyTradeApplicationReceived). Enough
-  // of the form to triage from the inbox; the full form is in the CRM's
-  // Applicants tab, which `review_url` points at. The applicant gets no mail
+  // of the form to triage from the inbox; the full form is on the account's
+  // own CRM page, which `review_url` points at. The applicant gets no mail
   // here — the acceptance letter (trade_application_approved) is the ONE
   // notification, sent on approval.
   backoffice_new_trade_application: ({
@@ -428,9 +450,9 @@ const TEMPLATES = Object.freeze({
     email,
     review_url,
   }) => ({
-    subject: `New trade application to review: ${business_name}`,
+    subject: `New trade application to approve: ${business_name}`,
     text: [
-      'A new trade account application has been submitted and is awaiting review.',
+      'A new trade account application has been submitted and is awaiting your approval.',
       '',
       `Business: ${business_name}`,
       `Type: ${business_type ?? '—'}`,
@@ -438,6 +460,21 @@ const TEMPLATES = Object.freeze({
       `Login email: ${email}`,
       '',
       `Review it in the CRM: ${review_url}`,
+    ].join('\n'),
+  }),
+
+  // To the accounts desk once the approver has approved an application
+  // (notifyTradeAccountToReview): the final approval is theirs, and it is the
+  // one that emails the client and adds the company to Xero.
+  backoffice_trade_account_review: ({ business_name, email, approved_by, review_url }) => ({
+    subject: `New trade account to approve: ${business_name}`,
+    text: [
+      `${business_name}'s trade application has been approved${approved_by ? ` by ${approved_by}` : ''} and is waiting for your final approval.`,
+      'When you approve it, the client is emailed that their account is approved and the company is added to Xero.',
+      '',
+      `Login email: ${email}`,
+      '',
+      `Click here to review and approve the account: ${review_url}`,
     ].join('\n'),
   }),
 

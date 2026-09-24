@@ -69,6 +69,8 @@ const start = async () => {
     stripeWebhookSecret: config.stripeWebhookSecret,
     storeBaseUrl: config.storeBaseUrl,
     crmBaseUrl: config.crmBaseUrl,
+    tradeApproverEmail: config.tradeApproverEmail,
+    tradeAccountsEmail: config.tradeAccountsEmail,
     mailer,
     newsletter: config.newsletter,
     tradePriceListsEnabled: config.tradePriceListsEnabled,

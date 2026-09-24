@@ -220,7 +220,11 @@ describe('trade applications', () => {
       const roles = detail.json().trade_account.contacts.map((c) => c.role).sort()
       expect(roles).toEqual(['Accounts', 'Design'])
 
-      // Approving the login is what takes the account off the pending list.
+      // Approving the login (both steps) is what takes the account off the
+      // pending list; the approver's step alone leaves it waiting.
+      await inject('POST', `/admin/users/${user.id}/approve`, backofficeCookie)
+      const waiting = await inject('GET', '/admin/trade-accounts?pending=true&q=raised@', backofficeCookie)
+      expect(waiting.json().trade_accounts.some((a) => a.id === accountId)).toBe(true)
       await inject('PATCH', `/admin/users/${user.id}`, backofficeCookie, { trade_approved: true })
       const after = await inject('GET', '/admin/trade-accounts?pending=true&q=raised@', backofficeCookie)
       expect(after.json().trade_accounts.some((a) => a.id === accountId)).toBe(false)
@@ -255,7 +259,7 @@ describe('trade applications', () => {
         await mailApp.close()
       })
 
-      it('goes to the one back-office address, Reply-To the applicant, linking the CRM', async () => {
+      it('goes to the approver (else the back office), Reply-To the applicant, linking the account', async () => {
         const response = await mailApp.inject({
           method: 'POST',
           url: '/auth/trade-application',
@@ -270,9 +274,14 @@ describe('trade applications', () => {
         expect(sent[0]).toMatchObject({
           to: BACKOFFICE,
           replyTo: testEmail('alerted'),
-          subject: 'New trade application to review: Studio Interiors Ltd',
+          subject: 'New trade application to approve: Studio Interiors Ltd',
         })
-        expect(sent[0].text).toContain(`${CRM}/#/clients/accounts?pending=true`)
+        const { rows } = await pool.query(
+          `SELECT ta.trade_account_id FROM trade_applications ta
+             JOIN users u ON u.id = ta.user_id WHERE u.email = $1`,
+          [testEmail('alerted')]
+        )
+        expect(sent[0].text).toContain(`${CRM}/#/clients/accounts/${rows[0].trade_account_id}`)
         // The applicant is NOT mailed: the acceptance letter is their one letter.
         expect(sent.some((m) => m.to === testEmail('alerted'))).toBe(false)
       })
@@ -506,6 +515,8 @@ describe('trade applications', () => {
       const { rows } = await pool.query('SELECT id FROM users WHERE email = $1', [
         testEmail('applicant'),
       ])
+      const first = await inject('POST', `/admin/users/${rows[0].id}/approve`, backofficeCookie)
+      expect(first.statusCode).toBe(200)
       const patch = await inject(
         'PATCH',
         `/admin/users/${rows[0].id}`,

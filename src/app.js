@@ -49,6 +49,11 @@ export const buildApp = ({
   stripeWebhookSecret = null,
   storeBaseUrl = 'http://localhost:4321',
   crmBaseUrl = 'http://localhost:5273',
+  // The trade application review's two people (src/config.js): who approves a
+  // new application first, and who gives the final approval. null = any
+  // back-office login may take that step.
+  tradeApproverEmail = null,
+  tradeAccountsEmail = null,
   mailer = null,
   // Mailchimp audience config (src/config.js `newsletter`). null = POST
   // /newsletter answers 503 and a trade form's opt-in signs nobody up.
@@ -142,6 +147,7 @@ export const buildApp = ({
       fetchImpl: newsletterFetch,
       storeBaseUrl,
       crmBaseUrl,
+      tradeApproverEmail,
     })
     api.register(catalogueRoutes, { pool })
     api.register(shippingRoutes, { pool })
@@ -168,14 +174,22 @@ export const buildApp = ({
     // /admin/users — client/user management; /admin/inventory — stock edits;
     // /admin/price-list-items — supplier pricing. All storefront admin islands,
     // same CORS + backoffice guard.
-    api.register(adminUsersRoutes, { pool, mailer, storeBaseUrl, crmBaseUrl })
+    api.register(adminUsersRoutes, {
+      pool,
+      mailer,
+      xero,
+      storeBaseUrl,
+      crmBaseUrl,
+      tradeApproverEmail,
+      tradeAccountsEmail,
+    })
     // /admin/trade-applications — read-only review of submitted trade forms
     // (the CRM's Users -> Applicants tab). Approval stays on /admin/users/:id.
     api.register(adminTradeApplicationRoutes, { pool })
     // /admin/trade-accounts — links a storefront login to its D365 customer, so
     // the portal can serve that company's invoices and cuttings. Manual by
     // design: an email match is a suggestion, never an automatic grant.
-    api.register(adminTradeAccountRoutes, { pool })
+    api.register(adminTradeAccountRoutes, { pool, xero, tradeApproverEmail, tradeAccountsEmail })
     // /admin/contacts — the whole address book across companies (the per-company
     // book stays under /admin/trade-accounts/:id/contacts).
     api.register(adminContactRoutes, { pool })

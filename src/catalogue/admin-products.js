@@ -573,7 +573,8 @@ export const createProduct = async (pool, input) => {
         name,
         slug,
         input.product_type,
-        reportingLabelFrom(input.product_range),
+        // The range is the house; a blank one takes the house's name.
+        reportingLabelFrom(input.product_range) ?? brand.name,
         input.category ?? null,
         input.composition ?? null,
         input.width ?? null,

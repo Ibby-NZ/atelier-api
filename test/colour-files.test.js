@@ -2157,6 +2157,9 @@ describe('colourway import — database', () => {
         unit: 'metres',
       },
     ])
+    // The range is the house.
+    const { rows } = await pool.query('SELECT product_range FROM products WHERE slug = $1', [PRODUCT_SLUG])
+    expect(rows).toEqual([{ product_range: HOUSE }])
   })
 
   it('changes nothing on a re-import', async () => {

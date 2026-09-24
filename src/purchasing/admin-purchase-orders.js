@@ -41,11 +41,13 @@
 //      read time. There is no counter column and there must never be one.
 //      `status` holds only what a person did, and **`closed` is not `full`**.
 //
-//   5. NOTHING HERE WRITES AN INVENTORY QUANTITY. `moveReservation` stays the
-//      sole writer of `qty_reserved` / `qty_available`. The word `inventory`
+//   5. THIS DOMAIN WRITES NO STOCK SQL OF ITS OWN. A goods receipt moves
+//      `qty_available` through `receiveStock` (src/inventory/admin-inventory.js)
+//      inside the receipt's transaction; `qty_reserved` is never touched from
+//      here — `moveReservation` stays its sole writer. The word `inventory`
 //      does not appear in a SQL position anywhere in this domain, and
-//      `test/purchasing.test.js` asserts that by source scan and by statement
-//      scan rather than by everyone remembering.
+//      `test/purchasing.test.js` asserts that by source scan rather than by
+//      everyone remembering.
 //
 //   6. COST FIGURES ARE FINANCE-GATED through `loadReportAccess` — never
 //      `reportAccess(request.user)`, which reads `can_view_finance` as

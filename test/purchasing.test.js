@@ -899,23 +899,26 @@ describe('W13 purchase orders', () => {
     })
   })
 
-  describe('purchasing writes NO inventory quantity', () => {
-    // `moveReservation` in src/orders/admin-orders.js is the sole writer of
-    // qty_reserved / qty_available. A second writer breaks the reservation
-    // arithmetic SILENTLY, and W13, W19 and W20 can each do it independently.
+  describe('receipts move stock — qty_available only, through the inventory module', () => {
+    // A goods receipt joins the shelf and a reversal takes it off (24 Sep 2026:
+    // "purchase order should also update the stock once received"). The
+    // movement lives in src/inventory/admin-inventory.js (`receiveStock`), so
+    // this domain still carries no stock SQL of its own, and `qty_reserved`
+    // stays `moveReservation`'s alone: a second writer breaks the reservation
+    // arithmetic SILENTLY.
     const SRC = new URL('../src/', import.meta.url).pathname
     const MIGRATIONS = new URL('../migrations/', import.meta.url).pathname
 
-    // A comment may still EXPLAIN why samples and purchases are not stock; what
-    // is banned is the table in a SQL position and the two quantity columns in
-    // any position, so comments are stripped before the scan.
+    // A comment may still EXPLAIN how receipts reach stock; what is banned is
+    // the table in a SQL position and the two quantity columns in any
+    // position, so comments are stripped before the scan.
     const stripComments = (source) =>
       source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
 
     const files = [
       // `.js` only: the domain guide beside them is prose, and prose is exactly
-      // where the reason receipting is NOT a stock movement has to be written
-      // down. Same split the samples scan draws.
+      // where the reason stock moves through the inventory module has to be
+      // written down. Same split the samples scan draws.
       ...readdirSync(join(SRC, 'purchasing'))
         .filter((file) => file.endsWith('.js'))
         .map((file) => join(SRC, 'purchasing', file)),
@@ -938,30 +941,81 @@ describe('W13 purchase orders', () => {
       expect(source).not.toMatch(/qty_available|qty_reserved/)
     })
 
-    it('leaves the stock row untouched across a whole purchasing flow', async () => {
-      const before = await pool.query(
-        `SELECT qty_available, qty_reserved FROM inventory WHERE colourway_id = $1`,
-        [fixtures.colourwayIds[SKU.alpha]]
-      )
+    const stockOf = async (sku) =>
+      (
+        await pool.query(
+          `SELECT qty_available, qty_reserved FROM inventory WHERE colourway_id = $1`,
+          [fixtures.colourwayIds[sku]]
+        )
+      ).rows[0]
+
+    // A purchase order for one colourway, sent, so goods can be booked in.
+    const sentOrderFor = async (sku, qty = 40) => {
       const created = await inject('POST', '/admin/purchase-orders', staffCookie, {
         brand_id: fixtures.brandIds.alpha,
-        lines: [{ colourway_id: fixtures.colourwayIds[SKU.alpha], qty_ordered: 40 }],
+        lines: [{ colourway_id: fixtures.colourwayIds[sku], qty_ordered: qty }],
       })
       const purchaseOrder = created.json().purchase_order
       await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/send`, staffCookie)
-      await inject(
-        'POST',
-        `/admin/purchase-order-lines/${purchaseOrder.lines[0].id}/receipts`,
-        staffCookie,
-        { qty: 40 }
-      )
-      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/close`, staffCookie)
+      return purchaseOrder
+    }
+    const receive = (lineId, qty) =>
+      inject('POST', `/admin/purchase-order-lines/${lineId}/receipts`, staffCookie, { qty })
 
-      const after = await pool.query(
-        `SELECT qty_available, qty_reserved FROM inventory WHERE colourway_id = $1`,
-        [fixtures.colourwayIds[SKU.alpha]]
+    it('adds a goods receipt to what is on hand and leaves the reservation alone', async () => {
+      const before = await stockOf(SKU.alpha)
+      const purchaseOrder = await sentOrderFor(SKU.alpha)
+
+      const received = await receive(purchaseOrder.lines[0].id, 40)
+      expect(received.statusCode).toBe(201)
+      expect(received.json().stock).toMatchObject({
+        qty_available: Number(before.qty_available) + 40,
+        unit: 'metres',
+      })
+      const after = await stockOf(SKU.alpha)
+      expect(Number(after.qty_available)).toBe(Number(before.qty_available) + 40)
+      expect(after.qty_reserved).toBe(before.qty_reserved)
+
+      // The ledger's reversal takes it back off the shelf.
+      expect((await receive(purchaseOrder.lines[0].id, -40)).statusCode).toBe(201)
+      expect(await stockOf(SKU.alpha)).toEqual(before)
+    })
+
+    it('refuses a reversal that would take stock below zero, and books nothing', async () => {
+      const purchaseOrder = await sentOrderFor(SKU.alpha)
+      const lineId = purchaseOrder.lines[0].id
+      await receive(lineId, 40)
+      // Most of it has gone out since.
+      await pool.query(`UPDATE inventory SET qty_available = 10 WHERE colourway_id = $1`, [
+        fixtures.colourwayIds[SKU.alpha],
+      ])
+
+      const refused = await receive(lineId, -40)
+      expect(refused.statusCode).toBe(422)
+      expect(refused.json().message).toMatch(/below zero/)
+      const { rows } = await pool.query(
+        `SELECT count(*)::int AS n FROM purchase_order_receipts WHERE purchase_order_line_id = $1`,
+        [lineId]
       )
-      expect(after.rows[0]).toEqual(before.rows[0])
+      expect(rows[0].n).toBe(1)
+      expect(Number((await stockOf(SKU.alpha)).qty_available)).toBe(10)
+    })
+
+    it('gives a never-stocked colourway its row, reserving what its open orders already hold', async () => {
+      // With no row, the open order on it reserved nothing; once a row exists
+      // the order desk reads that order as holding — so the row must start there.
+      await pool.query(`DELETE FROM inventory WHERE colourway_id = $1`, [
+        fixtures.colourwayIds[SKU.alphaTwo],
+      ])
+      await placeOrder(SKU.alphaTwo, 7)
+      const purchaseOrder = await sentOrderFor(SKU.alphaTwo, 10)
+
+      expect((await receive(purchaseOrder.lines[0].id, 10)).statusCode).toBe(201)
+      const { rows } = await pool.query(
+        `SELECT qty_available, qty_reserved, unit FROM inventory WHERE colourway_id = $1`,
+        [fixtures.colourwayIds[SKU.alphaTwo]]
+      )
+      expect(rows[0]).toEqual({ qty_available: '10.00', qty_reserved: '7.00', unit: 'metres' })
     })
   })
 

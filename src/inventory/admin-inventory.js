@@ -1,10 +1,11 @@
 // Back-office stock (inventory) management.
 //
-// Inventory quantities normally move only through the order state machine
-// (src/orders/admin-orders.js): a request reserves stock, shipping converts the
-// reservation to a decrement, declining releases it. This module is the manual
-// correction path staff reach for when reality and the ledger disagree —
-// receiving a delivery, writing off shrinkage, or fixing a mis-typed count.
+// Inventory quantities move through the order state machine
+// (src/orders/admin-orders.js: a request reserves stock, shipping converts the
+// reservation to a decrement, cancelling releases it) and through purchase-order
+// receipts (`receiveStock` below: goods booked in join `qty_available`). This
+// module is also the manual correction path staff reach for when reality and
+// the ledger disagree — writing off shrinkage, or fixing a mis-typed count.
 //
 // Three rules shape it:
 //   - qty_available and qty_reserved are both editable (receiving, shrinkage, a
@@ -21,6 +22,8 @@
 
 import { buildUpdate } from '../catalogue/admin-brands.js'
 import { unitFor, pageWindow } from '../catalogue/admin-products.js'
+// The demand a never-stocked colourway's row must start from — a pure leaf.
+import { HELD_STATUSES, RESERVING_KINDS } from '../orders/order-states.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -256,4 +259,59 @@ export const adjustInventory = async (pool, colourwayId, delta) => {
     throw httpError(422, 'Adjustment would make stock negative.')
   }
   return getInventory(pool, colourwayId)
+}
+
+/**
+ * Goods booked in against a purchase order join the shelf, and a negative
+ * receipt — the ledger's reversal — takes them off again (24 Sep 2026:
+ * "purchase order should also update the stock once received"). Called inside
+ * the receipt's own transaction, so a refused movement leaves no receipt.
+ *
+ * `qty_available` ONLY. `qty_reserved` stays the order state machine's: an
+ * order waiting on these goods reserved them when it was placed, so receiving
+ * them raises what is on hand and leaves what is spoken for exactly as it was.
+ *
+ * A colourway that has never been stocked gets its row here, starting from the
+ * demand its open reserving orders already hold. The order desk reads every
+ * held line as reserving once a row exists (`reserved_qty` in
+ * src/orders/admin-orders.js), so a row born at 0 reserved would let the first
+ * shipment drive `qty_reserved` below zero.
+ *
+ * @param {{ query: Function }} db the receipt's transaction client
+ * @param {number} colourwayId
+ * @param {number} qty signed: a receipt adds, a reversal takes away
+ * @returns {Promise<object>} the stock row after the move
+ */
+export const receiveStock = async (db, colourwayId, qty) => {
+  const { rows } = await db.query(
+    `SELECT p.product_type
+       FROM colourways c
+       JOIN products p ON p.id = c.product_id
+      WHERE c.id = $1`,
+    [colourwayId]
+  )
+  if (!rows[0]) {
+    throw httpError(422, `Unknown colourway ${colourwayId}.`)
+  }
+  await db.query(
+    `INSERT INTO inventory (colourway_id, qty_available, qty_reserved, unit)
+     SELECT $1, 0, COALESCE(SUM(ol.qty), 0), $2
+       FROM order_lines ol
+       JOIN orders o ON o.id = ol.order_id
+      WHERE ol.colourway_id = $1
+        AND o.kind = ANY($3::text[])
+        AND o.status = ANY($4::text[])
+     ON CONFLICT (colourway_id) DO NOTHING`,
+    [colourwayId, unitFor(rows[0].product_type), [...RESERVING_KINDS], [...HELD_STATUSES]]
+  )
+  try {
+    return await adjustInventory(db, colourwayId, qty)
+  } catch (error) {
+    if (error?.statusCode !== 422) throw error
+    throw httpError(
+      422,
+      'Reversing this receipt would take the stock below zero — some of it has already ' +
+        'gone out. Correct the count on the Stock screen first, then reverse the receipt.'
+    )
+  }
 }

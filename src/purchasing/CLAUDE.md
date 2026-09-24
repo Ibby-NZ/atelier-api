@@ -246,13 +246,26 @@ receipted against and closed. Four tables —
   `suppliers`.** Receipts are RESTRICT from the lines, the allocations are RESTRICT from
   `order_lines`, and `order_lines.colourway_id` is RESTRICT from the colourways — one wrong step
   and the cleanup itself 23503s in the next `beforeEach`.
-- **"Purchasing writes no inventory quantity" is asserted twice**, the samples posture: a source
-  scan over `src/purchasing/**`, `src/routes/admin-purchase-orders.js` and every
-  `migrations/*purchase-order*` for `inventory` in a SQL position and for
-  `qty_available`/`qty_reserved` in any position (comments stripped first, so a comment may still
-  EXPLAIN why receipting is not a stock movement), plus a real end-to-end run — create, send,
-  receipt in full, close — that asserts the stock row is byte-identical afterwards. `moveReservation`
-  stays the sole writer, and a second one breaks the reservation arithmetic SILENTLY.
+- **A goods receipt moves stock — `qty_available` only, through `receiveStock` in
+  `src/inventory/admin-inventory.js`** (24 Sep 2026, the client: "purchase order should also update
+  the stock once received"; until then receipting fed no stock, by decision). It runs inside the
+  receipt's own transaction: a receipt adds its quantity, a reversal (negative receipt) takes it
+  back, and a reversal that would take the shelf below zero is a **422 that books no receipt** —
+  correct the count on the Stock screen first. A **sample line moves nothing** (samples are not
+  stock). **`qty_reserved` is never touched**: an order waiting on the goods reserved them when it
+  was placed, so arrival raises what is on hand and leaves what is spoken for alone —
+  `moveReservation` stays the sole writer of `qty_reserved`, because a second one breaks the
+  reservation arithmetic SILENTLY. A colourway that has never been stocked gets its row on its
+  first receipt, **starting `qty_reserved` at the demand its open reserving orders already hold**:
+  the order desk reads every held line as reserving once a row exists, so a row born at 0 would let
+  the first shipment drive the figure negative. The receipt answers with `stock` (the row after the
+  move; null for a sample line). **This domain still writes no stock SQL of its own** — a source
+  scan over `src/purchasing/**`, `src/routes/admin-purchase-orders.js`, the supplier-invoice route
+  and every `migrations/*purchase-order*` bans `inventory` in a SQL position and
+  `qty_available`/`qty_reserved` in any position (comments stripped first), so the movement cannot
+  drift out of the inventory module. Tested end to end in `test/purchasing.test.js` (receipt,
+  reversal, the below-zero refusal, the never-stocked row) and for samples in
+  `test/purchasing-samples.test.js`.
 
 ## Consolidated supplier invoices (W14)
 
@@ -416,7 +429,6 @@ it; the route takes the mailer, which is the only reason `adminSupplierInvoiceRo
 
 ### Deliberately not built
 
-- **Receipting does not feed stock.** That is a decision, not an omission — see the invariant above.
 - **No `add_lines` / `remove_line_ids` on the PATCH.** A wholly wrong line means cancelling the
   order, which releases its allocations and lets the derivation raise it again; correcting a
   quantity or a price covers the rest. Add them when the office asks, not before.

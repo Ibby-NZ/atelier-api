@@ -431,12 +431,13 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
   // `sample_register` travels beside it (C18): which register rows the receipt
   // valued by barcode, and — the actionable half — which barcodes matched no
   // register row, so the screen can say "register the tag, then key the value
-  // on the sample" instead of the flow failing silently.
+  // on the sample" instead of the flow failing silently. `stock` is the
+  // colourway's shelf after the receipt moved it (null for a sample line).
   app.post(
     '/admin/purchase-order-lines/:id/receipts',
     { preHandler: backoffice, schema: { params: idParamsSchema, body: receiptBodySchema } },
     async (request, reply) => {
-      const { receipt, purchase_order_id, sample_register } = await createReceipt(
+      const { receipt, purchase_order_id, sample_register, stock } = await createReceipt(
         pool,
         request.params.id,
         request.body,
@@ -451,7 +452,7 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
       // inside the building.
       await notifyPurchaseOrderReceipt(mailer, purchase_order, receipt)
       reply.code(201)
-      return { receipt, sample_register, purchase_order }
+      return { receipt, sample_register, stock, purchase_order }
     }
   )
 }

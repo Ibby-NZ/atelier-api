@@ -144,6 +144,8 @@ const loadLinesByOrderId = async (db, orderIds) => {
             p.width,
             p.size,
             p.description,
+            p.trade_price_cents AS catalogue_trade_cents,
+            p.retail_price_cents AS catalogue_retail_cents,
             i.qty_available,
             i.qty_reserved,
             i.unit,
@@ -221,6 +223,13 @@ const toLine = (row, state) => ({
   size: row.size ?? null,
   description: row.description ?? null,
   unit_price_cents: row.unit_price_cents,
+  // The design's catalogue prices on both bases, so the CRM can re-price a
+  // line still on its catalogue price when the order's price list switches
+  // between trade and retail. Null where the design is quoted per job.
+  catalogue_prices: {
+    trade: row.catalogue_trade_cents ?? null,
+    retail: row.catalogue_retail_cents ?? null,
+  },
   cut_requirements: row.cut_requirements,
   colourway_id: row.colourway_id,
   inventory:

@@ -144,7 +144,9 @@ const buildWhere = ({ q, includeArchived }) => {
       )
       OR EXISTS (
         SELECT 1 FROM brands
-         WHERE brands.supplier_id = suppliers.id
+         WHERE (brands.supplier_id = suppliers.id
+                OR EXISTS (SELECT 1 FROM brand_additional_suppliers bas
+                            WHERE bas.brand_id = brands.id AND bas.supplier_id = suppliers.id))
            AND brands.name ILIKE $${i} ESCAPE '\\'
       )
     )`)
@@ -185,7 +187,9 @@ export const listSuppliers = async (
   // unqualified, and the lateral projects only disjoint last_* names.
   const { rows } = await pool.query(
     `SELECT ${SUPPLIER_COLUMNS}, last_contact.*,
-            (SELECT count(*)::int FROM brands WHERE brands.supplier_id = suppliers.id)
+            ((SELECT count(*)::int FROM brands WHERE brands.supplier_id = suppliers.id)
+              + (SELECT count(*)::int FROM brand_additional_suppliers bas
+                  WHERE bas.supplier_id = suppliers.id))
               AS brand_count
      FROM suppliers
      LEFT JOIN LATERAL (
@@ -255,8 +259,12 @@ export const getSupplier = async (pool, id) => {
       [id]
     ),
     pool.query(
-      `SELECT id, name, slug, archived_at FROM brands
-        WHERE supplier_id = $1 ORDER BY name ASC, id ASC`,
+      // Main houses and the ones this supplier invoices as an ADDITIONAL
+      // supplier (migration 1791638400000); `is_main` tells them apart.
+      `SELECT id, name, slug, archived_at, supplier_id = $1 AS is_main FROM brands
+        WHERE supplier_id = $1
+           OR id IN (SELECT brand_id FROM brand_additional_suppliers WHERE supplier_id = $1)
+        ORDER BY name ASC, id ASC`,
       [id]
     ),
     listSupplierBrandTerms(pool, id),
@@ -276,6 +284,7 @@ export const getSupplier = async (pool, id) => {
           name: row.name,
           slug: row.slug,
           archived_at: row.archived_at,
+          is_main: row.is_main,
           terms: termsByBrand.get(row.id) ?? null,
         })
       )

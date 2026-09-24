@@ -166,8 +166,8 @@ const toTier = (row) =>
     pct: Number(row.pct),
     is_fallback: row.is_fallback,
     // Advisory, not a rule: a label that is neither a category nor the fallback
-    // can never be selected by resolveTermsChain, and the office has no other
-    // way to see that. Compared the way the resolver compares.
+    // is never selected by category matching — only by a product choosing it
+    // (product-tiers.js). Compared the way the resolver compares.
     matches_category: CATEGORIES.has(String(row.label).trim().toLowerCase()),
   })
 

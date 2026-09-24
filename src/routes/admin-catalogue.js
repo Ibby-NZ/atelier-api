@@ -34,6 +34,7 @@ import {
   setFeaturedCollections,
   FEATURED_LIMIT,
 } from '../catalogue/admin-brands.js'
+import { addBrandSupplier, removeBrandSupplier } from '../suppliers/brand-suppliers.js'
 import {
   listAdminProducts,
   countAdminProductsByCategory,
@@ -208,6 +209,22 @@ const brandPatchSchema = {
     // A duplicate under the same supplier is a 409 from the partial unique
     // index, phrased in admin-brands.js's CONFLICT_MESSAGES.
     brand_code: reportingLabelProp,
+  },
+}
+
+const brandSupplierBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['supplier_id'],
+  properties: { supplier_id: { type: 'integer', minimum: 1 } },
+}
+
+const brandSupplierParamsSchema = {
+  type: 'object',
+  required: ['id', 'supplierId'],
+  properties: {
+    id: { type: 'integer', minimum: 1 },
+    supplierId: { type: 'integer', minimum: 1 },
   },
 }
 
@@ -437,6 +454,28 @@ export const adminCatalogueRoutes = async (app, { pool }) => {
     async (request) => ({
       brand: await updateBrand(pool, request.params.id, request.body),
     })
+  )
+
+  // A house's ADDITIONAL suppliers (migration 1791638400000). The main one
+  // stays `supplier_id` on PATCH above; these are the others that also
+  // invoice it. Same guard as that PATCH: who invoices a house is not a rate.
+  app.post(
+    '/admin/brands/:id/suppliers',
+    { preHandler: backoffice, schema: { params: idParamsSchema, body: brandSupplierBodySchema } },
+    async (request, reply) => {
+      await addBrandSupplier(pool, request.params.id, request.body.supplier_id)
+      reply.code(201)
+      return { brand: await getAdminBrand(pool, request.params.id) }
+    }
+  )
+
+  app.delete(
+    '/admin/brands/:id/suppliers/:supplierId',
+    { preHandler: backoffice, schema: { params: brandSupplierParamsSchema } },
+    async (request) => {
+      await removeBrandSupplier(pool, request.params.id, request.params.supplierId)
+      return { brand: await getAdminBrand(pool, request.params.id) }
+    }
   )
 
   // Whole-list featured reorder. PUT rather than PATCH because the body IS the

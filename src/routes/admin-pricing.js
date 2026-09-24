@@ -75,6 +75,10 @@ export const adminPricingRoutes = async (app, { pool }) => {
           properties: {
             brand_id: { type: 'integer', minimum: 1 },
             wholesale_rate: { type: 'number', minimum: 0 },
+            // Which of the house's suppliers to price through (main when
+            // absent), and the product whose chosen discount tier applies.
+            supplier_id: { type: 'integer', minimum: 1 },
+            product_id: { type: 'integer', minimum: 1 },
             // Free text: a terms tier is matched against it case-insensitively,
             // and the freight ledger's category enum is checked by the resolver.
             category: { type: 'string', maxLength: 40 },
@@ -91,13 +95,15 @@ export const adminPricingRoutes = async (app, { pool }) => {
       },
     },
     async (request) => {
-      const { brand_id, wholesale_rate, category, duty_class, on, ...rest } = request.query
+      const { brand_id, wholesale_rate, supplier_id, product_id, category, duty_class, on, ...rest } = request.query
       const overrides = Object.fromEntries(
         OVERRIDABLE_INPUTS.filter((key) => rest[key] !== undefined).map((key) => [key, rest[key]])
       )
       return previewWaterfall(pool, {
         brandId: brand_id,
         wholesaleRate: wholesale_rate,
+        supplierId: supplier_id ?? null,
+        productId: product_id ?? null,
         category: category ?? null,
         dutyClass: duty_class ?? null,
         on: on ?? null,

@@ -84,26 +84,38 @@ const loadLinesByOrderId = async (pool, orderIds) => {
   return byOrder
 }
 
-const toOrder = (row, linesByOrderId) => ({
-  id: row.id,
-  order_number: row.order_number,
-  kind: row.kind,
-  status: row.status,
-  subtotal_cents: row.subtotal_cents,
-  shipping_cents: row.shipping_cents,
-  gst_cents: row.gst_cents,
-  total_cents: row.total_cents,
-  shipping_zone: row.shipping_zone,
-  // The percentage only: the client sees why their total is under the
-  // subtotal, the reason and who applied it stay in the back office.
-  discount_pct: row.discount_pct,
-  xero_invoice_ref: row.xero_invoice_ref,
-  // Where a card checkout is being delivered. Null for request-kind orders and
-  // for checkouts placed before delivery details were collected.
-  shipping_address: row.shipping_address ?? null,
-  created_at: row.created_at,
-  lines: linesByOrderId.get(row.id) ?? [],
-})
+// A quote the office has not sent carries no price the client may read (24 Sep
+// 2026: "customer cannot see price on quote made until quote status set sent").
+// The indicative figures a request is stored with are the office's starting
+// point, not an offer; the money appears once the quote goes out — and hides
+// again if the office takes a sent quote back to re-price it.
+const PRICE_HIDDEN_STATUSES = Object.freeze(['quote_requested'])
+
+const toOrder = (row, linesByOrderId) => {
+  const hidden = PRICE_HIDDEN_STATUSES.includes(row.status)
+  const money = (value) => (hidden ? null : value)
+  const lines = linesByOrderId.get(row.id) ?? []
+  return {
+    id: row.id,
+    order_number: row.order_number,
+    kind: row.kind,
+    status: row.status,
+    subtotal_cents: money(row.subtotal_cents),
+    shipping_cents: money(row.shipping_cents),
+    gst_cents: money(row.gst_cents),
+    total_cents: money(row.total_cents),
+    shipping_zone: row.shipping_zone,
+    // The percentage only: the client sees why their total is under the
+    // subtotal, the reason and who applied it stay in the back office.
+    discount_pct: money(row.discount_pct),
+    xero_invoice_ref: row.xero_invoice_ref,
+    // Where a card checkout is being delivered. Null for request-kind orders and
+    // for checkouts placed before delivery details were collected.
+    shipping_address: row.shipping_address ?? null,
+    created_at: row.created_at,
+    lines: hidden ? lines.map((line) => ({ ...line, unit_price_cents: null })) : lines,
+  }
+}
 
 export const DEFAULT_PAGE = 1
 export const DEFAULT_LIMIT = 20

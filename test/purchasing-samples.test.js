@@ -329,12 +329,24 @@ describe('C18 sample lines on purchase orders', () => {
         },
       ])
 
+      const stockBefore = await pool.query(
+        `SELECT qty_available, qty_reserved FROM inventory WHERE colourway_id = $1`,
+        [fixtures.colourwayIds[SKU.hanger]]
+      )
       const response = await receipt(purchaseOrder.lines[0].id)
       expect(response.statusCode).toBe(201)
       expect(response.json().sample_register).toEqual({
         updated: [TAG('flow')],
         unmatched: [],
       })
+      // Samples are not stock: a sample receipt moves no shelf, where a goods
+      // receipt does (test/purchasing.test.js).
+      expect(response.json().stock).toBeNull()
+      const stockAfter = await pool.query(
+        `SELECT qty_available, qty_reserved FROM inventory WHERE colourway_id = $1`,
+        [fixtures.colourwayIds[SKU.hanger]]
+      )
+      expect(stockAfter.rows).toEqual(stockBefore.rows)
 
       const row = await costOf(TAG('flow'))
       expect(Number(row.unit_cost)).toBe(48.5)

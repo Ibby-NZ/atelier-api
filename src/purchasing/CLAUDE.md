@@ -47,11 +47,12 @@ receipted against and closed. Four tables —
   (`po_email`, `agent`, `incoterm`, `currency`) carry the `users.email` argument: a wrong PO address
   means the order reaches nobody, and correcting the paper is not the same act as re-pointing the
   brand.
-- **`status` holds what a person did, or what the bank did — `draft | sent | paid | closed |
-  cancelled` — and `closed` is NOT `full`.** `paid` (22 Sep 2026, client asked) is reachable from
-  `sent` and `closed` and moves on to `closed` (a prepaid order's goods still arrive); the Xero bill
-  sync moves it, and `POST …/:id/pay` is the hand-keyed path. It is never cancelled — money that has
-  left is a credit note, a document nobody has stated. A purchase order closed short because the house discontinued the balance is a
+- **`status` holds what a person did, or what the bank did — `draft | pending_payment | paid |
+  awaiting_delivery | received | completed | cancelled` (24 Sep 2026; migration `1791724800000`
+  renamed `sent` → `pending_payment` and `closed` → `completed`) — and `completed` is NOT `full`.**
+  See "The purchase-order lifecycle" below for the moves. `paid` is reached by hand or by the Xero
+  bill sync; it is never cancelled — money that has left is a credit note, a document nobody has
+  stated. A purchase order completed short because the house discontinued the balance is a
   DECISION; `full` is arithmetic about a warehouse. Storing the second beside the first gives two
   answers to one question the first time they disagree, which is the ordinary case. The vocabulary
   is `purchase_orders_status_check`; the transitions are `src/purchasing/po-states.js`, because a
@@ -159,14 +160,14 @@ receipted against and closed. Four tables —
   are a MIRROR of Xero, beside `status` and never in it.** Send raises the bill
   (`src/xero/CLAUDE.md`); the sync route copies Xero's own answer back, and a
   `PAID` answer ALSO moves `status` to `paid` where the machine allows it
-  (`sent`/`closed` — never a draft). The mirror stays beside it so the Xero
+  (`SOURCE_STATUSES.paid` — pending payment, awaiting delivery, received; never a draft). The mirror stays beside it so the Xero
   bill number and its own status are readable whatever the office did next.
 
 ### Lifecycle
 
 - **`purchase_order` is in the registry with two probes and `archivable: false`.** There is no
   `archived_at` column to match it (`test/lifecycle-registry.test.js` asserts the agreement):
-  `cancelled` and `closed` already take a finished order off every list AND say why, which
+  `cancelled` and `completed` already take a finished order off every list AND say why, which
   `archived_at` cannot, and a second vocabulary for "take it off my screen" is how two lists start
   disagreeing about what is open. The lines CASCADE — they are the document's body — while a
   receipt and an allocation each refuse.
@@ -246,13 +247,87 @@ receipted against and closed. Four tables —
   `suppliers`.** Receipts are RESTRICT from the lines, the allocations are RESTRICT from
   `order_lines`, and `order_lines.colourway_id` is RESTRICT from the colourways — one wrong step
   and the cleanup itself 23503s in the next `beforeEach`.
-- **"Purchasing writes no inventory quantity" is asserted twice**, the samples posture: a source
-  scan over `src/purchasing/**`, `src/routes/admin-purchase-orders.js` and every
-  `migrations/*purchase-order*` for `inventory` in a SQL position and for
-  `qty_available`/`qty_reserved` in any position (comments stripped first, so a comment may still
-  EXPLAIN why receipting is not a stock movement), plus a real end-to-end run — create, send,
-  receipt in full, close — that asserts the stock row is byte-identical afterwards. `moveReservation`
-  stays the sole writer, and a second one breaks the reservation arithmetic SILENTLY.
+- **A goods receipt moves stock — `qty_available` only, through `receiveStock` in
+  `src/inventory/admin-inventory.js`** (24 Sep 2026, the client: "purchase order should also update
+  the stock once received"; until then receipting fed no stock, by decision). It runs inside the
+  receipt's own transaction: a receipt adds its quantity, a reversal (negative receipt) takes it
+  back, and a reversal that would take the shelf below zero is a **422 that books no receipt** —
+  correct the count on the Stock screen first. A **sample line moves nothing** (samples are not
+  stock). **`qty_reserved` is never touched**: an order waiting on the goods reserved them when it
+  was placed, so arrival raises what is on hand and leaves what is spoken for alone —
+  `moveReservation` stays the sole writer of `qty_reserved`, because a second one breaks the
+  reservation arithmetic SILENTLY. A colourway that has never been stocked gets its row on its
+  first receipt, **starting `qty_reserved` at the demand its open reserving orders already hold**:
+  the order desk reads every held line as reserving once a row exists, so a row born at 0 would let
+  the first shipment drive the figure negative. The receipt answers with `stock` (the row after the
+  move; null for a sample line). **This domain still writes no stock SQL of its own** — a source
+  scan over `src/purchasing/**`, `src/routes/admin-purchase-orders.js`, the supplier-invoice route
+  and every `migrations/*purchase-order*` bans `inventory` in a SQL position and
+  `qty_available`/`qty_reserved` in any position (comments stripped first), so the movement cannot
+  drift out of the inventory module. Tested end to end in `test/purchasing.test.js` (receipt,
+  reversal, the below-zero refusal, the never-stocked row) and for samples in
+  `test/purchasing-samples.test.js`.
+
+## The purchase-order lifecycle, bulk orders and pricing (24 Sep 2026)
+
+The client: purchase orders should have the statuses "Draft, Send PO (should create a bill against
+that supplier in Xero), Pending Payment, Paid, Waiting on Delivery, Received, Cancelled, Completed",
+with emails to the supplier, an email function like the sales order's, a Bulk order that sends one
+supplier several purchase orders in one letter and is received back per sales order, and prices from
+the wholesale rate less supplier discounts, with freight.
+
+- **One route for every move: `POST /admin/purchase-orders/:id/status { status }`** replaced
+  `/send`, `/pay`, `/close` and `/cancel`. `setPurchaseOrderStatus` runs the machine
+  (`ALLOWED_TRANSITIONS`, 409) and, on `cancelled`, releases the allocations. The moves:
+  `draft → pending_payment` (**Send PO**), `pending_payment → paid | awaiting_delivery | received |
+  cancelled`, `paid → awaiting_delivery | received | completed`, `awaiting_delivery → paid | received
+  | completed`, `received → paid | completed`. Goods may arrive before the house is paid (a supplier
+  on account), hence `received → paid`. Cancelled only before money has left. One stamp per state:
+  `sent_at` (pending payment), `paid_at`, `awaiting_delivery_at`, `received_at`, `closed_at`
+  (completed), `cancelled_at`.
+- **Send PO raises the Xero bill and writes to the house**, exactly as `send` did: the bill push
+  never fails the move (`xero_bill.reason`), and the letter re-reads the finance view. **The letters**:
+  Send PO → `purchase_order_sent` (+ the office copy), `paid` → `purchase_order_paid` (release the
+  goods), `completed` → `purchase_order_closed` **only when a line is still outstanding** (nothing to
+  stop otherwise), `cancelled` → `purchase_order_cancelled`. Awaiting delivery and received write to
+  nobody. **Every letter to the house also goes to the purchase order's own Emails list**
+  (`purchase_orders.notify_emails`, PATCHed whole like the sales order's, same pattern and cap from
+  `src/orders/notify-emails.js`). Those letters carry prices, so **only a staffer who can see costs
+  may change the list** — anyone else gets 403 (`updatePurchaseOrder`), else the list would be a way
+  round finance masking. (`po_email`, on the purchase order and the supplier, predates this and is
+  not guarded.)
+- **Received is automatic too**: after a receipt, a purchase order whose roll-up is `full`/`over`
+  moves to `received` where the machine allows it (the receipt route). A reversal moves nothing back;
+  the receipt state beside the status still tells the truth.
+- **`POST /admin/purchase-orders/:id/email { letter: 'details'|'status' }`** is the Emails panel —
+  the sales order's rule: the letter IS the act, so 503 with no delivering mailer, 409 on a draft
+  (Send PO is what first sends it), 422 at a status with no letter, 502 when every address failed;
+  answers `{ template, sent, failed }`. To the house and the Emails list.
+- **Bulk orders** (`src/purchasing/bulk-orders.js`, table `purchase_order_bulks`, number
+  `BULK-000001` from its own sequence; `purchase_orders.bulk_order_id` RESTRICT): a GROUPING and a
+  SEND, not a second kind of purchase order. `POST /admin/purchase-orders/bulk { purchase_order_ids }`
+  takes DRAFTS of ONE supplier (409 for a non-draft, 422 for mixed suppliers, 404 for an unknown
+  id), moves them all to `pending_payment` in ONE transaction, then raises each member's Xero bill
+  and sends ONE letter (`purchase_order_bulk_sent`: every member's lines under its own PO number) to
+  the house, every member's Emails list and the office. `GET /admin/purchase-orders/bulk` is the
+  history; `GET …/bulk/:id` is the bulk with every member (lines, allocations, received) — which is
+  what the CRM's receive screen splits back per sales order. Receiving stays per purchase-order line.
+- **Confirming a client's stock is a sales-order action**: `POST /admin/orders/:id/stock-arrived
+  { note? }` (src/routes/admin-orders.js) moves a `back_order` order to `processing` with the note on
+  its timeline and sends `order_stock_arrived` to the client, the rep, the list and the standing
+  copy; at any other status it moves nothing and still writes. The CRM offers it per sales order once
+  every line it waits on has arrived.
+- **A goods line is priced from the catalogue** (`src/purchasing/po-pricing.js`) unless a price is
+  typed: `unit_price` = the design's `products.wholesale_rate` (supplier currency; the coming
+  wholesale import fills it, the product page edits it) less the supplier's discount for the house
+  (terms chain, product tier, supplier default) — the waterfall's `export_price` step — and
+  `freight_per_unit` (NZ$, new column) = the house's freight rate — the `freight_amount` step.
+  Blank is not zero: no wholesale rate or no discount stated leaves the line unpriced; a pricing
+  refusal (4xx) leaves it unpriced rather than blocking the purchase order. Both are SNAPSHOTS at
+  insert. The finance view carries `freight_per_unit`, `freight_cost` per line and `total_freight`
+  (NZ$, absent while any goods line has no estimate), beside `total_cost` and never added to it.
+- **The list takes a status SET** (`status` anyOf string|array, bound `= ANY`), for the dashboard's
+  Inbound tile: goods on their way in = `pending_payment`, `paid`, `awaiting_delivery`.
 
 ## Consolidated supplier invoices (W14)
 
@@ -416,7 +491,6 @@ it; the route takes the mailer, which is the only reason `adminSupplierInvoiceRo
 
 ### Deliberately not built
 
-- **Receipting does not feed stock.** That is a decision, not an omission — see the invariant above.
 - **No `add_lines` / `remove_line_ids` on the PATCH.** A wholly wrong line means cancelling the
   order, which releases its allocations and lets the derivation raise it again; correcting a
   quantity or a price covers the rest. Add them when the office asks, not before.

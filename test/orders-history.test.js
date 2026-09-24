@@ -136,8 +136,10 @@ describe('order history + guest lookup', () => {
   it('GET /orders/mine carries the discount percentage but not its reason', async () => {
     const user = await registerUser(app, `${PREFIX}-disc@example.com`)
     const orderId = await insertOrder(pool, colourwayId, { userId: user.id, orderNumber: `${PREFIX}-D1` })
+    // Past the quote stage: a quote the office has not sent shows no money.
     await pool.query(
-      `UPDATE orders SET discount_pct = 5, discount_reason = 'Loyal', total_cents = 4750 WHERE id = $1`,
+      `UPDATE orders SET status = 'pending_payment', discount_pct = 5, discount_reason = 'Loyal',
+              total_cents = 4750 WHERE id = $1`,
       [orderId]
     )
     const res = await app.inject({ method: 'GET', url: '/orders/mine', headers: { cookie: user.cookie } })
@@ -145,6 +147,35 @@ describe('order history + guest lookup', () => {
     expect(Number(order.discount_pct)).toBe(5)
     expect(order).not.toHaveProperty('discount_reason')
     expect(order).not.toHaveProperty('discount_applied_by')
+  })
+
+  // 24 Sep 2026: "customer cannot see price on quote made until quote status
+  // set sent". The office's indicative figures stay stored; the client reads
+  // none of them until the quote goes out.
+  it('GET /orders/mine shows no money on a quote the office has not sent', async () => {
+    const user = await registerUser(app, `${PREFIX}-hide@example.com`)
+    const orderId = await insertOrder(pool, colourwayId, { userId: user.id, orderNumber: `${PREFIX}-H1` })
+    await pool.query(`UPDATE order_lines SET unit_price_cents = 1250 WHERE order_id = $1`, [orderId])
+    const read = async () =>
+      (await app.inject({ method: 'GET', url: '/orders/mine', headers: { cookie: user.cookie } }))
+        .json()
+        .orders.find((order) => order.order_number === `${PREFIX}-H1`)
+
+    const hidden = await read()
+    expect(hidden.status).toBe('quote_requested')
+    expect(hidden).toMatchObject({
+      subtotal_cents: null,
+      shipping_cents: null,
+      gst_cents: null,
+      total_cents: null,
+      discount_pct: null,
+    })
+    expect(hidden.lines.every((line) => line.unit_price_cents === null)).toBe(true)
+
+    await pool.query(`UPDATE orders SET status = 'quote_sent' WHERE id = $1`, [orderId])
+    const shown = await read()
+    expect(shown.total_cents).toBe(5000)
+    expect(shown.lines[0].unit_price_cents).toBe(1250)
   })
 
   it('GET /orders/mine never returns another user\'s orders', async () => {

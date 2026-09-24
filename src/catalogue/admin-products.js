@@ -94,6 +94,7 @@ const PRODUCT_COLUMNS = `p.id,
         p.lead_time,
         p.retail_price_cents,
         p.trade_price_cents,
+        p.wholesale_rate,
         p.currency,
         p.show_on_website,
         p.hi_res_asset_url,
@@ -141,6 +142,11 @@ const PRODUCT_UPDATE_COLUMNS = Object.freeze([
   'lead_time',
   'retail_price_cents',
   'trade_price_cents',
+  // The design's wholesale rate in its supplier's currency (24 Sep 2026) — the
+  // coming wholesale import fills it, and the office may key it meanwhile. A
+  // purchase-order line is priced from it (src/purchasing/po-pricing.js). A
+  // cost INPUT, not a sell price, so no `reason` is asked for.
+  'wholesale_rate',
   'currency',
   'show_on_website',
   'hi_res_asset_url',
@@ -176,6 +182,8 @@ const toProduct = (row, extra) =>
     lead_time: row.lead_time,
     retail_price_cents: row.retail_price_cents,
     trade_price_cents: row.trade_price_cents,
+    // numeric(12,4) arrives as a string; null is "not imported yet", never 0.
+    wholesale_rate: row.wholesale_rate == null ? null : Number(row.wholesale_rate),
     currency: row.currency,
     show_on_website: row.show_on_website,
     hi_res_asset_url: row.hi_res_asset_url,
@@ -223,7 +231,9 @@ const COLOURWAY_CONTEXT_COLUMNS = `p.name AS product_name,
               p.slug AS product_slug,
               p.product_type,
               p.brand_id,
-              b.name AS brand_name`
+              b.name AS brand_name,
+              p.trade_price_cents,
+              p.retail_price_cents`
 
 // Both joins are inner: product_id and brand_id are NOT NULL, so a colourway
 // always has both. inventory stays a LEFT JOIN and cannot multiply rows —
@@ -239,6 +249,12 @@ const colourwayContext = (row) => ({
   product_type: row.product_type,
   brand_id: row.brand_id,
   brand_name: row.brand_name,
+  // The design's catalogue prices, so a line added to a sales order is priced
+  // on the order's own basis (trade or retail) without anyone retyping it.
+  // The CRM always lets the office override; null means the design is quoted
+  // per job.
+  trade_price_cents: row.trade_price_cents ?? null,
+  retail_price_cents: row.retail_price_cents ?? null,
 })
 
 // Escape the LIKE wildcards so a search for "100%" matches a literal percent

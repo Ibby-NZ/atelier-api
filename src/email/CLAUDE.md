@@ -19,6 +19,10 @@ Extracted from the root CLAUDE.md (root conventions still apply). Loaded automat
 - Wiring: `buildApp({ ..., mailer })` (default null) passes the mailer into `orderRoutes`, `adminOrderRoutes`, `webhookRoutes`. Triggers: `POST /orders/request` → `notifyRequestReceived`; webhook after a *fresh* paid order (`result.order` truthy, i.e. not a replay) → `notifyCheckoutReceipt` **+ `notifyBackofficeNewOrder`**; `POST /admin/orders` → `notifyOrderCreated`; `POST /admin/orders/:id/status` → `notifyOrderTransition` (NOT `patch` — patch never moves the status and must not re-send; `cancelled` joined on 23 Sep 2026 with `order_cancelled`, the letter the CRM's Cancel dialog had long promised); `POST /orders/quote/:token/accept|reject` and `/orders/mine/:order_number/accept|reject` → `notifyQuoteAnswered`. `processStripeEvent` returns `kind`/`user_id`/`guest_email`/`total_cents` on `result.order` so neither the receipt nor the alert needs an extra query.
 - Config/env: `SMTP_HOST`/`SMTP_PORT`/`SMTP_SECURE`/`SMTP_USER`/`SMTP_PASS` (all optional), `EMAIL_FROM`, `BACKOFFICE_EMAIL` (non-secret defaults). **Setting `SMTP_HOST` without BOTH `EMAIL_FROM` and `BACKOFFICE_EMAIL` refuses to boot** (`loadConfig` throws — `test/config.test.js`): with a real relay the `.example` placeholders are a From that Postmark rejects and an alert address that bounces, and neither shows up anywhere but a relay log. This also applies to a dev `.env` that points at a real SMTP host — add the two lines rather than unset the host. Production is **Postmark over SMTP** (`smtp.postmarkapp.com:587`, `SMTP_USER` = `SMTP_PASS` = the transactional stream's Server API token, SMTP access enabled on the stream, From on the verified `atelier.co.nz` signature/domain); no Postmark SDK — nodemailer speaks SMTP and the default `outbound` stream needs no header. `server.js` builds the transport+mailer; `buildApp` in tests gets `mailer` only when a test needs to observe sends (existing suites pass no mailer → null → no-op, unchanged).
 
+- **`order_stock_arrived`** (24 Sep 2026) tells the client their goods are in: `notifyStockArrived`,
+  from `POST /admin/orders/:id/stock-arrived` (the bulk order's receive screen), to everyone a status
+  letter goes to (`orderLetterRecipients`), resolving to who it reached.
+
 ## The template store (W20-US-003 / US-006)
 
 - `template-store.js` — `renderStoredTemplate(db, name, data, { log })` returns the same
@@ -78,7 +82,9 @@ one fact drives everything below.
   receiving real purchase orders**, and the thing that keeps that from being forgotten is the boot
   warning in `server.js`, printed on every start while the valve is open.
 - **The house is told what a PERSON did, never what arithmetic says.** The purchase-order letters
-  hang off `send`, `close` and `cancel` — the three moves in `src/purchasing/po-states.js` — and
+  hang off Send PO (`pending_payment`), `paid`, a SHORT `completed` and `cancelled` — moves in
+  `src/purchasing/po-states.js` (24 Sep 2026) — plus ONE `purchase_order_bulk_sent` for a bulk order,
+  and every one also goes to the purchase order's own Emails list (`notify_emails`); and
   the reserve letters off a raised line and a cancelled one. The DERIVED receipt state
   (`none|part|full|over`) mails the back office ONLY: it changes every time a roll is scanned, and a
   house that got "your order is now part-received" each time would filter us.
@@ -119,7 +125,7 @@ one fact drives everything below.
   raised for another house — all BEFORE anything is sent. A statement is refused WHOLE and never
   narrowed: a letter that went out missing an order the staffer ticked is worse than one that did not
   go, because nothing on screen says so.
-- Templates: `purchase_order_sent` / `_closed` / `_cancelled`, `supplier_invoice_request` and
+- Templates: `purchase_order_sent` / `_paid` / `_bulk_sent` / `_closed` / `_cancelled`, `supplier_invoice_request` and
   `supplier_reserve_request` / `supplier_cutting_request` / `supplier_reserve_cancelled` go OUT;
   `backoffice_purchase_order_sent` / `_received`, `backoffice_supplier_invoice_request` and
   `backoffice_reserve_request` stay in. Triggers

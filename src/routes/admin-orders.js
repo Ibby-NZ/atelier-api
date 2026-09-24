@@ -26,9 +26,13 @@ import { SHIPPING_ADDRESS_SCHEMA } from '../orders/order-request.js'
 // the CHECK and the filter drift apart on the next kind.
 import { ORDER_KINDS } from '../reports/filters.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
-import { notifyOrderTransition, notifyOrderCreated } from '../email/notifications.js'
+import {
+  notifyOrderTransition,
+  notifyOrderCreated,
+  notifyStockArrived,
+} from '../email/notifications.js'
 import { ORDER_LETTERS, currentStatusTemplate, sendOrderLetter } from '../email/order-letters.js'
-import { unpricedLineCount } from '../orders/order-states.js'
+import { canTransition, unpricedLineCount } from '../orders/order-states.js'
 // Who else hears about a status change — the shape and count rules, shared with
 // the edit path and mirrored by the CRM.
 import { NOTIFY_EMAILS_MAX, NOTIFY_EMAIL_PATTERN } from '../orders/notify-emails.js'
@@ -529,6 +533,43 @@ export const adminOrderRoutes = async (
         }
       }
       return result
+    }
+  )
+
+  // The goods for this order have arrived (24 Sep 2026): the office confirms it
+  // from a purchase order's — or a bulk order's — receive screen, "to confirm
+  // stock availability for client email". A back-ordered order moves on to
+  // processing with the arrival on its timeline; at any other status nothing
+  // moves. Either way the client, the rep and the Emails list are told, and the
+  // answer says who was reached.
+  app.post(
+    '/admin/orders/:id/stock-arrived',
+    {
+      preHandler: backoffice,
+      schema: {
+        params: idParamsSchema,
+        body: {
+          type: ['object', 'null'],
+          additionalProperties: false,
+          properties: { note: { type: ['string', 'null'], maxLength: 2000 } },
+        },
+      },
+    },
+    async (request, reply) => {
+      const existing = await getAdminOrder(pool, request.params.id)
+      if (!existing) {
+        reply.code(404)
+        return { error: 'Not Found', message: `Order ${request.params.id} not found.` }
+      }
+      const order =
+        existing.status === 'back_order' && canTransition(existing.status, 'processing')
+          ? await setOrderStatus(pool, existing.id, 'processing', {
+              actor: { kind: 'staff', userId: request.user.id },
+              note: request.body?.note || 'Stock arrived.',
+            })
+          : existing
+      const email = await notifyStockArrived(mailer, pool, order)
+      return { order, email }
     }
   )
 

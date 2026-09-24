@@ -18,15 +18,24 @@ import {
   rollUpReceiptState,
   requireStatus,
   requireTransition,
+  canTransition,
 } from '../src/purchasing/po-states.js'
 import { planPurchaseOrders } from '../src/purchasing/po-plan.js'
 
 describe('the purchase-order machine', () => {
-  it('holds only what a person did', () => {
+  it('holds only what a person did (and the two moves the platform makes for them)', () => {
     // `full` and `part` are receipt states and must never appear here: a
-    // purchase order closed short is a DECISION, and storing a derived "fully
-    // received" beside it gives two answers to one question.
-    expect(PURCHASE_ORDER_STATUSES).toEqual(['draft', 'sent', 'paid', 'closed', 'cancelled'])
+    // purchase order completed short is a DECISION, and storing a derived
+    // "fully received" beside it gives two answers to one question.
+    expect(PURCHASE_ORDER_STATUSES).toEqual([
+      'draft',
+      'pending_payment',
+      'paid',
+      'awaiting_delivery',
+      'received',
+      'completed',
+      'cancelled',
+    ])
     for (const derived of RECEIPT_STATES) {
       if (derived === 'none') continue
       expect(PURCHASE_ORDER_STATUSES).not.toContain(derived)
@@ -40,16 +49,31 @@ describe('the purchase-order machine', () => {
       if (status === INITIAL_PURCHASE_ORDER_STATUS) continue
       expect(typeof STATUS_STAMPS[status]).toBe('string')
     }
+    // The send moment and the finish keep their columns under the new words.
+    expect(STATUS_STAMPS.pending_payment).toBe('sent_at')
+    expect(STATUS_STAMPS.completed).toBe('closed_at')
   })
 
-  it('makes cancelled a dead end, and lets paid and closed reach each other', () => {
-    // Paid before delivery still closes on the goods; closed then paid is the
-    // ordinary case. Neither is ever cancelled: money that has left is a
-    // credit note, a document nobody has stated.
-    expect(ALLOWED_TRANSITIONS.paid).toEqual(['closed'])
-    expect(ALLOWED_TRANSITIONS.closed).toEqual(['paid'])
+  it('sends a draft to pending payment, and cancels only before money has left', () => {
+    expect(ALLOWED_TRANSITIONS.draft).toEqual(['pending_payment', 'cancelled'])
+    expect(SOURCE_STATUSES.cancelled).toEqual(['draft', 'pending_payment'])
+    expect(ALLOWED_TRANSITIONS.completed).toEqual([])
     expect(ALLOWED_TRANSITIONS.cancelled).toEqual([])
-    expect(LIVE_PURCHASE_ORDER_STATUSES).toEqual(['draft', 'sent', 'paid', 'closed'])
+    expect(LIVE_PURCHASE_ORDER_STATUSES).toEqual([
+      'draft',
+      'pending_payment',
+      'paid',
+      'awaiting_delivery',
+      'received',
+    ])
+  })
+
+  it('lets goods arrive before the house is paid, and payment follow', () => {
+    // A supplier on account ships first: received before paid, then paid.
+    expect(canTransition('pending_payment', 'received')).toBe(true)
+    expect(canTransition('received', 'paid')).toBe(true)
+    expect(canTransition('paid', 'awaiting_delivery')).toBe(true)
+    expect(canTransition('paid', 'cancelled')).toBe(false)
   })
 
   it('derives SOURCE_STATUSES from the machine rather than restating it', () => {
@@ -58,20 +82,22 @@ describe('the purchase-order machine', () => {
         expect(SOURCE_STATUSES[target]).toContain(from)
       }
     }
-    // Closing a draft is a cancellation with the wrong word on it.
-    expect(SOURCE_STATUSES.closed).toEqual(['sent', 'paid'])
-    expect(SOURCE_STATUSES.paid).toEqual(['sent', 'closed'])
+    // Completing a draft is a cancellation with the wrong word on it.
+    expect(SOURCE_STATUSES.completed).toEqual(['paid', 'awaiting_delivery', 'received'])
+    expect(SOURCE_STATUSES.paid).toEqual(['pending_payment', 'awaiting_delivery', 'received'])
   })
 
   it('refuses an illegal move with a 409', () => {
-    expect(() => requireTransition({ status: 'draft' }, 'closed')).toThrow(/status "draft"/)
+    expect(() => requireTransition({ status: 'draft' }, 'completed')).toThrow(/status "draft"/)
+    let caught = null
     try {
-      requireTransition({ status: 'cancelled' }, 'sent')
+      requireTransition({ status: 'cancelled' }, 'pending_payment')
     } catch (error) {
-      expect(error.statusCode).toBe(409)
+      caught = error
     }
-    expect(() => requireTransition({ status: 'draft' }, 'sent')).not.toThrow()
-    expect(() => requireStatus({ status: 'sent' }, ['draft', 'sent'], 'edit')).not.toThrow()
+    expect(caught?.statusCode).toBe(409)
+    expect(() => requireTransition({ status: 'draft' }, 'pending_payment')).not.toThrow()
+    expect(() => requireStatus({ status: 'paid' }, ['draft', 'paid'], 'edit')).not.toThrow()
   })
 })
 

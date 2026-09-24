@@ -132,7 +132,8 @@ contact — `users`, `trade_accounts`, `suppliers` — each with its own
   the platform by POLL, not webhook**: `POST …/bill/sync` re-reads the bill and
   mirrors `Status` / `FullyPaidOnDate` onto `xero_bill_status` /
   `xero_bill_paid_at`, and a `PAID` answer moves the order's own `status` to
-  `paid` through `payPurchaseOrder` where the machine allows it (sent/closed).
+  `paid` through `payPurchaseOrder` where the machine allows it (pending
+  payment, awaiting delivery, received — 24 Sep 2026 statuses).
   The CRM syncs when it opens an order whose bill is unsettled. Guarded by the "purchase orders as
   bills" block of `test/admin-xero.test.js`.
 - `expires_at_ms` in the stored token set is OUR computed absolute expiry

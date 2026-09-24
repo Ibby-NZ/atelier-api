@@ -114,6 +114,8 @@ const productDetailProps = {
   lead_time: nullableShort,
   retail_price_cents: nullableCents,
   trade_price_cents: nullableCents,
+  // Supplier currency, four decimals like the price lists' own wholesale_rate.
+  wholesale_rate: { type: ['number', 'null'], minimum: 0 },
   currency: currencyProp,
   hi_res_asset_url: nullableUrl,
 }

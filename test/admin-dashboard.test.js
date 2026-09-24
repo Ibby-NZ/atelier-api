@@ -226,9 +226,9 @@ describe('GET /admin/dashboard', () => {
       return rows[0].id
     }
     await insertPo('draft', 'draft')
-    const sentId = await insertPo('sent-1', 'sent')
-    await insertPo('sent-2', 'sent')
-    await insertPo('closed', 'closed')
+    const sentId = await insertPo('sent-1', 'pending_payment')
+    await insertPo('sent-2', 'awaiting_delivery')
+    await insertPo('closed', 'completed')
     // A costed line on one sent PO, so the finance masking has a figure to hide.
     await pool.query(
       `INSERT INTO purchase_order_lines (purchase_order_id, colourway_id, qty_ordered, unit_price)
@@ -280,11 +280,11 @@ describe('GET /admin/dashboard', () => {
   it('counts only sent purchase orders as inbound', async () => {
     const body = await fetchDashboard(bossCookie)
     expect(body.inbound.count - baseline.inbound.count).toBe(2)
-    expect(body.inbound.status).toBe('sent')
+    expect([...body.inbound.statuses]).toEqual(['pending_payment', 'paid', 'awaiting_delivery'])
     const mine = body.inbound.purchase_orders.filter((po) =>
       po.po_number.startsWith(PREFIX)
     )
-    expect(mine.map((po) => po.status)).toEqual(['sent', 'sent'])
+    expect(mine.map((po) => po.status).sort()).toEqual(['awaiting_delivery', 'pending_payment'])
   })
 
   it('deletes PO cost keys for a login without finance visibility', async () => {

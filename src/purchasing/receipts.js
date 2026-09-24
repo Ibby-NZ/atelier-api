@@ -14,15 +14,16 @@
 // cannot be registered against this table even by accident. Nothing to argue
 // with beats a guard that returns a refusal.
 //
-// **NOTHING HERE WRITES AN INVENTORY QUANTITY.** `moveReservation` in
-// `src/orders/admin-orders.js` is the sole writer of `inventory.qty_reserved`
-// and `qty_available`. A second writer does not break loudly — it breaks
-// SILENTLY, by making the reserved figure stop meaning what every other reader
-// assumes, and W13, W19 and W20 can each do it independently. Receipting
-// feeding stock is a separate, deliberate decision that has not been taken.
-// `test/purchasing.test.js` asserts it twice: a source scan over this whole
-// domain for `inventory` in a SQL position, and a statement scan over a
-// recording stub pool.
+// **A GOODS RECEIPT MOVES STOCK — THROUGH `receiveStock`, AND ONLY
+// `qty_available`** (24 Sep 2026: "purchase order should also update the stock
+// once received"). The movement lives in `src/inventory/admin-inventory.js`
+// and runs in this receipt's own transaction: a receipt adds its quantity, a
+// reversal takes it back, and a reversal that would go below zero refuses the
+// whole receipt. `qty_reserved` is never touched from here — `moveReservation`
+// in `src/orders/admin-orders.js` stays its sole writer, because a second
+// writer breaks the reserved figure SILENTLY. A sample line moves no stock:
+// samples are not stock. `test/purchasing.test.js` still scans this domain for
+// inventory SQL of its own; the stock SQL belongs to the inventory module.
 //
 // OVER-RECEIPT IS NEVER CLAMPED. There is no comparison against `qty_ordered`
 // anywhere in this file. Suppliers over-ship rolls; 42 against an order of 40 is
@@ -39,6 +40,8 @@
 // This module does NOT import `admin-purchase-orders.js`. The dependency runs
 // one way — that module loads receipts for its read model — so the route, not
 // this file, re-reads the purchase order after a receipt lands.
+
+import { receiveStock } from '../inventory/admin-inventory.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -181,6 +184,7 @@ export const createReceipt = async (pool, lineId, input, { user = null } = {}) =
   const unmatched = []
   const client = await pool.connect()
   let receiptRow
+  let stock = null
   try {
     await client.query('BEGIN')
     // COALESCE rather than a bare placeholder: the column is NOT NULL with a
@@ -208,7 +212,7 @@ export const createReceipt = async (pool, lineId, input, { user = null } = {}) =
     // price at the moment the goods were booked, not at the moment the request
     // was validated.
     const { rows: sampleRows } = await client.query(
-      `SELECT l.is_sample, l.sample_barcode, l.unit_price, po.currency
+      `SELECT l.is_sample, l.sample_barcode, l.unit_price, l.colourway_id, po.currency
          FROM purchase_order_lines l
          JOIN purchase_orders po ON po.id = l.purchase_order_id
         WHERE l.id = $1`,
@@ -236,6 +240,13 @@ export const createReceipt = async (pool, lineId, input, { user = null } = {}) =
       else unmatched.push(sampleLine.sample_barcode)
     }
 
+    // Goods join the shelf (a reversal takes them off). A sample line never
+    // does — samples are not stock. A refused movement throws, and the ROLLBACK
+    // below takes the receipt with it.
+    if (sampleLine?.is_sample !== true && sampleLine?.colourway_id != null) {
+      stock = await receiveStock(client, sampleLine.colourway_id, input.qty)
+    }
+
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK')
@@ -254,6 +265,10 @@ export const createReceipt = async (pool, lineId, input, { user = null } = {}) =
   return Object.freeze({
     receipt: toReceipt(receiptRow),
     purchase_order_id: line.purchase_order_id,
+    // The colourway's stock row after the move (the inventory module's own
+    // shape) — null for a sample line, which moves none — so the screen can
+    // say what is now on the shelf.
+    stock,
     // Always present, so the CRM reads one shape whether or not the line was a
     // sample. `unmatched` is the actionable half: the tag is not in the
     // register, so no value flowed — register it and key the value manually.

@@ -371,10 +371,13 @@ describe('POST /orders/request', () => {
     })
     expect(response.statusCode).toBe(201)
     const { order } = response.json()
-    expect(order.lines[0].unit_price_cents).toBe(RETAIL_CENTS)
+    // The client sees no price until the office sends the quote; the
+    // indicative figure is stored for the CRM.
+    expect(order.lines[0]).not.toHaveProperty('unit_price_cents')
 
     const lines = await lineRows(pool, order.id)
     expect(lines[0].unit_price_cents).toBe(RETAIL_CENTS)
+    expect((await orderRow(pool, order.id)).price_type).toBe('retail')
 
     const row = await orderRow(pool, order.id)
     expect(row.subtotal_cents).toBe(RETAIL_CENTS * 4)
@@ -396,10 +399,14 @@ describe('POST /orders/request', () => {
       { cookie }
     )
     expect(response.statusCode).toBe(201)
-    expect(response.json().order.lines[0].unit_price_cents).toBe(TRADE_CENTS)
+    const [line] = await lineRows(pool, response.json().order.id)
+    expect(line.unit_price_cents).toBe(TRADE_CENTS)
 
     const row = await orderRow(pool, response.json().order.id)
     expect(row.total_cents).toBe(TRADE_CENTS * 2)
+    // The order states the basis its lines were priced on, so a line the office
+    // adds later is picked up on the same one.
+    expect(row.price_type).toBe('trade')
   })
 
   it('leaves a design the catalogue does not price at 0', async () => {
@@ -410,7 +417,7 @@ describe('POST /orders/request', () => {
     })
     expect(response.statusCode).toBe(201)
     const { order } = response.json()
-    expect(order.lines[0].unit_price_cents).toBe(0)
+    expect((await lineRows(pool, order.id))[0].unit_price_cents).toBe(0)
 
     const row = await orderRow(pool, order.id)
     expect(row.subtotal_cents).toBe(0)

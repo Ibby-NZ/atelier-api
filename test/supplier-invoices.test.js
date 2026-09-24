@@ -731,7 +731,7 @@ describe('W14 consolidated supplier invoices', () => {
 
     it('leaves a cancelled purchase order out of the search', async () => {
       const purchaseOrder = await raisePurchaseOrder('alpha')
-      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/cancel`, staffCookie)
+      await inject('POST', `/admin/purchase-orders/${purchaseOrder.id}/status`, staffCookie, { status: 'cancelled' })
       const response = await inject(
         'GET',
         `/admin/supplier-invoices/unbilled?supplier_id=${fixtures.supplierIds.main}`,

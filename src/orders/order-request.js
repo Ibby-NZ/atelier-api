@@ -324,8 +324,9 @@ export const createOrderRequest = async (
       `INSERT INTO orders
          (user_id, guest_email, order_number, kind, status,
           subtotal_cents, shipping_cents, total_cents, notes,
-          contact_phone, client_reference, customer_po_number, shipping_address)
-       VALUES ($1, $2, $3, $4, 'quote_requested', $5, 0, $5, $6, $7, $8, $9, $10)
+          contact_phone, client_reference, customer_po_number, shipping_address,
+          price_type)
+       VALUES ($1, $2, $3, $4, 'quote_requested', $5, 0, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id, order_number, kind, status`,
       [
         userId,
@@ -339,6 +340,10 @@ export const createOrderRequest = async (
         trimmedOrNull(customerPoNumber),
         // jsonb: pg maps a raw object to a record, not to jsonb.
         address ? JSON.stringify(address) : null,
+        // The basis the lines were just priced on, stated on the order: a line
+        // the office adds later is priced on this same basis (the CRM reads
+        // it), so a trade client's quote cannot end up half trade, half retail.
+        trade ? 'trade' : 'retail',
       ]
     )
     const order = orderRows[0]
@@ -388,11 +393,13 @@ export const createOrderRequest = async (
         order_number: order.order_number,
         kind: order.kind,
         status: order.status,
+        // No price: the order is `quote_requested`, and a client sees no money
+        // on a quote until the office sends it (order-history.js). The
+        // indicative figures are stored for the office's CRM.
         lines: resolved.map((line) => ({
           sku: line.sku,
           qty_metres: line.qty_metres,
           cut_requirements: line.cut_requirements,
-          unit_price_cents: line.unit_price_cents,
         })),
       },
     }

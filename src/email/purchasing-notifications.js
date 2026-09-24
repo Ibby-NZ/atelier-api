@@ -4,8 +4,10 @@
 // client, and the difference sets every rule in this file:
 //
 //   - **The house is told what a PERSON did, never what arithmetic says.** The
-//     letters hang off `send`, `close` and `cancel` — the three moves in
-//     `src/purchasing/po-states.js` — and off a booked receipt. The DERIVED
+//     letters hang off Send PO (`pending_payment`), `paid`, `cancelled` and a
+//     `completed` that is SHORT — moves in `src/purchasing/po-states.js`
+//     (24 Sep 2026) — and a Bulk order sends ONE letter for several purchase
+//     orders. A booked receipt alerts the office only. The DERIVED
 //     receipt state (`none|part|full|over`) mails nobody outside the office: it
 //     changes whenever a receipt is keyed, and a house that got "your order is
 //     now part-received" every time a roll was scanned would filter us.
@@ -22,10 +24,16 @@
 //     and the back-office copy says the letter went nowhere, which is the only
 //     place that fact can usefully appear.
 //
+// **Every letter to the house also goes to the purchase order's Emails list**
+// (`notify_emails`, the sales order's rule) — one letter each, each address
+// once. Not the office copy: that stays the one configured address.
+//
 // Every helper here is a no-op when `mailer` is null and NEVER throws: a
 // purchase order that moved must not un-move because a relay was down.
 // `mailer.send` already swallows delivery failures; the guards below cover the
 // rest (a missing address, an empty order).
+
+import { uniqueEmails } from '../orders/notify-emails.js'
 
 const noop = { ok: false }
 
@@ -60,6 +68,34 @@ const formatSupplierLines = (purchaseOrder) =>
   (purchaseOrder.lines ?? [])
     .map((line, index) => formatSupplierLine(line, index, purchaseOrder.currency))
     .join('\n')
+
+// The house and the purchase order's Emails list, each address once. The house
+// may have no address on file (a snapshot, nullable): the list still hears.
+const houseRecipients = (purchaseOrder) =>
+  uniqueEmails([purchaseOrder.po_email, ...(purchaseOrder.notify_emails ?? [])])
+
+// One letter to each of them, in turn; resolves to who it reached.
+const sendToHouse = async (mailer, recipients, template, data) => {
+  const sent = []
+  const failed = []
+  for (const to of recipients) {
+    const { ok } = await mailer.send({ template, to, data })
+    ;(ok ? sent : failed).push(to)
+  }
+  return { ok: sent.length > 0, template, sent, failed }
+}
+
+/** The purchase order itself, as the house receives it — Send PO's letter. */
+export const purchaseOrderLetterData = (purchaseOrder) => ({
+  po_number: purchaseOrder.po_number,
+  supplier_name: purchaseOrder.supplier_name ?? 'Sir or Madam',
+  incoterm: purchaseOrder.incoterm,
+  currency: purchaseOrder.currency,
+  expected_at: purchaseOrder.expected_at,
+  lines_text: formatSupplierLines(purchaseOrder),
+  total_text: money(purchaseOrder.total_cost, purchaseOrder.currency),
+  notes: purchaseOrder.notes,
+})
 
 /**
  * The lines still owed at the moment the order is closed — the balance the
@@ -114,32 +150,85 @@ export const notifyPurchaseOrderSent = async (mailer, purchaseOrder) => {
   if (!mailer || !purchaseOrder) {
     return noop
   }
-  if (purchaseOrder.po_email) {
-    await mailer.send({
-      template: 'purchase_order_sent',
-      to: purchaseOrder.po_email,
-      data: {
-        po_number: purchaseOrder.po_number,
-        supplier_name: purchaseOrder.supplier_name ?? 'Sir or Madam',
-        incoterm: purchaseOrder.incoterm,
-        currency: purchaseOrder.currency,
-        expected_at: purchaseOrder.expected_at,
-        lines_text: formatSupplierLines(purchaseOrder),
-        total_text: money(purchaseOrder.total_cost, purchaseOrder.currency),
-        notes: purchaseOrder.notes,
-      },
-    })
-  }
+  await sendToHouse(
+    mailer,
+    houseRecipients(purchaseOrder),
+    'purchase_order_sent',
+    purchaseOrderLetterData(purchaseOrder)
+  )
   await sendBackofficeCopy(mailer, purchaseOrder)
   return { ok: true }
 }
 
 /**
- * `close` and `cancel` — both tell the house to stop, and they are NOT the same
- * letter. `close` may be short by agreement and leaves delivered goods bought;
- * `cancel` withdraws the order whole and releases every allocation
- * (src/purchasing/admin-purchase-orders.js). A house that cannot tell which one
- * it received will ship against the wrong one.
+ * The house has been paid (24 Sep 2026) — so it can release the goods. To the
+ * house and the Emails list; the office pressed the button (or Xero's bill
+ * sync did, which does not come through here).
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {object} purchaseOrder
+ */
+export const notifyPurchaseOrderPaid = async (mailer, purchaseOrder) => {
+  if (!mailer || !purchaseOrder) {
+    return noop
+  }
+  return sendToHouse(mailer, houseRecipients(purchaseOrder), 'purchase_order_paid', {
+    po_number: purchaseOrder.po_number,
+    supplier_name: purchaseOrder.supplier_name ?? 'Sir or Madam',
+    total_text: money(purchaseOrder.total_cost, purchaseOrder.currency),
+  })
+}
+
+/**
+ * ONE letter to a house covering several purchase orders — the Bulk orders
+ * tab's Send (24 Sep 2026). Every line of every purchase order, under its own
+ * PO number so the house can ship and invoice against each, to the house, to
+ * every member's Emails list, and a copy to the office (the same letter: the
+ * record of what went).
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ bulk_number: string }} bulk
+ * @param {object[]} purchaseOrders the finance view of each member
+ */
+export const notifyBulkOrderSent = async (mailer, bulk, purchaseOrders) => {
+  if (!mailer || !bulk || purchaseOrders.length === 0) {
+    return noop
+  }
+  const [first] = purchaseOrders
+  const data = {
+    bulk_number: bulk.bulk_number,
+    supplier_name: first.supplier_name ?? 'Sir or Madam',
+    po_numbers: purchaseOrders.map((po) => po.po_number).join(', '),
+    orders_text: purchaseOrders
+      .map((po) =>
+        [
+          `${po.po_number}${po.brand_name ? ` — ${po.brand_name}` : ''}`,
+          formatSupplierLines(po),
+          po.total_cost == null ? null : `  Total: ${money(po.total_cost, po.currency)}`,
+        ]
+          .filter(Boolean)
+          .join('\n')
+      )
+      .join('\n\n'),
+    incoterm: first.incoterm,
+    currency: first.currency,
+  }
+  const recipients = uniqueEmails(
+    purchaseOrders.flatMap((po) => [po.po_email, ...(po.notify_emails ?? [])])
+  )
+  const result = await sendToHouse(mailer, recipients, 'purchase_order_bulk_sent', data)
+  await mailer.send({ template: 'purchase_order_bulk_sent', to: mailer.backofficeEmail, data })
+  return result
+}
+
+/**
+ * `completed` and `cancelled` — both tell the house to stop, and they are NOT
+ * the same letter. `completed` may be short by agreement and leaves delivered
+ * goods bought; `cancelled` withdraws the order whole and releases every
+ * allocation (src/purchasing/admin-purchase-orders.js). A house that cannot
+ * tell which one it received will ship against the wrong one. A completed
+ * order with nothing outstanding sends nothing: the house delivered it all,
+ * and there is no balance to tell it to stop on.
  *
  * No back-office copy on either: unlike `send`, nothing here is at risk of
  * having silently gone nowhere that the order's own status does not already
@@ -147,28 +236,68 @@ export const notifyPurchaseOrderSent = async (mailer, purchaseOrder) => {
  *
  * @param {import('./mailer.js').Mailer|null} mailer
  * @param {object} purchaseOrder
- * @param {'closed'|'cancelled'} status
+ * @param {'completed'|'cancelled'} status
  */
 export const notifyPurchaseOrderEnded = async (mailer, purchaseOrder, status) => {
   const template =
-    status === 'closed'
+    status === 'completed'
       ? 'purchase_order_closed'
       : status === 'cancelled'
         ? 'purchase_order_cancelled'
         : null
-  if (!mailer || !purchaseOrder || !template || !purchaseOrder.po_email) {
+  if (!mailer || !purchaseOrder || !template) {
     return noop
   }
-  await mailer.send({
-    template,
-    to: purchaseOrder.po_email,
-    data: {
-      po_number: purchaseOrder.po_number,
-      supplier_name: purchaseOrder.supplier_name ?? 'Sir or Madam',
-      ...(status === 'closed' ? { outstanding_text: formatOutstanding(purchaseOrder) } : {}),
-    },
+  const outstanding = status === 'completed' ? formatOutstanding(purchaseOrder) : ''
+  if (status === 'completed' && outstanding === '') {
+    return noop
+  }
+  return sendToHouse(mailer, houseRecipients(purchaseOrder), template, {
+    po_number: purchaseOrder.po_number,
+    supplier_name: purchaseOrder.supplier_name ?? 'Sir or Madam',
+    ...(status === 'completed' ? { outstanding_text: outstanding } : {}),
   })
-  return { ok: true }
+}
+
+/**
+ * The letter for where a purchase order stands NOW — what the Emails panel's
+ * "Resend" sends, and which of the functions above a move to it calls. Null
+ * for a status the house hears nothing about.
+ *
+ * @param {{ status: string }} purchaseOrder
+ * @returns {string|null}
+ */
+export const purchaseOrderStatusTemplate = (purchaseOrder) =>
+  ({
+    pending_payment: 'purchase_order_sent',
+    paid: 'purchase_order_paid',
+    completed: 'purchase_order_closed',
+    cancelled: 'purchase_order_cancelled',
+  })[purchaseOrder.status] ?? null
+
+/**
+ * The Emails panel's on-demand letters about a purchase order (24 Sep 2026:
+ * "purchase orders should also have email function like sales order"):
+ * `details` is the purchase order itself; `status` re-sends the letter for
+ * where it stands. To the house and the Emails list. Resolves to who it
+ * reached, so the route can say so.
+ *
+ * @param {import('./mailer.js').Mailer} mailer
+ * @param {object} purchaseOrder the finance view, lines included
+ * @param {'details'|'status'} letter
+ */
+export const sendPurchaseOrderLetter = async (mailer, purchaseOrder, letter) => {
+  const template = letter === 'details' ? 'purchase_order_sent' : purchaseOrderStatusTemplate(purchaseOrder)
+  const data =
+    template === 'purchase_order_sent'
+      ? purchaseOrderLetterData(purchaseOrder)
+      : {
+          po_number: purchaseOrder.po_number,
+          supplier_name: purchaseOrder.supplier_name ?? 'Sir or Madam',
+          total_text: money(purchaseOrder.total_cost, purchaseOrder.currency),
+          outstanding_text: formatOutstanding(purchaseOrder),
+        }
+  return sendToHouse(mailer, houseRecipients(purchaseOrder), template, data)
 }
 
 /**

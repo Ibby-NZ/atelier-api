@@ -334,43 +334,65 @@ export const notifyPasswordReset = async (mailer, { user, resetUrl, expiresMinut
 }
 
 /**
- * A new trade application is waiting: alert the back office (the single
- * configured address, like every other alert) with a link to the CRM's
- * Applicants tab. The applicant is NOT mailed here — a pending account cannot
- * sign in, and the acceptance letter on approval is the one letter they get.
+ * A new trade application is waiting: ask the approver (TRADE_APPROVER_EMAIL,
+ * passed as `to`; else the back-office address) to approve or decline it, with
+ * a link to the account it raised. The applicant is NOT mailed here — a pending
+ * account cannot sign in, and the decision is the one letter they get.
  * No-op when mailer is null; never throws.
  *
  * @param {import('./mailer.js').Mailer|null} mailer
- * @param {{ user: { email: string }, application: { business_name: string, business_type?: string|null, signatory_name?: string|null }, crmBaseUrl: string }} args
+ * @param {{ to?: string|null, user: { email: string }, application: { business_name: string, business_type?: string|null, signatory_name?: string|null }, tradeAccountId: number, crmBaseUrl: string }} args
  */
-export const notifyTradeApplicationReceived = async (mailer, { user, application, crmBaseUrl }) => {
+export const notifyTradeApplicationReceived = async (
+  mailer,
+  { to = null, user, application, tradeAccountId, crmBaseUrl }
+) => {
   if (!mailer) {
     return
   }
   await mailer.send({
     template: 'backoffice_new_trade_application',
-    to: mailer.backofficeEmail,
+    to: to || mailer.backofficeEmail,
     replyTo: user.email,
     data: {
       business_name: application.business_name,
       business_type: application.business_type ?? null,
       signatory_name: application.signatory_name ?? null,
       email: user.email,
-      // The CRM is a hash router; this is its Applicants tab.
-      review_url: `${crmBaseUrl}/#/clients/accounts?pending=true`,
+      review_url: crmAccountUrl(crmBaseUrl, tradeAccountId),
     },
   })
 }
 
+/** The CRM (a hash router) page for one client company. */
+export const crmAccountUrl = (crmBaseUrl, tradeAccountId) =>
+  `${crmBaseUrl}/#/clients/accounts/${tradeAccountId}`
+
 // The store-backed acceptance letter; the CRM Letters screen edits it by name.
 export const TRADE_APPROVED_TEMPLATE = 'trade_application_approved'
+export const TRADE_DECLINED_TEMPLATE = 'trade_application_declined'
+
+// Greets by the login's name, else the signatory on the application (`name`
+// is optional on the form; "Dear ," is not a letter). The decision is already
+// committed by the time this runs, so a failed lookup degrades the greeting
+// rather than 500ing the request.
+const applicantName = async (db, user) => {
+  if (user.name) return user.name
+  const { rows } = await db
+    .query(
+      `SELECT signatory_name FROM trade_applications
+        WHERE user_id = $1 ORDER BY id DESC LIMIT 1`,
+      [user.id]
+    )
+    .catch(() => ({ rows: [] }))
+  return rows[0]?.signatory_name || 'Customer'
+}
 
 /**
- * The acceptance letter, sent when a trade application is approved. The caller
- * (PATCH /admin/users/:id) decides WHEN — only on the false -> true flip, so a
- * re-saved approval never re-sends it. Greets by the login's name, else by the
- * signatory on the application (`name` is optional on the form; "Dear ," is
- * not a letter). No-op when mailer is null; never throws.
+ * The acceptance letter, sent on the FINAL approval. The caller
+ * (PATCH /admin/users/:id) decides WHEN — only on the false -> true flip of
+ * `trade_approved`, so a re-saved approval never re-sends it. No-op when
+ * mailer is null; never throws.
  *
  * @param {import('./mailer.js').Mailer|null} mailer
  * @param {{ query: Function }} db
@@ -380,21 +402,61 @@ export const notifyTradeApproved = async (mailer, db, user) => {
   if (!mailer) {
     return
   }
-  let name = user.name
-  if (!name) {
-    // The approval is already committed by now, so a failed lookup degrades
-    // the greeting rather than 500ing the PATCH.
-    const { rows } = await db
-      .query(
-        `SELECT signatory_name FROM trade_applications
-          WHERE user_id = $1 ORDER BY id DESC LIMIT 1`,
-        [user.id]
-      )
-      .catch(() => ({ rows: [] }))
-    name = rows[0]?.signatory_name || 'Customer'
-  }
+  const name = await applicantName(db, user)
   const { subject, text } = await renderStoredTemplate(db, TRADE_APPROVED_TEMPLATE, { name })
   await mailer.send({ to: user.email, subject, text })
+}
+
+/**
+ * The refusal, carrying the approver's reason. Sent by
+ * POST /admin/users/:id/decline after the login is archived. No-op when mailer
+ * is null; never throws.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ query: Function }} db
+ * @param {{ user: { id: number, email: string, name?: string|null }, businessName?: string|null, reason: string }} args
+ */
+export const notifyTradeDeclined = async (mailer, db, { user, businessName, reason }) => {
+  if (!mailer) {
+    return
+  }
+  const name = await applicantName(db, user)
+  const { subject, text } = await renderStoredTemplate(db, TRADE_DECLINED_TEMPLATE, {
+    name,
+    business_name: businessName || 'your business',
+    reason,
+  })
+  await mailer.send({ to: user.email, subject, text })
+}
+
+/**
+ * The approver has approved: ask the accounts desk (TRADE_ACCOUNTS_EMAIL,
+ * passed as `to`) for the final approval, with a "click here to review" link
+ * to the account. Nobody to ask when the address is unset. No-op when mailer
+ * is null; never throws.
+ *
+ * @param {import('./mailer.js').Mailer|null} mailer
+ * @param {{ to?: string|null, user: { email: string }, account: { id: number, company_name: string }|null, approvedBy?: string|null, crmBaseUrl: string }} args
+ */
+export const notifyTradeAccountToReview = async (
+  mailer,
+  { to = null, user, account, approvedBy = null, crmBaseUrl }
+) => {
+  if (!mailer || !to) {
+    return
+  }
+  await mailer.send({
+    template: 'backoffice_trade_account_review',
+    to,
+    data: {
+      business_name: account?.company_name ?? user.email,
+      email: user.email,
+      approved_by: approvedBy,
+      review_url: account
+        ? crmAccountUrl(crmBaseUrl, account.id)
+        : `${crmBaseUrl}/#/clients/accounts?q=${encodeURIComponent(user.email)}`,
+    },
+  })
 }
 
 /**

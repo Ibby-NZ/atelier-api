@@ -25,6 +25,11 @@ import {
   DEFAULT_LIMIT,
   MAX_LIMIT,
 } from '../trade-accounts/admin-trade-accounts.js'
+import {
+  linkCompanyToXero,
+  setCompanyXeroArchived,
+  setTradeAccountArchived,
+} from '../trade-accounts/review.js'
 
 const idParamsSchema = {
   type: 'object',
@@ -160,6 +165,9 @@ const patchBodySchema = {
     country: text(200),
     payment_terms: text(200),
     xero_contact_id: text(100),
+    // The staff login who owns the client and is its account manager in the
+    // portal (a current backoffice/director login, else 422); null clears it.
+    account_owner_id: { type: ['integer', 'null'], minimum: 1 },
   },
 }
 
@@ -168,7 +176,18 @@ const notFound = (reply, message) => {
   return { error: 'Not Found', message }
 }
 
-export const adminTradeAccountRoutes = async (app, { pool }) => {
+export const adminTradeAccountRoutes = async (
+  app,
+  { pool, xero = null, tradeApproverEmail = null, tradeAccountsEmail = null }
+) => {
+  // Who takes each review step (config), for the CRM to offer the right
+  // buttons to the right person — the order_copy_email precedent. The routes
+  // in admin-users.js enforce it; this only tells. null = anyone back-office.
+  const tradeReview = Object.freeze({
+    approver_email: tradeApproverEmail || null,
+    accounts_email: tradeAccountsEmail || null,
+  })
+
   const backoffice = app.guards.requireRole('backoffice')
 
   app.get(
@@ -221,7 +240,7 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
       if (!tradeAccount) {
         return notFound(reply, `Trade account ${request.params.id} not found.`)
       }
-      return { trade_account: tradeAccount }
+      return { trade_account: tradeAccount, trade_review: tradeReview }
     }
   )
 
@@ -264,6 +283,52 @@ export const adminTradeAccountRoutes = async (app, { pool }) => {
         return notFound(reply, `Trade account ${request.params.id} not found.`)
       }
       return { trade_account: tradeAccount }
+    }
+  )
+
+  // ---- cancelling a client ---------------------------------------------------
+  // Archive is the client's cancellation: the company AND its logins are
+  // archived (nobody there can sign in), and so is its Xero contact. Restore
+  // brings the company and its Xero contact back; each login is restored on
+  // its own. Xero's answer rides along as `xero_contact` (null when the
+  // company has no contact) and never fails the move.
+  for (const [verb, archived] of [['archive', true], ['restore', false]]) {
+    app.post(
+      `/admin/trade-accounts/:id/${verb}`,
+      { preHandler: backoffice, schema: { params: idParamsSchema } },
+      async (request, reply) => {
+        const moved = await setTradeAccountArchived(pool, request.params.id, archived)
+        if (!moved) {
+          return notFound(reply, `Trade account ${request.params.id} not found.`)
+        }
+        const xeroContact = await setCompanyXeroArchived(xero, moved.xeroContactId, archived)
+        return {
+          trade_account: await getTradeAccount(pool, request.params.id),
+          xero_contact: xeroContact,
+        }
+      }
+    )
+  }
+
+  // "Add to Xero": match-or-create the company's contact and remember its id —
+  // the retry for an approval whose Xero step did not land.
+  app.post(
+    '/admin/trade-accounts/:id/xero-contact',
+    { preHandler: backoffice, schema: { params: idParamsSchema } },
+    async (request, reply) => {
+      if (!(await getTradeAccount(pool, request.params.id))) {
+        return notFound(reply, `Trade account ${request.params.id} not found.`)
+      }
+      if (!xero) {
+        reply.code(503)
+        return { error: 'Service Unavailable', message: 'Xero is not set up on this server.' }
+      }
+      const result = await linkCompanyToXero(xero, request.params.id)
+      if (!result.linked) {
+        reply.code(502)
+        return { error: 'Bad Gateway', message: result.reason }
+      }
+      return { trade_account: await getTradeAccount(pool, request.params.id) }
     }
   )
 

@@ -68,8 +68,12 @@ describe('email templates', () => {
         'password_reset',
         // The acceptance letter, store-backed too, sent on trade approval.
         'trade_application_approved',
-        // The back office's alert that an application is waiting for review.
+        // The approver's alert that an application is waiting for review.
         'backoffice_new_trade_application',
+        // The review flow (24 Sep 2026): the refusal with its reason, and the
+        // accounts desk asked for the final approval.
+        'trade_application_declined',
+        'backoffice_trade_account_review',
         // The storefront's sample enquiry cart, sent (16 Sep 2026): the
         // shopper's acknowledgement and the office's alert.
         'sample_request_received',
@@ -108,22 +112,46 @@ describe('email templates', () => {
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(36)
+    expect(TEMPLATE_NAMES).toHaveLength(38)
   })
 
-  it('backoffice_new_trade_application names the business and links the CRM applicants tab', () => {
+  it('backoffice_new_trade_application names the business and links the account in the CRM', () => {
     const { subject, text } = renderTemplate('backoffice_new_trade_application', {
       business_name: 'Studio Interiors Ltd',
       business_type: 'limited_liability_company',
       signatory_name: 'Alex Designer',
       email: 'alex@studio.example',
-      review_url: 'http://crm.example/#/clients/applicants',
+      review_url: 'http://crm.example/#/clients/accounts/7',
     })
-    expect(subject).toBe('New trade application to review: Studio Interiors Ltd')
+    expect(subject).toBe('New trade application to approve: Studio Interiors Ltd')
     expect(text).toContain('Business: Studio Interiors Ltd')
     expect(text).toContain('Signatory: Alex Designer')
     expect(text).toContain('Login email: alex@studio.example')
-    expect(text).toContain('http://crm.example/#/clients/applicants')
+    expect(text).toContain('http://crm.example/#/clients/accounts/7')
+  })
+
+  it('trade_application_declined carries the reason the approver gave', () => {
+    const { subject, text } = renderTemplate('trade_application_declined', {
+      name: 'Alex Designer',
+      business_name: 'Studio Interiors Ltd',
+      reason: 'We could not verify your NZBN.',
+    })
+    expect(subject).toContain('application')
+    expect(text).toContain('Dear Alex Designer,')
+    expect(text).toContain('Studio Interiors Ltd')
+    expect(text).toContain('We could not verify your NZBN.')
+  })
+
+  it('backoffice_trade_account_review asks for the final approval and links the account', () => {
+    const { subject, text } = renderTemplate('backoffice_trade_account_review', {
+      business_name: 'Studio Interiors Ltd',
+      email: 'alex@studio.example',
+      approved_by: 'Liz',
+      review_url: 'http://crm.example/#/clients/accounts/7',
+    })
+    expect(subject).toBe('New trade account to approve: Studio Interiors Ltd')
+    expect(text).toContain('approved by Liz and is waiting for your final approval')
+    expect(text).toContain('Click here to review and approve the account: http://crm.example/#/clients/accounts/7')
   })
 
   it('trade_application_approved is the office acceptance letter, addressed by name', () => {
@@ -545,20 +573,33 @@ describe('notifications', () => {
 
   // W12 US-004/FR-119: the alert goes to the ONE configured address. Not a
   // per-salesperson routing table — the restriction is the requirement.
-  it('notifyTradeApplicationReceived alerts the back office with Reply-To the applicant', async () => {
+  it('notifyTradeApplicationReceived falls back to the back office with Reply-To the applicant', async () => {
     const { transport, mailer } = buildMailer()
     await notifyTradeApplicationReceived(mailer, {
       user: { email: 'alex@studio.example' },
       application: { business_name: 'Studio Interiors Ltd', signatory_name: 'Alex Designer' },
+      tradeAccountId: 7,
       crmBaseUrl: 'http://crm.example',
     })
     expect(transport.sent).toHaveLength(1)
     expect(transport.sent[0]).toMatchObject({
       to: BACKOFFICE,
       replyTo: 'alex@studio.example',
-      subject: 'New trade application to review: Studio Interiors Ltd',
+      subject: 'New trade application to approve: Studio Interiors Ltd',
     })
-    expect(transport.sent[0].text).toContain('http://crm.example/#/clients/accounts?pending=true')
+    expect(transport.sent[0].text).toContain('http://crm.example/#/clients/accounts/7')
+  })
+
+  it('notifyTradeApplicationReceived asks the approver when one is configured', async () => {
+    const { transport, mailer } = buildMailer()
+    await notifyTradeApplicationReceived(mailer, {
+      to: 'liz@atelier.example',
+      user: { email: 'alex@studio.example' },
+      application: { business_name: 'Studio Interiors Ltd' },
+      tradeAccountId: 7,
+      crmBaseUrl: 'http://crm.example',
+    })
+    expect(transport.sent.map((m) => m.to)).toEqual(['liz@atelier.example'])
   })
 
   it('notifyBackofficeNewOrder alerts the single configured address only', async () => {

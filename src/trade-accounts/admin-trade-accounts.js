@@ -52,6 +52,8 @@ const ACCOUNT_COLUMNS = `ta.id,
         ta.payment_terms,
         ta.xero_contact_id,
         ta.archived_at,
+        (SELECT json_build_object('id', o.id, 'name', o.name, 'email', o.email)
+           FROM users o WHERE o.id = ta.account_owner_id) AS account_owner,
         (SELECT COUNT(*)::int FROM trade_account_contacts tac WHERE tac.trade_account_id = ta.id) AS contact_count,
         (SELECT tap.id FROM trade_applications tap WHERE tap.trade_account_id = ta.id
           ORDER BY tap.created_at DESC, tap.id DESC LIMIT 1) AS trade_application_id`
@@ -102,6 +104,10 @@ const toTradeAccount = (row, users = []) => ({
   payment_terms: row.payment_terms ?? null,
   xero_contact_id: row.xero_contact_id ?? null,
   archived_at: row.archived_at ?? null,
+  // The staff login who owns the client ({ id, name, email }), picked in the
+  // CRM. It IS the account manager the client portal shows (viewer.js); the
+  // text block above is only the fallback while nobody is picked.
+  account_owner: row.account_owner ?? null,
   contact_count: row.contact_count ?? 0,
   // The trade application that raised this company, when one did (the
   // storefront form; migration 1791379200000). The CRM reviews it on the row.
@@ -123,7 +129,8 @@ const loadUsersByAccountId = async (db, accountIds) => {
             u.role,
             u.trade_approved,
             u.archived_at,
-            u.created_at
+            u.created_at,
+            u.trade_first_approved_at
        FROM trade_account_users tau
        JOIN users u ON u.id = tau.user_id
       WHERE tau.trade_account_id = ANY($1::int[])
@@ -144,6 +151,8 @@ const loadUsersByAccountId = async (db, accountIds) => {
       trade_approved: row.trade_approved,
       archived_at: row.archived_at ?? null,
       created_at: row.created_at,
+      // The approver has approved; the final approval is still to come.
+      trade_first_approved_at: row.trade_first_approved_at ?? null,
     }
     const existing = byAccount.get(row.trade_account_id)
     if (existing) {
@@ -638,6 +647,21 @@ export const updateTradeAccount = async (pool, id, input) => {
     }
     params.push(name)
     sets.push(`legacy_customer_name = $${params.length}`)
+  }
+  if (Object.hasOwn(input, 'account_owner_id')) {
+    const ownerId = input.account_owner_id ?? null
+    if (ownerId !== null) {
+      const { rows: owners } = await pool.query(
+        `SELECT 1 FROM users
+          WHERE id = $1 AND role IN ('backoffice', 'director') AND archived_at IS NULL`,
+        [ownerId]
+      )
+      if (!owners[0]) {
+        throw httpError(422, 'The account owner must be a current staff login.')
+      }
+    }
+    params.push(ownerId)
+    sets.push(`account_owner_id = $${params.length}`)
   }
   if (sets.length === 0) {
     throw httpError(400, 'No updatable fields provided.')

@@ -30,12 +30,17 @@ const sessionCookieFrom = (response) => {
 
 // Create a disposable account directly (no register endpoint -> no rate-limit
 // spend). Returns the new id.
-const insertUser = async (pool, { local, name = null, role = 'customer', tradeApproved = false }) => {
+// `firstApproved` stands in for the approver's step (POST /admin/users/:id/approve),
+// which the final trade approval waits on.
+const insertUser = async (
+  pool,
+  { local, name = null, role = 'customer', tradeApproved = false, firstApproved = false }
+) => {
   const { rows } = await pool.query(
-    `INSERT INTO users (email, password_hash, name, role, trade_approved)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO users (email, password_hash, name, role, trade_approved, trade_first_approved_at)
+     VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END)
      RETURNING id`,
-    [fixtureEmail(local), DUMMY_HASH, name, role, tradeApproved]
+    [fixtureEmail(local), DUMMY_HASH, name, role, tradeApproved, firstApproved]
   )
   return rows[0].id
 }
@@ -333,8 +338,18 @@ describe('back-office users admin', () => {
   })
 
   describe('PATCH /admin/users/:id', () => {
-    it('updates role and trade_approved together', async () => {
-      const id = await insertUser(pool, { local: 'applicant', role: 'customer' })
+    // Approval is two steps (24 Sep 2026): a promotion approved in the same
+    // body is the final approval, so it waits for the approver's too.
+    it('updates role and trade_approved together once the approver has approved', async () => {
+      const unreviewed = await insertUser(pool, { local: 'unreviewed', role: 'customer' })
+      const refused = await inject('PATCH', `/admin/users/${unreviewed}`, backofficeCookie, {
+        role: 'trade',
+        trade_approved: true,
+      })
+      expect(refused.statusCode).toBe(422)
+      expect((await pool.query('SELECT role FROM users WHERE id = $1', [unreviewed])).rows[0].role).toBe('customer')
+
+      const id = await insertUser(pool, { local: 'applicant', role: 'customer', firstApproved: true })
       const response = await inject('PATCH', `/admin/users/${id}`, backofficeCookie, {
         role: 'trade',
         trade_approved: true,
@@ -924,7 +939,7 @@ describe('back-office users admin', () => {
     })
 
     it('sends the letter on the false -> true flip and on nothing else', async () => {
-      const id = await insertUser(pool, { local: 'applicant', name: 'Ada Applicant', role: 'trade' })
+      const id = await insertUser(pool, { local: 'applicant', name: 'Ada Applicant', role: 'trade', firstApproved: true })
 
       expect((await mailInject('PATCH', `/admin/users/${id}`, { name: 'Ada A.' })).statusCode).toBe(200)
       expect(transport.sent).toHaveLength(0)
@@ -944,7 +959,7 @@ describe('back-office users admin', () => {
     })
 
     it('greets by the application signatory when the login has no name, from the stored letter', async () => {
-      const id = await insertUser(pool, { local: 'nameless', role: 'trade' })
+      const id = await insertUser(pool, { local: 'nameless', role: 'trade', firstApproved: true })
       await insertTradeApplication(pool, id) // signatory_name: 'Ada Applicant'
       const put = await mailInject('PUT', `/admin/email-templates/${TEMPLATE}`, {
         subject: 'Hello {{ name }}',

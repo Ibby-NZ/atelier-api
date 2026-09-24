@@ -244,10 +244,11 @@ const chunks = function* (items) {
 const upsertProducts = async (client, products) => {
   for (const chunk of chunks(products)) {
     await client.query(
-      `INSERT INTO products (brand_id, name, slug, product_type, currency)
-       SELECT p.brand_id, p.name, p.slug, $5::text, p.currency
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, product_range)
+       SELECT p.brand_id, p.name, p.slug, $5::text, p.currency, b.name
        FROM unnest($1::int[], $2::text[], $3::text[], $4::text[])
          AS p(brand_id, name, slug, currency)
+       JOIN brands b ON b.id = p.brand_id
        ON CONFLICT (slug) DO NOTHING`,
       [
         chunk.map((product) => product.brand_id),

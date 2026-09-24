@@ -1040,17 +1040,23 @@ describe('back-office order management', () => {
     })
 
     // What the packing slip prints under a design: the catalogue's own words.
-    it('carries each line\'s composition, width and size from the product', async () => {
+    it('carries each line\'s composition, width, size and description from the product', async () => {
       const placed = await placeRequest(10)
       await pool.query(
-        `UPDATE products SET composition = '100% Linen', width = '137 cm'
+        `UPDATE products SET composition = '100% Linen', width = '137 cm',
+                description = 'A washed linen with a soft hand.'
           WHERE id = (SELECT product_id FROM colourways WHERE sku = $1)`,
         [SKU.inStock]
       )
 
       const [line] = (await orderFor(placed.id)).lines
 
-      expect(line).toMatchObject({ composition: '100% Linen', width: '137 cm', size: null })
+      expect(line).toMatchObject({
+        composition: '100% Linen',
+        width: '137 cm',
+        size: null,
+        description: 'A washed linen with a soft hand.',
+      })
     })
 
     it('rejects a line edit that says nothing but its id with 400', async () => {

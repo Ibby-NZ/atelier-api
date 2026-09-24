@@ -12,6 +12,7 @@ const noopLog = { error: () => {}, info: () => {} }
  *   transport: { sendMail: (msg: object) => Promise<unknown> },
  *   from: string,
  *   backofficeEmail: string,
+ *   orderCopyEmail?: string|null,
  *   redirectTo?: string|null,
  *   log?: { error: Function, info: Function },
  * }} deps
@@ -20,6 +21,7 @@ export const createMailer = ({
   transport,
   from,
   backofficeEmail,
+  orderCopyEmail = null,
   redirectTo = null,
   log = noopLog,
 }) => {
@@ -120,6 +122,10 @@ export const createMailer = ({
   return Object.freeze({
     send,
     backofficeEmail,
+    // Copied on every sales-order letter (notifications.js
+    // orderLetterRecipients). Null — every test mailer that does not name one —
+    // copies nobody.
+    orderCopyEmail: orderCopyEmail || null,
     delivers: transport.delivers !== false,
     // Surfaced so a boot log can say the valve is open. Never read to decide
     // WHETHER to send: a redirected letter is still a letter that was sent.

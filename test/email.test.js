@@ -52,6 +52,8 @@ describe('email templates', () => {
         'shipped',
         // The decline transition's letter ("Cancel order" in the CRM).
         'order_cancelled',
+        // The whole order, sent on demand from the CRM order page (24 Sep 2026).
+        'order_details',
         'contact_received',
         'backoffice_new_contact',
         // The trade portal's invoice-copy request (both halves).
@@ -94,7 +96,7 @@ describe('email templates', () => {
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(29)
+    expect(TEMPLATE_NAMES).toHaveLength(30)
   })
 
   it('backoffice_new_trade_application names the business and links the CRM applicants tab', () => {
@@ -889,5 +891,138 @@ describe('order-request trigger wiring', () => {
       // The order goes with the SKU fixture; the rep FK is SET NULL.
       await pool.query('DELETE FROM users WHERE id = $1', [rows[0].id])
     }
+  })
+
+  // 24 Sep 2026: "send order details to the customer or resend the order
+  // notification" from the order page, with Jenette always in the loop.
+  describe('POST /admin/orders/:id/email', () => {
+    const sendLetter = (id, letter, via = app) =>
+      via.inject({
+        method: 'POST',
+        url: `/admin/orders/${id}/email`,
+        headers: { cookie: backofficeCookie },
+        payload: { letter },
+      })
+
+    it('emails the order details to the client and the list, and answers who', async () => {
+      const order = await keyOrder({
+        shipping_address: { line1: '1 Queen St', city: 'Auckland' },
+      })
+      await patchOrder(order.id, { notify_emails: ['pa@client.email-test.example'] })
+      transport.sent.length = 0
+
+      const response = await sendLetter(order.id, 'details')
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toEqual({
+        template: 'order_details',
+        sent: ['walkin@email-test.example', 'pa@client.email-test.example'],
+        failed: [],
+      })
+      expect(transport.sent).toHaveLength(2)
+      const [letter] = transport.sent
+      expect(letter.subject).toContain(`details of order ${order.order_number}`)
+      expect(letter.text).toContain('2 metres at $99.00 = $198.00')
+      expect(letter.text).toContain('Total incl. GST: $227.70 NZD')
+      expect(letter.text).toContain('Deliver to:\n1 Queen St\nAuckland')
+    })
+
+    it('re-sends the letter for where the order stands, at any status', async () => {
+      const order = await keyOrder()
+      transport.sent.length = 0
+      expect((await sendLetter(order.id, 'status')).json().template).toBe('order_confirmed')
+      expect(transport.sent[0].subject).toContain(`order ${order.order_number} confirmed`)
+
+      await move(order.id, 'confirm', { xero_invoice_ref: 'INV-RESEND' })
+      await move(order.id, 'mark-paid')
+      await move(order.id, 'ship', { tracking_url: 'https://track.example/resend' })
+      transport.sent.length = 0
+      const response = await sendLetter(order.id, 'status')
+      expect(response.statusCode).toBe(200)
+      expect(response.json().template).toBe('shipped')
+      expect(transport.sent.map((m) => m.to)).toEqual(['walkin@email-test.example'])
+      expect(transport.sent[0].text).toContain('https://track.example/resend')
+      // Nothing moved: a resend is a letter, not a transition.
+      const { rows } = await pool.query('SELECT status FROM orders WHERE id = $1', [order.id])
+      expect(rows[0].status).toBe('shipped')
+    })
+
+    it('refuses order details while a line is unpriced, before anything is sent', async () => {
+      const { rows } = await pool.query('SELECT id FROM colourways WHERE sku = $1', [SKU])
+      const order = await keyOrder({
+        lines: [{ colourway_id: rows[0].id, qty: 2, unit_price_cents: 0 }],
+      })
+      transport.sent.length = 0
+      const response = await sendLetter(order.id, 'details')
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toContain('1 line is still at $0.00')
+      expect(transport.sent).toHaveLength(0)
+      // The status letter says nothing about money, so it still goes.
+      expect((await sendLetter(order.id, 'status')).statusCode).toBe(200)
+    })
+
+    it('400s an unknown letter and 404s an unknown order', async () => {
+      const order = await keyOrder()
+      expect((await sendLetter(order.id, 'invoice')).statusCode).toBe(400)
+      expect((await sendLetter(2147483000, 'details')).statusCode).toBe(404)
+    })
+
+    it('answers 503 and sends nothing when email is not configured', async () => {
+      const order = await keyOrder()
+      // Same cookie secret, so the staff session is valid on this instance.
+      const unmailed = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+      await unmailed.ready()
+      try {
+        const response = await sendLetter(order.id, 'details', unmailed)
+        expect(response.statusCode).toBe(503)
+        expect(response.json().message).toContain('nothing was sent')
+      } finally {
+        await unmailed.close()
+      }
+    })
+
+    it('copies ORDER_COPY_EMAIL on every letter and names it on the order', async () => {
+      const COPY = 'jenettec@email-test.example'
+      const copied = buildMailer()
+      const withCopy = buildApp({
+        pool,
+        cookieSecret: TEST_COOKIE_SECRET,
+        mailer: createMailer({
+          transport: copied.transport,
+          from: FROM,
+          backofficeEmail: BACKOFFICE,
+          orderCopyEmail: COPY,
+        }),
+        logger: false,
+      })
+      await withCopy.ready()
+      try {
+        const order = await keyOrder()
+        const read = await withCopy.inject({
+          method: 'GET',
+          url: `/admin/orders/${order.id}`,
+          headers: { cookie: backofficeCookie },
+        })
+        expect(read.json().order.order_copy_email).toBe(COPY)
+
+        expect((await sendLetter(order.id, 'details', withCopy)).json().sent).toEqual([
+          'walkin@email-test.example',
+          COPY,
+        ])
+        copied.transport.sent.length = 0
+        const confirmed = await withCopy.inject({
+          method: 'POST',
+          url: `/admin/orders/${order.id}/confirm`,
+          headers: { cookie: backofficeCookie },
+          payload: { xero_invoice_ref: 'INV-COPY' },
+        })
+        expect(confirmed.statusCode).toBe(200)
+        expect(copied.transport.sent.map((m) => m.to)).toEqual([
+          'walkin@email-test.example',
+          COPY,
+        ])
+      } finally {
+        await withCopy.close()
+      }
+    })
   })
 })

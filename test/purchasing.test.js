@@ -405,9 +405,7 @@ describe('W13 purchase orders', () => {
       expect(response.json().message).toContain(`${PREFIX} orphan`)
     })
 
-    it('ignores a client-supplied supplier_id outright', async () => {
-      // Ajv's `removeAdditional` STRIPS an unlisted key rather than rejecting
-      // it, which is exactly why the derivation — not the schema — is the gate.
+    it('refuses a supplier_id that does not invoice the house', async () => {
       const { rows } = await pool.query(
         `INSERT INTO suppliers (name, slug) VALUES ($1, $2) RETURNING id`,
         [`${PREFIX} Wrong House`, `${PREFIX}-wrong-house`]
@@ -417,8 +415,37 @@ describe('W13 purchase orders', () => {
         supplier_id: rows[0].id,
         lines: [{ colourway_id: fixtures.colourwayIds[SKU.alpha], qty_ordered: 5 }],
       })
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toContain('does not invoice this house')
+    })
+
+    it('addresses the purchase order to an additional supplier the caller names', async () => {
+      const { rows } = await pool.query(
+        `INSERT INTO suppliers (name, slug, currency, po_email) VALUES ($1, $2, 'USD', 'orders@second.example')
+         RETURNING id`,
+        [`${PREFIX} Second House`, `${PREFIX}-second-house`]
+      )
+      await pool.query(
+        'INSERT INTO brand_additional_suppliers (brand_id, supplier_id) VALUES ($1, $2)',
+        [fixtures.brandIds.alpha, rows[0].id]
+      )
+      const response = await inject('POST', '/admin/purchase-orders', staffCookie, {
+        brand_id: fixtures.brandIds.alpha,
+        supplier_id: rows[0].id,
+        lines: [{ colourway_id: fixtures.colourwayIds[SKU.alpha], qty_ordered: 5 }],
+      })
       expect(response.statusCode).toBe(201)
-      expect(response.json().purchase_order.supplier_id).toBe(fixtures.supplierId)
+      const order = response.json().purchase_order
+      expect(order.supplier_id).toBe(rows[0].id)
+      expect(order.supplier_name).toBe(`${PREFIX} Second House`)
+      expect(order.po_email).toBe('orders@second.example')
+
+      // Naming none still means the main supplier.
+      const fallback = await inject('POST', '/admin/purchase-orders', staffCookie, {
+        brand_id: fixtures.brandIds.alpha,
+        lines: [{ colourway_id: fixtures.colourwayIds[SKU.alpha], qty_ordered: 5 }],
+      })
+      expect(fallback.json().purchase_order.supplier_id).toBe(fixtures.supplierId)
     })
 
     it('mints PO-NNNNNN numbers that climb', async () => {

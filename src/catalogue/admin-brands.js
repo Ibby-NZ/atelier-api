@@ -132,6 +132,15 @@ export const buildUpdate = (input, columns) => {
 // well as the key), and readable here because the CRM is where it is typed in.
 const BRAND_COLUMNS = `id, name, slug, headline, story, country, currency, is_international, trade_only, bespoke, website_url, image_url, logo_url, featured_rank, supplier_id, brand_code, archived_at, created_at`
 
+// The OTHER suppliers that also invoice this house (migration 1791638400000),
+// as [{id, name}] — `supplier_id` above stays the main one. Correlated on the
+// unaliased `brands` for the same reason `supplier_name` is below.
+const ADDITIONAL_SUPPLIERS = `COALESCE((
+    SELECT json_agg(json_build_object('id', s.id, 'name', s.name) ORDER BY s.name, s.id)
+      FROM brand_additional_suppliers bas
+      JOIN suppliers s ON s.id = bas.supplier_id
+     WHERE bas.brand_id = brands.id), '[]'::json) AS additional_suppliers`
+
 const BRAND_UPDATE_COLUMNS = Object.freeze([
   'name',
   // The one line the storefront house page opens on, above the story.
@@ -292,12 +301,18 @@ export const listAdminBrands = async (pool, { includeArchived = false } = {}) =>
   const { rows } = await pool.query(
     `SELECT ${BRAND_COLUMNS},
             (SELECT name FROM suppliers WHERE suppliers.id = brands.supplier_id)
-              AS supplier_name
+              AS supplier_name,
+            ${ADDITIONAL_SUPPLIERS}
        FROM brands ${where} ORDER BY name ASC, id ASC`
   )
   // Arrow, not a bare `map(toBrand)`: the mapper takes a second `extra`
   // argument, and map would hand it the array index.
-  return rows.map((row) => toBrand(row, { supplier_name: row.supplier_name ?? null }))
+  return rows.map((row) =>
+    toBrand(row, {
+      supplier_name: row.supplier_name ?? null,
+      additional_suppliers: row.additional_suppliers,
+    })
+  )
 }
 
 /**
@@ -323,7 +338,8 @@ export const listAdminBrands = async (pool, { includeArchived = false } = {}) =>
 export const getAdminBrand = async (pool, id) => {
   const { rows } = await pool.query(
     `SELECT ${BRAND_COLUMNS},
-            (SELECT COUNT(*)::int FROM products WHERE brand_id = brands.id) AS product_count
+            (SELECT COUNT(*)::int FROM products WHERE brand_id = brands.id) AS product_count,
+            ${ADDITIONAL_SUPPLIERS}
        FROM brands
       WHERE id = $1`,
     [id]
@@ -337,6 +353,7 @@ export const getAdminBrand = async (pool, id) => {
     [id]
   )
   return toBrand(row, {
+    additional_suppliers: row.additional_suppliers,
     product_count: row.product_count,
     collection_count: collections.length,
     collections: collections.map((row) => toCollection(row)),
@@ -409,10 +426,19 @@ export const updateBrand = async (pool, id, input) => {
   }
   const { sets, params } = buildUpdate(patch, BRAND_UPDATE_COLUMNS)
   try {
+    // Promoting an additional supplier to main drops it from the additional
+    // list in the same statement: the main supplier is never stated twice.
     const { rows } = await pool.query(
-      `UPDATE brands SET ${sets.join(', ')}
-        WHERE id = $${params.length + 1}
-        RETURNING ${BRAND_COLUMNS}`,
+      `WITH updated AS (
+         UPDATE brands SET ${sets.join(', ')}
+          WHERE id = $${params.length + 1}
+          RETURNING ${BRAND_COLUMNS}
+       ), promoted AS (
+         DELETE FROM brand_additional_suppliers bas
+          USING updated
+          WHERE bas.brand_id = updated.id AND bas.supplier_id = updated.supplier_id
+       )
+       SELECT * FROM updated`,
       [...params, id]
     )
     if (rows.length === 0) {

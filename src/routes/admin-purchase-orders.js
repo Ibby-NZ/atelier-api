@@ -88,16 +88,18 @@ const listQuerySchema = {
   },
 }
 
-// `supplier_id` is deliberately not a property here and must never become one.
-// It is DERIVED from `brands.supplier_id`; a client-chosen value produces no
-// constraint violation and no error of any kind, it silently addresses the
-// purchase order to the wrong house.
+// `supplier_id` is optional and CHECKED, never trusted: it must be one of the
+// house's suppliers (main or additional, migration 1791638400000) or the
+// create is a 422. Absent means the house's main supplier. An unchecked value
+// would produce no constraint violation of any kind — it would silently
+// address the purchase order to the wrong house.
 const createBodySchema = {
   type: 'object',
   additionalProperties: false,
   required: ['brand_id', 'lines'],
   properties: {
     brand_id: { type: 'integer', minimum: 1 },
+    supplier_id: { type: ['integer', 'null'], minimum: 1 },
     expected_at: timestampProp,
     notes: nullableText,
     lines: {

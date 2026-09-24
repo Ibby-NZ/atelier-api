@@ -11,14 +11,15 @@ receipted against and closed. Four tables —
 `1787716800000_purchase-order-receipts.js` (the ledger) — behind
 `src/routes/admin-purchase-orders.js`, all `requireRole('backoffice')` (director inherits).
 
-- **`supplier_id` is DERIVED from `brands.supplier_id` at create and is NEVER accepted from a
-  client.** No route schema names it, no whitelist contains it, and both write paths
-  (`createPurchaseOrder`, `generatePurchaseOrders`) read it off the brand through
-  `resolveBrandSupplier`. There is nothing a CHECK could catch: every supplier id is a valid
-  supplier id, so a client-chosen value produces a perfectly well-formed purchase order addressed
-  to the WRONG HOUSE, and the first anyone hears of it is that house shipping the goods. Ajv's
-  `removeAdditional` strips a `supplier_id` a caller sends, so the derivation is the gate rather
-  than the schema — a test posts one and asserts the derived value wins.
+- **`supplier_id` comes from the HOUSE, never trusted from a client.** Both write paths
+  (`createPurchaseOrder`, `generatePurchaseOrders`) resolve it through `resolveBrandSupplier`.
+  A house may have several suppliers (`brand_additional_suppliers`, migration 1791638400000 —
+  Stroheim via Fabricut AND Jim Thompson), so `POST /admin/purchase-orders` takes an OPTIONAL
+  `supplier_id`, CHECKED by `supplierForBrand` (src/suppliers/brand-suppliers.js): one of the
+  house's suppliers or a 422; absent means the main one (`brands.supplier_id`). The check is the
+  gate because nothing else could catch it: every supplier id is a valid supplier id, so an
+  unchecked value produces a perfectly well-formed purchase order addressed to the WRONG HOUSE.
+  plan/generate still group by brand and address the MAIN supplier.
 - **A brand with a NULL `supplier_id` is a 422 naming the brand**, and it fires on most houses
   today because `backfill:suppliers` has linked a minority of them. Schedule that; do not discover
   it. Two flavours deliberately: a manual create and a `generate` that NAMED the house both 422,

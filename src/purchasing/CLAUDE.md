@@ -118,8 +118,16 @@ receipted against and closed. Four tables —
 - **Candidates are `reserves(kind)` × `HELD_STATUSES`, both IMPORTED from
   `src/orders/order-states.js` and never retyped.** A card checkout is excluded BY CONSTRUCTION —
   it is not a reserving kind, because it arrived paid with stock already decremented, so it is not
-  demand to buy against — and `shipped`/`declined` have already been settled. A local copy of
-  either list is how the derivation and the reservation model start disagreeing about what is owed.
+  demand to buy against — and shipped/completed/cancelled/refunded have already been settled. A
+  local copy of either list is how the derivation and the reservation model start disagreeing about
+  what is owed. A quote still at `quote_requested` IS demand: the office may buy before quoting.
+- **`order_ids` narrows a plan or a run to named sales orders** (24 Sep 2026, the order page's
+  "Create purchase order"), beside or instead of `brand_ids`. After a `generate` carrying
+  `order_ids` commits, `backOrderRaisedOrders` moves every sales order that got an allocation to
+  `back_order` through `setOrderStatus` (audit row, `order_back_ordered` letter) — only when
+  `canTransition(status, 'back_order')`; an order the machine will not move (paid, already on back
+  order) keeps its status and comes back in `not_moved: [{ order_number, status }]`. The purchase
+  orders stand either way. A bulk run (no `order_ids`) moves nothing.
 - **Grouping is by BRAND, and one supplier selling two brands correctly produces TWO purchase
   orders.** That is not a bug to fix later; it is the entire reason consolidated supplier invoicing
   (W14) exists as a separate concept. Tested explicitly, with both houses under one supplier.

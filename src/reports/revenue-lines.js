@@ -38,11 +38,11 @@ import { clampLimit, DEFAULT_ROW_LIMIT } from './limits.js'
 
 // The default revenue population, overridable by a `status` filter.
 //
-// Only checkout orders carry money: the Stripe webhook inserts them `paid` with
-// every price re-resolved from retail_price_cents. `confirmed` is deliberately
-// absent — on this platform a confirmation is a Xero reference typed by a human
-// and carries no amount — and `requested` / `declined` are not sales at all.
-export const REVENUE_STATUSES = Object.freeze(['paid', 'shipped'])
+// Money has changed hands from `paid` on: a paid order, a shipped one, and one
+// the office has closed as completed. `pending_payment` is deliberately absent —
+// an invoice is not a sale until it is paid — and the quote statuses,
+// `cancelled` and `refunded` are not sales at all.
+export const REVENUE_STATUSES = Object.freeze(['paid', 'shipped', 'completed'])
 
 // A report that asks a question about a different part of the lifecycle states
 // its own set instead (US-007's not-invoiced covers every live status, because
@@ -226,7 +226,7 @@ export const buildRevenueScope = (filters = {}, { params = [], statuses } = {}) 
     const conditions = [...source.conditions]
 
     // The default population is REPLACED by a status filter, never intersected
-    // with it: an intersection would answer `status=requested` with zero rows,
+    // with it: an intersection would answer `status=quote_requested` with zero rows,
     // which reads as "no trade" rather than "not in the default population".
     if (source.statusColumn && filters.status === undefined) {
       bound = [...bound, [...population]]

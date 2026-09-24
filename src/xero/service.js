@@ -26,8 +26,12 @@
 // duplicate gate is orders.xero_invoice_id — set once, further pushes 409.
 
 import crypto from 'node:crypto'
-import { getAdminOrder, markOrderPaid } from '../orders/admin-orders.js'
-import { unpricedLineCount } from '../orders/order-states.js'
+import { getAdminOrder, markOrderPaid, setOrderStatus } from '../orders/admin-orders.js'
+import {
+  INVOICEABLE_STATUSES,
+  canTransition,
+  unpricedLineCount,
+} from '../orders/order-states.js'
 import { getPurchaseOrder, payPurchaseOrder } from '../purchasing/admin-purchase-orders.js'
 import { SOURCE_STATUSES } from '../purchasing/po-states.js'
 import { createTradeAccount } from '../trade-accounts/admin-trade-accounts.js'
@@ -73,7 +77,7 @@ export class XeroCallbackError extends Error {
   }
 }
 
-/** A push refused by our own rules (already pushed, declined, unpriced). */
+/** A push refused by our own rules (already pushed, not invoiceable, unpriced). */
 export class XeroConflictError extends Error {
   constructor(message) {
     super(message)
@@ -97,7 +101,7 @@ const UPSERT_BATCH_SIZE = 40
 
 // The statuses at which money has already changed hands, so a freshly pushed
 // invoice is recorded paid on the spot (card checkouts are born `paid`).
-const PAID_STATUSES = Object.freeze(['paid', 'shipped'])
+const PAID_STATUSES = Object.freeze(['paid', 'shipped', 'completed'])
 
 /** One sentence for a payment that Xero, or the connection, refused. */
 const paymentFailureReason = (error) =>
@@ -110,10 +114,10 @@ export const createXeroService = ({
   config,
   http,
   now = () => Date.now(),
-  // Called with the fresh order after the pull marks it paid — server.js
-  // wires the order-paid letter here so the scheduled pull writes the same
-  // letter the CRM's Mark paid button does.
-  notifyOrderPaid = async () => {},
+  // Called with the fresh order after Xero moves it — the pull's `paid`, the
+  // push's `pending_payment`. server.js wires the status letter here so a move
+  // Xero makes writes the same letter the CRM's status dropdown does.
+  notifyOrderTransition = async () => {},
 }) => {
   // client_credentials keeps its short-lived token in memory only: it can be
   // re-minted at will, so persisting it buys nothing and staleness bugs.
@@ -718,11 +722,16 @@ export const createXeroService = ({
 
   // ---- invoices -------------------------------------------------------------
 
-  const pushOrderInvoice = async (orderId, { email: sendEmail = false } = {}) => {
+  const pushOrderInvoice = async (
+    orderId,
+    { email: sendEmail = false, actor = { kind: 'xero' } } = {}
+  ) => {
     const order = await getAdminOrder(pool, orderId)
     if (!order) return null // route answers 404
-    if (order.status === 'declined') {
-      throw new XeroConflictError('A declined order is not invoiceable.')
+    // A quote the client has not accepted is not awaiting an invoice, and a
+    // cancelled or refunded order never will be (INVOICEABLE_STATUSES).
+    if (!INVOICEABLE_STATUSES.includes(order.status)) {
+      throw new XeroConflictError(`An order in status "${order.status}" is not invoiceable.`)
     }
     // A pushed invoice is the duplicate gate — unless the last pull saw Xero
     // void or delete it, in which case the office may push a corrected one.
@@ -781,6 +790,22 @@ export const createXeroService = ({
 
     let emailed = false
     let warning = null
+
+    // The invoice exists, so the order is waiting on payment: the push makes
+    // the `pending_payment` move itself (with its letter) rather than leaving
+    // the office to remember it. An order that cannot take the move — already
+    // pending, or paid and beyond — keeps its status; the paid branch below
+    // records the payment instead. Like the payment, a refused move is a
+    // warning on a push that succeeded, never a rollback of it.
+    if (canTransition(order.status, 'pending_payment')) {
+      try {
+        const moved = await setOrderStatus(pool, orderId, 'pending_payment', { actor })
+        await notifyOrderTransition(moved)
+      } catch (error) {
+        warning = `Invoice created but the order did not move to pending payment: ${error.message}`
+      }
+    }
+
     if (sendEmail) {
       // Xero sends its own branded invoice email to the contact. Only an
       // AUTHORISED invoice can be emailed; a DRAFT deployment answers with a
@@ -1007,10 +1032,11 @@ export const createXeroService = ({
    * Xero → platform for invoices and bills. Reads the status of every pushed
    * document that is not yet settled (PAID / VOIDED / DELETED are terminal)
    * and stores Xero's word for it. An invoice Xero shows PAID marks its
-   * order paid here — the same transition the CRM's Mark paid button makes,
-   * with the same letter — so a payment recorded at the accountant's desk
-   * reaches the order desk without anyone re-keying it. An order that cannot
-   * take the transition (still `requested`) is reported, not forced.
+   * order paid here — the same move the CRM's status dropdown makes, with the
+   * same letter — so a payment recorded at the accountant's desk reaches the
+   * order desk without anyone re-keying it. An order the machine will not move
+   * to `paid` (a quote, a cancelled order) is reported, not forced; one that is
+   * already paid or beyond is left alone.
    */
   const pullStatuses = async () => {
     const result = {
@@ -1036,18 +1062,17 @@ export const createXeroService = ({
         [order.id, status, invoice.InvoiceNumber ?? null]
       )
       result.invoices.updated += 1
-      if (status !== 'PAID' || order.status !== 'confirmed') {
-        if (status === 'PAID' && order.status === 'requested') {
-          result.invoices.failed.push({
-            key: order.order_number,
-            message: 'paid in Xero but still awaiting confirmation here — confirm it, then mark it paid.',
-          })
-        }
+      if (status !== 'PAID' || PAID_STATUSES.includes(order.status)) continue
+      if (!canTransition(order.status, 'paid')) {
+        result.invoices.failed.push({
+          key: order.order_number,
+          message: `paid in Xero but "${order.status}" here cannot be marked paid — move it on, then mark it paid.`,
+        })
         continue
       }
       try {
-        const paid = await markOrderPaid(pool, order.id)
-        await notifyOrderPaid(paid)
+        const paid = await markOrderPaid(pool, order.id, { kind: 'xero' })
+        await notifyOrderTransition(paid)
         result.invoices.orders_marked_paid.push({ id: order.id, order_number: order.order_number })
       } catch (error) {
         result.invoices.failed.push({ key: order.order_number, message: error.message })

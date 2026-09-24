@@ -91,7 +91,7 @@ const parseXero = (env, port) => {
     // The Xero BANK account a payment is recorded against when an order is
     // marked paid (a Payment needs an account; the sales account above is
     // revenue and cannot take one). Unset = invoices are pushed but never
-    // marked paid from here; the mark-paid route says so in its answer.
+    // marked paid from here; the status route says so in its answer.
     paymentAccountCode: env.XERO_PAYMENT_ACCOUNT_CODE ?? null,
     // The expense account a purchase order's bill posts to, and the status
     // it lands in (DRAFT until the house's invoice arrives, by default).

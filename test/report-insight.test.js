@@ -154,9 +154,9 @@ const insertFixture = async (db) => {
   await line(paid, d, '1.00', 5000)
   const shipped = await order('SHP', 'order_request', 'shipped', '2026-04-02 12:00:00')
   await line(shipped, e, '3.00', 0)
-  const requested = await order('REQ', 'order_request', 'requested', '2026-04-10 12:00:00')
+  const requested = await order('REQ', 'order_request', 'quote_requested', '2026-04-10 12:00:00')
   await line(requested, a, '5.00', 0)
-  const declined = await order('DEC', 'order_request', 'declined', '2026-04-11 12:00:00')
+  const declined = await order('DEC', 'order_request', 'cancelled', '2026-04-11 12:00:00')
   await line(declined, a, '9.00', 0)
   const archived = await order('ARC', 'checkout', 'paid', '2026-03-15 12:00:00', { archived: true })
   await line(archived, a, '7.00', 10000)
@@ -586,17 +586,17 @@ describe('the insight view against real orders and stock', () => {
 
       expect(report.meta.statuses).toBe(ORDER_STATUSES)
       expect(report.rows.map((row) => [row.status, row.kind, row.lines, row.qty])).toEqual([
-        ['declined', 'order_request', 1, 9],
+        ['cancelled', 'order_request', 1, 9],
         ['paid', 'checkout', 2, 3],
-        ['requested', 'order_request', 1, 5],
+        ['quote_requested', 'order_request', 1, 5],
         ['shipped', 'order_request', 1, 3],
       ])
       expect(report.totals.orders).toBe(4)
     })
 
     it('still lets a status filter replace even that default', async () => {
-      const { rows } = await grouped('status', { status: 'requested' })
-      expect(rows.map((row) => row.status)).toEqual(['requested'])
+      const { rows } = await grouped('status', { status: 'quote_requested' })
+      expect(rows.map((row) => row.status)).toEqual(['quote_requested'])
     })
 
     it('is reachable over HTTP and refuses a grain it does not have', async () => {
@@ -687,7 +687,9 @@ describe('the insight view against real orders and stock', () => {
           allocated: 5,
           available: 10,
         },
-        awaiting_invoice: { lines: 2 },
+        // The REQ fixture is a quote nobody accepted, so it is not awaiting an
+        // invoice (INVOICEABLE_STATUSES).
+        awaiting_invoice: { lines: 1 },
       })
       expect(monthOf(summary.first_order_at)).toBe('2026-03')
       expect(monthOf(summary.last_order_at)).toBe('2026-04')
@@ -703,7 +705,7 @@ describe('the insight view against real orders and stock', () => {
       const colours = insight.sections.find((section) => section.key === 'by_colourway')
       expect(skuOf(colours.rows)).toEqual(['SKU-A'])
       const status = insight.sections.find((section) => section.key === 'by_status')
-      expect(status.rows.map((row) => row.status)).toEqual(['declined', 'paid', 'requested'])
+      expect(status.rows.map((row) => row.status)).toEqual(['cancelled', 'paid', 'quote_requested'])
       expect(insight.summary).toMatchObject({ orders: 1, qty: 2, value_cents: 20000 })
     })
 

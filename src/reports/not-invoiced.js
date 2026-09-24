@@ -18,10 +18,13 @@
 //     therefore intersects to nothing rather than opening it back up, and
 //     `meta.kinds` says which kinds the report is of.
 //
-//   - `declined` IS NOT AWAITING ANYTHING and archived orders are out of the
-//     office's own lists, so neither is here. Every other live status is,
-//     because `requested` and `confirmed` are exactly the stages a chase list
-//     is for; `status` remains a filter, so one stage at a time is a query.
+//   - A QUOTE IS NOT AWAITING AN INVOICE until the client accepts it, a
+//     cancelled or refunded order never will be, and archived orders are out
+//     of the office's own lists — so none of them is here. Every invoiceable
+//     status is (INVOICEABLE_STATUSES, the Xero push's own set), because
+//     accepted, back-ordered and processing orders are exactly the stages a
+//     chase list is for; `status` remains a filter, so one stage at a time is
+//     a query.
 //
 //   - IT CANNOT SAY WHAT THE ORDERS ARE WORTH. Request-kind lines are created
 //     at `unit_price_cents = 0` and nothing on this platform ever fills them
@@ -35,18 +38,16 @@ import { defineColumns } from './access.js'
 import { dimensionCoverage, stockSource } from './coverage.js'
 import { buildRevenueScope, SCOPE_NAME } from './revenue-lines.js'
 import { clampLimit, DEFAULT_ROW_LIMIT } from './limits.js'
+import { INVOICEABLE_STATUSES } from '../orders/order-states.js'
 
 export const NOT_INVOICED = 'not-invoiced'
 export const NOT_INVOICED_TITLE = 'Orders awaiting invoice'
 
 // The lifecycle window, replacing the revenue scope's paid/shipped default. A
-// `status` filter still replaces THIS, the same way it replaces that one.
-export const NOT_INVOICED_STATUSES = Object.freeze([
-  'requested',
-  'confirmed',
-  'paid',
-  'shipped',
-])
+// `status` filter still replaces THIS, the same way it replaces that one. It is
+// the Xero push's own set (INVOICEABLE_STATUSES): a quote the client has not
+// accepted is not awaiting an invoice, and a cancelled order never will be.
+export const NOT_INVOICED_STATUSES = INVOICEABLE_STATUSES
 
 // The kinds this platform invoices at all. A definition of the report, not a
 // default — see the header.
@@ -78,7 +79,8 @@ export const NOT_INVOICED_COLUMNS = defineColumns([
 export const NOT_INVOICED_COVERAGE_NOTE =
   'Live platform orders carrying no Xero invoice reference, oldest first. Card checkouts are ' +
   'paid at Stripe and are never invoiced through this platform, so they are outside this ' +
-  'report however long their reference stays empty; declined and archived orders are out of it ' +
+  'report however long their reference stays empty; quotes not yet accepted, cancelled and ' +
+  'archived orders are out of it ' +
   'too. A request line is created with no price and the invoice amount is typed into Xero by ' +
   'hand, so this report states what is awaiting an invoice and never what it is worth. ' +
   'Atelier’s historic Dynamics 365 invoices are staged header-only, so nothing from before the ' +

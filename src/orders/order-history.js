@@ -1,7 +1,9 @@
 // Order history (US-013, FR meeting 00:21:46).
 //
-// One read path: listUserOrders(pool, userId) — every order owned by a
-// logged-in user, header + lines. The unauthenticated order_number + email
+// Two read paths, one shape: listUserOrders(pool, userId) — every order owned
+// by a logged-in user, header + lines — and getCustomerOrder(pool, { id }), the
+// single order a quote link names (src/routes/orders.js resolves the token to
+// the id; nothing here takes one from a caller). The unauthenticated order_number + email
 // lookup that used to sit beside it is gone: it let anyone who knew (or
 // guessed) both halves read another client's order, and a logged-in client
 // already sees their orders under /account.
@@ -148,4 +150,20 @@ export const listUserOrders = async (
       limit: safeLimit,
     },
   }
+}
+
+/**
+ * One order in the customer shape, or null. For the quote page, which reaches
+ * it through the signed link's token — the caller resolves the token; this
+ * never takes an id from a request.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ id: number }} args
+ */
+export const getCustomerOrder = async (pool, { id }) => {
+  const { rows } = await pool.query(`SELECT ${ORDER_COLUMNS} FROM orders o WHERE o.id = $1`, [
+    id,
+  ])
+  if (!rows[0]) return null
+  return toOrder(rows[0], await loadLinesByOrderId(pool, [id]))
 }

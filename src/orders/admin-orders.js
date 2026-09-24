@@ -3,16 +3,17 @@
 // Staff review, edit, and drive website orders through their lifecycle. The
 // interesting state lives in the reservation: an order-request reserves stock
 // (qty_reserved) the moment it is placed (US-012). This module holds that
-// reservation through review and payment, then either converts it to a real
-// decrement (ship) or releases it (decline).
+// reservation through quoting, invoicing and payment, then either converts it
+// to a real decrement (shipped) or releases it (cancelled, refunded unshipped).
 //
-// Lifecycle (order-request / backorder kinds):
-//   requested --confirm--> confirmed --mark-paid--> paid --ship--> shipped
-//         \____________________ decline ____________________/  -> declined
-//
-// Any other transition is rejected with 409 (e.g. ship before paid). Checkout
-// orders (kind='checkout') arrive already paid with inventory decremented and
-// hold no reservation, so their inventory is never touched here.
+// Lifecycle (24 Sep 2026): quote_requested → quote_sent → quote_accepted |
+// quote_rejected → back_order | processing → pending_payment → paid → shipped →
+// completed, with cancelled and refunded as the dead ends. The legal moves are
+// `ALLOWED_TRANSITIONS` in ./order-states.js and every one of them runs through
+// `setOrderStatus` below — one function, one audit row per move — so a move the
+// machine does not list is a 409 whoever asks. Checkout orders
+// (kind='checkout') arrive already paid with inventory decremented and hold no
+// reservation, so their inventory is never touched here.
 
 import { setArchived } from '../lifecycle/archive.js'
 // The staff segment is the rep vocabulary — one frozen list, never retyped.
@@ -20,7 +21,17 @@ import { USER_SEGMENTS } from '../users/admin-users.js'
 // Which kinds hold a reservation lives in a leaf module: src/lifecycle/registry.js
 // needs the same predicate for the delete guard and cannot import this file
 // (archive.js -> registry.js -> here would be a cycle).
-import { reserves, unpricedLineCount } from './order-states.js'
+import {
+  ORDER_STATUSES,
+  DELIVERY_EDIT_STATUSES,
+  LINE_EDIT_STATUSES,
+  PRICED_ENTRY_STATUSES,
+  holdsReservation,
+  requireTransition,
+  reservationState,
+  reserves,
+  unpricedLineCount,
+} from './order-states.js'
 // The same packing the storefront's request flow writes, so `orders.notes` reads
 // identically however the order was raised.
 import { buildNotes, addressOrNull } from './order-request.js'
@@ -47,13 +58,10 @@ export const MAX_LIMIT = 200
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
 
-export const ORDER_STATUSES = Object.freeze([
-  'requested',
-  'confirmed',
-  'paid',
-  'shipped',
-  'declined',
-])
+// The vocabulary lives in the leaf module now (the CRM and the registry read
+// it there); re-exported for the route schemas and reports that import it
+// from here.
+export { ORDER_STATUSES }
 
 // Which price list the order was written off. Stated on the order, never
 // derived from the account: the storefront's trade-vs-retail rule
@@ -62,18 +70,6 @@ export const ORDER_STATUSES = Object.freeze([
 // a one-off to a trade client. The route schema spends this as its `enum`, so
 // the vocabulary and the CHECK cannot drift.
 export const PRICE_TYPES = Object.freeze(['trade', 'retail'])
-
-// The reservation a reserving order currently holds against inventory:
-//   held      -> qty_reserved still carries this order's demand
-//   converted -> reservation turned into a real stock decrement (shipped)
-//   released  -> reservation handed back (declined)
-//   none      -> non-reserving kind (checkout)
-const reservationState = (kind, status) => {
-  if (!reserves(kind)) return 'none'
-  if (status === 'shipped') return 'converted'
-  if (status === 'declined') return 'released'
-  return 'held'
-}
 
 const requireStatus = (order, allowed, action) => {
   const set = Array.isArray(allowed) ? allowed : [allowed]
@@ -149,11 +145,21 @@ const loadLinesByOrderId = async (db, orderIds) => {
             p.size,
             i.qty_available,
             i.qty_reserved,
-            i.unit
+            i.unit,
+            po.id AS purchase_order_id,
+            po.po_number,
+            po.status AS purchase_order_status
        FROM order_lines ol
        JOIN colourways c ON c.id = ol.colourway_id
        JOIN products p ON p.id = c.product_id
        LEFT JOIN inventory i ON i.colourway_id = ol.colourway_id
+       -- The purchase order raised for this line, if any. At most one live
+       -- allocation per line (purchase_order_line_allocations_open_unique), so
+       -- the join never duplicates a line.
+       LEFT JOIN purchase_order_line_allocations a
+              ON a.order_line_id = ol.id AND a.released_at IS NULL
+       LEFT JOIN purchase_order_lines pol ON pol.id = a.purchase_order_line_id
+       LEFT JOIN purchase_orders po ON po.id = pol.purchase_order_id
       WHERE ol.order_id = ANY($1::int[])
       ORDER BY ol.id`,
     [orderIds]
@@ -171,15 +177,15 @@ const loadLinesByOrderId = async (db, orderIds) => {
 }
 
 /**
- * Refuse a money transition while any line is still at $0.00 (422, naming the
- * count — the CRM shows API messages verbatim). Reads the lines inside the
- * order's own transaction: `withOrderTxn` selects only `id, kind, status`.
+ * Refuse a priced move while any line is still at $0.00 (422, naming the count
+ * — the CRM shows API messages verbatim). Reads the lines inside the order's own
+ * transaction: `withOrderTxn` selects only `id, kind, status`.
  *
- * Applied to `confirm` and `mark-paid`, NOT `ship`: a PATCH may still zero a
- * line at `confirmed`, but money is frozen from `paid` on, so an unpriced paid
- * order cannot exist once mark-paid refuses. The Xero push applies the same
- * predicate (`src/xero/service.js`). No director override — an unpriced order
- * is priced first, not confirmed at nil.
+ * Applied on ENTERING `PRICED_ENTRY_STATUSES` (a quote going out, an invoice,
+ * money received), not on shipping: money is frozen from `paid` on, so once
+ * `paid` refuses an unpriced order, an unpriced paid order cannot exist. The
+ * Xero push applies the same predicate (`src/xero/service.js`). No director
+ * override — an unpriced order is priced first, not invoiced at nil.
  */
 const requirePriced = async (client, id, phrase) => {
   const lines = (await loadLinesByOrderId(client, [id])).get(id) ?? []
@@ -221,9 +227,57 @@ const toLine = (row, state) => ({
       : { qty_available: row.qty_available, qty_reserved: row.qty_reserved },
   // How much of inventory.qty_reserved this line is responsible for right now.
   reserved_qty: state === 'held' && row.qty_available !== null ? row.qty : '0',
+  // The purchase order raised for this line (its live allocation), so the CRM
+  // can link the order desk to the paper that will fill it. Null when none.
+  purchase_order:
+    row.purchase_order_id === null || row.purchase_order_id === undefined
+      ? null
+      : { id: row.purchase_order_id, po_number: row.po_number, status: row.purchase_order_status },
 })
 
-const toOrder = (row, lineRows) => {
+// Every status move an order has made, newest first (one query for the whole
+// set, grouped — the lines loader's posture). `actor_name` rides the join so a
+// staffer who later leaves still displays; the client and the Xero pull have
+// no user row to name.
+const loadEventsByOrderId = async (db, orderIds) => {
+  if (orderIds.length === 0) {
+    return new Map()
+  }
+  const { rows } = await db.query(
+    `SELECT e.id,
+            e.order_id,
+            e.from_status,
+            e.to_status,
+            e.actor_kind,
+            e.actor_user_id,
+            u.name AS actor_name,
+            e.note,
+            e.created_at
+       FROM order_events e
+       LEFT JOIN users u ON u.id = e.actor_user_id
+      WHERE e.order_id = ANY($1::int[])
+      ORDER BY e.created_at DESC, e.id DESC`,
+    [orderIds]
+  )
+  const byOrder = new Map()
+  for (const { order_id: orderId, ...event } of rows) {
+    byOrder.set(orderId, [...(byOrder.get(orderId) ?? []), event])
+  }
+  return byOrder
+}
+
+// Why the client turned the quote down — the note on the latest answer, when
+// that answer was a rejection. A re-quote the client then accepted clears it;
+// a rejected quote the office went on to cancel keeps it, which is the context
+// the order page wants. Events arrive newest first.
+const quoteRejectionReason = (events) => {
+  const answer = events.find((event) =>
+    ['quote_accepted', 'quote_rejected'].includes(event.to_status)
+  )
+  return answer?.to_status === 'quote_rejected' ? (answer.note ?? null) : null
+}
+
+const toOrder = (row, lineRows, events = []) => {
   const state = reservationState(row.kind, row.status)
   return {
     id: row.id,
@@ -285,6 +339,10 @@ const toOrder = (row, lineRows) => {
     created_at: row.created_at,
     reservation_state: state,
     lines: (lineRows ?? []).map((line) => toLine(line, state)),
+    // The audit trail (order_events), newest first: who moved it, from what,
+    // to what, and any note — a rejected quote's reason is one of these.
+    events,
+    quote_rejection_reason: quoteRejectionReason(events),
   }
 }
 
@@ -360,12 +418,15 @@ export const listAdminOrders = async (
       LIMIT $${search.params.length + 1} OFFSET $${search.params.length + 2}`,
     [...search.params, safeLimit, offset]
   )
-  const linesByOrderId = await loadLinesByOrderId(
-    pool,
-    rows.map((row) => row.id)
-  )
+  const ids = rows.map((row) => row.id)
+  const [linesByOrderId, eventsByOrderId] = await Promise.all([
+    loadLinesByOrderId(pool, ids),
+    loadEventsByOrderId(pool, ids),
+  ])
   return {
-    orders: rows.map((row) => toOrder(row, linesByOrderId.get(row.id))),
+    orders: rows.map((row) =>
+      toOrder(row, linesByOrderId.get(row.id), eventsByOrderId.get(row.id))
+    ),
     total: countResult.rows[0].total,
   }
 }
@@ -383,8 +444,10 @@ export const getAdminOrder = async (db, id) => {
   if (!row) {
     return null
   }
+  // In turn, not in parallel: `db` may be a single transaction client.
   const linesByOrderId = await loadLinesByOrderId(db, [id])
-  return toOrder(row, linesByOrderId.get(id))
+  const eventsByOrderId = await loadEventsByOrderId(db, [id])
+  return toOrder(row, linesByOrderId.get(id), eventsByOrderId.get(id))
 }
 
 // Lock the order row, run a mutation inside one transaction, and return the
@@ -580,10 +643,10 @@ const isNotesOnly = (patch) => {
 // office, is ordinary — and the packing slip is printed from this address, so an
 // order the office could not correct after payment shipped to the wrong place.
 // Like notes, it rides ALONE: a body that also touches lines, money or any other
-// header field is an ordinary edit and keeps the requested/confirmed guard.
-// Shipped is excluded because the address is then the record of where the order
-// went; declined, because nothing is going anywhere.
-const DELIVERY_EDIT_STATUSES = Object.freeze(['requested', 'confirmed', 'paid'])
+// header field is an ordinary edit and keeps the LINE_EDIT_STATUSES guard.
+// DELIVERY_EDIT_STATUSES (./order-states.js) is every held status: shipped and
+// later are excluded because the address is then the record of where the order
+// went; cancelled, because nothing is going anywhere.
 
 const isDeliveryOnly = (patch) => {
   const keys = Object.keys(patch)
@@ -645,9 +708,9 @@ const applyOrderHeader = async (client, id, patch) => {
  * Edit an order: line quantities and prices, added lines, removed lines, and the
  * contact/notes header — keeping the held reservation and the money in step.
  *
- * Only allowed while the order is still in the reservation phase
- * (requested/confirmed); later states have already converted or released the
- * reservation, and their money has been invoiced. The exceptions are the
+ * Only allowed while the order still holds its reservation and nobody has paid
+ * it (LINE_EDIT_STATUSES); later states have converted or released the
+ * reservation, and their money is settled. The exceptions are the
  * ANNOTATION_COLUMNS and a patch carrying nothing but `notes`: neither moves
  * money, stock or a reservation, and both are written after the fact by
  * definition. A patch carrying nothing but `shipping_address` is the third,
@@ -687,7 +750,7 @@ export const editOrderLines = (pool, id, patch, actor) =>
       return
     }
     if (!isAnnotationOnly(patch) && !isNotesOnly(patch)) {
-      requireStatus(order, ['requested', 'confirmed'], 'edit')
+      requireStatus(order, LINE_EDIT_STATUSES, 'edit')
     }
 
     const edits = patch.lines ?? []
@@ -700,13 +763,13 @@ export const editOrderLines = (pool, id, patch, actor) =>
     )
     const byId = new Map(lines.map((line) => [line.id, line]))
 
-    // An order with no lines is not an order. Declining it is what the office
-    // means by "cancel this" — that releases the reservation and leaves a record,
-    // where an empty order would keep its number and say nothing.
+    // An order with no lines is not an order. Cancelling it is what the office
+    // means by "get rid of this" — that releases the reservation and leaves a
+    // record, where an empty order would keep its number and say nothing.
     if (lines.length - removeIds.length + adds.length <= 0) {
       throw httpError(
         422,
-        'An order cannot be left with no lines. Decline it instead.'
+        'An order cannot be left with no lines. Cancel it instead.'
       )
     }
 
@@ -892,7 +955,7 @@ export const createManualOrder = async (pool, input, actor) => {
       `INSERT INTO orders (user_id, guest_email, order_number, kind, status, notes,
                            discount_pct, discount_reason, discount_applied_by,
                            sales_rep_user_id, price_type, shipping_address)
-       VALUES ($1, $2, $3, 'manual', 'requested', $4, $5, $6, $7, $8, COALESCE($9, 'retail'), $10)
+       VALUES ($1, $2, $3, 'manual', 'quote_requested', $4, $5, $6, $7, $8, COALESCE($9, 'retail'), $10)
        RETURNING id`,
       [
         userId,
@@ -941,86 +1004,119 @@ export const createManualOrder = async (pool, input, actor) => {
   return getAdminOrder(pool, orderId)
 }
 
-/**
- * Confirm a requested order and store the manually-created Xero invoice ref.
- * No Xero API call — the ref is typed in by staff after invoicing in Xero.
- */
-export const confirmOrder = (pool, id, xeroInvoiceRef) =>
-  withOrderTxn(pool, id, async (client, order) => {
-    requireStatus(order, 'requested', 'confirm')
-    await requirePriced(client, id, 'confirm this order')
+// The words `requirePriced` finishes its sentence with, per priced target.
+const PRICED_PHRASES = Object.freeze({
+  quote_sent: 'send the quote',
+  pending_payment: 'invoice this order',
+  paid: 'mark this order paid',
+})
+
+// The stock side of a move is keyed on the TRANSITION, not on the status: what
+// matters is whether the order still held its reservation when it left `from`.
+//   → shipped              convert: the reservation becomes a real decrement
+//   → cancelled | refunded release: the reservation is handed back
+// A refund after shipping holds nothing (the stock already left), so it touches
+// no inventory — `holdsReservation` answers that, as it does for the delete.
+// Both statements aggregate per colourway first (ORDER_DEMAND, above).
+const settleReservation = async (client, order, to) => {
+  if (!holdsReservation(order)) return
+  if (to === 'shipped') {
     await client.query(
-      `UPDATE orders SET status = 'confirmed', xero_invoice_ref = $2 WHERE id = $1`,
-      [id, xeroInvoiceRef]
+      `UPDATE inventory i
+          SET qty_reserved = i.qty_reserved - demand.qty,
+              qty_available = i.qty_available - demand.qty
+         FROM (${ORDER_DEMAND}) AS demand
+        WHERE i.colourway_id = demand.colourway_id`,
+      [order.id]
     )
-  })
-
-/** Mark a confirmed order paid (payment reconciled manually / off-platform). */
-export const markOrderPaid = (pool, id) =>
-  withOrderTxn(pool, id, async (client, order) => {
-    requireStatus(order, 'confirmed', 'mark paid')
-    await requirePriced(client, id, 'mark this order paid')
-    await client.query(`UPDATE orders SET status = 'paid' WHERE id = $1`, [id])
-  })
+  } else if (to === 'cancelled' || to === 'refunded') {
+    await client.query(
+      `UPDATE inventory i
+          SET qty_reserved = i.qty_reserved - demand.qty
+         FROM (${ORDER_DEMAND}) AS demand
+        WHERE i.colourway_id = demand.colourway_id`,
+      [order.id]
+    )
+  }
+}
 
 /**
- * Ship a paid order: set status=shipped and convert the held reservation into a
- * real stock decrement (qty_reserved down, qty_available down by the same amount).
+ * Move an order to `to` — THE one transition. The CRM's status dropdown, the
+ * client's accept/reject, the purchase-order generator's back order and both
+ * Xero directions all come through here, so every move is checked by the same
+ * machine, settles stock the same way and leaves the same audit row.
  *
- * `trackingUrl` is optional — plenty of orders are hand-delivered — and is
- * written in the SAME statement as the status, so the order the route hands to
- * `notifyOrderTransition` already carries the link the shipped letter quotes.
- * Its shape is the route schema's business (`^https?://`).
+ * In one transaction: the machine (409 for a move `ALLOWED_TRANSITIONS` does not
+ * list), the price gate on entering `PRICED_ENTRY_STATUSES` (422), the stock
+ * side effect, the status write, and the `order_events` row. `trackingUrl` and
+ * `xeroInvoiceRef` are written in the SAME statement as the status, so the order
+ * handed to `notifyOrderTransition` already carries the link / reference its
+ * letter quotes; absent, each keeps what the order already had.
+ *
+ * Returns the fresh admin order. Anything a caller needs beyond it (the quote
+ * link a `quote_sent` letter carries) is issued after the transaction commits.
  *
  * @param {import('pg').Pool} pool
  * @param {number} id
- * @param {{ trackingUrl?: string|null }} [options]
+ * @param {string} to one of ORDER_STATUSES
+ * @param {{
+ *   actor: { kind: 'staff'|'customer'|'xero', userId?: number|null },
+ *   note?: string|null,
+ *   trackingUrl?: string|null,
+ *   xeroInvoiceRef?: string|null,
+ * }} options
  */
-export const shipOrder = (pool, id, { trackingUrl = null } = {}) =>
+export const setOrderStatus = (
+  pool,
+  id,
+  to,
+  { actor, note = null, trackingUrl = null, xeroInvoiceRef = null }
+) =>
   withOrderTxn(pool, id, async (client, order) => {
-    requireStatus(order, 'paid', 'ship')
-    if (reserves(order.kind)) {
-      await client.query(
-        `UPDATE inventory i
-            SET qty_reserved = i.qty_reserved - demand.qty,
-                qty_available = i.qty_available - demand.qty
-           FROM (${ORDER_DEMAND}) AS demand
-          WHERE i.colourway_id = demand.colourway_id`,
-        [id]
-      )
+    requireTransition(order, to)
+    if (PRICED_ENTRY_STATUSES.includes(to)) {
+      await requirePriced(client, id, PRICED_PHRASES[to])
     }
+    await settleReservation(client, order, to)
     await client.query(
-      `UPDATE orders SET status = 'shipped', tracking_url = $2 WHERE id = $1`,
-      [id, trackingUrl]
+      `UPDATE orders
+          SET status = $2::text,
+              tracking_url = COALESCE($3, tracking_url),
+              xero_invoice_ref = COALESCE($4, xero_invoice_ref),
+              quote_sent_at = CASE WHEN $2::text = 'quote_sent' THEN now() ELSE quote_sent_at END
+        WHERE id = $1`,
+      [id, to, trackingUrl || null, xeroInvoiceRef || null]
+    )
+    await client.query(
+      `INSERT INTO order_events (order_id, from_status, to_status, actor_kind, actor_user_id, note)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        id,
+        order.status,
+        to,
+        actor.kind,
+        actor.userId ?? null,
+        // A blank note is no note: '' would print an empty line in the trail.
+        typeof note === 'string' && note.trim() !== '' ? note.trim() : null,
+      ]
     )
   })
 
 /**
- * Decline an order still in the reservation phase (requested/confirmed) and
- * release its held reservation back to available stock.
+ * Mark an order paid — the Xero pull's move (a payment recorded at the
+ * accountant's desk). Kept as its own name because the Xero service imports it;
+ * it is `setOrderStatus` and nothing else.
  */
-export const declineOrder = (pool, id) =>
-  withOrderTxn(pool, id, async (client, order) => {
-    requireStatus(order, ['requested', 'confirmed'], 'decline')
-    if (reserves(order.kind)) {
-      await client.query(
-        `UPDATE inventory i
-            SET qty_reserved = i.qty_reserved - demand.qty
-           FROM (${ORDER_DEMAND}) AS demand
-          WHERE i.colourway_id = demand.colourway_id`,
-        [id]
-      )
-    }
-    await client.query(`UPDATE orders SET status = 'declined' WHERE id = $1`, [id])
-  })
+export const markOrderPaid = (pool, id, actor = { kind: 'xero' }) =>
+  setOrderStatus(pool, id, 'paid', { actor })
 
 /**
  * Archive (soft-delete) or restore an order. Archiving only removes it from the
  * default queue; the record and its lines are kept. A reserving order is only
- * archivable once it has reached a terminal state (shipped or declined) — while
- * it is still requested/confirmed/paid it holds a live reservation, and hiding
- * it would strand that reserved stock forever. Decline (or ship) it first.
- * Restore has no such rule.
+ * archivable once its reservation is settled (shipped, completed, cancelled,
+ * refunded) — while it still holds one (HELD_STATUSES), hiding it would strand
+ * that reserved stock forever. Cancel (or ship) it first. Restore has no such
+ * rule.
  *
  * @param {import('pg').Pool} pool
  * @param {number} id
@@ -1028,8 +1124,11 @@ export const declineOrder = (pool, id) =>
  */
 export const setOrderArchived = (pool, id, archived) =>
   withOrderTxn(pool, id, async (client, order) => {
-    if (archived && reserves(order.kind)) {
-      requireStatus(order, ['shipped', 'declined'], 'archive')
+    if (archived && holdsReservation(order)) {
+      throw httpError(
+        409,
+        `Cannot archive an order in status "${order.status}" — it still holds stock. Cancel or ship it first.`
+      )
     }
     // The transaction's client, not the pool: the guard above and this write
     // must be the same transaction, or a concurrent transition could slip in

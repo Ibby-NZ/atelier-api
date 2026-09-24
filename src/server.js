@@ -53,7 +53,7 @@ const start = async () => {
         }),
         // An invoice paid at the accountant's desk marks its order paid here
         // — with the same letter the CRM's Mark paid button sends.
-        notifyOrderPaid: (order) => notifyOrderTransition(mailer, pool, order),
+        notifyOrderTransition: (order) => notifyOrderTransition(mailer, pool, order),
       })
     : null
   if (!xero) {

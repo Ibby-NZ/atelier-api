@@ -64,7 +64,7 @@ const inventoryGuard = async (client, colourwayId) => {
     return refuse(
       409,
       `This stock row still has ${reserved} reserved against open orders. ` +
-        'Ship or decline those orders first, then delete it.'
+        'Ship or cancel those orders first, then delete it.'
     )
   }
   return null
@@ -189,11 +189,12 @@ const reserveRequestGuard = async (client, id) => {
  * Two different facts refuse it, and neither implies the other. A `checkout`
  * order was paid at Stripe: it carries a session id, its stock was already
  * decremented, and the row is the platform's only record of the payment — so it
- * is refused whatever its status. Everything else is refused once it reaches
- * `paid` or `shipped`: money has moved, `xero_invoice_ref` names the invoice the
- * office raised against it, and a shipped order is what its stock decrement was
- * justified by. What is left — a request nobody has priced, a confirmed order
- * before payment, and a declined one — destroys nothing when removed.
+ * is refused whatever its status. Everything else is refused once it is `paid`
+ * or beyond (money has moved; a shipped order is what its stock decrement was
+ * justified by) or once it has an invoice in Xero — `cancelled` is reachable
+ * after the invoice went out, and an invoiced order is a financial record
+ * whatever its status. What is left — a quote, an order before invoicing, and a
+ * cancelled one nobody invoiced — destroys nothing when removed.
  *
  * The predicate lives in `src/orders/order-states.js`, the leaf module the CRM
  * mirrors, so the button and the guard cannot disagree about which orders offer
@@ -201,7 +202,7 @@ const reserveRequestGuard = async (client, id) => {
  */
 const orderGuard = async (client, id) => {
   const { rows } = await client.query(
-    `SELECT kind, status FROM orders WHERE id = $1`,
+    `SELECT kind, status, xero_invoice_id FROM orders WHERE id = $1`,
     [id]
   )
   const order = rows[0]
@@ -213,6 +214,13 @@ const orderGuard = async (client, id) => {
       409,
       'This is a card checkout, so it is the record of a payment taken at ' +
         'Stripe. Archive it instead to hide it without losing that.'
+    )
+  }
+  if (order.xero_invoice_id != null) {
+    return refuse(
+      409,
+      'This order has an invoice in Xero, so it is a financial record. ' +
+        'Archive it instead to hide it without losing the record.'
     )
   }
   return refuse(
@@ -232,7 +240,7 @@ const orderGuard = async (client, id) => {
  * exists (delete.js's (C2)).
  *
  * `holdsReservation` is what stops a double release: a shipped order converted
- * its reservation into a real decrement and a declined one already handed it
+ * its reservation into a real decrement and a cancelled one already handed it
  * back, so releasing again would inflate availability. (Shipped is unreachable
  * here anyway — the guard refuses it — but the predicate is the rule, not the
  * guard's side effect.) A colourway with no inventory row reserved nothing, so
@@ -241,9 +249,9 @@ const orderGuard = async (client, id) => {
  * The quantity is SUMMED PER COLOURWAY first, for the reason `ORDER_DEMAND` in
  * src/orders/admin-orders.js states: two lines may name one colourway, and
  * `UPDATE … FROM order_lines` would then release only one of them, stranding
- * the rest of the reservation for good. Same shape as `shipOrder` and
- * `declineOrder`, deliberately — this is the third of the three whole-order
- * inventory moves and they must agree.
+ * the rest of the reservation for good. Same shape as the two statements in
+ * `settleReservation` (src/orders/admin-orders.js), deliberately — this is the
+ * third of the three whole-order inventory moves and they must agree.
  */
 const releaseOrderReservation = async (client, id) => {
   const { rows } = await client.query(

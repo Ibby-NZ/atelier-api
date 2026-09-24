@@ -37,7 +37,7 @@ const insertOrder = async (pool, colourwayId, { userId, guestEmail, orderNumber 
     `INSERT INTO orders
        (user_id, guest_email, order_number, kind, status,
         subtotal_cents, shipping_cents, total_cents, shipping_zone, xero_invoice_ref)
-     VALUES ($1, $2, $3, 'order_request', 'requested', 5000, 0, 5000, 'Auckland', NULL)
+     VALUES ($1, $2, $3, 'order_request', 'quote_requested', 5000, 0, 5000, 'Auckland', NULL)
      RETURNING id`,
     [userId ?? null, guestEmail ?? null, orderNumber]
   )
@@ -126,7 +126,7 @@ describe('order history + guest lookup', () => {
     expect(orders).toHaveLength(2)
     expect(orders[0].order_number).toMatch(new RegExp(`^${PREFIX}-A`))
     expect(orders[0].lines[0].sku).toBe(`${PREFIX}-SKU`)
-    expect(orders[0].status).toBe('requested')
+    expect(orders[0].status).toBe('quote_requested')
   })
 
   // The office's discount used to be invisible to the client: a $700 subtotal

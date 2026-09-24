@@ -152,11 +152,17 @@ describe('xero integration', () => {
   let directorCookie
   let customerCookie
 
+  const notified = []
+
   const inject = (method, url, cookie, payload) =>
     app.inject({ method, url, headers: cookie ? { cookie } : {}, payload })
 
+  const move = (orderId, status, extra = {}) =>
+    inject('POST', `/admin/orders/${orderId}/status`, backofficeCookie, { status, ...extra })
+
   // A priced, account-owned order ready to invoice: the customer requests it,
-  // the back office prices the line.
+  // the back office prices the line and takes it on (`processing` — an
+  // unaccepted quote is not invoiceable).
   const placePricedOrder = async (unitPriceCents = 5000) => {
     const placed = await app.inject({
       method: 'POST',
@@ -170,6 +176,7 @@ describe('xero integration', () => {
     await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
       lines: [{ id: lineId, unit_price_cents: unitPriceCents }],
     })
+    expect((await move(order.id, 'processing')).statusCode).toBe(200)
     return order.id
   }
 
@@ -183,6 +190,7 @@ describe('xero integration', () => {
       lines: [{ colourway_id: cws[0].id, qty: 10, unit_price_cents: unitPriceCents }],
     })
     expect(created.statusCode).toBe(201)
+    expect((await move(created.json().order.id, 'processing')).statusCode).toBe(200)
     return created.json().order.id
   }
 
@@ -197,7 +205,16 @@ describe('xero integration', () => {
       log: () => {},
     })
     fake = createFakeXero()
-    const xero = createXeroService({ pool, config: XERO_CONFIG, http: fake })
+    const xero = createXeroService({
+      pool,
+      config: XERO_CONFIG,
+      http: fake,
+      // Every move Xero makes (push → pending_payment, pull → paid) hands the
+      // fresh order here; server.js wires the status letter to it.
+      notifyOrderTransition: async (order) => {
+        notified.push(order)
+      },
+    })
     app = buildApp({
       pool,
       cookieSecret: TEST_COOKIE_SECRET,
@@ -227,6 +244,7 @@ describe('xero integration', () => {
   beforeEach(async () => {
     await cleanup(pool)
     fake.calls.length = 0
+    notified.length = 0
     await seedCatalogue(pool)
     await seedConnected(pool)
   })
@@ -367,26 +385,24 @@ describe('xero integration', () => {
         lines: [{ colourway_id: colourways[0].id, qty: 10, unit_price_cents: 5000 }],
       })
       expect(keyed.statusCode).toBe(201)
+      expect((await move(keyed.json().order.id, 'processing')).statusCode).toBe(200)
       return keyed.json().order.id
     }
 
-    // requested → confirmed (against the pushed ref) so mark-paid is legal.
+    // The push moves the order to pending_payment itself, so paid is legal.
     const pushedAndConfirmed = async () => {
       scriptInvoiceCreate()
       const orderId = await keyPricedOrder()
-      await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
-      const confirmed = await inject('POST', `/admin/orders/${orderId}/confirm`, backofficeCookie, {
-        xero_invoice_ref: 'INV-0042',
-      })
-      expect(confirmed.statusCode).toBe(200)
+      const pushed = await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+      expect(pushed.json().order.status).toBe('pending_payment')
       return orderId
     }
 
-    it('mark-paid records a payment for what Xero says is due', async () => {
+    it('moving to paid records a payment for what Xero says is due', async () => {
       const orderId = await pushedAndConfirmed()
       scriptInvoiceDue(575)
       fake.on('PUT', 'Payments', () => ({ Payments: [{ PaymentID: 'pay-1' }] }))
-      const response = await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      const response = await move(orderId, 'paid')
       expect(response.statusCode).toBe(200)
       expect(response.json().order.status).toBe('paid')
       expect(response.json().xero_payment).toEqual({
@@ -408,7 +424,7 @@ describe('xero integration', () => {
     it('records nothing when Xero already shows the invoice paid', async () => {
       const orderId = await pushedAndConfirmed()
       scriptInvoiceDue(0)
-      const response = await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      const response = await move(orderId, 'paid')
       expect(response.statusCode).toBe(200)
       expect(response.json().order.status).toBe('paid')
       expect(response.json().xero_payment.recorded).toBe(false)
@@ -418,10 +434,8 @@ describe('xero integration', () => {
 
     it('still marks the order paid when the order was never pushed, and says so', async () => {
       const orderId = await keyPricedOrder()
-      await inject('POST', `/admin/orders/${orderId}/confirm`, backofficeCookie, {
-        xero_invoice_ref: 'INV-BY-HAND',
-      })
-      const response = await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      await move(orderId, 'pending_payment', { xero_invoice_ref: 'INV-BY-HAND' })
+      const response = await move(orderId, 'paid')
       expect(response.statusCode).toBe(200)
       expect(response.json().order.status).toBe('paid')
       expect(response.json().xero_payment).toEqual({
@@ -442,7 +456,7 @@ describe('xero integration', () => {
           },
         })
       })
-      const response = await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      const response = await move(orderId, 'paid')
       expect(response.statusCode).toBe(200)
       expect(response.json().order.status).toBe('paid')
       expect(response.json().xero_payment.recorded).toBe(false)
@@ -451,10 +465,8 @@ describe('xero integration', () => {
 
     it('a push for an order that is already paid records the payment on the spot', async () => {
       const orderId = await keyPricedOrder()
-      await inject('POST', `/admin/orders/${orderId}/confirm`, backofficeCookie, {
-        xero_invoice_ref: 'INV-BY-HAND',
-      })
-      await inject('POST', `/admin/orders/${orderId}/mark-paid`, backofficeCookie)
+      await move(orderId, 'pending_payment', { xero_invoice_ref: 'INV-BY-HAND' })
+      await move(orderId, 'paid')
       scriptInvoiceCreate()
       scriptInvoiceDue(575)
       fake.on('PUT', 'Payments', () => ({ Payments: [{ PaymentID: 'pay-2' }] }))
@@ -840,12 +852,10 @@ describe('xero integration', () => {
         Contacts: body.Contacts.map((c, i) => ({ ...c, ContactID: `pull-${i}` })),
       }))
       const orderId = await raisePricedOrder()
-      // The desk's order: push (which fills the ref), then confirm with it.
-      expect((await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})).statusCode).toBe(200)
-      const confirmed = await inject('POST', `/admin/orders/${orderId}/confirm`, backofficeCookie, {
-        xero_invoice_ref: 'INV-PULL',
-      })
-      expect(confirmed.statusCode).toBe(200)
+      // The desk's order: the push fills the ref and moves it to pending_payment.
+      const pushed = await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+      expect(pushed.statusCode).toBe(200)
+      expect(pushed.json().order.status).toBe('pending_payment')
 
       fake.on('GET', 'Invoices', ({ query }) => ({
         Invoices: (query?.IDs ?? '').split(',').filter(Boolean).map((id) =>
@@ -864,6 +874,87 @@ describe('xero integration', () => {
       fake.calls.length = 0
       await inject('POST', '/admin/xero/pull/statuses', backofficeCookie, {})
       expect(fake.calls.filter((c) => c.method === 'GET' && c.path === 'Invoices')).toEqual([])
+    })
+
+    // The sales-order overhaul (24 Sep 2026): the push is the invoice going
+    // out, so it moves the order to pending_payment itself; the pull's PAID
+    // moves any order the machine lets move to paid.
+    const scriptPushAndContact = (invoiceId) => {
+      fake.on('POST', 'Invoices', ({ body }) => ({
+        Invoices: [{ ...body.Invoices[0], InvoiceID: invoiceId, InvoiceNumber: 'INV-FLOW', Status: 'AUTHORISED' }],
+      }))
+      fake.on('POST', 'Contacts', ({ body }) => ({
+        Contacts: body.Contacts.map((c, i) => ({ ...c, ContactID: `flow-${i}` })),
+      }))
+    }
+    const scriptPaid = (invoiceId) =>
+      fake.on('GET', 'Invoices', ({ query }) => ({
+        Invoices: (query?.IDs ?? '').split(',').filter(Boolean).map((id) =>
+          id === invoiceId
+            ? { InvoiceID: id, InvoiceNumber: 'INV-FLOW', Status: 'PAID', AmountDue: 0 }
+            : { InvoiceID: id, Status: 'AUTHORISED' }
+        ),
+      }))
+
+    it('a push from an accepted quote moves it to pending_payment, with its letter and audit row', async () => {
+      scriptPushAndContact('inv-accepted')
+      const orderId = await raisePricedOrder()
+      // processing → back to a quote the client accepted, the storefront path.
+      await pool.query(`UPDATE orders SET status = 'quote_accepted' WHERE id = $1`, [orderId])
+
+      const pushed = await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+      expect(pushed.statusCode).toBe(200)
+      expect(pushed.json().order.status).toBe('pending_payment')
+      expect(notified.map((order) => order.status)).toEqual(['pending_payment'])
+
+      const { rows } = await pool.query(
+        `SELECT from_status, to_status, actor_kind, actor_user_id FROM order_events
+          WHERE order_id = $1 AND to_status = 'pending_payment'`,
+        [orderId]
+      )
+      const { rows: boss } = await pool.query(`SELECT id FROM users WHERE email = $1`, [
+        testEmail('boss'),
+      ])
+      expect(rows).toEqual([
+        {
+          from_status: 'quote_accepted',
+          to_status: 'pending_payment',
+          actor_kind: 'staff',
+          actor_user_id: boss[0].id,
+        },
+      ])
+    })
+
+    it('refuses to push a quote the client has not accepted', async () => {
+      const orderId = await raisePricedOrder()
+      await pool.query(`UPDATE orders SET status = 'quote_sent' WHERE id = $1`, [orderId])
+      const response = await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+      expect(response.statusCode).toBe(409)
+      expect(response.json().message).toBe('An order in status "quote_sent" is not invoiceable.')
+      expect(fake.calls.filter((c) => c.method === 'POST' && c.path === 'Invoices')).toEqual([])
+    })
+
+    it('the pull moves a processing or back-ordered order to paid', async () => {
+      for (const [invoiceId, status] of [
+        ['inv-processing', 'processing'],
+        ['inv-backorder', 'back_order'],
+      ]) {
+        scriptPushAndContact(invoiceId)
+        const orderId = await raisePricedOrder()
+        await inject('POST', `/admin/xero/orders/${orderId}/invoice`, backofficeCookie, {})
+        // The office moved it on after invoicing — the goods are being cut, or
+        // were short after all.
+        expect((await move(orderId, status)).statusCode).toBe(200)
+
+        scriptPaid(invoiceId)
+        const pull = await inject('POST', '/admin/xero/pull/statuses', backofficeCookie, {})
+        expect(pull.json().result.invoices.orders_marked_paid).toEqual([
+          { id: orderId, order_number: expect.any(String) },
+        ])
+        const order = (await inject('GET', `/admin/orders/${orderId}`, backofficeCookie)).json().order
+        expect(order.status).toBe('paid')
+        expect(order.events[0]).toMatchObject({ to_status: 'paid', actor_kind: 'xero' })
+      }
     })
 
     it('a voided invoice re-opens the push, under a fresh idempotency key', async () => {

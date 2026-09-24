@@ -46,7 +46,7 @@ describe('users/orders/shipping schema migration', () => {
     await expect(
       pool.query(
         `INSERT INTO orders (order_number, kind, status)
-         VALUES ('CHK-0001', 'checkout', 'cancelled')`
+         VALUES ('CHK-0001', 'checkout', 'declined')`
       )
     ).rejects.toThrow(/orders_status_check/)
   })

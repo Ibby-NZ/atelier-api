@@ -12,6 +12,7 @@ const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 //   POST /checkout/session    — creates a Checkout Session at STRIPE on every call
 //   POST /orders/request      — writes an order and sends TWO emails
 //   GET  /checkout/session/:id — retrieves the session from STRIPE on every call
+//   GET/POST /orders/quote/:token[/accept|/reject] — a query per call; answers mail the office
 //
 // Every case below sends something that dies short of the third party — a
 // payload the schema rejects, or (for the GET by id, which has no rejectable
@@ -74,6 +75,25 @@ describe('rate limits on the public, costly routes', () => {
       expect(over.statusCode).toBe(429)
     } finally {
       await app.close()
+    }
+  })
+
+  // The quote link's routes (24 Sep 2026): public, every call a query, and an
+  // answer sends mail. A token that matches nothing 404s before any write or
+  // letter, and the limiter still counts it.
+  it('429s the 11th GET or answer on /orders/quote/:token from one IP', async () => {
+    for (const [method, url] of [
+      ['GET', '/orders/quote/no-such-token'],
+      ['POST', '/orders/quote/no-such-token/accept'],
+      ['POST', '/orders/quote/no-such-token/reject'],
+    ]) {
+      const app = await freshApp()
+      try {
+        const over = await exhaust(app, () => app.inject({ method, url, payload: {} }), 10, 404)
+        expect(over.statusCode).toBe(429)
+      } finally {
+        await app.close()
+      }
     }
   })
 

@@ -10,6 +10,11 @@ const DEFAULT_CRM_BASE_URL = 'http://localhost:5273'
 const DEFAULT_SMTP_PORT = 587
 const DEFAULT_EMAIL_FROM = 'Atelier Textiles <no-reply@ateliertextiles.example>'
 const DEFAULT_BACKOFFICE_EMAIL = 'orders@ateliertextiles.example'
+// Copied on every sales-order letter (24 Sep 2026: "make sure
+// jenettec@atelier.co.nz is always in the loop"). A real address by default,
+// unlike the two above: it is the client's standing instruction, not a
+// placeholder waiting for the relay. ORDER_COPY_EMAIL= (empty) turns it off.
+const DEFAULT_ORDER_COPY_EMAIL = 'jenettec@atelier.co.nz'
 const MIN_COOKIE_SECRET_LENGTH = 32
 // Xero defaults. The scopes are the code-flow set (offline_access is what
 // yields the refresh token); a custom connection ignores the scope PARAM and
@@ -168,6 +173,10 @@ export const loadConfig = (env = process.env) => {
     smtpPass: env.SMTP_PASS ?? null,
     emailFrom: env.EMAIL_FROM ?? DEFAULT_EMAIL_FROM,
     backofficeEmail: env.BACKOFFICE_EMAIL ?? DEFAULT_BACKOFFICE_EMAIL,
+    // The standing copy on every letter about a sales order — status changes
+    // and the order page's Send buttons (src/email/notifications.js
+    // orderLetterRecipients). Empty string means nobody.
+    orderCopyEmail: env.ORDER_COPY_EMAIL ?? DEFAULT_ORDER_COPY_EMAIL,
     // THE TEST-DRIVE VALVE. Set it and EVERY letter — client, back office and
     // SUPPLIER alike — is delivered to this one address instead of its real
     // recipient, with the intended recipient written into the subject and the

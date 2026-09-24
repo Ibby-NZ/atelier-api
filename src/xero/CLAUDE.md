@@ -72,9 +72,12 @@ contact — `users`, `trade_accounts`, `suppliers` — each with its own
 - **Xero's status word is stored, not derived, and it re-opens a push.**
   `pullStatuses` reads every unsettled pushed document (`GET Invoices?IDs=`)
   and writes `xero_invoice_status` / `xero_bill_status`. PAID on an invoice
-  runs `markOrderPaid` (the same transition and letter as the CRM button,
-  via the injected `notifyOrderPaid`); an order still `requested` is reported,
-  not forced. VOIDED/DELETED (`isDeadInXero`) lets `pushOrderInvoice` /
+  runs `markOrderPaid` (the same `setOrderStatus` move and letter as the
+  CRM's status dropdown, audit row `actor_kind: 'xero'`, letter via the
+  injected `notifyOrderTransition`) from any status the machine lets move to
+  `paid` (`back_order`, `processing`, `pending_payment`); an order already
+  paid/shipped/completed is left alone, and one the machine will not move (a
+  quote, a cancelled order) is reported in `failed`, not forced. VOIDED/DELETED (`isDeadInXero`) lets `pushOrderInvoice` /
   `pushPurchaseOrderBill` run again under the key
   `atelier-order-<id>-after-<deadId>` — Xero's idempotency window is 24h,
   so the plain key would hand the voided invoice straight back. PAID /
@@ -98,11 +101,19 @@ contact — `users`, `trade_accounts`, `suppliers` — each with its own
   Xero's tax lines would otherwise leave a cent outstanding), against the BANK
   account `XERO_PAYMENT_ACCOUNT_CODE` names. Idempotent by construction: a
   second call finds nothing due and records nothing. Two callers: the
-  `mark-paid` route (the order transition NEVER fails because of Xero — a
-  refusal comes back as `xero_payment.reason` for the CRM to print) and
-  `pushOrderInvoice` itself when the order is already `paid`/`shipped` (a card
-  checkout is born paid), where a failure is a `warning` on a push that
-  succeeded. Unset account code = "recorded by hand", said in words, not an
+  status route on a move to `paid` (the order transition NEVER fails because
+  of Xero — a refusal comes back as `xero_payment.reason` for the CRM to
+  print) and `pushOrderInvoice` itself when the order is already
+  `paid`/`shipped`/`completed` (a card checkout is born paid), where a
+  failure is a `warning` on a push that succeeded.
+- **The push is the invoice going out, so it moves the order** (24 Sep
+  2026). Only `INVOICEABLE_STATUSES` (quote_accepted → completed) may be
+  pushed — an unaccepted quote or a cancelled order is a 409 naming its
+  status. After the invoice is stored, an order the machine lets move goes to
+  `pending_payment` through `setOrderStatus` (actor = the staffer the route
+  passes; letter via the injected `notifyOrderTransition`); one already
+  pending, or paid and beyond, keeps its status. A refused move is a
+  `warning`, never a rollback of a push Xero already holds. Unset account code = "recorded by hand", said in words, not an
   error.
 - **A purchase order becomes a BILL (ACCPAY) against its supplier when it is
   SENT** (22 Sep 2026). `pushPurchaseOrderBill` mirrors the invoice push:
@@ -113,7 +124,7 @@ contact — `users`, `trade_accounts`, `suppliers` — each with its own
   (the org must have that currency enabled), against
   `XERO_PURCHASES_ACCOUNT_CODE` (default 300); an unpriced line refuses. The
   send route calls it and NEVER fails because of Xero — the answer travels as
-  `xero_bill: { raised, number | reason }`, the `mark-paid` posture — and
+  `xero_bill: { raised, number | reason }`, the status route's `xero_payment` posture — and
   `POST /admin/xero/purchase-orders/:id/bill` is the retry. **"Paid" reaches
   the platform by POLL, not webhook**: `POST …/bill/sync` re-reads the bill and
   mirrors `Status` / `FullyPaidOnDate` onto `xero_bill_status` /

@@ -5,11 +5,19 @@ import {
 } from '../orders/order-request.js'
 import {
   listUserOrders,
+  getCustomerOrder,
   DEFAULT_PAGE,
   DEFAULT_LIMIT,
   MAX_LIMIT,
 } from '../orders/order-history.js'
-import { notifyRequestReceived } from '../email/notifications.js'
+import {
+  REJECTION_REASON_MAX,
+  validateQuoteAnswer,
+  respondToQuote,
+  findOrderByQuoteToken,
+  findUserOrderByNumber,
+} from '../orders/quote-response.js'
+import { notifyRequestReceived, notifyQuoteAnswered } from '../email/notifications.js'
 import { honeypotProperty, honeypotTripped } from '../lib/honeypot.js'
 
 // Paging for /orders/mine. Fastify coerces both from the querystring; an
@@ -81,7 +89,62 @@ const orderRequestBodySchema = {
 // number.
 const ORDER_REQUEST_RATE_LIMIT = Object.freeze({ max: 10, timeWindow: 15 * 60 * 1000 })
 
+// The quote link's token: 256 bits of base64url (src/orders/quote-links.js).
+// The bound only keeps a junk path from reaching the hash.
+const quoteTokenParamsSchema = {
+  type: 'object',
+  required: ['token'],
+  properties: { token: { type: 'string', minLength: 1, maxLength: 200 } },
+}
+
+const orderNumberParamsSchema = {
+  type: 'object',
+  required: ['order_number'],
+  properties: { order_number: { type: 'string', minLength: 1, maxLength: 100 } },
+}
+
+// Accept needs no body; reject carries the reason. `['object','null']` because
+// Fastify validates a body-less POST as null (the admin ship posture). Whether
+// the reason is present is a 422 from validateQuoteAnswer, not a 400 here.
+const quoteAnswerBodySchema = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  properties: {
+    reason: { type: ['string', 'null'], maxLength: REJECTION_REASON_MAX },
+  },
+}
+
 export const orderRoutes = async (app, { pool, mailer = null }) => {
+  // The client's answer to a quote, however they reached it: validate (422
+  // field errors), move the order (409 unless it is still `quote_sent` — the
+  // machine answers that), tell the office, and hand back the CUSTOMER shape.
+  // Never the admin shape: these routes are the client's, and it carries the
+  // office's notes and discount reasons.
+  const answerQuote = async (request, reply, { orderId, accept, userId }) => {
+    const reason = request.body?.reason ?? null
+    const errors = validateQuoteAnswer({ accept, reason })
+    if (errors.length > 0) {
+      reply.code(422)
+      return { error: 'Unprocessable Entity', message: 'Validation failed.', errors }
+    }
+    const answered = await respondToQuote(pool, {
+      orderId,
+      accept,
+      reason: typeof reason === 'string' ? reason.trim() : null,
+      userId,
+    })
+    await notifyQuoteAnswered(mailer, pool, answered, {
+      accepted: accept,
+      reason: answered.quote_rejection_reason,
+    })
+    return { order: await getCustomerOrder(pool, { id: orderId }) }
+  }
+
+  const quoteNotFound = (reply) => {
+    reply.code(404)
+    return { error: 'Not Found', message: 'This quote link is not valid.' }
+  }
+
   // Public: guests may request an order. When logged in, the request is tied to
   // the user and their email is used when no contact email is supplied.
   app.post(
@@ -147,5 +210,70 @@ export const orderRoutes = async (app, { pool, mailer = null }) => {
       })
     }
   )
+
+  // The quote page behind the `quote_sent` letter's link. Public — a guest has
+  // no account — and the token IS the authorisation: 256 bits, stored hashed,
+  // rotated on every send. Never an order_number + email lookup (the removed
+  // /orders/lookup was exactly that). Viewable at any status once a quote has
+  // gone out, so the client can see the outcome; answering is `quote_sent`
+  // only. Rate-limited like /orders/request: every call is a query, and the
+  // answers send mail.
+  app.get(
+    '/orders/quote/:token',
+    {
+      schema: { params: quoteTokenParamsSchema },
+      config: { rateLimit: ORDER_REQUEST_RATE_LIMIT },
+    },
+    async (request, reply) => {
+      const found = await findOrderByQuoteToken(pool, request.params.token)
+      if (!found) return quoteNotFound(reply)
+      return { order: await getCustomerOrder(pool, { id: found.id }) }
+    }
+  )
+
+  for (const [action, accept] of [
+    ['accept', true],
+    ['reject', false],
+  ]) {
+    app.post(
+      `/orders/quote/:token/${action}`,
+      {
+        schema: { params: quoteTokenParamsSchema, body: quoteAnswerBodySchema },
+        config: { rateLimit: ORDER_REQUEST_RATE_LIMIT },
+      },
+      async (request, reply) => {
+        const found = await findOrderByQuoteToken(pool, request.params.token)
+        if (!found) return quoteNotFound(reply)
+        // The link holder is the client, but not necessarily a signed-in one;
+        // the trail says "Client" without naming an account.
+        return answerQuote(request, reply, { orderId: found.id, accept, userId: null })
+      }
+    )
+
+    // The same answer from My Account. Ownership in SQL: another client's
+    // order number is a 404, exactly like one that does not exist.
+    app.post(
+      `/orders/mine/:order_number/${action}`,
+      {
+        preHandler: app.guards.requireAuth,
+        schema: { params: orderNumberParamsSchema, body: quoteAnswerBodySchema },
+      },
+      async (request, reply) => {
+        const found = await findUserOrderByNumber(pool, {
+          userId: request.user.id,
+          orderNumber: request.params.order_number,
+        })
+        if (!found) {
+          reply.code(404)
+          return { error: 'Not Found', message: `No order ${request.params.order_number}.` }
+        }
+        return answerQuote(request, reply, {
+          orderId: found.id,
+          accept,
+          userId: request.user.id,
+        })
+      }
+    )
+  }
 
 }

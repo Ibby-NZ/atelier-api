@@ -372,6 +372,11 @@ describe('product categories', () => {
           label: `${PREFIX} Matting`,
         })
       ).json()
+      // A range rate is keyed on a house's name, so the house must exist.
+      await pool.query(
+        `INSERT INTO brands (name, slug, currency) VALUES ($1, $1, 'NZD') ON CONFLICT DO NOTHING`,
+        [`${PREFIX}-range`]
+      )
 
       const created = await inject('POST', '/admin/freight/rates', backofficeCookie, {
         range_name: `${PREFIX}-range`,

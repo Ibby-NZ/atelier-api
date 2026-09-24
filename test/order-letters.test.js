@@ -36,7 +36,7 @@ const db = { query: async () => ({ rows: [] }) }
 const ORDER = Object.freeze({
   order_number: 'SO-100',
   kind: 'manual',
-  status: 'confirmed',
+  status: 'pending_payment',
   xero_invoice_ref: 'INV-100',
   guest_email: 'client@test.example',
   user_id: null,
@@ -106,13 +106,21 @@ describe('the standing copy (ORDER_COPY_EMAIL)', () => {
 
 describe('currentStatusTemplate — what "Resend" sends', () => {
   it('re-sends the letter for where the order stands', () => {
-    expect(currentStatusTemplate({ status: 'requested', kind: 'manual' })).toBe('order_confirmed')
-    expect(currentStatusTemplate({ status: 'requested', kind: 'order_request' })).toBe('request_received')
-    expect(currentStatusTemplate({ status: 'requested', kind: 'backorder_request' })).toBe('request_received')
-    expect(currentStatusTemplate({ status: 'confirmed', kind: 'manual' })).toBe('order_invoiced')
+    expect(currentStatusTemplate({ status: 'quote_requested', kind: 'manual' })).toBe('order_confirmed')
+    expect(currentStatusTemplate({ status: 'quote_requested', kind: 'order_request' })).toBe('request_received')
+    expect(currentStatusTemplate({ status: 'quote_requested', kind: 'backorder_request' })).toBe('request_received')
+    expect(currentStatusTemplate({ status: 'quote_sent', kind: 'manual' })).toBe('quote_sent')
+    expect(currentStatusTemplate({ status: 'back_order', kind: 'manual' })).toBe('order_back_ordered')
+    expect(currentStatusTemplate({ status: 'pending_payment', kind: 'manual' })).toBe('order_invoiced')
     expect(currentStatusTemplate({ status: 'paid', kind: 'checkout' })).toBe('payment_received')
     expect(currentStatusTemplate({ status: 'shipped', kind: 'manual' })).toBe('shipped')
-    expect(currentStatusTemplate({ status: 'declined', kind: 'manual' })).toBe('order_cancelled')
+    expect(currentStatusTemplate({ status: 'cancelled', kind: 'manual' })).toBe('order_cancelled')
+  })
+
+  it('has nothing to re-send for a status with no letter of its own', () => {
+    for (const status of ['quote_accepted', 'quote_rejected', 'processing', 'completed', 'refunded']) {
+      expect(currentStatusTemplate({ status, kind: 'manual' }), status).toBeNull()
+    }
   })
 })
 

@@ -16,20 +16,22 @@ export const ORDER_LETTERS = Object.freeze(['details', 'status'])
 
 /**
  * The letter that says where an order stands NOW — what "Resend" sends. A
- * status an order MOVED to has its transition letter; `requested` is the
+ * status an order MOVED to has its transition letter; `quote_requested` is the
  * status an order is created in, so its letter is the creation one: the
  * office's own sales order was confirmed to the client at creation, a
- * storefront request was acknowledged.
+ * storefront request was acknowledged. Null for a status with no letter of its
+ * own (the client's quote answer, the office's bookkeeping moves) — there is
+ * nothing to re-send, and the route says so.
  *
  * @param {{ status: string, kind: string }} order
- * @returns {string}
+ * @returns {string|null}
  */
 export const currentStatusTemplate = (order) =>
-  order.status === 'requested'
+  order.status === 'quote_requested'
     ? order.kind === 'manual'
       ? 'order_confirmed'
       : 'request_received'
-    : TRANSITION_TEMPLATES[order.status]
+    : (TRANSITION_TEMPLATES[order.status] ?? null)
 
 // $297.00 — the currency is named once, on the grand total.
 const money = (cents) => `$${(Number(cents ?? 0) / 100).toFixed(2)}`
@@ -131,11 +133,14 @@ export const orderDetailsData = (order) => ({
  * @param {{ query: Function }} db
  * @param {object} order the admin order shape (with `gst` for 'details')
  * @param {'details'|'status'} letter
+ * @param {{ quote_url?: string|null }} [extra] spread into a status letter's
+ *   data — the `quote_url` a re-sent quote carries (notifyOrderTransition's rule)
  * @returns {Promise<{ template: string, sent: string[], failed: string[] }>}
  */
-export const sendOrderLetter = async (mailer, db, order, letter) => {
+export const sendOrderLetter = async (mailer, db, order, letter, extra = {}) => {
   const template = letter === 'details' ? 'order_details' : currentStatusTemplate(order)
-  const data = letter === 'details' ? orderDetailsData(order) : statusLetterData(order)
+  const data =
+    letter === 'details' ? orderDetailsData(order) : { ...statusLetterData(order), ...extra }
   const sent = []
   const failed = []
   // In turn, not in parallel — the notifyOrderTransition rule.

@@ -3,6 +3,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { createMailer } from '../src/email/mailer.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'ord-test'
@@ -164,7 +165,7 @@ describe('POST /orders/request', () => {
     expect(response.statusCode).toBe(201)
     const { order } = response.json()
     expect(order.kind).toBe('order_request')
-    expect(order.status).toBe('requested')
+    expect(order.status).toBe('quote_requested')
     expect(order.order_number).toMatch(/^REQ-/)
     expect(order.lines[0].cut_requirements).toBe('One 12m cut')
 
@@ -413,5 +414,215 @@ describe('POST /orders/request', () => {
 
     const row = await orderRow(pool, order.id)
     expect(row.subtotal_cents).toBe(0)
+  })
+})
+
+// The client's answer to a quote (24 Sep 2026). The office sends the quote from
+// the CRM; the letter carries a signed link a guest answers from, and a
+// signed-in client can answer from My Account. The token is read from the
+// captured letter — never from the database, which holds only its hash.
+//
+// A fresh app per case: the public quote routes are rate limited (10 / 15 min
+// per IP, per route, per app instance), and so is register.
+describe('the client answers a quote', () => {
+  let pool
+  let app
+  let sent
+  let staffCookie
+
+  const inject = (method, url, { cookie, payload } = {}) =>
+    app.inject({ method, url, headers: cookie ? { cookie } : {}, payload })
+
+  const tokenFrom = (letter) => letter.text.match(/quote\?token=([A-Za-z0-9_-]+)/)[1]
+
+  // A guest's request for the in-stock (catalogue-priced) design, quoted by
+  // the office. Returns the order and the raw token from the quote letter.
+  const quotedRequest = async ({ cookie } = {}) => {
+    const placed = await inject('POST', '/orders/request', {
+      cookie,
+      payload: {
+        lines: [{ sku: SKU.inStock, qty_metres: 2 }],
+        ...(cookie ? {} : { contact: { email: `${PREFIX}-guest@example.com` } }),
+      },
+    })
+    expect(placed.statusCode).toBe(201)
+    const order = placed.json().order
+    const quoted = await inject('POST', `/admin/orders/${order.id}/status`, {
+      cookie: staffCookie,
+      payload: { status: 'quote_sent' },
+    })
+    expect(quoted.statusCode).toBe(200)
+    const letter = sent.find((message) => message.subject.includes('your quote for'))
+    return { order, token: tokenFrom(letter) }
+  }
+
+  const eventsFor = async (id) =>
+    (
+      await pool.query(
+        `SELECT to_status, actor_kind, actor_user_id, note FROM order_events
+          WHERE order_id = $1 ORDER BY id`,
+        [id]
+      )
+    ).rows
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    pool = createPool(config.databaseUrl)
+    await runner({
+      databaseUrl: config.databaseUrl,
+      dir: 'migrations',
+      direction: 'up',
+      migrationsTable: 'pgmigrations',
+      log: () => {},
+    })
+  })
+
+  beforeEach(async () => {
+    await cleanup(pool)
+    await seedFixtures(pool)
+    sent = []
+    app = buildApp({
+      pool,
+      cookieSecret: TEST_COOKIE_SECRET,
+      logger: false,
+      storeBaseUrl: 'https://store.test',
+      mailer: createMailer({
+        transport: { sendMail: async (message) => sent.push(message) },
+        from: 'Atelier <no-reply@test.example>',
+        backofficeEmail: 'office@test.example',
+      }),
+    })
+    await app.ready()
+    staffCookie = await registerCookie(app, `${PREFIX}-staff@example.com`)
+    await pool.query(`UPDATE users SET role = 'backoffice' WHERE email = $1`, [
+      `${PREFIX}-staff@example.com`,
+    ])
+  })
+
+  afterEach(async () => {
+    await app.close()
+  })
+
+  afterAll(async () => {
+    await cleanup(pool)
+    await pool.end()
+  })
+
+  it('accepts by the emailed link, once, and tells the office', async () => {
+    const { order, token } = await quotedRequest()
+
+    // The link lands on the storefront, and the table holds only its hash.
+    const letter = sent.find((message) => message.subject.includes('your quote for'))
+    expect(letter.text).toContain(`https://store.test/quote?token=${token}`)
+    const row = await orderRow(pool, order.id)
+    expect(row.quote_token_hash).toMatch(/^[0-9a-f]{64}$/)
+    expect(row.quote_token_hash).not.toBe(token)
+
+    const view = await inject('GET', `/orders/quote/${token}`)
+    expect(view.statusCode).toBe(200)
+    expect(view.json().order).toMatchObject({ order_number: order.order_number, status: 'quote_sent' })
+    // The customer shape: none of the office's own fields.
+    expect(view.json().order.notes).toBeUndefined()
+    expect(view.json().order.events).toBeUndefined()
+
+    sent.length = 0
+    const accept = await inject('POST', `/orders/quote/${token}/accept`)
+    expect(accept.statusCode).toBe(200)
+    expect(accept.json().order.status).toBe('quote_accepted')
+    expect((await eventsFor(order.id)).at(-1)).toEqual({
+      to_status: 'quote_accepted',
+      actor_kind: 'customer',
+      actor_user_id: null,
+      note: null,
+    })
+    const alert = sent.find((message) => message.to === 'office@test.example')
+    expect(alert.subject).toBe(`Quote accepted: ${order.order_number}`)
+    expect(alert.replyTo).toBe(`${PREFIX}-guest@example.com`)
+    // The client did it — no letter to them.
+    expect(sent.some((message) => message.to === `${PREFIX}-guest@example.com`)).toBe(false)
+
+    const again = await inject('POST', `/orders/quote/${token}/accept`)
+    expect(again.statusCode).toBe(409)
+  })
+
+  it('rejects by the link only with a reason, which the office then sees', async () => {
+    const { order, token } = await quotedRequest()
+
+    const blank = await inject('POST', `/orders/quote/${token}/reject`, {
+      payload: { reason: '   ' },
+    })
+    expect(blank.statusCode).toBe(422)
+    expect(blank.json().errors).toEqual([
+      { field: 'reason', message: 'Tell us why so we can re-quote.' },
+    ])
+    expect((await orderRow(pool, order.id)).status).toBe('quote_sent')
+
+    sent.length = 0
+    const reject = await inject('POST', `/orders/quote/${token}/reject`, {
+      payload: { reason: '  Too dear for this job  ' },
+    })
+    expect(reject.statusCode).toBe(200)
+    expect(reject.json().order.status).toBe('quote_rejected')
+
+    const admin = await inject('GET', `/admin/orders/${order.id}`, { cookie: staffCookie })
+    expect(admin.json().order.quote_rejection_reason).toBe('Too dear for this job')
+    const alert = sent.find((message) => message.to === 'office@test.example')
+    expect(alert.subject).toBe(`Quote rejected: ${order.order_number}`)
+    expect(alert.text).toContain('Reason: Too dear for this job')
+
+    // A made-up token matches nothing.
+    expect((await inject('GET', '/orders/quote/not-a-real-token')).statusCode).toBe(404)
+    expect((await inject('POST', '/orders/quote/not-a-real-token/accept')).statusCode).toBe(404)
+  })
+
+  it('a re-quote rotates the link and clears the rejection once accepted', async () => {
+    const { order, token } = await quotedRequest()
+    await inject('POST', `/orders/quote/${token}/reject`, { payload: { reason: 'Wrong colour' } })
+
+    sent.length = 0
+    const requote = await inject('POST', `/admin/orders/${order.id}/status`, {
+      cookie: staffCookie,
+      payload: { status: 'quote_sent' },
+    })
+    expect(requote.statusCode).toBe(200)
+    // Still shown while the new quote is out — it is what the office re-quoted from.
+    expect(requote.json().order.quote_rejection_reason).toBe('Wrong colour')
+    const fresh = tokenFrom(sent.find((message) => message.subject.includes('your quote for')))
+    expect(fresh).not.toBe(token)
+    expect((await inject('GET', `/orders/quote/${token}`)).statusCode).toBe(404)
+
+    await inject('POST', `/orders/quote/${fresh}/accept`)
+    const admin = await inject('GET', `/admin/orders/${order.id}`, { cookie: staffCookie })
+    expect(admin.json().order.quote_rejection_reason).toBeNull()
+  })
+
+  it('answers from My Account for the owner only', async () => {
+    const ownerCookie = await registerCookie(app, `${PREFIX}-owner@example.com`)
+    const otherCookie = await registerCookie(app, `${PREFIX}-other@example.com`)
+    const { order } = await quotedRequest({ cookie: ownerCookie })
+
+    const stranger = await inject('POST', `/orders/mine/${order.order_number}/accept`, {
+      cookie: otherCookie,
+    })
+    expect(stranger.statusCode).toBe(404)
+    expect((await inject('POST', `/orders/mine/${order.order_number}/accept`)).statusCode).toBe(
+      401
+    )
+
+    const reject = await inject('POST', `/orders/mine/${order.order_number}/reject`, {
+      cookie: ownerCookie,
+      payload: { reason: 'Need it sooner' },
+    })
+    expect(reject.statusCode).toBe(200)
+    expect(reject.json().order.status).toBe('quote_rejected')
+    const { rows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [
+      `${PREFIX}-owner@example.com`,
+    ])
+    expect((await eventsFor(order.id)).at(-1)).toEqual({
+      to_status: 'quote_rejected',
+      actor_kind: 'customer',
+      actor_user_id: rows[0].id,
+      note: 'Need it sooner',
+    })
   })
 })

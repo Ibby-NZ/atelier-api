@@ -166,7 +166,7 @@ describe('C18 sample lines on purchase orders', () => {
   const placeOrder = async (qty = 10) => {
     const { rows: orders } = await pool.query(
       `INSERT INTO orders (order_number, kind, status, guest_email)
-       VALUES ($1, 'manual', 'confirmed', 'buyer@po-sampleval-test.example.com')
+       VALUES ($1, 'manual', 'pending_payment', 'buyer@po-sampleval-test.example.com')
        RETURNING id`,
       [`${PREFIX}-SO-${Math.random().toString(36).slice(2, 10)}`]
     )

@@ -92,11 +92,17 @@ describe('email templates', () => {
         // orders, and the office's own copy of it (Sept 2026).
         'supplier_invoice_request',
         'backoffice_supplier_invoice_request',
+        // The sales-order lifecycle overhaul (24 Sep 2026): the quote going
+        // out with its accept/reject link, the back-order notice, and the
+        // office's alert when the client answers a quote.
+        'quote_sent',
+        'order_back_ordered',
+        'backoffice_quote_answered',
       ])
     )
     // The count is the tripwire: arrayContaining passes on a superset, so
     // without it a template added and never listed above goes unnoticed.
-    expect(TEMPLATE_NAMES).toHaveLength(30)
+    expect(TEMPLATE_NAMES).toHaveLength(33)
   })
 
   it('backoffice_new_trade_application names the business and links the CRM applicants tab', () => {
@@ -355,11 +361,13 @@ describe('notifications', () => {
   it('notifyOrderTransition maps every status an order moves to onto a letter', async () => {
     const db = { query: async () => ({ rows: [] }) }
     const cases = [
-      { status: 'confirmed', subject: 'invoice for order REQ-8' },
+      { status: 'quote_sent', subject: 'your quote for REQ-8 is ready' },
+      { status: 'back_order', subject: 'order REQ-8 is on back order' },
+      { status: 'pending_payment', subject: 'invoice for order REQ-8' },
       { status: 'paid', subject: 'payment received for order REQ-8' },
       { status: 'shipped', subject: 'order REQ-8 has shipped' },
       // "Cancel order" in the CRM — it used to send nothing (23 Sep 2026).
-      { status: 'declined', subject: 'order REQ-8 has been cancelled' },
+      { status: 'cancelled', subject: 'order REQ-8 has been cancelled' },
     ]
     for (const { status, subject } of cases) {
       const { transport, mailer } = buildMailer()
@@ -375,15 +383,38 @@ describe('notifications', () => {
       expect(transport.sent[0].subject).toContain(subject)
     }
 
-    // `requested` is the status an order is CREATED in; creation has its own
-    // letter (notifyOrderCreated), so there is no transition to announce.
+    // `quote_requested` is the status an order is CREATED in (creation has its
+    // own letter, notifyOrderCreated); the client's own answers and the
+    // office's bookkeeping moves have no letter either.
+    for (const status of [
+      'quote_requested',
+      'quote_accepted',
+      'quote_rejected',
+      'processing',
+      'completed',
+      'refunded',
+    ]) {
+      const { transport, mailer } = buildMailer()
+      await notifyOrderTransition(mailer, db, {
+        order_number: 'REQ-8',
+        status,
+        guest_email: 'buyer@test.example',
+      })
+      expect(transport.sent).toHaveLength(0)
+    }
+  })
+
+  it('carries the quote link into the quote_sent letter', async () => {
+    const db = { query: async () => ({ rows: [] }) }
     const { transport, mailer } = buildMailer()
-    await notifyOrderTransition(mailer, db, {
-      order_number: 'REQ-8',
-      status: 'requested',
-      guest_email: 'buyer@test.example',
-    })
-    expect(transport.sent).toHaveLength(0)
+    await notifyOrderTransition(
+      mailer,
+      db,
+      { order_number: 'REQ-9', status: 'quote_sent', guest_email: 'buyer@test.example' },
+      { quote_url: 'https://store.example/quote?token=abc' }
+    )
+    expect(transport.sent).toHaveLength(1)
+    expect(transport.sent[0].text).toContain('https://store.example/quote?token=abc')
   })
 
   // 23 Sep 2026: "when the status changes on a sales order, an email is sent to
@@ -442,7 +473,7 @@ describe('notifications', () => {
     const db = { query: async () => ({ rows: [] }) }
     await notifyOrderTransition(mailer, db, {
       order_number: 'SO-79',
-      status: 'confirmed',
+      status: 'pending_payment',
       xero_invoice_ref: 'INV-79',
       guest_email: null,
       user_id: null,
@@ -539,8 +570,8 @@ describe('notifications', () => {
     expect(transport.sent[0].text).toContain('shopper@test.example')
   })
 
-  // FR-121: confirming must not re-send the mail the client got at creation.
-  it('the confirm transition sends a different message from the creation one', async () => {
+  // FR-121: invoicing must not re-send the mail the client got at creation.
+  it('the move to pending_payment sends a different message from the creation one', async () => {
     const db = { query: async () => ({ rows: [] }) }
     const order = {
       order_number: 'SO-9',
@@ -554,7 +585,7 @@ describe('notifications', () => {
     const confirmed = buildMailer()
     await notifyOrderTransition(confirmed.mailer, db, {
       ...order,
-      status: 'confirmed',
+      status: 'pending_payment',
       xero_invoice_ref: 'INV-1',
     })
 
@@ -778,12 +809,12 @@ describe('order-request trigger wiring', () => {
       headers: { cookie: backofficeCookie },
       payload,
     })
-  const move = (id, action, payload = {}) =>
+  const move = (id, status, payload = {}) =>
     app.inject({
       method: 'POST',
-      url: `/admin/orders/${id}/${action}`,
+      url: `/admin/orders/${id}/status`,
       headers: { cookie: backofficeCookie },
-      payload,
+      payload: { status, ...payload },
     })
 
   it('a status change reaches the client, the sales rep and every added address — once each', async () => {
@@ -810,7 +841,7 @@ describe('order-request trigger wiring', () => {
     ])
 
     transport.sent.length = 0
-    const confirmed = await move(order.id, 'confirm', { xero_invoice_ref: 'INV-EMAIL-1' })
+    const confirmed = await move(order.id, 'pending_payment', { xero_invoice_ref: 'INV-EMAIL-1' })
     expect(confirmed.statusCode).toBe(200)
     expect(transport.sent.map((m) => m.to)).toEqual([
       'walkin@email-test.example',
@@ -829,7 +860,7 @@ describe('order-request trigger wiring', () => {
     await patchOrder(order.id, { notify_emails: ['pa@client.email-test.example'] })
     transport.sent.length = 0
 
-    const declined = await move(order.id, 'decline')
+    const declined = await move(order.id, 'cancelled')
     expect(declined.statusCode).toBe(200)
     expect(transport.sent.map((m) => m.to)).toEqual([
       'walkin@email-test.example',
@@ -841,9 +872,9 @@ describe('order-request trigger wiring', () => {
 
   it('the Emails list is an annotation: it saves on a shipped order', async () => {
     const order = await keyOrder()
-    expect((await move(order.id, 'confirm', { xero_invoice_ref: 'INV-EMAIL-2' })).statusCode).toBe(200)
-    expect((await move(order.id, 'mark-paid')).statusCode).toBe(200)
-    expect((await move(order.id, 'ship')).statusCode).toBe(200)
+    expect((await move(order.id, 'pending_payment', { xero_invoice_ref: 'INV-EMAIL-2' })).statusCode).toBe(200)
+    expect((await move(order.id, 'paid')).statusCode).toBe(200)
+    expect((await move(order.id, 'shipped')).statusCode).toBe(200)
 
     const saved = await patchOrder(order.id, { notify_emails: ['late@client.email-test.example'] })
     expect(saved.statusCode).toBe(200)
@@ -882,7 +913,7 @@ describe('order-request trigger wiring', () => {
 
       await pool.query('UPDATE users SET archived_at = now() WHERE id = $1', [rows[0].id])
       transport.sent.length = 0
-      const confirmed = await move(order.id, 'confirm', { xero_invoice_ref: 'INV-EMAIL-3' })
+      const confirmed = await move(order.id, 'pending_payment', { xero_invoice_ref: 'INV-EMAIL-3' })
       expect(confirmed.json().order.sales_rep_email).toBeNull()
       // Still the seller of record — reports keep them — just no longer mailed.
       expect(confirmed.json().order.sales_rep_user_id).toBe(rows[0].id)
@@ -932,9 +963,11 @@ describe('order-request trigger wiring', () => {
       expect((await sendLetter(order.id, 'status')).json().template).toBe('order_confirmed')
       expect(transport.sent[0].subject).toContain(`order ${order.order_number} confirmed`)
 
-      await move(order.id, 'confirm', { xero_invoice_ref: 'INV-RESEND' })
-      await move(order.id, 'mark-paid')
-      await move(order.id, 'ship', { tracking_url: 'https://track.example/resend' })
+      expect((await move(order.id, 'pending_payment', { xero_invoice_ref: 'INV-RESEND' })).statusCode).toBe(200)
+      expect((await move(order.id, 'paid')).statusCode).toBe(200)
+      expect(
+        (await move(order.id, 'shipped', { tracking_url: 'https://track.example/resend' })).statusCode
+      ).toBe(200)
       transport.sent.length = 0
       const response = await sendLetter(order.id, 'status')
       expect(response.statusCode).toBe(200)
@@ -944,6 +977,32 @@ describe('order-request trigger wiring', () => {
       // Nothing moved: a resend is a letter, not a transition.
       const { rows } = await pool.query('SELECT status FROM orders WHERE id = $1', [order.id])
       expect(rows[0].status).toBe('shipped')
+    })
+
+    it('re-sends a quote with a fresh accept/reject link, retiring the old one', async () => {
+      const order = await keyOrder()
+      expect((await move(order.id, 'quote_sent')).statusCode).toBe(200)
+      const linkIn = (message) => message.text.match(/\/quote\?token=\S+/)?.[0]
+      const first = linkIn(transport.sent.at(-1))
+      expect(first).toBeTruthy()
+
+      transport.sent.length = 0
+      const response = await sendLetter(order.id, 'status')
+      expect(response.statusCode).toBe(200)
+      expect(response.json().template).toBe('quote_sent')
+      const second = linkIn(transport.sent[0])
+      expect(second).toBeTruthy()
+      expect(second).not.toBe(first)
+    })
+
+    it('refuses to re-send at a status with no letter of its own', async () => {
+      const order = await keyOrder()
+      expect((await move(order.id, 'processing')).statusCode).toBe(200)
+      transport.sent.length = 0
+      const response = await sendLetter(order.id, 'status')
+      expect(response.statusCode).toBe(422)
+      expect(response.json().message).toContain('no letter')
+      expect(transport.sent).toHaveLength(0)
     })
 
     it('refuses order details while a line is unpriced, before anything is sent', async () => {
@@ -1011,9 +1070,9 @@ describe('order-request trigger wiring', () => {
         copied.transport.sent.length = 0
         const confirmed = await withCopy.inject({
           method: 'POST',
-          url: `/admin/orders/${order.id}/confirm`,
+          url: `/admin/orders/${order.id}/status`,
           headers: { cookie: backofficeCookie },
-          payload: { xero_invoice_ref: 'INV-COPY' },
+          payload: { status: 'pending_payment', xero_invoice_ref: 'INV-COPY' },
         })
         expect(confirmed.statusCode).toBe(200)
         expect(copied.transport.sent.map((m) => m.to)).toEqual([

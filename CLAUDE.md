@@ -21,7 +21,7 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 - Tests run migrations themselves via the programmatic runner: `import runner from 'node-pg-migrate'` with `{ databaseUrl, dir: 'migrations', direction: 'up', migrationsTable: 'pgmigrations', log: () => {} }`. Runner returns the array of applied migrations — empty array proves a re-run is a no-op.
 - `vitest.config.js` sets `fileParallelism: false` — the runner takes a Postgres advisory lock, so parallel test files throw "Another migration is already running". Keep it serialized.
 - Schema: one `inventory` row per colourway (`colourway_id` unique). Check constraints: `products.product_type IN ('fabric','finished_good')`, `inventory.unit IN ('metres','units')`. Upsert targets for the seed: `brands.slug`, `products.slug`, `colourways.sku`, `collections (brand_id, slug)` — all unique.
-- Commerce schema: `users.role IN ('customer','trade','backoffice','director')` (default `customer`), `orders.kind IN ('checkout','order_request','backorder_request')`, `orders.status IN ('requested','confirmed','paid','shipped','declined')`. `order_lines.colourway_id` is `ON DELETE RESTRICT` (commerce records survive catalogue cleanup); `orders.user_id` is `SET NULL` (guest orders keep `guest_email`). Shipping seed upsert key: `shipping_rates (zone, threshold_qty)` unique.
+- Commerce schema: `users.role IN ('customer','trade','backoffice','director')` (default `customer`), `orders.kind IN ('checkout','order_request','backorder_request')`, `orders.status IN ('quote_requested','quote_sent','quote_accepted','quote_rejected','back_order','processing','pending_payment','paid','shipped','completed','cancelled','refunded')` (migration `1791638400000`; the machine is `src/orders/order-states.js`, every move writes `order_events`). `order_lines.colourway_id` is `ON DELETE RESTRICT` (commerce records survive catalogue cleanup); `orders.user_id` is `SET NULL` (guest orders keep `guest_email`). Shipping seed upsert key: `shipping_rates (zone, threshold_qty)` unique.
 
 ## Auth
 
@@ -71,7 +71,7 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 The deep per-domain docs live in nested CLAUDE.md files that load automatically when working in that directory. **Read the relevant one BEFORE editing that area** — each records invariants and confirmed regressions, not style preferences:
 
 - `src/catalogue/CLAUDE.md` — public catalogue, admin catalogue CRUD, trade PRICE vs trade VISIBILITY gates, collections, featured ranking
-- `src/orders/CLAUDE.md` — order requests, history, back-office state machine + reservation model
+- `src/orders/CLAUDE.md` — order requests, history, the sales-order lifecycle (quote → paid → shipped, one status route, audit trail, quote links) + reservation model
 - `src/checkout/CLAUDE.md` — Stripe checkout (no client prices; 422 rules)
 - `src/webhooks/CLAUDE.md` — Stripe webhook (raw body, idempotency ledger, server-side money re-resolution)
 - `src/shipping/CLAUDE.md` — flat-rate quotes + tier upserts

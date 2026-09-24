@@ -325,7 +325,7 @@ export const createOrderRequest = async (
          (user_id, guest_email, order_number, kind, status,
           subtotal_cents, shipping_cents, total_cents, notes,
           contact_phone, client_reference, customer_po_number, shipping_address)
-       VALUES ($1, $2, $3, $4, 'requested', $5, 0, $5, $6, $7, $8, $9, $10)
+       VALUES ($1, $2, $3, $4, 'quote_requested', $5, 0, $5, $6, $7, $8, $9, $10)
        RETURNING id, order_number, kind, status`,
       [
         userId,

@@ -133,7 +133,7 @@ describe('W13 purchase orders', () => {
   const placeOrder = async (sku, qty = 10, orderNumber = `${PREFIX}-SO`) => {
     const { rows: orders } = await pool.query(
       `INSERT INTO orders (order_number, kind, status, guest_email)
-       VALUES ($1, 'manual', 'confirmed', 'buyer@po-test.example.com')
+       VALUES ($1, 'manual', 'pending_payment', 'buyer@po-test.example.com')
        RETURNING id`,
       [`${orderNumber}-${Math.random().toString(36).slice(2, 10)}`]
     )
@@ -527,6 +527,59 @@ describe('W13 purchase orders', () => {
         new Set([first.orderLineId, second.orderLineId])
       )
       expect(line.allocations.map((a) => a.qty).sort((x, y) => x - y)).toEqual([15, 25])
+    })
+
+    // The order page's "Create purchase order" (24 Sep 2026): the run narrowed
+    // to named sales orders, each moved to back_order through the one
+    // transition — unless the machine will not move it.
+    it('narrows a run to named orders and moves each to back_order, with an audit row', async () => {
+      const named = await placeOrder(SKU.alpha, 25)
+      const other = await placeOrder(SKU.alpha, 15)
+
+      const response = await generate({ order_ids: [named.orderId] })
+      expect(response.statusCode).toBe(201)
+      const [line] = response.json().purchase_orders[0].lines
+      expect(line.allocations.map((a) => a.order_line_id)).toEqual([named.orderLineId])
+      expect(response.json().not_moved).toEqual([])
+
+      const { rows } = await pool.query(`SELECT id, status FROM orders WHERE id = ANY($1)`, [
+        [named.orderId, other.orderId],
+      ])
+      const statusOf = new Map(rows.map((row) => [row.id, row.status]))
+      expect(statusOf.get(named.orderId)).toBe('back_order')
+      // The order nobody named is untouched and still open demand.
+      expect(statusOf.get(other.orderId)).toBe('pending_payment')
+
+      const { rows: events } = await pool.query(
+        `SELECT from_status, to_status, actor_kind FROM order_events WHERE order_id = $1`,
+        [named.orderId]
+      )
+      expect(events).toEqual([
+        { from_status: 'pending_payment', to_status: 'back_order', actor_kind: 'staff' },
+      ])
+    })
+
+    it('raises the purchase order for a paid order but leaves it paid, and says so', async () => {
+      const paid = await placeOrder(SKU.alpha, 5)
+      await pool.query(`UPDATE orders SET status = 'paid' WHERE id = $1`, [paid.orderId])
+
+      const response = await generate({ order_ids: [paid.orderId] })
+      expect(response.statusCode).toBe(201)
+      expect(response.json().purchase_orders).toHaveLength(1)
+      expect(response.json().not_moved).toEqual([
+        { order_number: expect.any(String), status: 'paid' },
+      ])
+      const { rows } = await pool.query(`SELECT status FROM orders WHERE id = $1`, [paid.orderId])
+      expect(rows[0].status).toBe('paid')
+    })
+
+    it('counts a quote nobody has priced as demand to buy against', async () => {
+      const quote = await placeOrder(SKU.alpha, 5)
+      await pool.query(`UPDATE orders SET status = 'quote_requested' WHERE id = $1`, [quote.orderId])
+      const response = await generate({ order_ids: [quote.orderId] })
+      expect(response.json().purchase_orders).toHaveLength(1)
+      const { rows } = await pool.query(`SELECT status FROM orders WHERE id = $1`, [quote.orderId])
+      expect(rows[0].status).toBe('back_order')
     })
 
     it('reports a house with no supplier instead of guessing one', async () => {
@@ -985,7 +1038,7 @@ describe('W13 purchase orders', () => {
       // The reservation must NOT have been handed back by beforeDelete: the
       // refusal rolls the whole transaction back.
       const { rows } = await pool.query('SELECT status FROM orders WHERE id = $1', [orderId])
-      expect(rows[0].status).toBe('confirmed')
+      expect(rows[0].status).toBe('pending_payment')
     })
 
     it('still blocks the order delete after the purchase order is cancelled', async () => {

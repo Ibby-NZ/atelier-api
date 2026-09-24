@@ -158,6 +158,9 @@ export const adminXeroRoutes = async (app, { pool, xero, crmBaseUrl }) => {
       return answer(reply, async () => {
         const result = await xero.pushOrderInvoice(request.params.id, {
           email: request.body?.email === true,
+          // The push moves the order to pending_payment; the audit row names
+          // the staffer who pressed the button.
+          actor: { kind: 'staff', userId: request.user.id },
         })
         if (!result) {
           reply.code(404)

@@ -101,7 +101,7 @@ describe('back-office order management', () => {
   const inject = (method, url, cookie, payload) =>
     app.inject({ method, url, headers: cookie ? { cookie } : {}, payload })
 
-  // Place a fresh in-stock order-request (status=requested, reservation held).
+  // Place a fresh in-stock order-request (status=quote_requested, reservation held).
   //
   // Calls the service DIRECTLY rather than POSTing to /orders/request, which is
   // the same reason the enquiry-delete block in test/contact.test.js INSERTs its
@@ -116,8 +116,8 @@ describe('back-office order management', () => {
   // test/orders.test.js, and this app is built with no mailer anyway.
   //
   // The line is PRICED before it is handed back (through the real PATCH, so the
-  // money is recomputed the way the office's edit would): `confirm` and
-  // `mark-paid` refuse a $0.00 line, and most of this file drives the fixture
+  // money is recomputed the way the office's edit would): `quote_sent`,
+  // `pending_payment` and `paid` refuse a $0.00 line, and most of this file drives the fixture
   // through them. Pass `{ unitPriceCents: 0 }` to get the raw storefront state.
   const placeRequest = async (qty = 10, { unitPriceCents = 1000 } = {}) => {
     const { order } = await createOrderRequest(pool, {
@@ -239,7 +239,7 @@ describe('back-office order management', () => {
       expect(shipped.json().orders.some((o) => o.id === placed.id)).toBe(false)
       const requested = await inject(
         'GET',
-        '/admin/orders?status=requested',
+        '/admin/orders?status=quote_requested',
         backofficeCookie
       )
       expect(requested.json().orders.some((o) => o.id === placed.id)).toBe(true)
@@ -296,78 +296,196 @@ describe('back-office order management', () => {
     })
   })
 
-  describe('full lifecycle', () => {
-    it('runs requested -> confirmed -> paid -> shipped and converts the reservation', async () => {
+  // The one status route (24 Sep 2026): every move the office makes, checked by
+  // the machine in src/orders/order-states.js, with the stock settled on the
+  // TRANSITION and an audit row for every move.
+  describe('POST /admin/orders/:id/status', () => {
+    const move = (id, status, extra = {}) =>
+      inject('POST', `/admin/orders/${id}/status`, backofficeCookie, { status, ...extra })
+
+    const eventsFor = async (id) =>
+      (
+        await pool.query(
+          `SELECT from_status, to_status, actor_kind, actor_user_id, note
+             FROM order_events WHERE order_id = $1 ORDER BY id`,
+          [id]
+        )
+      ).rows
+
+    const bossId = async () =>
+      (await pool.query(`SELECT id FROM users WHERE email = $1`, [testEmail('boss')])).rows[0].id
+
+    it('runs quote → accepted → processing → invoiced → paid → shipped → completed, converting the reservation', async () => {
       const placed = await placeRequest(10)
-      expect((await inventoryFor(pool, SKU.inStock))).toEqual({
-        available: 100,
-        reserved: 10,
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({ available: 100, reserved: 10 })
+
+      for (const status of ['quote_sent', 'quote_accepted', 'processing']) {
+        const response = await move(placed.id, status)
+        expect(response.statusCode).toBe(200)
+        expect(response.json().order.status).toBe(status)
+      }
+
+      const invoiced = await move(placed.id, 'pending_payment', {
+        xero_invoice_ref: 'INV-2026-001',
       })
+      expect(invoiced.json().order.status).toBe('pending_payment')
+      expect(invoiced.json().order.xero_invoice_ref).toBe('INV-2026-001')
 
-      const confirm = await inject(
-        'POST',
-        `/admin/orders/${placed.id}/confirm`,
-        backofficeCookie,
-        { xero_invoice_ref: 'INV-2026-001' }
-      )
-      expect(confirm.statusCode).toBe(200)
-      expect(confirm.json().order.status).toBe('confirmed')
-      expect(confirm.json().order.xero_invoice_ref).toBe('INV-2026-001')
-
-      const paid = await inject(
-        'POST',
-        `/admin/orders/${placed.id}/mark-paid`,
-        backofficeCookie
-      )
+      const paid = await move(placed.id, 'paid')
       expect(paid.json().order.status).toBe('paid')
       // Reservation still held through payment.
       expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
 
-      const ship = await inject(
-        'POST',
-        `/admin/orders/${placed.id}/ship`,
-        backofficeCookie
-      )
-      expect(ship.json().order.status).toBe('shipped')
-      expect(ship.json().order.reservation_state).toBe('converted')
+      const shipped = await move(placed.id, 'shipped')
+      expect(shipped.json().order.status).toBe('shipped')
+      expect(shipped.json().order.reservation_state).toBe('converted')
       // Reservation converted to a real decrement.
-      expect(await inventoryFor(pool, SKU.inStock)).toEqual({
-        available: 90,
-        reserved: 0,
-      })
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({ available: 90, reserved: 0 })
+
+      const completed = await move(placed.id, 'completed')
+      expect(completed.json().order.reservation_state).toBe('converted')
+      // Completing touches no stock.
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({ available: 90, reserved: 0 })
     })
 
-    it('declines a requested order and releases its reservation', async () => {
+    it('writes an audit row for every move, naming the staffer and the note', async () => {
+      const placed = await placeRequest(10)
+      await move(placed.id, 'quote_sent', { note: '  Priced off the trade list  ' })
+      await move(placed.id, 'back_order')
+
+      const events = await eventsFor(placed.id)
+      const boss = await bossId()
+      expect(events).toEqual([
+        {
+          from_status: 'quote_requested',
+          to_status: 'quote_sent',
+          actor_kind: 'staff',
+          actor_user_id: boss,
+          note: 'Priced off the trade list',
+        },
+        {
+          from_status: 'quote_sent',
+          to_status: 'back_order',
+          actor_kind: 'staff',
+          actor_user_id: boss,
+          note: null,
+        },
+      ])
+
+      // …and serves them on the order, newest first, with the staffer's name.
+      const order = (await inject('GET', `/admin/orders/${placed.id}`, backofficeCookie)).json()
+        .order
+      expect(order.events.map((event) => event.to_status)).toEqual(['back_order', 'quote_sent'])
+      expect(order.events[0].actor_name).toBe('Boss')
+      expect(order.quote_rejection_reason).toBeNull()
+    })
+
+    it('stamps quote_sent_at when the quote goes out', async () => {
+      const placed = await placeRequest(10)
+      await move(placed.id, 'quote_sent')
+      const { rows } = await pool.query(`SELECT quote_sent_at FROM orders WHERE id = $1`, [
+        placed.id,
+      ])
+      expect(rows[0].quote_sent_at).toBeInstanceOf(Date)
+    })
+
+    it('cancels a quote and releases its reservation', async () => {
       const placed = await placeRequest(15)
       expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(15)
 
-      const decline = await inject(
-        'POST',
-        `/admin/orders/${placed.id}/decline`,
-        backofficeCookie
+      const cancel = await move(placed.id, 'cancelled')
+      expect(cancel.statusCode).toBe(200)
+      expect(cancel.json().order.status).toBe('cancelled')
+      expect(cancel.json().order.reservation_state).toBe('released')
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({ available: 100, reserved: 0 })
+    })
+
+    it('releases the reservation when a processing order is cancelled', async () => {
+      const placed = await placeRequest(12)
+      await move(placed.id, 'processing')
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(12)
+
+      expect((await move(placed.id, 'cancelled')).statusCode).toBe(200)
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({ available: 100, reserved: 0 })
+    })
+
+    it('releases the reservation when a paid order is refunded before it ships', async () => {
+      const placed = await placeRequest(8)
+      await move(placed.id, 'pending_payment')
+      await move(placed.id, 'paid')
+
+      const refund = await move(placed.id, 'refunded')
+      expect(refund.statusCode).toBe(200)
+      expect(refund.json().order.reservation_state).toBe('released')
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({ available: 100, reserved: 0 })
+    })
+
+    it('touches no stock when a shipped order is refunded — it already left', async () => {
+      const placed = await placeRequest(8)
+      await move(placed.id, 'pending_payment')
+      await move(placed.id, 'paid')
+      await move(placed.id, 'shipped')
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({ available: 92, reserved: 0 })
+
+      expect((await move(placed.id, 'refunded')).statusCode).toBe(200)
+      expect(await inventoryFor(pool, SKU.inStock)).toEqual({ available: 92, reserved: 0 })
+    })
+
+    it('takes an invoice move without a Xero reference', async () => {
+      const placed = await placeRequest(10)
+      const response = await move(placed.id, 'pending_payment')
+      expect(response.statusCode).toBe(200)
+      expect(response.json().order.xero_invoice_ref).toBeNull()
+    })
+
+    it('refuses a move the machine does not list with 409, touching nothing', async () => {
+      const placed = await placeRequest(10)
+      const response = await move(placed.id, 'shipped')
+      expect(response.statusCode).toBe(409)
+      expect(response.json().message).toBe(
+        'Cannot move an order from "quote_requested" to "shipped".'
       )
-      expect(decline.statusCode).toBe(200)
-      expect(decline.json().order.status).toBe('declined')
-      expect(decline.json().order.reservation_state).toBe('released')
-      expect(await inventoryFor(pool, SKU.inStock)).toEqual({
-        available: 100,
-        reserved: 0,
+      // Reservation untouched and no audit row for the refused move.
+      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
+      expect(await eventsFor(placed.id)).toEqual([])
+    })
+
+    it('refuses to move a cancelled order anywhere', async () => {
+      const placed = await placeRequest(10)
+      await move(placed.id, 'cancelled')
+      expect((await move(placed.id, 'quote_sent')).statusCode).toBe(409)
+      expect((await move(placed.id, 'cancelled')).statusCode).toBe(409)
+    })
+
+    it('rejects an unknown status with 400', async () => {
+      const placed = await placeRequest(10)
+      // A word retired by the overhaul is not a status any more.
+      expect((await move(placed.id, 'confirmed')).statusCode).toBe(400)
+    })
+
+    it('answers 404 for an unknown order', async () => {
+      expect((await move(99999999, 'quote_sent')).statusCode).toBe(404)
+    })
+
+    it('rejects a non-backoffice caller with 403', async () => {
+      const placed = await placeRequest(10)
+      const response = await inject('POST', `/admin/orders/${placed.id}/status`, customerCookie, {
+        status: 'quote_sent',
       })
+      expect(response.statusCode).toBe(403)
     })
   })
 
   // A4 (Userback 8367567). "Your order has shipped" was the whole letter: the
   // office had nowhere to put the courier link, so it went out in a mail
   // somebody typed by hand, or nowhere.
-  describe('POST /admin/orders/:id/ship — the tracking URL', () => {
+  describe('moving to shipped — the tracking URL', () => {
     const TRACKING = 'https://tracking.courier.test/parcel/ABC123'
 
     const paidOrder = async () => {
       const placed = await placeRequest(10)
-      await inject('POST', `/admin/orders/${placed.id}/confirm`, backofficeCookie, {
-        xero_invoice_ref: 'INV-TRACK',
-      })
-      await inject('POST', `/admin/orders/${placed.id}/mark-paid`, backofficeCookie)
+      await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, { status: 'pending_payment', xero_invoice_ref: 'INV-TRACK' })
+      await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, { status: 'paid' })
       return placed
     }
 
@@ -392,9 +510,9 @@ describe('back-office order management', () => {
       try {
         const response = await mailed.inject({
           method: 'POST',
-          url: `/admin/orders/${id}/ship`,
+          url: `/admin/orders/${id}/status`,
           headers: { cookie: backofficeCookie },
-          payload,
+          payload: { status: 'shipped', ...payload },
         })
         return { response, sent }
       } finally {
@@ -446,12 +564,7 @@ describe('back-office order management', () => {
     it('refuses a tracking URL that is not http(s) with 400, and ships nothing', async () => {
       const placed = await paidOrder()
 
-      const response = await inject(
-        'POST',
-        `/admin/orders/${placed.id}/ship`,
-        backofficeCookie,
-        { tracking_url: 'javascript:alert(1)' }
-      )
+      const response = await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, { status: 'shipped', tracking_url: 'javascript:alert(1)' })
 
       expect(response.statusCode).toBe(400)
       const order = (
@@ -486,11 +599,9 @@ describe('back-office order management', () => {
       const placed = await placeRequest(10)
       const order = (await inject('GET', `/admin/orders/${placed.id}`, backofficeCookie))
         .json().order
-      await inject('POST', `/admin/orders/${placed.id}/confirm`, backofficeCookie, {
-        xero_invoice_ref: 'INV-X',
-      })
-      await inject('POST', `/admin/orders/${placed.id}/mark-paid`, backofficeCookie)
-      await inject('POST', `/admin/orders/${placed.id}/ship`, backofficeCookie)
+      await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, { status: 'pending_payment', xero_invoice_ref: 'INV-X' })
+      await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, { status: 'paid' })
+      await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, { status: 'shipped' })
 
       const response = await inject('PATCH', `/admin/orders/${placed.id}`, backofficeCookie, {
         lines: [{ id: order.lines[0].id, qty: 5 }],
@@ -499,79 +610,53 @@ describe('back-office order management', () => {
     })
   })
 
-  describe('invalid transitions (409)', () => {
-    it('rejects ship before paid', async () => {
-      const placed = await placeRequest(10)
-      const response = await inject(
-        'POST',
-        `/admin/orders/${placed.id}/ship`,
-        backofficeCookie
-      )
-      expect(response.statusCode).toBe(409)
-      // Reservation untouched by the rejected transition.
-      expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
-    })
-
-    it('rejects confirming an already-confirmed order', async () => {
-      const placed = await placeRequest(10)
-      await inject('POST', `/admin/orders/${placed.id}/confirm`, backofficeCookie, {
-        xero_invoice_ref: 'INV-1',
-      })
-      const again = await inject(
-        'POST',
-        `/admin/orders/${placed.id}/confirm`,
-        backofficeCookie,
-        { xero_invoice_ref: 'INV-2' }
-      )
-      expect(again.statusCode).toBe(409)
-    })
-
-    it('rejects mark-paid before confirm', async () => {
-      const placed = await placeRequest(10)
-      const response = await inject(
-        'POST',
-        `/admin/orders/${placed.id}/mark-paid`,
-        backofficeCookie
-      )
-      expect(response.statusCode).toBe(409)
-    })
-  })
-
   // A storefront request arrives with every line at $0.00 — "not priced yet",
-  // not "free" — and used to confirm and invoice at nil. The money transitions
-  // refuse until every line is priced (422, not 409: it is a business rule,
-  // not a wrong state), naming the count so the desk knows what is left.
+  // not "free" — and used to confirm and invoice at nil. The moves that state a
+  // price (quote_sent, pending_payment, paid) refuse until every line is priced
+  // (422, not 409: it is a business rule, not a wrong state), naming the count
+  // so the desk knows what is left.
   describe('unpriced lines (422)', () => {
     const orderFor = async (id) =>
       (await inject('GET', `/admin/orders/${id}`, backofficeCookie)).json().order
 
-    it('refuses to confirm while any line is unpriced and names the count', async () => {
+    it('refuses to send a quote while any line is unpriced and names the count', async () => {
       const placed = await placeRequest(10, { unitPriceCents: 0 })
       await inject('PATCH', `/admin/orders/${placed.id}`, backofficeCookie, {
         add_lines: [{ colourway_id: colourwayId.get(SKU.second), qty: 1, unit_price_cents: 0 }],
       })
-      const response = await inject('POST', `/admin/orders/${placed.id}/confirm`, backofficeCookie, {
-        xero_invoice_ref: 'INV-1',
+      const response = await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, {
+        status: 'quote_sent',
       })
       expect(response.statusCode).toBe(422)
-      expect(response.json().message).toMatch(/2 lines are still at \$0\.00/)
-      expect((await orderFor(placed.id)).status).toBe('requested')
+      expect(response.json().message).toMatch(/send the quote — 2 lines are still at \$0\.00/)
+      expect((await orderFor(placed.id)).status).toBe('quote_requested')
     })
 
-    it('refuses mark-paid after a confirmed order was zeroed back', async () => {
+    it('lets an unpriced order go on back order — no price is stated', async () => {
+      const placed = await placeRequest(10, { unitPriceCents: 0 })
+      const response = await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, {
+        status: 'back_order',
+      })
+      expect(response.statusCode).toBe(200)
+    })
+
+    it('refuses paid after an invoiced order was zeroed back', async () => {
       const placed = await placeRequest(10)
-      const confirmed = await inject('POST', `/admin/orders/${placed.id}/confirm`, backofficeCookie, {
+      const invoiced = await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, {
+        status: 'pending_payment',
         xero_invoice_ref: 'INV-1',
       })
-      expect(confirmed.statusCode).toBe(200)
-      // A price edit is still allowed at `confirmed`.
+      expect(invoiced.statusCode).toBe(200)
+      // A price edit is still allowed at `pending_payment`.
       await inject('PATCH', `/admin/orders/${placed.id}`, backofficeCookie, {
         lines: [{ id: placed.lines[0].id, unit_price_cents: 0 }],
       })
-      const response = await inject('POST', `/admin/orders/${placed.id}/mark-paid`, backofficeCookie)
+      const response = await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, {
+        status: 'paid',
+      })
       expect(response.statusCode).toBe(422)
       expect(response.json().message).toMatch(/1 line is still at \$0\.00/)
-      expect((await orderFor(placed.id)).status).toBe('confirmed')
+      expect((await orderFor(placed.id)).status).toBe('pending_payment')
     })
   })
 
@@ -602,7 +687,7 @@ describe('back-office order management', () => {
       expect(response.statusCode).toBe(201)
       const order = response.json().order
       expect(order.kind).toBe('manual')
-      expect(order.status).toBe('requested')
+      expect(order.status).toBe('quote_requested')
       expect(order.order_number).toMatch(/^SO-[0-9A-F]{8}$/)
       expect(order.user_id).toBe(rows[0].id)
       // An account's address lives on the account; duplicating it here goes stale.
@@ -847,14 +932,14 @@ describe('back-office order management', () => {
     // phone call, what the client asked for on the doorstep — arrives once the
     // order is paid or shipped. A guard that refuses it there sends it to
     // somebody's notebook instead. `notes` ALONE is the whole relaxation.
-    describe('notes past confirmed', () => {
-      const advanceTo = async (id, ...verbs) => {
-        for (const verb of verbs) {
+    describe('notes past pending_payment', () => {
+      const advanceTo = async (id, ...statuses) => {
+        for (const status of statuses) {
           const response = await inject(
             'POST',
-            `/admin/orders/${id}/${verb}`,
+            `/admin/orders/${id}/status`,
             backofficeCookie,
-            { xero_invoice_ref: 'INV-NOTES' }
+            { status, xero_invoice_ref: 'INV-NOTES' }
           )
           expect(response.statusCode).toBe(200)
         }
@@ -862,7 +947,7 @@ describe('back-office order management', () => {
 
       it('accepts a notes-only patch on a paid order', async () => {
         const placed = await placeRequest(10)
-        await advanceTo(placed.id, 'confirm', 'mark-paid')
+        await advanceTo(placed.id, 'pending_payment', 'paid')
 
         const response = await patch(placed.id, { notes: 'Courier called, left with reception.' })
 
@@ -873,7 +958,7 @@ describe('back-office order management', () => {
 
       it('accepts a notes-only patch on a shipped order', async () => {
         const placed = await placeRequest(10)
-        await advanceTo(placed.id, 'confirm', 'mark-paid', 'ship')
+        await advanceTo(placed.id, 'pending_payment', 'paid', 'shipped')
 
         const response = await patch(placed.id, { notes: 'Client rang to say it arrived.' })
 
@@ -887,7 +972,7 @@ describe('back-office order management', () => {
       it('keeps the status guard for every other body', async () => {
         const placed = await placeRequest(10)
         const order = await orderFor(placed.id)
-        await advanceTo(placed.id, 'confirm', 'mark-paid')
+        await advanceTo(placed.id, 'pending_payment', 'paid')
 
         const withCompany = await patch(placed.id, {
           notes: 'Courier called.',
@@ -913,13 +998,13 @@ describe('back-office order management', () => {
     // and the packing slip prints this address, so it stays editable until the
     // order ships. Like notes, it is one key wide.
     describe('delivery details', () => {
-      const advanceTo = async (id, ...verbs) => {
-        for (const verb of verbs) {
+      const advanceTo = async (id, ...statuses) => {
+        for (const status of statuses) {
           const response = await inject(
             'POST',
-            `/admin/orders/${id}/${verb}`,
+            `/admin/orders/${id}/status`,
             backofficeCookie,
-            { xero_invoice_ref: 'INV-DELIVERY' }
+            { status, xero_invoice_ref: 'INV-DELIVERY' }
           )
           expect(response.statusCode).toBe(200)
         }
@@ -957,7 +1042,7 @@ describe('back-office order management', () => {
 
       it('is accepted on a paid order and leaves the money exactly as it was', async () => {
         const placed = await placeRequest(10)
-        await advanceTo(placed.id, 'confirm', 'mark-paid')
+        await advanceTo(placed.id, 'pending_payment', 'paid')
         const before = await orderFor(placed.id)
 
         const response = await patch(placed.id, { shipping_address: DELIVERY })
@@ -975,7 +1060,7 @@ describe('back-office order management', () => {
       it('is refused once the order has shipped, and writes nothing', async () => {
         const placed = await placeRequest(10)
         await patch(placed.id, { shipping_address: DELIVERY })
-        await advanceTo(placed.id, 'confirm', 'mark-paid', 'ship')
+        await advanceTo(placed.id, 'pending_payment', 'paid', 'shipped')
 
         const response = await patch(placed.id, {
           shipping_address: { ...DELIVERY, line1: '1 Somewhere Else' },
@@ -1013,7 +1098,7 @@ describe('back-office order management', () => {
       it('keeps the status guard when the address travels with anything else', async () => {
         const placed = await placeRequest(10)
         const order = await orderFor(placed.id)
-        await advanceTo(placed.id, 'confirm', 'mark-paid')
+        await advanceTo(placed.id, 'pending_payment', 'paid')
 
         const response = await patch(placed.id, {
           shipping_address: DELIVERY,
@@ -1072,15 +1157,16 @@ describe('back-office order management', () => {
   describe('DELETE /admin/orders/:id', () => {
     const del = (id) => inject('DELETE', `/admin/orders/${id}`, backofficeCookie)
 
-    const advance = async (id, ...verbs) => {
-      for (const verb of verbs) {
-        await inject('POST', `/admin/orders/${id}/${verb}`, backofficeCookie, {
+    const advance = async (id, ...statuses) => {
+      for (const status of statuses) {
+        await inject('POST', `/admin/orders/${id}/status`, backofficeCookie, {
+          status,
           xero_invoice_ref: 'INV-DEL',
         })
       }
     }
 
-    it('deletes a requested order and hands its reservation back', async () => {
+    it('deletes a quote and hands its reservation back', async () => {
       const placed = await placeRequest(10)
       expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
 
@@ -1096,18 +1182,18 @@ describe('back-office order management', () => {
       expect(after.statusCode).toBe(404)
     })
 
-    it('deletes a confirmed order and releases its reservation', async () => {
+    it('deletes an invoiced-by-hand order and releases its reservation', async () => {
       const placed = await placeRequest(6)
-      await advance(placed.id, 'confirm')
+      await advance(placed.id, 'pending_payment')
 
       expect((await del(placed.id)).statusCode).toBe(200)
       expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(0)
     })
 
-    it('deletes a declined order without releasing its reservation twice', async () => {
+    it('deletes a cancelled order without releasing its reservation twice', async () => {
       const placed = await placeRequest(10)
-      await advance(placed.id, 'decline')
-      // Decline already handed the stock back.
+      await advance(placed.id, 'cancelled')
+      // Cancelling already handed the stock back.
       expect(await inventoryFor(pool, SKU.inStock)).toEqual({
         available: 100,
         reserved: 0,
@@ -1133,7 +1219,7 @@ describe('back-office order management', () => {
 
     it('refuses a paid order with 409 and offers archiving instead', async () => {
       const placed = await placeRequest(10)
-      await advance(placed.id, 'confirm', 'mark-paid')
+      await advance(placed.id, 'pending_payment', 'paid')
 
       const response = await del(placed.id)
 
@@ -1153,14 +1239,14 @@ describe('back-office order management', () => {
 
     it('refuses a shipped order with 409', async () => {
       const placed = await placeRequest(10)
-      await advance(placed.id, 'confirm', 'mark-paid', 'ship')
+      await advance(placed.id, 'pending_payment', 'paid', 'shipped')
       expect((await del(placed.id)).statusCode).toBe(409)
     })
 
     it('refuses a card checkout with 409 whatever its status', async () => {
       const { rows } = await pool.query(
         `INSERT INTO orders (order_number, kind, status, guest_email)
-         VALUES ($1, 'checkout', 'requested', 'buyer@example.com')
+         VALUES ($1, 'checkout', 'quote_requested', 'buyer@example.com')
          RETURNING id`,
         [`${PREFIX}-CHK`]
       )
@@ -1209,7 +1295,7 @@ describe('back-office order management', () => {
   // must therefore sum the demand per colourway. `UPDATE … FROM order_lines`
   // updates a target row once however many lines match it, so the reservation
   // would be taken twice and handed back once, stranding stock permanently and
-  // silently. All three moves (ship, decline, delete) are asserted, because they
+  // silently. All three moves (ship, cancel, delete) are asserted, because they
   // are three copies of the same statement.
   describe('an order with two lines on one colourway', () => {
     const twoLinesOn = async (sku, first, second) => {
@@ -1229,10 +1315,10 @@ describe('back-office order management', () => {
       expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(10)
     })
 
-    it('releases everything it reserved when declined', async () => {
+    it('releases everything it reserved when cancelled', async () => {
       const order = await twoLinesOn(SKU.inStock, 4, 6)
 
-      await inject('POST', `/admin/orders/${order.id}/decline`, backofficeCookie)
+      await inject('POST', `/admin/orders/${order.id}/status`, backofficeCookie, { status: 'cancelled' })
 
       expect(await inventoryFor(pool, SKU.inStock)).toEqual({
         available: 100,
@@ -1242,12 +1328,10 @@ describe('back-office order management', () => {
 
     it('draws down the SUM of both lines when shipped', async () => {
       const order = await twoLinesOn(SKU.inStock, 4, 6)
-      await inject('POST', `/admin/orders/${order.id}/confirm`, backofficeCookie, {
-        xero_invoice_ref: 'INV-DOUBLE',
-      })
-      await inject('POST', `/admin/orders/${order.id}/mark-paid`, backofficeCookie)
+      await inject('POST', `/admin/orders/${order.id}/status`, backofficeCookie, { status: 'pending_payment', xero_invoice_ref: 'INV-DOUBLE' })
+      await inject('POST', `/admin/orders/${order.id}/status`, backofficeCookie, { status: 'paid' })
 
-      await inject('POST', `/admin/orders/${order.id}/ship`, backofficeCookie)
+      await inject('POST', `/admin/orders/${order.id}/status`, backofficeCookie, { status: 'shipped' })
 
       // 10 metres left the shelf, not 4 or 6.
       expect(await inventoryFor(pool, SKU.inStock)).toEqual({
@@ -1278,7 +1362,7 @@ describe('back-office order management', () => {
       })
       expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(15)
 
-      await inject('POST', `/admin/orders/${placed.id}/decline`, backofficeCookie)
+      await inject('POST', `/admin/orders/${placed.id}/status`, backofficeCookie, { status: 'cancelled' })
       expect((await inventoryFor(pool, SKU.inStock)).reserved).toBe(0)
     })
   })
@@ -1350,14 +1434,12 @@ describe('back-office order management', () => {
 
       // The whole reason these two columns exist is that the number arrives
       // late — often in an email after the client has already paid. A guard
-      // that refuses it past `confirmed` would make the feature unusable at
+      // that refuses it past `pending_payment` would make the feature unusable at
       // exactly the moment it is needed.
       it('records a PO number on a paid order, but still refuses a line edit', async () => {
         const order = await placeWith(`${TAG} pays-first`)
-        await inject('POST', `/admin/orders/${order.id}/confirm`, backofficeCookie, {
-          xero_invoice_ref: 'INV-LATE-PO',
-        })
-        await inject('POST', `/admin/orders/${order.id}/mark-paid`, backofficeCookie)
+        await inject('POST', `/admin/orders/${order.id}/status`, backofficeCookie, { status: 'pending_payment', xero_invoice_ref: 'INV-LATE-PO' })
+        await inject('POST', `/admin/orders/${order.id}/status`, backofficeCookie, { status: 'paid' })
 
         const late = await patch(order.id, { customer_po_number: 'PO-LATE-1' })
         expect(late.statusCode).toBe(200)
@@ -1366,7 +1448,7 @@ describe('back-office order management', () => {
 
         // An annotation is not a licence to edit the commercial terms: money,
         // lines and the reservation stay frozen once an order is paid. (A note
-        // on its own IS allowed past confirmed — A4, covered above — so the
+        // on its own IS allowed past pending_payment — A4, covered above — so the
         // frozen half is proved with a line edit, which is the half that moves
         // money.)
         const lines = await patch(order.id, {
@@ -1467,7 +1549,7 @@ describe('back-office order management', () => {
       it('narrows with status at the same time', async () => {
         const order = await placeWith(`${TAG} statused`)
         expect(
-          (await list(`?reference=${TAG}&status=requested`)).json().orders.map((o) => o.id)
+          (await list(`?reference=${TAG}&status=quote_requested`)).json().orders.map((o) => o.id)
         ).toEqual([order.id])
         expect(
           (await list(`?reference=${TAG}&status=shipped`)).json().orders
@@ -1526,7 +1608,7 @@ describe('back-office order management', () => {
       repId = rows[0].id
     })
 
-    it('sets, serves and clears the rep on a requested order', async () => {
+    it('sets, serves and clears the rep on a quote', async () => {
       const order = await placeRequest()
       const patched = await inject('PATCH', `/admin/orders/${order.id}`, backofficeCookie, {
         sales_rep_user_id: repId,
@@ -1585,7 +1667,7 @@ describe('back-office order management', () => {
 
   describe('price type (trade or retail)', () => {
     // The basis the order was priced off. A commercial term, not an annotation:
-    // it sits behind the requested/confirmed guard like a price edit does.
+    // it sits behind the LINE_EDIT_STATUSES guard like a price edit does.
     it('defaults to retail and is patched to trade', async () => {
       const order = await placeRequest()
       const read = await inject('GET', `/admin/orders/${order.id}`, backofficeCookie)
@@ -1647,7 +1729,7 @@ describe('back-office order management', () => {
       const third = await placeRequest()
       await pool.query(`UPDATE orders SET status = 'paid' WHERE id = $1`, [first.id])
       await pool.query(`UPDATE orders SET status = 'shipped' WHERE id = $1`, [second.id])
-      await pool.query(`UPDATE orders SET status = 'declined' WHERE id = $1`, [third.id])
+      await pool.query(`UPDATE orders SET status = 'cancelled' WHERE id = $1`, [third.id])
 
       const response = await inject(
         'GET',
@@ -1662,9 +1744,9 @@ describe('back-office order management', () => {
 
     it('still takes a single status as before', async () => {
       const order = await placeRequest()
-      await pool.query(`UPDATE orders SET status = 'confirmed' WHERE id = $1`, [order.id])
-      const response = await inject('GET', '/admin/orders?status=confirmed', backofficeCookie)
-      expect(response.json().orders.map((row) => row.status)).toEqual(['confirmed'])
+      await pool.query(`UPDATE orders SET status = 'pending_payment' WHERE id = $1`, [order.id])
+      const response = await inject('GET', '/admin/orders?status=pending_payment', backofficeCookie)
+      expect(response.json().orders.map((row) => row.status)).toEqual(['pending_payment'])
     })
 
     it('refuses an unknown member of the set', async () => {
@@ -1683,12 +1765,12 @@ describe('back-office order management', () => {
       expect(response.statusCode).toBe(404)
     })
 
-    it('returns 404 when confirming an unknown order id', async () => {
+    it('returns 404 when moving an unknown order id', async () => {
       const response = await inject(
         'POST',
-        '/admin/orders/99999999/confirm',
+        '/admin/orders/99999999/status',
         backofficeCookie,
-        { xero_invoice_ref: 'INV-Z' }
+        { status: 'pending_payment', xero_invoice_ref: 'INV-Z' }
       )
       expect(response.statusCode).toBe(404)
     })

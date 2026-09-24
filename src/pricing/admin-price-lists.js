@@ -264,11 +264,19 @@ export const createPriceListItem = async (pool, input) => {
   const codeNormalized = deriveNormalizedCode(input.code)
   try {
     const { rows } = await pool.query(
+      // `supplier_id` is resolved here from the name, the same normalised
+      // match (then alias) the supplier backfill uses, so a rate keyed by hand
+      // against a supplier the CRM picked is linked at once rather than after
+      // the next backfill. An unknown name stays NULL, as an import would.
       `INSERT INTO price_list_items
          (supplier, product_range, category, code, code_normalized, description,
           contents, unit, width, "repeat", vertical_repeat, duty_class,
-          wholesale_rate, currency, freight_class, date_effective, source_file)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          wholesale_rate, currency, freight_class, date_effective, source_file,
+          supplier_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+         COALESCE(
+           (SELECT id FROM suppliers WHERE lower(btrim(name)) = lower(btrim($1))),
+           (SELECT supplier_id FROM supplier_aliases WHERE lower(btrim(alias)) = lower(btrim($1)))))
        RETURNING id`,
       [
         input.supplier,

@@ -115,7 +115,7 @@ describe('back-office catalogue admin', () => {
     orderSeq += 1
     const { rows } = await pool.query(
       `INSERT INTO orders (order_number, kind, status)
-            VALUES ($1, 'order_request', 'requested')
+            VALUES ($1, 'order_request', 'quote_requested')
          RETURNING id`,
       [`${PREFIX}-order-${orderSeq}`]
     )

@@ -63,6 +63,7 @@ import {
   NOT_INVOICED_COVERAGE_NOTE,
   INVOICEABLE_KINDS,
 } from '../src/reports/not-invoiced.js'
+import { INVOICEABLE_STATUSES } from '../src/orders/order-states.js'
 import {
   REVENUE_STATUSES,
   SCOPE_NAME,
@@ -647,8 +648,8 @@ describe('report access and masking', () => {
 // bound params — so everything except "does Postgres accept it" is provable
 // here. That half lives in test/admin-reports.test.js.
 describe('the revenue scope', () => {
-  it('defaults the population to paid and shipped, and says so in one constant', () => {
-    expect([...REVENUE_STATUSES]).toEqual(['paid', 'shipped'])
+  it('defaults the population to paid, shipped and completed, and says so in one constant', () => {
+    expect([...REVENUE_STATUSES]).toEqual(['paid', 'shipped', 'completed'])
     expect(Object.isFrozen(REVENUE_STATUSES)).toBe(true)
   })
 
@@ -657,17 +658,17 @@ describe('the revenue scope', () => {
 
     expect(cte).toContain('o.status = ANY($1::text[])')
     expect(cte).not.toContain("'paid'")
-    expect(params).toEqual([['paid', 'shipped']])
+    expect(params).toEqual([['paid', 'shipped', 'completed']])
   })
 
   // Overridable, and by REPLACEMENT: intersecting the two would answer
-  // status=requested with zero rows, which reads as "no trade".
+  // status=quote_requested with zero rows, which reads as "no trade".
   it('lets a status filter replace the default population rather than narrow it', () => {
-    const { cte, params } = buildRevenueScope(parseReportFilters({ status: 'requested' }))
+    const { cte, params } = buildRevenueScope(parseReportFilters({ status: 'quote_requested' }))
 
     expect(cte).toContain('o.status = $1')
     expect(cte).not.toContain('ANY($1::text[])')
-    expect(params).toEqual(['requested'])
+    expect(params).toEqual(['quote_requested'])
   })
 
   it('keeps every kind, so a request-kind line is in the population', () => {
@@ -694,7 +695,7 @@ describe('the revenue scope', () => {
     const filters = parseReportFilters({ brand: 'pierre-frey', from: '2026-01-01' })
     const { cte, params } = buildRevenueScope(filters)
 
-    expect(params).toEqual([['paid', 'shipped'], '2026-01-01', ['pierre-frey']])
+    expect(params).toEqual([['paid', 'shipped', 'completed'], '2026-01-01', ['pierre-frey']])
     expect(cte).toContain('o.created_at >= $2::date')
     expect(cte).toContain('b.slug = ANY($3::text[])')
   })
@@ -704,7 +705,7 @@ describe('the revenue scope', () => {
     const { cte, params } = buildRevenueScope({}, { params: existing })
 
     expect(cte).toContain('o.status = ANY($2::text[])')
-    expect(params).toEqual(['a-report-of-its-own', ['paid', 'shipped']])
+    expect(params).toEqual(['a-report-of-its-own', ['paid', 'shipped', 'completed']])
     expect(existing).toEqual(['a-report-of-its-own'])
   })
 
@@ -1197,11 +1198,14 @@ describe('W5-US-007 — stock and not-invoiced, declared', () => {
       expect(NOT_INVOICED_COVERAGE_NOTE).toMatch(/never what it is worth/)
     })
 
-    // An order is awaiting an invoice from the moment it is placed, so the
-    // revenue scope's paid/shipped default is the wrong window for it.
-    it('covers every live status and not the declined one', () => {
-      expect([...NOT_INVOICED_STATUSES]).toEqual(['requested', 'confirmed', 'paid', 'shipped'])
-      expect(NOT_INVOICED_STATUSES).not.toContain('declined')
+    // An order is awaiting an invoice from the moment the client accepts the
+    // quote, so the revenue scope's paid/shipped default is the wrong window
+    // for it — and it is the Xero push's own set, so the two cannot disagree.
+    it('covers the invoiceable statuses: no unaccepted quote, nothing cancelled', () => {
+      expect(NOT_INVOICED_STATUSES).toBe(INVOICEABLE_STATUSES)
+      for (const excluded of ['quote_requested', 'quote_sent', 'quote_rejected', 'cancelled', 'refunded']) {
+        expect(NOT_INVOICED_STATUSES).not.toContain(excluded)
+      }
       for (const status of NOT_INVOICED_STATUSES) {
         expect(ORDER_STATUSES).toContain(status)
       }
@@ -1242,10 +1246,10 @@ describe('W5-US-007 — stock and not-invoiced, declared', () => {
     })
 
     it('lets a status filter replace a report’s own default, never intersect it', () => {
-      const filters = parseReportFilters({ status: 'confirmed' })
+      const filters = parseReportFilters({ status: 'pending_payment' })
       const { cte, params } = buildRevenueScope(filters, { statuses: NOT_INVOICED_STATUSES })
 
-      expect(params).toEqual(['confirmed'])
+      expect(params).toEqual(['pending_payment'])
       expect(cte).not.toContain('ANY($1::text[])')
     })
 

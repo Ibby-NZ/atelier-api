@@ -125,7 +125,7 @@ describe('GET /admin/reports/sales-by-rep', () => {
     colourwayId = cwRows[0].id
 
     // Rebecca: two paid orders (three lines) in August 2026. Unassigned: one
-    // paid order. A requested order stays outside the revenue population.
+    // paid order. A quote_requested order stays outside the revenue population.
     const paid1 = await insertOrder('r1', 'paid', '2026-08-05 12:00:00', rebeccaId)
     await insertLine(paid1, 2, 5000)
     await insertLine(paid1, 1, 10000)
@@ -133,7 +133,7 @@ describe('GET /admin/reports/sales-by-rep', () => {
     await insertLine(paid2, 1, 30000)
     const orphan = await insertOrder('u1', 'paid', '2026-08-10 12:00:00', null)
     await insertLine(orphan, 1, 7000)
-    const requested = await insertOrder('req', 'requested', '2026-08-11 12:00:00', rebeccaId)
+    const requested = await insertOrder('req', 'quote_requested', '2026-08-11 12:00:00', rebeccaId)
     await insertLine(requested, 1, 0)
   })
 

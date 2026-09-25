@@ -553,6 +553,32 @@ export const findScopedTierId = async (pool, supplierId, termsId, tierId) => {
   return rows[0]?.id ?? null
 }
 
+/**
+ * Remove a tier, scoped to its terms row and that row's supplier in the
+ * deleting statement — the house page's discount classes, written as a whole
+ * set. A product that had chosen the tier falls back to category matching
+ * (`product_discount_tiers` CASCADEs), which is why the house page shows the
+ * count first. Returns whether a row went.
+ *
+ * @param {{ query: Function }} db
+ * @param {number} supplierId
+ * @param {number} termsId
+ * @param {number} tierId
+ * @returns {Promise<boolean>}
+ */
+export const deleteSupplierDiscountTier = async (db, supplierId, termsId, tierId) => {
+  const { rowCount } = await db.query(
+    `DELETE FROM supplier_discount_tiers
+      USING supplier_brand_terms
+      WHERE supplier_discount_tiers.supplier_brand_term_id = supplier_brand_terms.id
+        AND supplier_discount_tiers.id = $1
+        AND supplier_brand_terms.id = $2
+        AND supplier_brand_terms.supplier_id = $3`,
+    [tierId, termsId, supplierId]
+  )
+  return rowCount > 0
+}
+
 // ---------------------------------------------------------------------------
 // The SUPPLIER-level rate (suppliers.default_discount)
 //

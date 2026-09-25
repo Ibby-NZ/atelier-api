@@ -306,6 +306,9 @@ export const adminFreightRoutes = async (app, { pool }) => {
             supplier_id: { type: 'integer', minimum: 1 },
             range_name: { type: 'string', minLength: 1, maxLength: 200 },
             category: categoryProp,
+            // The letter the rate is for; absent or blank is every class. The
+            // module raises the case and refuses anything else in words.
+            freight_class: { type: ['string', 'null'], maxLength: 1 },
             basis: { type: 'string', enum: [...FREIGHT_BASES] },
             rate: { type: 'number', minimum: 0 },
             unit: { type: 'string', enum: [...FREIGHT_UNITS] },

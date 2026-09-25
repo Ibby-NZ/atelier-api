@@ -96,3 +96,24 @@ export const getProductTierId = async (db, productId, brandId) => {
   }
   return product.tier_id ?? null
 }
+
+/**
+ * How many products chose each of the given tiers — the house page says so
+ * before a discount class is removed, because removing it sends those products
+ * back to category matching.
+ *
+ * @param {{ query: Function }} db
+ * @param {number[]} tierIds
+ * @returns {Promise<Map<number, number>>} tier id -> products
+ */
+export const countProductsByTier = async (db, tierIds) => {
+  if (tierIds.length === 0) return new Map()
+  const { rows } = await db.query(
+    `SELECT tier_id, count(*)::int AS products
+       FROM product_discount_tiers
+      WHERE tier_id = ANY($1::int[])
+      GROUP BY tier_id`,
+    [tierIds]
+  )
+  return new Map(rows.map((row) => [row.tier_id, row.products]))
+}

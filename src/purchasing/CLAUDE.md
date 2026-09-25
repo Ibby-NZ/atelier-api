@@ -47,9 +47,10 @@ receipted against and closed. Four tables —
   (`po_email`, `agent`, `incoterm`, `currency`) carry the `users.email` argument: a wrong PO address
   means the order reaches nobody, and correcting the paper is not the same act as re-pointing the
   brand.
-- **`status` holds what a person did, or what the bank did — `draft | pending_payment | paid |
-  awaiting_delivery | received | completed | cancelled` (24 Sep 2026; migration `1791724800000`
-  renamed `sent` → `pending_payment` and `closed` → `completed`) — and `completed` is NOT `full`.**
+- **`status` holds what a person did, or what the bank did — `draft | ready_to_send |
+  pending_payment | paid | awaiting_delivery | received | completed | cancelled` (24 Sep 2026;
+  migration `1791724800000` renamed `sent` → `pending_payment` and `closed` → `completed`;
+  `ready_to_send` joined 25 Sep 2026, migration `1791811260000`) — and `completed` is NOT `full`.**
   See "The purchase-order lifecycle" below for the moves. `paid` is reached by hand or by the Xero
   bill sync; it is never cancelled — money that has left is a credit note, a document nobody has
   stated. A purchase order completed short because the house discontinued the balance is a
@@ -329,6 +330,52 @@ the wholesale rate less supplier discounts, with freight.
 - **The list takes a status SET** (`status` anyOf string|array, bound `= ANY`), for the dashboard's
   Inbound tile: goods on their way in = `pending_payment`, `paid`, `awaiting_delivery`.
 
+## Ready to send, the PDF and the statement (25 Sep 2026)
+
+The client: "Supplier invoice page and sections should be removed, ask for invoice should be merged
+with bulk purchase orders. We should add a preview ability for purchase orders before sending it
+(generate statement button creates PDF and attaches that pdf and sends it as an email, place this
+generate statement button next to send bulk order button). Add a status to purchase orders called
+Ready to Send after draft status (so that admin knows they can add it to other purchase orders for
+bulk order for that supplier)."
+
+- **`ready_to_send` sits between draft and pending payment and sends nothing.** Moves:
+  `draft → ready_to_send | pending_payment | cancelled`, `ready_to_send → draft | pending_payment |
+  cancelled`. Its stamp is `ready_at`; the move back to draft writes no stamp (`draft` has none —
+  `moveStatus` skips a null stamp) and keeps the last `ready_at`. `UNSENT_PURCHASE_ORDER_STATUSES`
+  (draft, ready_to_send) is what the Emails route 409s on. A ready order is still editable
+  (`EDITABLE_STATUSES` is everything but cancelled), and Send PO still works straight from a draft.
+- **A bulk order takes `ready_to_send` members ONLY** (`BULKABLE_PURCHASE_ORDER_STATUS`): a draft is
+  a 409 naming it and saying to mark it Ready to send; anything already sent is the old 409.
+- **One PDF renderer, `src/purchasing/po-pdf.js`, PURE (pdfkit only).** `order` is the purchase
+  order itself (one, or a bulk order's members under its BULK number); `statement` asks for one
+  invoice (a summary with each order's total, then each order's lines). The route's `letterPdf`
+  attaches the `order` PDF to Send PO's letter, the Emails panel's `details` letter and the bulk
+  letter (house copies AND the office copy) — **a render failure never stops a send**: it is logged
+  and the letter goes without it. **Prices are drawn only when the rows carry them**: the masked
+  read model DELETES the money keys, so their absence leaves the price columns off and prints a line
+  saying so; `null` still prints "Not priced". Totals across orders refuse an unpriced order or two
+  currencies (`documentTotal`). Dates are the NZ calendar day (`nzDate`), never an ISO slice.
+- **`POST /admin/purchase-orders/pdf { purchase_order_ids, document? }` is the preview** the CRM
+  shows before every send: `application/pdf`, `Content-Disposition: inline; filename=…`, writes
+  nothing, drawn with the CALLER's finance grant (the house's copy is always the finance view). One
+  supplier per document (422 naming the mix), 404 for an unknown id.
+- **The statement moved: `POST /admin/purchase-orders/statement { purchase_order_ids, notes? }`**
+  (`requestConsolidatedInvoice` in `src/purchasing/invoice-statements.js`; the old
+  `POST /admin/supplier-invoices/statement` is gone). It derives the supplier from the purchase
+  orders (no `supplier_id` in the body), sends `supplier_invoice_request` with the statement PDF to
+  every order's PO email + Emails list (the bulk letter's rule, `documentRecipients`; the supplier
+  record's PO email only when no order names anybody), copies the office with the same PDF, and
+  logs the contact. Refusals, all BEFORE anything is sent and all run by the statement PREVIEW too:
+  404 unknown, 422 mixed houses, 422 cancelled, **422 draft ("mark it Ready to send")**, 409 already
+  on a supplier invoice, 422 nobody to send to, **503 unless `mailer.delivers`**, 502 when every
+  address failed. It answers `{ statement: { sent, failed, filename, purchase_order_count,
+  purchase_orders, contact_log_entry, … } }` — no money. Guarded by
+  `test/purchase-order-statement.test.js` (which replaced `test/supplier-invoice-statement.test.js`)
+  and, with no database, `test/purchasing-pdf.test.js`.
+- **The supplier-invoice tables and routes STAY** (bills already keyed are records, and a purchase
+  order on one still 409s a statement); only the CRM stopped drawing them.
+
 ## Consolidated supplier invoices (W14)
 
 **One supplier sends ONE invoice covering MANY purchase orders, every two to four weeks.** That
@@ -441,9 +488,13 @@ raised for two houses of one supplier is the ORDINARY case, not an edge one. Two
 
 ### The statement (Sept 2026)
 
-`POST /admin/supplier-invoices/statement` asks a house for ONE invoice covering several purchase
-orders — the letter the office typed by hand until now. `src/purchasing/invoice-statements.js` holds
-it; the route takes the mailer, which is the only reason `adminSupplierInvoiceRoutes` receives one.
+**Moved on 25 Sep 2026 to `POST /admin/purchase-orders/statement`, sent as a PDF — see "Ready to
+send, the PDF and the statement" above, which supersedes the route, the body and the refusals
+below.** The rules that carried over unchanged:
+
+`POST /admin/supplier-invoices/statement` asked a house for ONE invoice covering several purchase
+orders — the letter the office typed by hand until then. `src/purchasing/invoice-statements.js` holds
+it.
 
 - **It writes no invoice, and must not.** A bill that has not arrived has no number, date or total,
   and those are facts only the house can state — a row invented for it would put a figure in the

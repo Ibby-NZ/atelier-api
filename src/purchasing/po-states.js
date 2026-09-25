@@ -15,7 +15,8 @@
 // TWO VOCABULARIES LIVE HERE AND THEY MUST NEVER BE MERGED.
 //
 // `status` is WHAT A PERSON DID (24 Sep 2026: draft, pending_payment, paid,
-// awaiting_delivery, received, completed, cancelled) — with two moves the
+// awaiting_delivery, received, completed, cancelled; ready_to_send joined on
+// 25 Sep 2026) — with two moves the
 // platform makes for them: the Xero bill paid moves an order to `paid`, and the
 // last line booked in full moves it to `received`.
 // The receipt state is WHAT ARRIVED: none, part, full, over — arithmetic over
@@ -43,6 +44,7 @@ const httpError = (statusCode, message) =>
  */
 export const PURCHASE_ORDER_STATUSES = Object.freeze([
   'draft',
+  'ready_to_send',
   'pending_payment',
   'paid',
   'awaiting_delivery',
@@ -55,21 +57,41 @@ export const PURCHASE_ORDER_STATUSES = Object.freeze([
 export const INITIAL_PURCHASE_ORDER_STATUS = 'draft'
 
 /**
+ * The states in which nothing has gone to the house yet. A letter about the
+ * order (the Emails panel) is refused in either: Send PO is what first sends
+ * it, and a letter that went early is not recallable.
+ */
+export const UNSENT_PURCHASE_ORDER_STATUSES = Object.freeze(['draft', 'ready_to_send'])
+
+/**
+ * The one state a Bulk purchase order takes its members from (25 Sep 2026). A
+ * draft is still being written; marking it Ready to send is the office saying
+ * "this can go to the house with the others".
+ */
+export const BULKABLE_PURCHASE_ORDER_STATUS = 'ready_to_send'
+
+/**
  * The legal moves, keyed by the state being moved FROM (24 Sep 2026).
  *
- * `draft → pending_payment` is **Send PO**: the purchase order goes to the
+ * `draft → ready_to_send` (25 Sep 2026) is the office saying the order is
+ * finished and may go to the house — on its own, or in a Bulk purchase order
+ * with others for the same supplier; `ready_to_send → draft` takes it back for
+ * more work. Neither move sends anything.
+ *
+ * `draft | ready_to_send → pending_payment` is **Send PO**: the purchase order goes to the
  * house and its bill is raised in Xero, so from then on it is waiting to be
  * paid. Goods may arrive before the house is paid (a supplier on account), so
  * `received` is reachable before `paid` and `received → paid` closes that gap;
  * `awaiting_delivery` is the house confirmed and the goods are on their way.
  * `completed` is the office finishing with it — full, or SHORT by decision,
  * which is why it is not the receipt state `full`. `cancelled` is reachable
- * only before money has left (draft, pending_payment): money that has left is
+ * only before money has left (draft, ready_to_send, pending_payment): money that has left is
  * a credit note, and nobody has stated that document. Both terminal states are
  * dead ends — a cancelled order is re-raised, never resurrected.
  */
 export const ALLOWED_TRANSITIONS = Object.freeze({
-  draft: Object.freeze(['pending_payment', 'cancelled']),
+  draft: Object.freeze(['ready_to_send', 'pending_payment', 'cancelled']),
+  ready_to_send: Object.freeze(['draft', 'pending_payment', 'cancelled']),
   pending_payment: Object.freeze(['paid', 'awaiting_delivery', 'received', 'cancelled']),
   paid: Object.freeze(['awaiting_delivery', 'received', 'completed']),
   awaiting_delivery: Object.freeze(['paid', 'received', 'completed']),
@@ -84,7 +106,9 @@ export const canTransition = (from, to) => (ALLOWED_TRANSITIONS[from] ?? []).inc
 /**
  * The column each state stamps when it is reached. `draft` has none — it is the
  * state a row is created in, and `created_at` already dates that; inventing a
- * `drafted_at` beside it would be two columns holding one fact.
+ * `drafted_at` beside it would be two columns holding one fact. A ready order
+ * taken back to draft therefore writes no stamp, and keeps the `ready_at` of
+ * the last time it was marked ready.
  *
  * One stamp per move is the reason these columns exist at all: `status` answers
  * "where is it now" and the stamps answer "when did it move", which is what an
@@ -93,6 +117,7 @@ export const canTransition = (from, to) => (ALLOWED_TRANSITIONS[from] ?? []).inc
  */
 export const STATUS_STAMPS = Object.freeze({
   draft: null,
+  ready_to_send: 'ready_at',
   // The send moment keeps its column; `completed` keeps `closed_at` for the
   // same reason — renaming them would be a migration for a word.
   pending_payment: 'sent_at',

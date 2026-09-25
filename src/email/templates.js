@@ -523,12 +523,14 @@ const TEMPLATES = Object.freeze({
     lines_text,
     total_text,
     notes,
+    attachment_name,
   }) => ({
     subject: `Purchase order ${po_number} — ${BRAND}`,
     text: [
       `Dear ${supplier_name},`,
       '',
       `Please find our purchase order ${po_number} below.`,
+      ...(attachment_name ? [`It is also attached as a PDF (${attachment_name}).`] : []),
       '',
       lines_text ?? '',
       '',
@@ -566,16 +568,15 @@ const TEMPLATES = Object.freeze({
     total_text,
     reply_to,
     notes,
+    attachment_name,
   }) => ({
     subject: `Request for one consolidated invoice — ${BRAND}`,
     text: [
       `Dear ${supplier_name},`,
       '',
-      `The purchase order${purchase_order_count === 1 ? '' : 's'} below ${
-        purchase_order_count === 1 ? 'is' : 'are'
-      } outstanding with you and ${purchase_order_count === 1 ? 'has' : 'have'} not yet`,
-      'been invoiced to us. Could we please have a single consolidated invoice',
-      'covering them.',
+      `Could we please have a single consolidated invoice covering our purchase`,
+      `order${purchase_order_count === 1 ? '' : 's'} below.`,
+      ...(attachment_name ? [`Our statement is attached as a PDF (${attachment_name}).`] : []),
       '',
       lines_text ?? '',
       '',
@@ -613,7 +614,7 @@ const TEMPLATES = Object.freeze({
       lines_text ?? '',
       '',
       ...(total_text ? [`Costed total: ${total_text}`, ''] : []),
-      'The bill itself is keyed under Supplier invoices when it arrives.',
+      'The statement the house received is attached.',
     ].join('\n'),
   }),
 
@@ -664,6 +665,7 @@ const TEMPLATES = Object.freeze({
     orders_text,
     incoterm,
     currency,
+    attachment_name,
   }) => ({
     subject: `Order ${bulk_number} (${po_numbers}) — ${BRAND}`,
     text: [
@@ -671,6 +673,7 @@ const TEMPLATES = Object.freeze({
       '',
       `Please find our order ${bulk_number} below. It covers our purchase orders`,
       `${po_numbers}.`,
+      ...(attachment_name ? [`It is also attached as a PDF (${attachment_name}).`] : []),
       '',
       orders_text ?? '',
       '',

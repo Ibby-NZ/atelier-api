@@ -98,10 +98,16 @@ one fact drives everything below.
   the reserve letters off a raised line and a cancelled one. The DERIVED receipt state
   (`none|part|full|over`) mails the back office ONLY: it changes every time a roll is scanned, and a
   house that got "your order is now part-received" each time would filter us.
-- **A draft mails nobody.** `draft` is the state a purchase order is created in; nothing has left
-  the building and the person who typed it is looking at it. The FIRST letter is `send`, which is
-  exactly what that button means. Same rule on the reserve side: the trigger is the write that
-  raises the lines.
+- **A draft mails nobody, and nor does Ready to send.** `draft` is the state a purchase order is
+  created in and `ready_to_send` (25 Sep 2026) only says it is finished; nothing has left the
+  building in either. The FIRST letter is `send`, which is exactly what that button means. Same rule
+  on the reserve side: the trigger is the write that raises the lines.
+- **Attachments** (25 Sep 2026): `mailer.send` passes `attachments` (`{ filename, content,
+  contentType }`) to the transport, the redirect valve keeps them, and the capture transport prints
+  their names. Send PO's letter, the Emails panel's `details` letter and the bulk letter carry the
+  purchase-order PDF (`src/purchasing/po-pdf.js`, attached by the route — a failed render sends the
+  letter without it); the statement carries the statement PDF. The templates name the file through
+  `attachment_name` when there is one.
 - **No address is not an error.** `purchase_orders.po_email` is a nullable snapshot, so a house with
   nothing on file cannot be emailed — and the move still succeeds, because refusing to mark a
   purchase order sent when the office phones that house instead would make the status lie. The
@@ -130,9 +136,11 @@ one fact drives everything below.
   counterparty letter hangs off a move that stands on its own — a purchase order is sent whether or
   not the relay was up, and `po_email` being null is not an error. The statement asks a house for one
   bill covering several purchase orders and there is no state change behind it, so
-  `src/purchasing/invoice-statements.js` refuses rather than no-ops: **422** with no address on file,
-  **503** with no mailer configured, and the attach's own **409/422** for an order already billed or
-  raised for another house — all BEFORE anything is sent. A statement is refused WHOLE and never
+  `src/purchasing/invoice-statements.js` refuses rather than no-ops: **422** with nobody to send to,
+  **503** unless the mailer delivers, **502** when every address failed, and **409/422** for an order
+  already billed, raised for another house, cancelled or still a draft — all BEFORE anything is sent
+  (`POST /admin/purchase-orders/statement` since 25 Sep 2026, the statement attached as a PDF, to
+  every order's PO email and Emails list). A statement is refused WHOLE and never
   narrowed: a letter that went out missing an order the staffer ticked is worse than one that did not
   go, because nothing on screen says so.
 - Templates: `purchase_order_sent` / `_paid` / `_bulk_sent` / `_closed` / `_cancelled`, `supplier_invoice_request` and
@@ -141,10 +149,9 @@ one fact drives everything below.
   `backoffice_reserve_request` stay in. Triggers
   live in `purchasing-notifications.js` and `reserve-notifications.js` (separate files from
   `notifications.js`, which is the order lifecycle); both are no-ops when `mailer` is null and
-  neither throws. Wiring: `buildApp` passes `mailer` into `adminPurchaseOrderRoutes`,
-  `adminSupplierInvoiceRoutes` (for the statement route alone) and
-  `adminReserveRoutes`. Guarded by `test/purchasing-email.test.js`, `test/reserves-email.test.js` and
-  `test/supplier-invoice-statement.test.js`.
+  neither throws. Wiring: `buildApp` passes `mailer` into `adminPurchaseOrderRoutes` (the statement
+  included) and `adminReserveRoutes`. Guarded by `test/purchasing-email.test.js`,
+  `test/reserves-email.test.js` and `test/purchase-order-statement.test.js`.
 - All of them appear in the CRM's Emails screen automatically (`TEMPLATE_NAMES` is `Object.keys`), so a
   stored row can override any of them. Every list (`lines_text`) is PRE-FORMATTED by the notifier,
   the `sample_request_received` precedent — a stored override cannot do arithmetic or currency, so

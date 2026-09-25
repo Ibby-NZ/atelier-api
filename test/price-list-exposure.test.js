@@ -284,6 +284,10 @@ describe('cost-side exposure', () => {
       ['POST', '/admin/purchase-orders/1/email', { letter: 'details' }],
       ['GET', '/admin/purchase-orders/bulk', undefined],
       ['POST', '/admin/purchase-orders/bulk', { purchase_order_ids: [1] }],
+      // The PDF carries every price on the order; the statement names them to
+      // the house (25 Sep 2026).
+      ['POST', '/admin/purchase-orders/pdf', { purchase_order_ids: [1] }],
+      ['POST', '/admin/purchase-orders/statement', { purchase_order_ids: [1] }],
       ['DELETE', '/admin/purchase-orders/1', undefined],
       ['POST', '/admin/purchase-order-lines/1/allocations', { order_line_id: 1, qty: 1 }],
       ['POST', '/admin/purchase-order-lines/1/receipts', { qty: 1 }],

@@ -33,8 +33,11 @@ export const createMailTransport = (config, logger = console) => {
       delivers: false,
       sendMail: async (message) => {
         const info = await capture.sendMail(message)
+        const attached = (message.attachments ?? []).map((file) => file.filename).join(', ')
         logger.warn(
-          `[mail NOT sent — SMTP_HOST unset]\nTo: ${message.to}\nSubject: ${message.subject}\n\n${message.text}\n`
+          `[mail NOT sent — SMTP_HOST unset]\nTo: ${message.to}\nSubject: ${message.subject}\n${
+            attached ? `Attachments: ${attached}\n` : ''
+          }\n${message.text}\n`
         )
         return info
       },

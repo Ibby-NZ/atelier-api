@@ -12,10 +12,10 @@
 //     changes whenever a receipt is keyed, and a house that got "your order is
 //     now part-received" every time a roll was scanned would filter us.
 //
-//   - **A draft sends nothing.** `draft` is the state a purchase order is
-//     created in and nothing has left the building yet; the person looking at
-//     the screen typed it. The FIRST letter is `send`, which is exactly what
-//     that button means.
+//   - **A draft sends nothing, and nor does Ready to send.** `draft` is the
+//     state a purchase order is created in and `ready_to_send` (25 Sep 2026)
+//     only says it is finished; nothing has left the building in either. The
+//     FIRST letter is `send`, which is exactly what that button means.
 //
 //   - **No address is not an error.** `po_email` is a snapshot taken at create
 //     and it is nullable, so a house with nothing on file simply cannot be
@@ -74,19 +74,30 @@ const formatSupplierLines = (purchaseOrder) =>
 const houseRecipients = (purchaseOrder) =>
   uniqueEmails([purchaseOrder.po_email, ...(purchaseOrder.notify_emails ?? [])])
 
-// One letter to each of them, in turn; resolves to who it reached.
-const sendToHouse = async (mailer, recipients, template, data) => {
+// One letter to each of them, in turn; resolves to who it reached. The same
+// attachments ride on every copy (the purchase-order PDF, 25 Sep 2026).
+const sendToHouse = async (mailer, recipients, template, data, attachments = []) => {
   const sent = []
   const failed = []
   for (const to of recipients) {
-    const { ok } = await mailer.send({ template, to, data })
+    const { ok } = await mailer.send({ template, to, data, attachments })
     ;(ok ? sent : failed).push(to)
   }
   return { ok: sent.length > 0, template, sent, failed }
 }
 
+/**
+ * A PDF as the mailer attaches it. Null in, nothing out, so a letter whose PDF
+ * could not be drawn still goes (the route never lets a render failure stop a
+ * move).
+ *
+ * @param {{ filename: string, content: Buffer }|null} file
+ */
+export const pdfAttachments = (file) =>
+  file?.content ? [{ filename: file.filename, content: file.content, contentType: 'application/pdf' }] : []
+
 /** The purchase order itself, as the house receives it — Send PO's letter. */
-export const purchaseOrderLetterData = (purchaseOrder) => ({
+export const purchaseOrderLetterData = (purchaseOrder, attachments = []) => ({
   po_number: purchaseOrder.po_number,
   supplier_name: purchaseOrder.supplier_name ?? 'Sir or Madam',
   incoterm: purchaseOrder.incoterm,
@@ -95,6 +106,7 @@ export const purchaseOrderLetterData = (purchaseOrder) => ({
   lines_text: formatSupplierLines(purchaseOrder),
   total_text: money(purchaseOrder.total_cost, purchaseOrder.currency),
   notes: purchaseOrder.notes,
+  attachment_name: attachments[0]?.filename ?? null,
 })
 
 /**
@@ -143,10 +155,15 @@ const sendBackofficeCopy = (mailer, purchaseOrder) =>
  * and addressed to the house and the one configured back-office address, so it
  * is never shown to the staffer who triggered it.
  *
+ * The purchase order's PDF (src/purchasing/po-pdf.js — the document the CRM
+ * previewed before Send) rides on the letter as `attachments`, when the route
+ * could draw it.
+ *
  * @param {import('./mailer.js').Mailer|null} mailer
  * @param {object} purchaseOrder  the finance view of the order, lines included
+ * @param {{ attachments?: object[] }} [options]
  */
-export const notifyPurchaseOrderSent = async (mailer, purchaseOrder) => {
+export const notifyPurchaseOrderSent = async (mailer, purchaseOrder, { attachments = [] } = {}) => {
   if (!mailer || !purchaseOrder) {
     return noop
   }
@@ -154,7 +171,8 @@ export const notifyPurchaseOrderSent = async (mailer, purchaseOrder) => {
     mailer,
     houseRecipients(purchaseOrder),
     'purchase_order_sent',
-    purchaseOrderLetterData(purchaseOrder)
+    purchaseOrderLetterData(purchaseOrder, attachments),
+    attachments
   )
   await sendBackofficeCopy(mailer, purchaseOrder)
   return { ok: true }
@@ -186,11 +204,15 @@ export const notifyPurchaseOrderPaid = async (mailer, purchaseOrder) => {
  * every member's Emails list, and a copy to the office (the same letter: the
  * record of what went).
  *
+ * The bulk order's PDF — every member under its own PO number, the document
+ * the CRM previewed — rides on the letter as `attachments`.
+ *
  * @param {import('./mailer.js').Mailer|null} mailer
  * @param {{ bulk_number: string }} bulk
  * @param {object[]} purchaseOrders the finance view of each member
+ * @param {{ attachments?: object[] }} [options]
  */
-export const notifyBulkOrderSent = async (mailer, bulk, purchaseOrders) => {
+export const notifyBulkOrderSent = async (mailer, bulk, purchaseOrders, { attachments = [] } = {}) => {
   if (!mailer || !bulk || purchaseOrders.length === 0) {
     return noop
   }
@@ -212,12 +234,13 @@ export const notifyBulkOrderSent = async (mailer, bulk, purchaseOrders) => {
       .join('\n\n'),
     incoterm: first.incoterm,
     currency: first.currency,
+    attachment_name: attachments[0]?.filename ?? null,
   }
   const recipients = uniqueEmails(
     purchaseOrders.flatMap((po) => [po.po_email, ...(po.notify_emails ?? [])])
   )
-  const result = await sendToHouse(mailer, recipients, 'purchase_order_bulk_sent', data)
-  await mailer.send({ template: 'purchase_order_bulk_sent', to: mailer.backofficeEmail, data })
+  const result = await sendToHouse(mailer, recipients, 'purchase_order_bulk_sent', data, attachments)
+  await mailer.send({ template: 'purchase_order_bulk_sent', to: mailer.backofficeEmail, data, attachments })
   return result
 }
 
@@ -282,22 +305,31 @@ export const purchaseOrderStatusTemplate = (purchaseOrder) =>
  * where it stands. To the house and the Emails list. Resolves to who it
  * reached, so the route can say so.
  *
+ * The purchase order's own letter (`purchase_order_sent`) carries its PDF, as
+ * Send PO's does; `attachments` is ignored on every other letter.
+ *
  * @param {import('./mailer.js').Mailer} mailer
  * @param {object} purchaseOrder the finance view, lines included
  * @param {'details'|'status'} letter
+ * @param {{ attachments?: object[] }} [options]
  */
-export const sendPurchaseOrderLetter = async (mailer, purchaseOrder, letter) => {
+export const sendPurchaseOrderLetter = async (mailer, purchaseOrder, letter, { attachments = [] } = {}) => {
   const template = letter === 'details' ? 'purchase_order_sent' : purchaseOrderStatusTemplate(purchaseOrder)
-  const data =
-    template === 'purchase_order_sent'
-      ? purchaseOrderLetterData(purchaseOrder)
-      : {
-          po_number: purchaseOrder.po_number,
-          supplier_name: purchaseOrder.supplier_name ?? 'Sir or Madam',
-          total_text: money(purchaseOrder.total_cost, purchaseOrder.currency),
-          outstanding_text: formatOutstanding(purchaseOrder),
-        }
-  return sendToHouse(mailer, houseRecipients(purchaseOrder), template, data)
+  if (template === 'purchase_order_sent') {
+    return sendToHouse(
+      mailer,
+      houseRecipients(purchaseOrder),
+      template,
+      purchaseOrderLetterData(purchaseOrder, attachments),
+      attachments
+    )
+  }
+  return sendToHouse(mailer, houseRecipients(purchaseOrder), template, {
+    po_number: purchaseOrder.po_number,
+    supplier_name: purchaseOrder.supplier_name ?? 'Sir or Madam',
+    total_text: money(purchaseOrder.total_cost, purchaseOrder.currency),
+    outstanding_text: formatOutstanding(purchaseOrder),
+  })
 }
 
 /**
@@ -339,32 +371,40 @@ export const notifyPurchaseOrderReceipt = async (mailer, purchaseOrder, receipt)
 }
 
 /**
- * `POST /admin/supplier-invoices/statement` — the office asking a house for ONE
- * invoice covering several purchase orders, plus the office's copy.
+ * `POST /admin/purchase-orders/statement` — the office asking a house for ONE
+ * invoice covering several purchase orders, with the statement attached as a
+ * PDF, plus the office's copy (25 Sep 2026; it was
+ * `POST /admin/supplier-invoices/statement`, a text letter).
  *
  * Unlike the moves above, THE LETTER IS THE ACT. There is no status change
  * standing on its own behind it, so this helper does not quietly no-op: the
  * caller (src/purchasing/invoice-statements.js) refuses a missing address with
  * a 422 and an unconfigured mailer with a 503 before anything reaches here, and
- * the guard below is the last line rather than the policy.
+ * the guard below is the last line rather than the policy. It resolves to who
+ * the letter reached, so the caller can answer 502 when nobody did.
  *
  * The costs go to the house unmasked, for the reason `notifyPurchaseOrderSent`
  * gives: the house quoted them.
  *
  * @param {import('./mailer.js').Mailer|null} mailer
- * @param {{ supplier_name: string, po_email: string|null, lines_text: string,
+ * @param {{ supplier_name: string, recipients: string[], lines_text: string,
  *           purchase_order_count: number, currency: string|null,
- *           total: number|null, staff_name?: string|null, notes?: string|null }} statement
+ *           total: number|null, staff_name?: string|null, notes?: string|null,
+ *           attachment?: { filename: string, content: Buffer }|null }} statement
+ * @returns {Promise<{ ok: boolean, sent: string[], failed: string[] }>}
  */
 export const notifyConsolidatedInvoiceRequest = async (mailer, statement) => {
-  if (!mailer || !statement?.po_email) {
-    return noop
+  const recipients = uniqueEmails(statement?.recipients ?? [])
+  if (!mailer || recipients.length === 0) {
+    return { ...noop, sent: [], failed: [] }
   }
+  const attachments = pdfAttachments(statement.attachment)
   const total_text = money(statement.total, statement.currency)
-  await mailer.send({
-    template: 'supplier_invoice_request',
-    to: statement.po_email,
-    data: {
+  const result = await sendToHouse(
+    mailer,
+    recipients,
+    'supplier_invoice_request',
+    {
       supplier_name: statement.supplier_name ?? 'Sir or Madam',
       lines_text: statement.lines_text,
       purchase_order_count: statement.purchase_order_count,
@@ -373,19 +413,23 @@ export const notifyConsolidatedInvoiceRequest = async (mailer, statement) => {
       // so a house replying to the letter reaches the desk that keys it.
       reply_to: mailer.backofficeEmail,
       notes: statement.notes ?? null,
+      attachment_name: attachments[0]?.filename ?? null,
     },
-  })
+    attachments
+  )
   await mailer.send({
     template: 'backoffice_supplier_invoice_request',
     to: mailer.backofficeEmail,
+    attachments,
     data: {
       supplier_name: statement.supplier_name,
-      po_email: statement.po_email,
+      // Every address it went to — the one question asked afterwards.
+      po_email: result.sent.length > 0 ? result.sent.join(', ') : null,
       purchase_order_count: statement.purchase_order_count,
       lines_text: statement.lines_text,
       total_text,
       staff_name: statement.staff_name ?? null,
     },
   })
-  return { ok: true }
+  return { ok: result.ok, sent: result.sent, failed: result.failed }
 }

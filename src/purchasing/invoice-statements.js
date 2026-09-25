@@ -1,92 +1,60 @@
-// The statement that asks a house for ONE consolidated invoice covering several
-// purchase orders.
+// The purchase-order PDF, and the statement that asks a house for ONE
+// consolidated invoice covering several purchase orders.
 //
-// THE PROBLEM. W13 groups purchase orders by BRAND and one supplier sells
-// several houses, so there are always more purchase orders than invoices
+// 25 SEP 2026: "Supplier invoice page and sections should be removed, ask for
+// invoice should be merged with bulk purchase orders … generate statement
+// creates a PDF and attaches that PDF and sends it as an email." The statement
+// used to be a text letter sent from the supplier-invoice screens
+// (`POST /admin/supplier-invoices/statement`); it now lives beside the bulk
+// order it is asked alongside — `POST /admin/purchase-orders/statement` — and
+// carries the statement as a PDF (src/purchasing/po-pdf.js). The preview the
+// CRM shows first is `POST /admin/purchase-orders/pdf`, drawn by the same
+// loader and the same renderer, so the preview and the letter cannot disagree
+// about which orders are on it or what they cost.
+//
+// THE PROBLEM IT SOLVES. W13 groups purchase orders by BRAND and one supplier
+// sells several houses, so there are always more purchase orders than invoices
 // (`supplier-invoices.js` states this at length). The office's side of that is
-// a letter: "these six orders are outstanding with you — please bill them
-// together, quoting our numbers". Until now that letter was typed by hand,
-// which is how a purchase order already invoiced ends up on it.
+// a statement: "these orders are with you — please bill them together, quoting
+// our numbers".
 //
 // IT IS A LETTER, NOT A DOCUMENT OF RECORD, and nothing here writes an invoice.
 // A supplier invoice is the HOUSE's paper: its number, its date and its total
-// are facts only the house can state, and inventing a row for a bill that has
-// not arrived would put a figure in the ledger that no paper supports. What is
-// recorded is that the office asked — one entry in `supplier_contact_log`,
-// which is what the supplier list's "Last contact" column reads.
+// are facts only the house can state. What is recorded is that the office
+// asked — one entry in `supplier_contact_log`, which is what the supplier
+// list's "Last contact" column reads.
 //
-// EVERY REFUSAL IS THE ONE THE ATTACH ALREADY GIVES, in the same words:
-//   - a purchase order raised for another house      → 422 naming it
-//   - one a bill already covers                      → 409 naming that bill
+// EVERY REFUSAL RUNS BEFORE ANYTHING IS SENT, AND THE PREVIEW RUNS THEM TOO:
+//   - an unknown purchase order                      → 404 naming it
+//   - purchase orders for more than one house        → 422 naming them
 //   - a cancelled one                                → 422 naming it
-// A letter that asks a house to bill an order it has already billed is the
-// mistake this route exists to prevent, so the checks run BEFORE the send and
-// the whole statement is refused rather than quietly narrowed — a letter that
-// went out missing an order the staffer ticked is worse than one that did not
-// go at all, because nothing on screen says so.
+//   - a draft (not yet marked Ready to send)         → 422 naming it
+//   - one a supplier invoice already covers          → 409 naming that bill
+// A statement that went out missing an order the staffer ticked is worse than
+// one that did not go at all, because nothing on screen says so — so it is
+// refused WHOLE, never narrowed.
 //
-// THE LETTER CARRIES COSTS AND IS NOT FINANCE-MASKED, for the reason
-// `notifyPurchaseOrderSent` already gives: the house quoted those prices, and
-// masking them from the party that set them protects nobody. It is composed by
-// the server and addressed to the house and the one configured back-office
-// address, so it is never rendered to the staffer who triggered it — and the
-// RESPONSE that comes back to the screen carries no money at all, which is why
-// this module needs no finance flag.
+// THE LETTER AND ITS PDF CARRY COSTS AND ARE NOT FINANCE-MASKED, for the reason
+// `notifyPurchaseOrderSent` already gives: the house quoted those prices. The
+// RESPONSE that comes back to the screen carries no money at all. The PREVIEW
+// is drawn with the caller's own grant: a login without it reads the
+// quantities and is told the prices are withheld.
 
 import { loadInvoiceStateByPurchaseOrderId } from './supplier-invoices.js'
+import { listPurchaseOrders } from './admin-purchase-orders.js'
+import { documentFilename, documentTotal, nzDate, renderPurchaseOrderPdf } from './po-pdf.js'
 import { createContactLogEntry } from '../suppliers/supplier-contacts.js'
 import { notifyConsolidatedInvoiceRequest } from '../email/purchasing-notifications.js'
+import { uniqueEmails } from '../orders/notify-emails.js'
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
 
 /**
- * How many purchase orders one statement may name. A cycle is two to four
- * weeks of buying from one house, so the ceiling is generous; what it stops is
- * a request that renders the whole ledger into one letter.
+ * How many purchase orders one PDF or statement may carry — a bulk order's own
+ * ceiling (MAX_BULK_SIZE) and the list's page size, so the rows are one read.
  */
-export const MAX_STATEMENT_PURCHASE_ORDERS = 100
-
-// Duplicates are the screen's to make and not an error — a tick list can send
-// the same id twice — but a letter that names one order twice reads as two
-// orders, so they collapse here.
-const uniqueIds = (ids) => [...new Set(ids)]
-
-/**
- * The purchase orders a statement is being asked for, with the costed total
- * beside each. `unpriced_lines` travels with it: a cost over a partly-priced
- * order reads as the cost of the whole thing while describing part of it, so
- * the letter says "not priced" instead of a figure (the rule
- * `listUnbilledPurchaseOrders` states one grain up).
- */
-const loadPurchaseOrders = async (pool, ids) => {
-  const { rows } = await pool.query(
-    `SELECT po.id,
-            po.po_number,
-            po.supplier_id,
-            po.supplier_name,
-            po.brand_id,
-            b.name AS brand_name,
-            po.currency,
-            po.status,
-            po.created_at,
-            po.expected_at,
-            cost.ordered_cost,
-            COALESCE(cost.unpriced_lines, 0) AS unpriced_lines
-       FROM purchase_orders po
-       JOIN brands b ON b.id = po.brand_id
-       LEFT JOIN LATERAL (
-         SELECT SUM(round(l.qty_ordered * l.unit_price, 2)) AS ordered_cost,
-                count(*) FILTER (WHERE l.unit_price IS NULL)::int AS unpriced_lines
-           FROM purchase_order_lines l
-          WHERE l.purchase_order_id = po.id
-       ) cost ON true
-      WHERE po.id = ANY($1::int[])
-      ORDER BY po.created_at, po.id`,
-    [ids]
-  )
-  return rows
-}
+export const MAX_DOCUMENT_PURCHASE_ORDERS = 100
 
 const loadSupplier = async (pool, supplierId) => {
   const { rows } = await pool.query(
@@ -97,120 +65,214 @@ const loadSupplier = async (pool, supplierId) => {
 }
 
 /**
- * Every reason this statement must not go out, checked before anything is
- * sent. Throws the first one it finds, naming the purchase order — the same
- * posture `attachPurchaseOrder` takes, and for the same reason: an id is not
- * something the person on the screen can act on.
+ * The purchase orders a document is drawn from, oldest first (the order they
+ * were raised in — the page and the letter read upward, as a bulk order does),
+ * with the one supplier they share. Duplicates collapse: a tick list can send
+ * one id twice, and a document naming one order twice reads as two.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {number[]} purchaseOrderIds
+ * @param {{ finance: boolean }} options
  */
-const refuseUnsendable = (supplier, requestedIds, rows, invoiceState) => {
-  const byId = new Map(rows.map((row) => [row.id, row]))
-  for (const id of requestedIds) {
-    const row = byId.get(id)
-    if (!row) {
-      throw httpError(422, `Purchase order ${id} does not exist.`)
-    }
-    if (row.supplier_id !== supplier.id) {
+const loadDocumentRows = async (pool, purchaseOrderIds, { finance }) => {
+  const ids = [...new Set(purchaseOrderIds)]
+  if (ids.length === 0 || ids.length > MAX_DOCUMENT_PURCHASE_ORDERS) {
+    throw httpError(
+      422,
+      `A purchase-order document carries between 1 and ${MAX_DOCUMENT_PURCHASE_ORDERS} purchase orders.`
+    )
+  }
+  const { purchase_orders } = await listPurchaseOrders(pool, {
+    ids,
+    limit: MAX_DOCUMENT_PURCHASE_ORDERS,
+    finance,
+  })
+  const found = new Set(purchase_orders.map((po) => po.id))
+  const missing = ids.find((id) => !found.has(id))
+  if (missing !== undefined) {
+    throw httpError(404, `Purchase order ${missing} not found.`)
+  }
+  const purchaseOrders = [...purchase_orders].sort((a, b) => a.id - b.id)
+  const suppliers = [...new Set(purchaseOrders.map((po) => po.supplier_id))]
+  if (suppliers.length !== 1 || suppliers[0] == null) {
+    throw httpError(
+      422,
+      'A purchase-order document is addressed to ONE supplier — ' +
+        purchaseOrders.map((po) => `${po.po_number} is ${po.supplier_name ?? 'unaddressed'}`).join(', ') +
+        '.'
+    )
+  }
+  const supplier = await loadSupplier(pool, suppliers[0])
+  if (!supplier) {
+    throw httpError(404, `Supplier ${suppliers[0]} not found.`)
+  }
+  return { supplier, purchaseOrders }
+}
+
+/**
+ * Every reason a statement must not go out (or be previewed as one), checked
+ * before anything is sent. Throws the first it finds, naming the purchase
+ * order — an id is not something the person on the screen can act on.
+ */
+const refuseUnstatable = async (pool, purchaseOrders) => {
+  for (const po of purchaseOrders) {
+    if (po.status === 'cancelled') {
       throw httpError(
         422,
-        `${row.po_number} was raised for ${row.supplier_name ?? 'another house'}, not ` +
-          `${supplier.name}. A statement names one house's orders only.`
+        `${po.po_number} is cancelled — a house will not bill for an order Atelier withdrew.`
       )
     }
-    if (row.status === 'cancelled') {
+    if (po.status === 'draft') {
       throw httpError(
         422,
-        `${row.po_number} is cancelled — a house will not bill for an order Atelier withdrew.`
+        `${po.po_number} is still a draft — mark it Ready to send before asking the house to invoice it.`
       )
     }
-    const invoice = invoiceState.get(id)
+  }
+  const invoiceState = await loadInvoiceStateByPurchaseOrderId(
+    pool,
+    purchaseOrders.map((po) => po.id),
+    false
+  )
+  for (const po of purchaseOrders) {
+    const invoice = invoiceState.get(po.id)
     if (invoice) {
       throw httpError(
         409,
-        `${row.po_number} is already covered by invoice ${invoice.invoice_number}. ` +
-          'Take it off the statement, or detach it from that bill first.'
+        `${po.po_number} is already covered by invoice ${invoice.invoice_number}. ` +
+          'Take it off the statement.'
       )
     }
   }
-  if (!supplier.po_email) {
-    throw httpError(
-      422,
-      `There is no purchase-order address on file for ${supplier.name}, so there is ` +
-        'nowhere to send the statement. Add one on the supplier record.'
-    )
+}
+
+/**
+ * Who the documents about these purchase orders go to: each one's PO email (the
+ * snapshot, correctable on the order) and its Emails list, each address once —
+ * the bulk letter's rule. The supplier record's own PO email stands in only
+ * when not one of the orders names anybody.
+ *
+ * @param {{ po_email?: string|null }} supplier
+ * @param {object[]} purchaseOrders
+ * @returns {string[]}
+ */
+export const documentRecipients = (supplier, purchaseOrders) => {
+  const named = uniqueEmails(purchaseOrders.flatMap((po) => [po.po_email, ...(po.notify_emails ?? [])]))
+  return named.length > 0 ? named : uniqueEmails([supplier?.po_email])
+}
+
+/**
+ * The PDF for some purchase orders of one supplier: `order` is the purchase
+ * order itself (what Send PO and a bulk order attach), `statement` the request
+ * for one invoice (what the statement attaches, after its refusals).
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ purchaseOrderIds: number[], document?: 'order'|'statement', finance?: boolean,
+ *           replyTo?: string|null }} input
+ * @returns {Promise<{ pdf: Buffer, filename: string, supplier: object, purchaseOrders: object[],
+ *                     recipients: string[] }>}
+ */
+export const buildPurchaseOrderDocument = async (pool, input) => {
+  const { purchaseOrderIds, document = 'order', finance = false, replyTo = null } = input
+  const { supplier, purchaseOrders } = await loadDocumentRows(pool, purchaseOrderIds, { finance })
+  if (document === 'statement') {
+    await refuseUnstatable(pool, purchaseOrders)
+  }
+  const recipients = documentRecipients(supplier, purchaseOrders)
+  // A purchase order's supplier name is the snapshot on its paper.
+  const supplierName = purchaseOrders[0].supplier_name ?? supplier.name
+  const bulkNumbers = [...new Set(purchaseOrders.map((po) => po.bulk_order?.bulk_number ?? null))]
+  // Several members of one bulk order, and nothing else, are that bulk order's
+  // paper; one purchase order is always its own, whichever bulk it went in.
+  const reference =
+    document === 'order' && purchaseOrders.length > 1 && bulkNumbers.length === 1 ? bulkNumbers[0] : null
+  const issuedAt = new Date()
+  const pdf = await renderPurchaseOrderPdf({
+    document,
+    purchaseOrders,
+    supplierName,
+    recipients,
+    reference,
+    replyTo,
+    issuedAt,
+  })
+  return {
+    pdf,
+    filename: documentFilename({ document, purchaseOrders, reference, supplierName, issuedAt }),
+    supplier,
+    purchaseOrders,
+    recipients,
   }
 }
 
-/** One line per order, in the letter: ours, theirs, when, and what we costed it at. */
-const formatStatementLine = (row) => {
+/** One line per order in the letter: ours, the house, when, and what we costed it at. */
+const formatStatementLine = (po) => {
   const cost =
-    row.unpriced_lines > 0
+    po.total_cost == null
       ? 'not priced'
-      : `${Number(row.ordered_cost ?? 0).toFixed(2)}${row.currency ? ` ${row.currency}` : ''}`
-  const raised = String(row.created_at?.toISOString?.() ?? row.created_at ?? '').slice(0, 10)
-  return `  ${row.po_number} — ${row.brand_name}${raised ? ` — raised ${raised}` : ''} — ${cost}`
+      : `${Number(po.total_cost).toFixed(2)}${po.currency ? ` ${po.currency}` : ''}`
+  const raised = nzDate(po.created_at)
+  return `  ${po.po_number} — ${po.brand_name}${raised ? ` — raised ${raised}` : ''} — ${cost}`
 }
 
 /**
- * The costed total across the statement, or null where ANY order on it is
- * unpriced. Same rule as one purchase order's own total: a sum that silently
- * skips the unpriced ones states a figure the office cannot stand behind, and
- * the house would reconcile against it.
- */
-const statementTotal = (rows) => {
-  if (rows.some((row) => row.unpriced_lines > 0)) return null
-  const total = rows.reduce((sum, row) => sum + Number(row.ordered_cost ?? 0), 0)
-  return Math.round(total * 100) / 100
-}
-
-/**
- * Ask one house for a single invoice covering the purchase orders named.
+ * Ask one house for a single invoice covering the purchase orders named, with
+ * the statement attached as a PDF.
  *
- * The mailer is REQUIRED here, unlike on the purchase-order moves. There, the
- * letter hangs off a status change that stands on its own and a null mailer is
- * a no-op; here the letter IS the act, so an unconfigured relay is a 503 that
- * says so rather than a 200 over nothing sent.
+ * The mailer is REQUIRED and must deliver, unlike on the purchase-order moves.
+ * There, the letter hangs off a status change that stands on its own and a null
+ * mailer is a no-op; here the letter IS the act, so an unconfigured relay is a
+ * 503 that says so rather than a 200 over nothing sent.
  *
  * @param {import('pg').Pool} pool
  * @param {import('../email/mailer.js').Mailer|null} mailer
- * @param {{ supplierId: number, purchaseOrderIds: number[], user: object }} input
+ * @param {{ purchaseOrderIds: number[], notes?: string|null, user: object }} input
  * @returns {Promise<{ statement: object }>}
  */
 export const requestConsolidatedInvoice = async (pool, mailer, input) => {
-  const { supplierId, purchaseOrderIds, user } = input
-  const ids = uniqueIds(purchaseOrderIds)
+  const { purchaseOrderIds, notes = null, user } = input
 
-  const supplier = await loadSupplier(pool, supplierId)
-  if (!supplier) {
-    throw httpError(404, `Supplier ${supplierId} not found.`)
+  // The letter always carries prices — the house quoted them.
+  const { supplier, purchaseOrders, recipients, pdf, filename } = await buildPurchaseOrderDocument(pool, {
+    purchaseOrderIds,
+    document: 'statement',
+    finance: true,
+    replyTo: mailer?.backofficeEmail ?? null,
+  })
+  const supplierName = purchaseOrders[0].supplier_name ?? supplier.name
+
+  if (recipients.length === 0) {
+    throw httpError(
+      422,
+      `There is no purchase-order address on file for ${supplierName}, so there is nowhere to ` +
+        'send the statement. Add one on the supplier record or on the purchase orders.'
+    )
   }
-
-  const rows = await loadPurchaseOrders(pool, ids)
-  const invoiceState = await loadInvoiceStateByPurchaseOrderId(pool, ids, false)
-  refuseUnsendable(supplier, ids, rows, invoiceState)
-
-  if (!mailer) {
+  if (!mailer?.delivers) {
     throw httpError(
       503,
-      'Email is not configured on this server, so the statement cannot be sent.'
+      'Email is not configured on this server (SMTP_HOST is unset), so the statement cannot be sent.'
     )
   }
 
-  const currency = rows.find((row) => row.currency)?.currency ?? supplier.currency ?? null
-
-  await notifyConsolidatedInvoiceRequest(mailer, {
-    supplier_name: supplier.name,
-    po_email: supplier.po_email,
-    lines_text: rows.map(formatStatementLine).join('\n'),
-    purchase_order_count: rows.length,
+  const { total, currency } = documentTotal(purchaseOrders)
+  const { sent, failed } = await notifyConsolidatedInvoiceRequest(mailer, {
+    supplier_name: supplierName,
+    recipients,
+    lines_text: purchaseOrders.map(formatStatementLine).join('\n'),
+    purchase_order_count: purchaseOrders.length,
     currency,
-    total: statementTotal(rows),
+    total,
     staff_name: user?.name ?? user?.email ?? null,
-    notes: input.notes ?? null,
+    notes,
+    attachment: { filename, content: pdf },
   })
+  if (sent.length === 0) {
+    throw httpError(502, `The statement could not be sent to ${failed.join(', ')}.`)
+  }
 
   // The office asked a house something, which is exactly what the contact log
-  // is for — and it is what the supplier list's "Last contact" column reads, so
-  // a house chased for its bill stops looking like one nobody has spoken to.
+  // is for — and it is what the supplier list's "Last contact" column reads.
   // `user` is the SESSION, never the body: who chased a house is not something
   // the caller gets to state.
   const contact_log_entry = await createContactLogEntry(
@@ -218,9 +280,9 @@ export const requestConsolidatedInvoice = async (pool, mailer, input) => {
     supplier.id,
     {
       method: 'email',
-      note: `Asked for one consolidated invoice covering ${rows.length} purchase order${
-        rows.length === 1 ? '' : 's'
-      }: ${rows.map((row) => row.po_number).join(', ')}.`,
+      note: `Sent a statement asking for one invoice covering ${purchaseOrders.length} purchase order${
+        purchaseOrders.length === 1 ? '' : 's'
+      }: ${purchaseOrders.map((po) => po.po_number).join(', ')}.`,
     },
     user
   )
@@ -228,18 +290,19 @@ export const requestConsolidatedInvoice = async (pool, mailer, input) => {
   return {
     statement: {
       supplier_id: supplier.id,
-      supplier_name: supplier.name,
-      sent_to: supplier.po_email,
-      // No money on the way back: the letter quotes what Atelier costed each
-      // order at, but this payload is read by whichever staffer pressed the
-      // button and that reader may have no finance grant. How many orders went
-      // on the letter is the only figure a screen needs.
-      purchase_order_count: rows.length,
-      purchase_orders: rows.map((row) => ({
-        id: row.id,
-        po_number: row.po_number,
-        brand_name: row.brand_name,
-        status: row.status,
+      supplier_name: supplierName,
+      sent,
+      failed,
+      filename,
+      // No money on the way back: this payload is read by whichever staffer
+      // pressed the button, and that reader may have no finance grant. How many
+      // orders went on the letter is the only figure a screen needs.
+      purchase_order_count: purchaseOrders.length,
+      purchase_orders: purchaseOrders.map((po) => ({
+        id: po.id,
+        po_number: po.po_number,
+        brand_name: po.brand_name,
+        status: po.status,
       })),
       contact_log_entry,
     },

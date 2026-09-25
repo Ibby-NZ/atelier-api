@@ -188,6 +188,27 @@ describe('purchase-order notifications', () => {
     expect(supplierLetter.text).toContain('FOB')
 
     expect(to(BACKOFFICE)[0].text).toContain(PO_EMAIL)
+
+    // The PDF the CRM previewed rides on the letter (25 Sep 2026).
+    const [attachment] = supplierLetter.attachments ?? []
+    expect(attachment.filename).toBe(`${order.po_number}.pdf`)
+    expect(attachment.contentType).toBe('application/pdf')
+    expect(attachment.content.subarray(0, 5).toString('latin1')).toBe('%PDF-')
+    expect(supplierLetter.text).toContain(`${order.po_number}.pdf`)
+  })
+
+  // Ready to send (25 Sep 2026) is the office's own bookkeeping: nothing has
+  // gone to the house, so nothing is written to it.
+  it('sends nothing when a purchase order is marked ready to send, or taken back', async () => {
+    const order = await createOrder()
+    const ready = await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'ready_to_send' })
+    expect(ready.statusCode).toBe(200)
+    expect(ready.json().purchase_order.status).toBe('ready_to_send')
+    expect(ready.json().purchase_order.ready_at).not.toBeNull()
+    const back = await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'draft' })
+    expect(back.statusCode).toBe(200)
+    expect(back.json().purchase_order.status).toBe('draft')
+    expect(transport.sent).toHaveLength(0)
   })
 
   // Finance masking exists so a staffer does not read costs ON SCREEN. The
@@ -364,6 +385,11 @@ describe('purchase-order notifications', () => {
     const order = await createOrder()
     const early = await inject('POST', `/admin/purchase-orders/${order.id}/email`, { letter: 'details' })
     expect(early.statusCode).toBe(409)
+    // Ready to send has not gone to the house either.
+    await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'ready_to_send' })
+    const ready = await inject('POST', `/admin/purchase-orders/${order.id}/email`, { letter: 'details' })
+    expect(ready.statusCode).toBe(409)
+    expect(transport.sent).toHaveLength(0)
 
     await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'pending_payment' })
     transport.sent.length = 0
@@ -371,6 +397,7 @@ describe('purchase-order notifications', () => {
     expect(details.statusCode).toBe(200)
     expect(details.json()).toEqual({ template: 'purchase_order_sent', sent: [PO_EMAIL], failed: [] })
     expect(to(PO_EMAIL)[0].text).toContain('42.50')
+    expect(to(PO_EMAIL)[0].attachments[0].filename).toBe(`${order.po_number}.pdf`)
 
     await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'awaiting_delivery' })
     const none = await inject('POST', `/admin/purchase-orders/${order.id}/email`, { letter: 'status' })
@@ -380,10 +407,17 @@ describe('purchase-order notifications', () => {
   // The Bulk orders tab: ONE letter to a house for several purchase orders.
   describe('bulk orders', () => {
     const bulk = (ids) => inject('POST', '/admin/purchase-orders/bulk', { purchase_order_ids: ids })
+    // A bulk order takes purchase orders marked Ready to send (25 Sep 2026).
+    const readyOrder = async (options) => {
+      const order = await createOrder(options)
+      const moved = await inject('POST', `/admin/purchase-orders/${order.id}/status`, { status: 'ready_to_send' })
+      expect(moved.statusCode).toBe(200)
+      return order
+    }
 
-    it('sends several drafts to their house as ONE letter, each under its own PO number', async () => {
-      const first = await createOrder()
-      const second = await createOrder({ unitPrice: 10 })
+    it('sends several ready purchase orders to their house as ONE letter, each under its own PO number', async () => {
+      const first = await readyOrder()
+      const second = await readyOrder({ unitPrice: 10 })
       transport.sent.length = 0
 
       const response = await bulk([first.id, second.id])
@@ -400,8 +434,12 @@ describe('purchase-order notifications', () => {
       expect(letter.subject).toContain(`${bulkOrder.bulk_number} (${first.po_number}, ${second.po_number})`)
       expect(letter.text).toContain(first.po_number)
       expect(letter.text).toContain(second.po_number)
+      // The bulk order's PDF — the document the CRM previewed — rides on it.
+      expect(letter.attachments[0].filename).toBe(`${bulkOrder.bulk_number}.pdf`)
+      expect(letter.attachments[0].content.subarray(0, 5).toString('latin1')).toBe('%PDF-')
       // The office's record is the same letter.
       expect(to(BACKOFFICE)[0].subject).toBe(letter.subject)
+      expect(to(BACKOFFICE)[0].attachments[0].filename).toBe(`${bulkOrder.bulk_number}.pdf`)
 
       const read = await inject('GET', `/admin/purchase-orders/bulk/${bulkOrder.id}`)
       expect(read.json().bulk_order.purchase_orders).toHaveLength(2)
@@ -413,7 +451,7 @@ describe('purchase-order notifications', () => {
     })
 
     it('refuses a purchase order that has already gone to the house, and sends nothing', async () => {
-      const first = await createOrder()
+      const first = await readyOrder()
       const second = await createOrder()
       await inject('POST', `/admin/purchase-orders/${second.id}/status`, { status: 'pending_payment' })
       transport.sent.length = 0
@@ -423,11 +461,25 @@ describe('purchase-order notifications', () => {
       expect(response.json().message).toContain(second.po_number)
       expect(transport.sent).toHaveLength(0)
       const { rows } = await pool.query(`SELECT status, bulk_order_id FROM purchase_orders WHERE id = $1`, [first.id])
-      expect(rows[0]).toEqual({ status: 'draft', bulk_order_id: null })
+      expect(rows[0]).toEqual({ status: 'ready_to_send', bulk_order_id: null })
+    })
+
+    // A draft is still being written: marking it Ready to send is what puts it
+    // on the Bulk purchase orders tab.
+    it('refuses a draft, naming it, and sends nothing', async () => {
+      const ready = await readyOrder()
+      const draft = await createOrder()
+      transport.sent.length = 0
+
+      const response = await bulk([ready.id, draft.id])
+      expect(response.statusCode).toBe(409)
+      expect(response.json().message).toContain(draft.po_number)
+      expect(response.json().message).toMatch(/Ready to send/)
+      expect(transport.sent).toHaveLength(0)
     })
 
     it('refuses to mix suppliers in one bulk', async () => {
-      const first = await createOrder()
+      const first = await readyOrder()
       const { rows: suppliers } = await pool.query(
         `INSERT INTO suppliers (name, slug, currency, po_email) VALUES ($1, $2, 'GBP', 'other@po-mail-test.example.com') RETURNING id`,
         [`${PREFIX} Other`, `${PREFIX}-other`]
@@ -441,7 +493,9 @@ describe('purchase-order notifications', () => {
         brand_id: brands[0].id,
         lines: [{ colourway_id: colourwayId, qty_ordered: 5 }],
       })
-      const response = await bulk([first.id, other.json().purchase_order.id])
+      const otherId = other.json().purchase_order.id
+      await inject('POST', `/admin/purchase-orders/${otherId}/status`, { status: 'ready_to_send' })
+      const response = await bulk([first.id, otherId])
       expect(response.statusCode).toBe(422)
       expect(response.json().message).toMatch(/ONE supplier/)
     })

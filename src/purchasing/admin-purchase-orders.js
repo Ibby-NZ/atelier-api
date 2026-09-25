@@ -153,6 +153,7 @@ const PO_COLUMNS = `po.id,
         po.incoterm,
         po.po_email,
         po.status,
+        po.ready_at,
         po.sent_at,
         po.paid_at,
         po.awaiting_delivery_at,
@@ -324,6 +325,7 @@ const toPurchaseOrder = (row, lines, finance, invoice) =>
     incoterm: row.incoterm,
     po_email: row.po_email,
     status: row.status,
+    ready_at: row.ready_at ?? null,
     sent_at: row.sent_at,
     paid_at: row.paid_at,
     awaiting_delivery_at: row.awaiting_delivery_at ?? null,
@@ -390,9 +392,16 @@ const loadLinesByPurchaseOrderId = async (db, purchaseOrderIds, finance, { withR
 
 // Filter names are trusted column references; every VALUE flows through a $n
 // placeholder. Shape copied from `buildWhere` in admin-price-lists.js.
-const buildWhere = ({ supplierId, brandId, status, from, to, bulkOrderId }) => {
+const buildWhere = ({ supplierId, brandId, status, from, to, bulkOrderId, ids }) => {
   const clauses = []
   const params = []
+  // A named set — the purchase orders a PDF or a statement is drawn from
+  // (src/purchasing/po-documents.js). Never a route filter: the list route
+  // does not declare it, so Ajv strips it from a querystring.
+  if (Array.isArray(ids)) {
+    params.push(ids)
+    clauses.push(`po.id = ANY($${params.length}::int[])`)
+  }
   // The members of one bulk order (src/purchasing/bulk-orders.js).
   if (bulkOrderId) {
     params.push(bulkOrderId)
@@ -433,7 +442,7 @@ const buildWhere = ({ supplierId, brandId, status, from, to, bulkOrderId }) => {
  * @param {import('pg').Pool} pool
  * @param {{ supplierId?: number, brandId?: number, status?: string,
  *           from?: string, to?: string, page?: number, limit?: number,
- *           finance?: boolean }} [options]
+ *           bulkOrderId?: number, ids?: number[], finance?: boolean }} [options]
  * @returns {Promise<{ purchase_orders: object[], total: number }>}
  */
 export const listPurchaseOrders = async (pool, options = {}) => {
@@ -1156,11 +1165,12 @@ export const updatePurchaseOrder = (pool, id, patch, { finance = false } = {}) =
 
 // One move writes the state AND the stamp that dates it; either alone is a row
 // that contradicts itself. The stamp column is a code literal out of the frozen
-// `STATUS_STAMPS` map, never user input.
+// `STATUS_STAMPS` map, never user input. `draft` has no stamp (a ready order
+// taken back for more work), so that move writes the status alone.
 const moveStatus = async (client, id, target) => {
   const stamp = STATUS_STAMPS[target]
   await client.query(
-    `UPDATE purchase_orders SET status = $2, ${stamp} = now(), updated_at = now()
+    `UPDATE purchase_orders SET status = $2, ${stamp ? `${stamp} = now(), ` : ''}updated_at = now()
       WHERE id = $1`,
     [id, target]
   )

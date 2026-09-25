@@ -219,6 +219,8 @@ describe('W13 purchase orders', () => {
       ['GET', '/admin/purchase-orders/bulk', undefined],
       ['GET', '/admin/purchase-orders/bulk/1', undefined],
       ['POST', '/admin/purchase-orders/bulk', { purchase_order_ids: [1] }],
+      ['POST', '/admin/purchase-orders/pdf', { purchase_order_ids: [1] }],
+      ['POST', '/admin/purchase-orders/statement', { purchase_order_ids: [1] }],
       ['DELETE', '/admin/purchase-orders/1', undefined],
       ['POST', '/admin/purchase-order-lines/1/allocations', { order_line_id: 1, qty: 1 }],
       ['POST', '/admin/purchase-order-lines/1/receipts', { qty: 1 }],

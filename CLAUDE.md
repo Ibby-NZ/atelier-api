@@ -70,7 +70,7 @@ Fastify + Postgres API. Plain JavaScript, ESM, no TypeScript.
 
 The deep per-domain docs live in nested CLAUDE.md files that load automatically when working in that directory. **Read the relevant one BEFORE editing that area** — each records invariants and confirmed regressions, not style preferences:
 
-- `src/catalogue/CLAUDE.md` — public catalogue, admin catalogue CRUD, trade PRICE vs trade VISIBILITY gates, collections, featured ranking
+- `src/catalogue/CLAUDE.md` — public catalogue, admin catalogue CRUD, trade PRICE vs trade VISIBILITY gates, collections, featured ranking, the Supplier Colours upload (designs + colourways through the colourway import)
 - `src/orders/CLAUDE.md` — order requests, history, the sales-order lifecycle (quote → paid → shipped, one status route, audit trail, quote links) + reservation model
 - `src/checkout/CLAUDE.md` — Stripe checkout (no client prices; 422 rules)
 - `src/webhooks/CLAUDE.md` — Stripe webhook (raw body, idempotency ledger, server-side money re-resolution)
@@ -83,7 +83,7 @@ The deep per-domain docs live in nested CLAUDE.md files that load automatically 
 - `src/suppliers/CLAUDE.md` — suppliers vs brands, commercial terms (discount chains are MULTIPLICATIVE), backfill
 - `src/trade-accounts/CLAUDE.md` — trade client portal, viewer scoping, account-name collision rules
 - `src/products/CLAUDE.md` — category spreadsheet round trip (export/validate/apply), hardened CSV reader/writer
-- `src/pricing/CLAUDE.md` — the ONE waterfall engine, the platform's own pricing parameters (house override → supplier default → missing, PUT not PATCH), FX rates, the Dynamics backfill, and what stays a read-only Dynamics reference
+- `src/pricing/CLAUDE.md` — the ONE waterfall engine, the platform's own pricing parameters (house override → supplier default → missing, PUT not PATCH), FX rates, the Dynamics backfill, what stays a read-only Dynamics reference, and the Dynamics product-prices reimport (priced per row through its house, written fill-only onto catalogue products; the archive is never touched)
 - `src/reports/CLAUDE.md` — reporting: filters, revenue scope, finance masking, CSV export, stock/not-invoiced
 - `src/samples/CLAUDE.md` — samples register (samples are NOT stock), loans, sample orders, showrooms
 - `src/xero/CLAUDE.md` — Xero integration: connection lifecycle (rotating refresh tokens under a row lock), contact match-before-create, idempotent invoice push

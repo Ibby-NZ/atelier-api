@@ -18,8 +18,10 @@ import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminPriceListImportRoutes } from './routes/admin-price-list-import.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
+import { adminSupplierColourRoutes } from './routes/admin-supplier-colours.js'
 import { adminFreightRoutes } from './routes/admin-freight.js'
 import { adminPricingRoutes } from './routes/admin-pricing.js'
+import { adminProductPriceRoutes } from './routes/admin-product-prices.js'
 import { adminReportRoutes } from './routes/admin-reports.js'
 import { adminDashboardRoutes } from './routes/admin-dashboard.js'
 import { adminSampleRoutes } from './routes/admin-samples.js'
@@ -207,6 +209,10 @@ export const buildApp = ({
     // /admin/product-sheet/* — the spreadsheet round trip that fills in
     // products.category. Backoffice-only; the export is a CSV download.
     api.register(adminProductSheetRoutes, { pool })
+    // /admin/catalogue/colours/import/* — the Supplier Colours workbook landed
+    // as designs + colourways through the existing colourway import. Director
+    // only (a bulk catalogue write); its own plugin for the workbook parser.
+    api.register(adminSupplierColourRoutes, { pool })
     // /admin/freight/* — the incumbent's pricing parameters, the freight-letter
     // recovery report, the append-only rate ledger and the landed-cost preview.
     // Backoffice throughout; the parameter, recovery and preview routes are
@@ -217,6 +223,10 @@ export const buildApp = ({
     // it (per supplier, per house, FX by currency). Finance-gated throughout,
     // reads included: every figure is a cost input.
     api.register(adminPricingRoutes, { pool })
+    // /admin/product-prices/* — the Dynamics product prices, re-imported and
+    // each priced through its house's range parameters. Finance-gated like
+    // /admin/pricing; its own plugin because it registers the workbook parser.
+    api.register(adminProductPriceRoutes, { pool })
     // /admin/reports/* — the report library the CRM's Reporting screen reads.
     // Back-office only, masked server-side before the payload exists, and the
     // only admin routes here that opt into the rate limiter (a report is an

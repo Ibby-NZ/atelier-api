@@ -78,9 +78,19 @@ one fact drives everything below.
   never read to decide WHETHER to send — a redirected letter is still a letter sent. Guarded by
   `test/email-redirect.test.js`, which tests the BEHAVIOUR and deliberately asserts nothing about
   the ambient environment: a test reading `loadConfig().emailRedirectTo` passes for whoever wrote it
-  and fails in CI, which has no `.env` and needs none. **Unsetting it is what makes suppliers start
-  receiving real purchase orders**, and the thing that keeps that from being forgotten is the boot
-  warning in `server.js`, printed on every start while the valve is open.
+  and fails in CI, which has no `.env` and needs none. **The valve is OPEN BY DEFAULT while the
+  platform is being tested** (25 Sep 2026: "we don't want any emails to send to client or customer
+  addresses for testing purposes"): unset, `EMAIL_REDIRECT_TO` falls back to `ibrahim@verum.nz`
+  (`DEFAULT_EMAIL_REDIRECT_TO` in `config.js`, guarded by `test/config.test.js`), so a server whose
+  `.env` never mentions it still mails nobody else. **Setting it to empty (`EMAIL_REDIRECT_TO=`) is
+  what makes clients and suppliers start receiving real letters**, and the thing that keeps that from
+  being forgotten is the boot warning in `server.js`, printed on every start while the valve is open.
+- **Xero's invoice email goes round the valve, so the valve switches it off.** `POST
+  /admin/xero/orders/:id/invoice { email: true }` asks Xero to email its own invoice to the client's
+  Xero contact: that is Xero's mail, not ours, and there is no recipient to rewrite. With
+  `emailRedirectTo` set, `createXeroService` (handed it by `server.js`) never makes that call. The
+  push still succeeds and answers `emailed: false` plus a warning naming `EMAIL_REDIRECT_TO`.
+  Guarded in `test/admin-xero.test.js`.
 - **The house is told what a PERSON did, never what arithmetic says.** The purchase-order letters
   hang off Send PO (`pending_payment`), `paid`, a SHORT `completed` and `cancelled` — moves in
   `src/purchasing/po-states.js` (24 Sep 2026) — plus ONE `purchase_order_bulk_sent` for a bulk order,

@@ -552,6 +552,25 @@ describe('xero integration', () => {
       ).toBe(true)
     })
 
+    it('with EMAIL_REDIRECT_TO set, Xero is never asked to email the client', async () => {
+      scriptInvoiceCreate()
+      fake.on('POST', 'Invoices/inv-uuid-1/Email', () => null)
+      const orderId = await placePricedOrder()
+      const redirected = createXeroService({
+        pool,
+        config: XERO_CONFIG,
+        http: fake,
+        emailRedirectTo: testEmail('tester'),
+      })
+      const result = await redirected.pushOrderInvoice(orderId, { email: true })
+      expect(result.emailed).toBe(false)
+      expect(result.warning).toMatch(/EMAIL_REDIRECT_TO/)
+      expect(result.order.xero_invoice_id).toBe('inv-uuid-1')
+      expect(
+        fake.calls.some((c) => c.method === 'POST' && c.path === 'Invoices/inv-uuid-1/Email')
+      ).toBe(false)
+    })
+
     it('a failed email is a warning, not a failed push', async () => {
       scriptInvoiceCreate()
       fake.on('POST', 'Invoices/inv-uuid-1/Email', () => {

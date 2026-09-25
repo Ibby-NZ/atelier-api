@@ -23,6 +23,12 @@ const DEFAULT_ORDER_COPY_EMAIL = 'jenettec@atelier.co.nz'
 // sends that step's letter to BACKOFFICE_EMAIL / nobody respectively.
 const DEFAULT_TRADE_APPROVER_EMAIL = 'elizabethd@atelier.co.nz'
 const DEFAULT_TRADE_ACCOUNTS_EMAIL = 'jenettec@atelier.co.nz'
+// The test-drive valve is OPEN by default while the platform is being tested
+// (25 Sep 2026: "we don't want any emails to send to client or customer
+// addresses for testing purposes"), so a server whose .env never mentions it
+// still mails nobody but the tester. EMAIL_REDIRECT_TO= (empty) closes it —
+// that is the go-live switch.
+const DEFAULT_EMAIL_REDIRECT_TO = 'ibrahim@verum.nz'
 const MIN_COOKIE_SECRET_LENGTH = 32
 // Xero defaults. The scopes are the code-flow set (offline_access is what
 // yields the refresh token); a custom connection ignores the scope PARAM and
@@ -192,7 +198,8 @@ export const loadConfig = (env = process.env) => {
     // THE TEST-DRIVE VALVE. Set it and EVERY letter — client, back office and
     // SUPPLIER alike — is delivered to this one address instead of its real
     // recipient, with the intended recipient written into the subject and the
-    // first line of the body. Unset, mail goes where it is addressed.
+    // first line of the body. Unset, it defaults to DEFAULT_EMAIL_REDIRECT_TO;
+    // set to empty, mail goes where it is addressed.
     //
     // It exists because purchasing and reserves write to people OUTSIDE the
     // business: a purchase order goes to a fabric house, a reserve request asks
@@ -201,7 +208,7 @@ export const loadConfig = (env = process.env) => {
     // valve is the mailer's, not each route's, so it covers every send that
     // exists today AND every send added later — there is no route that can opt
     // out of it and no caller that has to remember it.
-    emailRedirectTo: env.EMAIL_REDIRECT_TO ?? null,
+    emailRedirectTo: (env.EMAIL_REDIRECT_TO ?? DEFAULT_EMAIL_REDIRECT_TO) || null,
 
     // Newsletter (Mailchimp). null until all three are set; POST /newsletter
     // answers 503 meanwhile and the trade form's opt-in is not acted on.

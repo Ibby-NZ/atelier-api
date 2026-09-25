@@ -30,4 +30,10 @@ describe('loadConfig: mail', () => {
     expect(config.smtpHost).toBe('smtp.postmarkapp.com')
     expect(config.smtpPort).toBe(587)
   })
+
+  it('EMAIL_REDIRECT_TO defaults to the tester while testing; empty turns it off', () => {
+    expect(loadConfig({ ...BASE }).emailRedirectTo).toBe('ibrahim@verum.nz')
+    expect(loadConfig({ ...BASE, EMAIL_REDIRECT_TO: 'x@verum.nz' }).emailRedirectTo).toBe('x@verum.nz')
+    expect(loadConfig({ ...BASE, EMAIL_REDIRECT_TO: '' }).emailRedirectTo).toBeNull()
+  })
 })

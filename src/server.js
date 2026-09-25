@@ -38,7 +38,8 @@ const start = async () => {
     console.warn(
       `EMAIL_REDIRECT_TO is set — EVERY letter, including purchase orders and ` +
         `reserve requests addressed to SUPPLIERS, is delivered to ` +
-        `${config.emailRedirectTo} and to nobody else. Unset it to go live.`
+        `${config.emailRedirectTo} and to nobody else, and Xero is not asked to ` +
+        `email invoices. Set EMAIL_REDIRECT_TO= (empty) to go live.`
     )
   }
 
@@ -55,6 +56,9 @@ const start = async () => {
         // An invoice paid at the accountant's desk marks its order paid here
         // — with the same letter the CRM's Mark paid button sends.
         notifyOrderTransition: (order) => notifyOrderTransition(mailer, pool, order),
+        // Xero's invoice email goes from Xero straight to the client, round the
+        // mailer — so the valve has to be handed to it separately.
+        emailRedirectTo: config.emailRedirectTo,
       })
     : null
   if (!xero) {

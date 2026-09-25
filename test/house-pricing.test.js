@@ -1,0 +1,537 @@
+// One house's pricing, and the Dynamics tracking-options export applied to
+// every house (Sept 2026 — "this information should be added to their
+// respective houses with editable fields"):
+//   1. reading the uploaded workbook — the D365 envelope, Range rows only
+//   2. the planner — fill vs replace vs kept, freight units, what is never touched
+//   3. /admin/pricing/houses/:id — read and write each figure into its one home
+//   4. /admin/pricing/houses/import/* — the upload, dry run then apply
+//
+// Real Postgres, prefixed fixtures, one app per suite (register and login share
+// a 10-per-15-min bucket per instance).
+
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
+import runner from 'node-pg-migrate'
+import { loadConfig } from '../src/config.js'
+import { createPool } from '../src/db.js'
+import { buildApp } from '../src/app.js'
+import { getBrandParameters, upsertBrandParameters } from '../src/pricing/pricing-parameters.js'
+import {
+  CHANGE_KINDS,
+  DISCOUNT_FIELD,
+  FREIGHT_FIELD,
+  planParametersBackfill,
+} from '../src/pricing/parameters-backfill.js'
+import { readTrackingOptionsWorkbook } from '../src/pricing/house-pricing-import.js'
+import { d365Workbook, trackingRow } from './helpers/d365-workbook-fixture.js'
+
+const PREFIX = 'w-house-pricing-test'
+const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
+const PASSWORD = 'correct horse battery staple'
+const FILENAME = 'Active Tracking Options 25-09-2026 10-58-14 AM.xlsx'
+const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
+const runMigrations = (databaseUrl) =>
+  runner({ databaseUrl, dir: 'migrations', direction: 'up', migrationsTable: 'pgmigrations', log: () => {} })
+
+const cleanup = async (pool) => {
+  await pool.query(`DELETE FROM supplier_freight_rates WHERE range_name ILIKE $1`, [`${PREFIX}%`])
+  await pool.query(`DELETE FROM price_list_items WHERE supplier LIKE $1`, [`${PREFIX}%`])
+  // parameters and terms CASCADE from brands and suppliers
+  await pool.query(`DELETE FROM brands WHERE slug LIKE $1`, [`${PREFIX}-%`])
+  await pool.query(`DELETE FROM suppliers WHERE slug LIKE $1`, [`${PREFIX}-%`])
+  await pool.query(`DELETE FROM users WHERE email LIKE $1`, [`${PREFIX}-%`])
+}
+
+const insertSupplier = (pool, suffix) =>
+  pool
+    .query(`INSERT INTO suppliers (name, slug, currency) VALUES ($1, $2, 'EUR') RETURNING id`, [
+      `${PREFIX} ${suffix}`,
+      `${PREFIX}-${suffix}`,
+    ])
+    .then(({ rows }) => rows[0].id)
+
+const houseName = (suffix) => `${PREFIX} ${suffix}`.toUpperCase()
+
+const insertBrand = (pool, suffix, supplierId = null) =>
+  pool
+    .query(
+      `INSERT INTO brands (name, slug, currency, trade_only, supplier_id)
+       VALUES ($1, $2, 'NZD', false, $3) RETURNING id`,
+      [houseName(suffix), `${PREFIX}-${suffix}`, supplierId]
+    )
+    .then(({ rows }) => rows[0].id)
+
+const insertTerms = (pool, { supplierId, brandId, discount = null, chain = null }) =>
+  pool.query(
+    `INSERT INTO supplier_brand_terms (supplier_id, brand_id, discount, discount_chain)
+     VALUES ($1, $2, $3, COALESCE($4::numeric(6,4)[], '{}'::numeric(6,4)[]))`,
+    [supplierId, brandId, discount, chain]
+  )
+
+// Price lines give a house its unit: `count` lines in `unit`.
+const insertPriceLines = async (pool, suffix, unit, count = 1) => {
+  for (let at = 0; at < count; at += 1) {
+    await pool.query(
+      `INSERT INTO price_list_items
+         (supplier, category, code, code_normalized, unit, wholesale_rate, currency, source_file, product_range)
+       VALUES ($1, 'fabric', $2, $2, $3, 10, 'EUR', 'fixture.xlsx', $4)`,
+      [`${PREFIX} ${suffix}`, `${suffix}-${unit}-${at}`, unit, houseName(suffix)]
+    )
+  }
+}
+
+const insertFreight = (pool, { rangeName, rate, unit = 'metre', on = '2020-01-01' }) =>
+  pool.query(
+    `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, unit, effective_from)
+     VALUES ($1, NULL, 'dollar', $2, $3, $4)`,
+    [rangeName, rate, unit, on]
+  )
+
+const houseFreight = (pool, rangeName) =>
+  pool
+    .query(
+      `SELECT rate::float AS rate, unit, to_char(effective_from, 'YYYY-MM-DD') AS effective_from
+         FROM supplier_freight_rates WHERE lower(range_name) = lower($1)
+        ORDER BY effective_from DESC, id DESC`,
+      [rangeName]
+    )
+    .then(({ rows }) => rows)
+
+const houseTerms = (pool, brandId) =>
+  pool
+    .query(
+      `SELECT discount::float AS discount, cardinality(discount_chain) AS chain FROM supplier_brand_terms WHERE brand_id = $1`,
+      [brandId]
+    )
+    .then(({ rows }) => rows[0] ?? null)
+
+// --------------------------------------------------------------------------
+// 1. The workbook
+// --------------------------------------------------------------------------
+
+describe('reading the tracking-options export', () => {
+  it('reads Range rows by their D365 logical names, drops Type rows, and keeps a blank freight unknown', () => {
+    const read = readTrackingOptionsWorkbook(
+      d365Workbook([
+        trackingRow('g1', 'BROCHIER', { freight: 50, discount: 0, markup: 92, minQty: 5, surcharge: 20 }),
+        trackingRow('g2', 'HAMAM', { duty: [5, 10, 5], markup: 75 }),
+        trackingRow('g3', 'Fabric', { category: 'Type', duty: [null, null, null], clearance: null }),
+      ]),
+      FILENAME
+    )
+    expect(read.rows).toBe(3)
+    expect(read.exported_at).toBe('2026-09-25T10:58:14')
+    expect(read.ranges.map((r) => r.name)).toEqual(['BROCHIER', 'HAMAM'])
+    expect(read.ranges[0]).toMatchObject({
+      duty_rate_a: 5,
+      clearance_percent: 10,
+      freight_per_unit: 50,
+      discount_percent: 0,
+      discount_stated: true,
+      trade_markup_percent: 92,
+      min_qty_to_avoid_surcharge: 5,
+      surcharge_per_unit: 20,
+    })
+    // Blank discount is 0% but says so; blank freight is UNKNOWN, never zero.
+    expect(read.ranges[1]).toMatchObject({ duty_rate_b: 10, freight_per_unit: null, discount_percent: 0, discount_stated: false })
+  })
+
+  it('refuses what is not the tracking-options export, in words the office can act on', () => {
+    const refusal = (buffer) => {
+      try {
+        readTrackingOptionsWorkbook(buffer)
+      } catch (error) {
+        return error
+      }
+      return null
+    }
+    expect(refusal(Buffer.alloc(0))).toMatchObject({ statusCode: 422, message: 'That file is empty.' })
+    expect(refusal(Buffer.from('Name,Duty\nALPAKA,5\n'))).toMatchObject({ statusCode: 422, message: expect.stringMatching(/not an Excel workbook/) })
+    expect(
+      refusal(d365Workbook([['a1', 'Some Co']], { entity: 'account', columns: [['accountid', 'Account'], ['name', 'Name']] }))
+    ).toMatchObject({ statusCode: 422, message: expect.stringMatching(/"account" export, not the tracking options/) })
+    expect(
+      refusal(d365Workbook([trackingRow('g1', 'X', { category: 'Type' })]))
+    ).toMatchObject({ statusCode: 422, message: expect.stringMatching(/no Range rows/) })
+  })
+})
+
+// --------------------------------------------------------------------------
+// 2. The planner (pure)
+// --------------------------------------------------------------------------
+
+describe('planning the export onto the houses', () => {
+  const range = (name, over = {}) => ({
+    name,
+    duty_rate_a: 5,
+    duty_rate_b: 5,
+    duty_rate_c: 5,
+    clearance_percent: 10,
+    freight_per_unit: 30,
+    discount_percent: 25,
+    discount_stated: true,
+    trade_markup_percent: 85,
+    min_qty_to_avoid_surcharge: 5,
+    surcharge_per_unit: 20,
+    status: 'Active',
+    ...over,
+  })
+  const brands = [
+    { id: 1, name: 'NEW HOUSE', slug: 'new-house', supplier_id: 7 },
+    { id: 2, name: 'SAVED HOUSE', slug: 'saved-house', supplier_id: 7 },
+    { id: 3, name: 'CHAIN HOUSE', slug: 'chain-house', supplier_id: 7 },
+    { id: 4, name: 'NO UNIT', slug: 'no-unit', supplier_id: null },
+  ]
+  const sources = {
+    parameters: [
+      range('NEW HOUSE'),
+      range('SAVED HOUSE', { clearance_percent: 12, duty_rate_b: null, trade_markup_percent: 90, freight_per_unit: 35 }),
+      range('CHAIN HOUSE'),
+      range('NO UNIT'),
+      range('RETIRED', { status: 'Inactive' }),
+    ],
+    brands,
+    existing: [{ brand_id: 2, duty_percent_a: '5.000', duty_percent_b: '7.000', clearance_percent: '10.000', trade_markup_percent: null }],
+    terms: [
+      { id: 20, brand_id: 2, supplier_id: 7, discount: 0.1, chain_length: 0, tier_count: 0 },
+      { id: 30, brand_id: 3, supplier_id: 7, discount: null, chain_length: 2, tier_count: 0 },
+    ],
+    freight: [{ range_name: 'Saved House', rate: 30, basis: 'dollar', unit: 'roll', effective_from: '2026-01-01' }],
+    units: [[1, 'metre'], [3, 'metre']],
+  }
+  const lines = (plan, brand) => plan.changes.filter((line) => line.brand === brand)
+  const line = (plan, brand, field) => lines(plan, brand).find((l) => l.field === field)
+
+  it('fills blanks, keeps what the office saved, and says so line by line', () => {
+    const plan = planParametersBackfill(sources, { on: '2026-09-25' })
+
+    // A house with nothing: every stated value is a fill, in all three homes.
+    expect(plan.inserts.map((row) => row.brand_id)).toEqual([1, 3, 4])
+    expect(plan.inserts[0]).toMatchObject({ surcharge_min_qty: 5, surcharge_per_unit: 20, trade_markup_percent: 85 })
+    expect(plan.termsInserts).toEqual([expect.objectContaining({ brand_id: 1, supplier_id: 7, discount: 0.25 })])
+    // Freight lands on every house with a unit — the chain house too, since
+    // only its DISCOUNT is off limits — and not on the saved house, whose rate
+    // the export disagrees with.
+    expect(plan.freightInserts.map((row) => row.brand_id)).toEqual([1, 3])
+    expect(plan.freightInserts[0]).toMatchObject({ range_name: 'NEW HOUSE', rate: 30, unit: 'metre', effective_from: '2026-09-25' })
+    expect(lines(plan, 'NEW HOUSE').every((l) => l.kind === CHANGE_KINDS.FILL)).toBe(true)
+
+    // The saved house: its blank markup and surcharge fill; the rest is kept.
+    expect(plan.fills).toEqual([
+      expect.objectContaining({ brand_id: 2, trade_markup_percent: 90, surcharge_min_qty: 5, duty_percent_c: 5 }),
+    ])
+    expect(plan.overwrites).toEqual([])
+    expect(line(plan, 'SAVED HOUSE', 'clearance_percent')).toMatchObject({ from: 10, to: 12, kind: CHANGE_KINDS.KEPT })
+    expect(line(plan, 'SAVED HOUSE', DISCOUNT_FIELD)).toMatchObject({ from: 10, to: 25, kind: CHANGE_KINDS.KEPT })
+    expect(line(plan, 'SAVED HOUSE', FREIGHT_FIELD)).toMatchObject({ from: 30, to: 35, kind: CHANGE_KINDS.KEPT })
+    // A BLANK in the export never clears the saved band.
+    expect(line(plan, 'SAVED HOUSE', 'duty_percent_b')).toBeUndefined()
+    // An unchanged value is no line at all.
+    expect(line(plan, 'SAVED HOUSE', 'duty_percent_a')).toBeUndefined()
+
+    expect(plan.reports.termsAlreadyOnFile).toEqual([expect.objectContaining({ brand: 'CHAIN HOUSE' })])
+    expect(plan.reports.brandsWithoutSupplier).toEqual([expect.objectContaining({ brand: 'NO UNIT' })])
+    expect(plan.reports.freightWithoutUnit).toEqual([expect.objectContaining({ brand: 'NO UNIT', rate: 30 })])
+    expect(plan.reports.inactiveRanges).toEqual([{ range: 'RETIRED', status: 'Inactive' }])
+    expect(plan.summary).toMatchObject({ houses_matched: 4, values_replaced: 0, values_kept: 3 })
+  })
+
+  it('with overwrite, replaces what disagrees — freight as a new dated row in the unit it already had — and still never touches a chain', () => {
+    const plan = planParametersBackfill(sources, { overwrite: true, on: '2026-09-25' })
+    expect(plan.overwrites).toEqual([expect.objectContaining({ brand_id: 2, clearance_percent: 12 })])
+    expect(plan.overwrites[0]).not.toHaveProperty('duty_percent_b')
+    expect(plan.termsUpdates).toEqual([expect.objectContaining({ terms_id: 20, supplier_id: 7, discount: 0.25, was: 0.1 })])
+    expect(plan.freightInserts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ brand_id: 2, rate: 35, unit: 'roll', effective_from: '2026-09-25' })])
+    )
+    expect(line(plan, 'SAVED HOUSE', FREIGHT_FIELD)).toMatchObject({ from: 30, to: 35, kind: CHANGE_KINDS.REPLACE, unit: 'roll' })
+    expect(plan.changes.some((l) => l.kind === CHANGE_KINDS.KEPT)).toBe(false)
+    expect(plan.termsUpdates.some((row) => row.brand_id === 3)).toBe(false)
+  })
+
+  it('fills the discount on terms that carry none — a markup-only row is a blank, not a saved rate', () => {
+    const plan = planParametersBackfill(
+      {
+        ...sources,
+        terms: [...sources.terms, { id: 40, brand_id: 1, supplier_id: 7, discount: null, chain_length: 0, tier_count: 0 }],
+      },
+      { on: '2026-09-25' }
+    )
+    expect(plan.termsInserts.some((row) => row.brand_id === 1)).toBe(false)
+    expect(plan.termsUpdates).toEqual([expect.objectContaining({ terms_id: 40, discount: 0.25, was: null })])
+    expect(line(plan, 'NEW HOUSE', DISCOUNT_FIELD)).toMatchObject({ from: null, to: 25, kind: CHANGE_KINDS.FILL })
+  })
+
+  it('does not replace a freight rate already dated today — the ledger holds one per day', () => {
+    const plan = planParametersBackfill(
+      { ...sources, freight: [{ ...sources.freight[0], effective_from: '2026-09-25' }] },
+      { overwrite: true, on: '2026-09-25' }
+    )
+    expect(plan.freightInserts.some((row) => row.brand_id === 2)).toBe(false)
+    expect(plan.reports.freightDatedToday).toEqual([expect.objectContaining({ brand: 'SAVED HOUSE', rate: 35, current: 30 })])
+  })
+})
+
+// --------------------------------------------------------------------------
+// 3 + 4. The routes
+// --------------------------------------------------------------------------
+
+describe('/admin/pricing/houses', () => {
+  let pool
+  let app
+  let financeCookie
+  let plainCookie
+  let supplierId
+  let houseId // linked, flat terms
+  let chainId // linked, on a chain
+  let bareId // no supplier
+
+  const sessionCookieFrom = (response) => {
+    const setCookie = response.headers['set-cookie']
+    const header = Array.isArray(setCookie) ? setCookie[0] : setCookie
+    return header.split(';')[0]
+  }
+  const inject = (method, url, { cookie = financeCookie, payload, headers = {} } = {}) =>
+    app.inject({ method, url, headers: { ...(cookie ? { cookie } : {}), ...headers }, ...(payload !== undefined ? { payload } : {}) })
+  const upload = (step, buffer, query = '') =>
+    inject('POST', `/admin/pricing/houses/import/${step}?filename=${encodeURIComponent(FILENAME)}${query}`, {
+      payload: buffer,
+      headers: { 'content-type': XLSX },
+    })
+
+  const fullSet = (over = {}) => ({
+    duty_percent_a: 5,
+    duty_percent_b: 5,
+    duty_percent_c: 5,
+    clearance_percent: 10,
+    trade_markup_percent: 85,
+    fx_margin_percent: null,
+    handling: null,
+    surcharge_min_qty: 5,
+    surcharge_per_unit: 20,
+    note: null,
+    ...over,
+  })
+
+  beforeAll(async () => {
+    const config = loadConfig()
+    await runMigrations(config.databaseUrl)
+    pool = createPool(config.databaseUrl)
+    await cleanup(pool)
+    app = buildApp({ pool, cookieSecret: TEST_COOKIE_SECRET, logger: false })
+    await app.ready()
+
+    supplierId = await insertSupplier(pool, 'supplier')
+    houseId = await insertBrand(pool, 'house', supplierId)
+    chainId = await insertBrand(pool, 'chain', supplierId)
+    bareId = await insertBrand(pool, 'bare', null)
+    await insertTerms(pool, { supplierId, brandId: chainId, chain: [0.4, 0.4] })
+    await insertPriceLines(pool, 'house', 'metre', 3)
+    await insertPriceLines(pool, 'house', 'roll', 1)
+
+    for (const [key, finance] of [
+      ['finance', true],
+      ['plain', false],
+    ]) {
+      const email = `${PREFIX}-${key}@example.test`
+      const res = await app.inject({ method: 'POST', url: '/auth/register', payload: { email, password: PASSWORD, name: key } })
+      const cookie = sessionCookieFrom(res)
+      await pool.query(`UPDATE users SET role = 'backoffice', can_view_finance = $2 WHERE email = $1`, [email, finance])
+      if (key === 'finance') financeCookie = cookie
+      else plainCookie = cookie
+    }
+  })
+
+  afterAll(async () => {
+    await app.close()
+    await cleanup(pool)
+    await pool.end()
+  })
+
+  beforeEach(async () => {
+    const houses = [houseId, chainId, bareId]
+    await pool.query(`DELETE FROM supplier_pricing_parameters WHERE brand_id = ANY($1::int[])`, [houses])
+    await pool.query(`DELETE FROM supplier_brand_terms WHERE brand_id = ANY($1::int[]) AND brand_id <> $2`, [houses, chainId])
+    await pool.query(`DELETE FROM supplier_freight_rates WHERE range_name ILIKE $1`, [`${PREFIX}%`])
+  })
+
+  it('is finance-gated, reads included', async () => {
+    const book = d365Workbook([trackingRow('g1', houseName('house'))])
+    for (const [method, url, payload] of [
+      ['GET', `/admin/pricing/houses/${houseId}`],
+      ['PUT', `/admin/pricing/houses/${houseId}`, { parameters: fullSet() }],
+    ]) {
+      expect((await inject(method, url, { cookie: plainCookie, payload })).statusCode).toBe(403)
+      expect((await inject(method, url, { cookie: null, payload })).statusCode).toBe(401)
+    }
+    for (const step of ['validate', 'apply']) {
+      const res = await inject('POST', `/admin/pricing/houses/import/${step}`, {
+        cookie: plainCookie,
+        payload: book,
+        headers: { 'content-type': XLSX },
+      })
+      expect(res.statusCode).toBe(403)
+    }
+  })
+
+  it('reads a house with nothing set: every figure blank, the discount writable, the freight unit taken from its price lines', async () => {
+    const res = await inject('GET', `/admin/pricing/houses/${houseId}`)
+    expect(res.statusCode).toBe(200)
+    const { pricing } = res.json()
+    expect(pricing.house).toMatchObject({ id: houseId, supplier_id: supplierId, supplier_name: `${PREFIX} supplier` })
+    expect(pricing.parameters).toBe(null)
+    expect(pricing.discount).toMatchObject({ percent: null, source: 'missing', editable: true })
+    expect(pricing.freight).toBe(null)
+    expect(pricing.freight_unit_hint).toBe('metre')
+    expect((await inject('GET', '/admin/pricing/houses/999999999')).statusCode).toBe(404)
+  })
+
+  it('saves each figure into its one home — parameters, a flat discount on the terms, a dated freight rate', async () => {
+    const res = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
+      payload: {
+        parameters: fullSet(),
+        discount_percent: 25,
+        freight: { rate: 30, unit: 'metre', effective_from: '2026-01-01' },
+      },
+    })
+    expect(res.statusCode).toBe(200)
+    const { pricing } = res.json()
+    expect(pricing.parameters).toMatchObject({ duty_percent_a: 5, clearance_percent: 10, surcharge_min_qty: 5, surcharge_per_unit: 20 })
+    expect(pricing.discount).toMatchObject({ percent: 25, source: 'house', shape: 'flat', editable: true })
+    expect(pricing.freight).toMatchObject({ rate: 30, unit: 'metre', basis: 'dollar', effective_from: '2026-01-01' })
+    expect(await houseTerms(pool, houseId)).toMatchObject({ discount: 0.25, chain: 0 })
+
+    // The same figures again change nothing: no second ledger row, no 409.
+    const again = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
+      payload: { parameters: fullSet(), discount_percent: 25, freight: { rate: 30, unit: 'metre', effective_from: '2026-02-01' } },
+    })
+    expect(again.statusCode).toBe(200)
+    expect(await houseFreight(pool, houseName('house'))).toHaveLength(1)
+
+    // A new rate is a new dated row; the old one stays as history.
+    const moved = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
+      payload: { parameters: fullSet(), discount_percent: 20, freight: { rate: 32, unit: 'metre', effective_from: '2026-03-01' } },
+    })
+    expect(moved.json().pricing).toMatchObject({ discount: { percent: 20 }, freight: { rate: 32 } })
+    expect((await houseFreight(pool, houseName('house'))).map((row) => row.rate)).toEqual([32, 30])
+
+    // PUT semantics on the parameter set: an omitted column clears.
+    const cleared = await inject('PUT', `/admin/pricing/houses/${houseId}`, { payload: { parameters: { duty_percent_a: 5 } } })
+    expect(cleared.json().pricing.parameters).toMatchObject({ duty_percent_a: 5, clearance_percent: null, surcharge_min_qty: null })
+    // Absent discount and freight are left alone.
+    expect(cleared.json().pricing.discount.percent).toBe(20)
+  })
+
+  it('refuses a discount it cannot write as one transaction — nothing else is saved either', async () => {
+    const chain = await inject('PUT', `/admin/pricing/houses/${chainId}`, {
+      payload: { parameters: fullSet(), discount_percent: 10 },
+    })
+    expect(chain.statusCode).toBe(422)
+    expect(chain.json().message).toMatch(/chain or a set of tiers/)
+    expect(await getBrandParameters(pool, chainId)).toBe(null)
+    expect(await houseTerms(pool, chainId)).toMatchObject({ discount: null, chain: 2 })
+
+    const read = (await inject('GET', `/admin/pricing/houses/${chainId}`)).json().pricing
+    expect(read.discount).toMatchObject({ shape: 'chain', editable: false, percent: 64 })
+
+    const orphan = await inject('PUT', `/admin/pricing/houses/${bareId}`, {
+      payload: { parameters: fullSet(), discount_percent: 10 },
+    })
+    expect(orphan.statusCode).toBe(422)
+    expect(orphan.json().message).toMatch(/Link this house to the supplier/)
+    expect(await getBrandParameters(pool, bareId)).toBe(null)
+  })
+
+  it('refuses a freight rate with no unit the ledger knows, and a discount of 100%', async () => {
+    const unit = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
+      payload: { parameters: fullSet(), freight: { rate: 30, unit: 'bolt' } },
+    })
+    expect(unit.statusCode).toBe(422)
+    expect(await getBrandParameters(pool, houseId)).toBe(null)
+    const whole = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
+      payload: { parameters: fullSet(), discount_percent: 100 },
+    })
+    expect(whole.statusCode).toBe(400)
+  })
+
+  it('validates an upload without writing, applies it, fills only blanks, and replaces only when asked', async () => {
+    // The office had already saved a clearance on the house.
+    await upsertBrandParameters(pool, houseId, { clearance_percent: 12 })
+    const book = d365Workbook([
+      trackingRow('g1', houseName('house'), { freight: 30, discount: 25, markup: 85, minQty: 5, surcharge: 20 }),
+      trackingRow('g2', houseName('chain'), { freight: 40, discount: 10, markup: 70 }),
+      trackingRow('g3', houseName('bare'), { freight: 50, discount: 5, markup: 60 }),
+      trackingRow('g4', `${PREFIX} NOBODY`, { freight: 1 }),
+    ])
+
+    const dry = await upload('validate', book)
+    expect(dry.statusCode).toBe(200)
+    const plan = dry.json()
+    expect(plan).toMatchObject({ dry_run: true, exported_at: '2026-09-25T10:58:14', houses_matched: 3 })
+    expect(plan.changes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ brand_id: houseId, field: 'clearance_percent', from: 12, to: 10, kind: 'kept' }),
+        expect.objectContaining({ brand_id: houseId, field: 'freight', to: 30, unit: 'metre', kind: 'fill' }),
+        expect.objectContaining({ brand_id: houseId, field: 'discount_percent', to: 25, kind: 'fill' }),
+      ])
+    )
+    expect(plan.reports.rangesWithoutBrand).toEqual([expect.objectContaining({ range: `${PREFIX} NOBODY` })])
+    expect(plan.reports.brandsWithoutSupplier).toEqual([expect.objectContaining({ brand: houseName('bare') })])
+    // The dry run wrote nothing.
+    expect(await getBrandParameters(pool, houseId)).toMatchObject({ clearance_percent: 12, trade_markup_percent: null })
+    expect(await houseFreight(pool, houseName('house'))).toEqual([])
+
+    const applied = await upload('apply', book)
+    expect(applied.statusCode).toBe(200)
+    expect(applied.json()).toMatchObject({ dry_run: false, terms_inserted: 1, freight_inserted: 1 })
+    expect(await getBrandParameters(pool, houseId)).toMatchObject({
+      clearance_percent: 12,
+      trade_markup_percent: 85,
+      surcharge_min_qty: 5,
+      surcharge_per_unit: 20,
+    })
+    expect(await houseTerms(pool, houseId)).toMatchObject({ discount: 0.25 })
+    expect(await houseFreight(pool, houseName('house'))).toEqual([expect.objectContaining({ rate: 30, unit: 'metre' })])
+    // The chain house kept its chain; the house with no unit has no freight.
+    expect(await houseTerms(pool, chainId)).toMatchObject({ discount: null, chain: 2 })
+    expect(applied.json().reports.freightWithoutUnit.map((r) => r.brand)).toEqual(
+      expect.arrayContaining([houseName('chain'), houseName('bare')])
+    )
+
+    // Re-running changes nothing but the one kept line.
+    const rerun = (await upload('validate', book)).json()
+    expect(rerun.changes).toEqual([expect.objectContaining({ field: 'clearance_percent', kind: 'kept' })])
+
+    // With overwrite the export wins the clearance.
+    const replaced = await upload('apply', book, '&overwrite=true')
+    expect(replaced.json()).toMatchObject({ parameters_replaced: 1, values_replaced: 1 })
+    expect(await getBrandParameters(pool, houseId)).toMatchObject({ clearance_percent: 10 })
+  })
+
+  it('replaces a house’s freight only when asked, as a new dated row in the unit the house already had', async () => {
+    await insertFreight(pool, { rangeName: houseName('house'), rate: 20, unit: 'roll', on: '2020-01-01' })
+    const book = d365Workbook([trackingRow('g1', houseName('house'), { freight: 30 })])
+
+    const kept = (await upload('validate', book)).json()
+    expect(kept.changes).toEqual(
+      expect.arrayContaining([expect.objectContaining({ field: 'freight', from: 20, to: 30, kind: 'kept', unit: 'roll' })])
+    )
+
+    const applied = await upload('apply', book, '&overwrite=true')
+    expect(applied.json()).toMatchObject({ freight_inserted: 1 })
+    const rates = await houseFreight(pool, houseName('house'))
+    expect(rates.map((row) => [row.rate, row.unit])).toEqual([[30, 'roll'], [20, 'roll']])
+  })
+
+  it('refuses a file that is not the export with the per-cell reasons, and writes nothing', async () => {
+    const res = await upload('apply', Buffer.from('Name,Duty\n'))
+    expect(res.statusCode).toBe(422)
+    expect(res.json()).toMatchObject({ message: expect.stringMatching(/not an Excel workbook/), errors: [], error_count: 0 })
+
+    const bad = d365Workbook([trackingRow('g1', houseName('house'), { markup: 'eighty-five' })])
+    const cells = await upload('validate', bad)
+    expect(cells.statusCode).toBe(422)
+    expect(cells.json().errors).toEqual([expect.stringMatching(/trade_markup/)])
+    expect(await getBrandParameters(pool, houseId)).toBe(null)
+  })
+})

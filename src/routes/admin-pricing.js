@@ -8,6 +8,10 @@
 //   GET|PUT|DELETE /admin/pricing/parameters/brands/:id  the house's override set
 //   GET    /admin/pricing/fx-rates
 //   PUT    /admin/pricing/fx-rates/:currency            { rate, set_on?, note? }
+//   GET    /admin/pricing/houses/:id                    one house's pricing, as the house page shows it
+//   PUT    /admin/pricing/houses/:id                    { parameters, discount_percent?, freight? }
+//   POST   /admin/pricing/houses/import/validate        the Dynamics tracking-options .xlsx — dry run
+//   POST   /admin/pricing/houses/import/apply           the same file — one transaction
 //
 // EVERY ROUTE IS FINANCE-GATED, reads included, through `requireFinance` — the
 // one gate, recomputed per request. Every figure here is a cost input (what
@@ -20,6 +24,9 @@
 // what reaches SQL; the schema's job is types and non-negativity.
 
 import { requireFinance } from '../reports/access.js'
+import { getHousePricing, saveHousePricing } from '../pricing/house-pricing.js'
+import { backfillPricingParameters } from '../pricing/parameters-backfill.js'
+import { readTrackingOptionsWorkbook } from '../pricing/house-pricing-import.js'
 import {
   NUMERIC_PARAMETERS,
   OVERRIDABLE_INPUTS,
@@ -50,6 +57,55 @@ const PARAMETERS_BODY = {
       NUMERIC_PARAMETERS.map((column) => [column, { type: ['number', 'null'], minimum: 0 }])
     ),
     note: { type: ['string', 'null'], maxLength: 1000 },
+  },
+}
+
+// One house's pricing in one body. `parameters` is the whole override set (PUT
+// semantics); the discount and the freight are optional because each lives
+// somewhere else and absent means "leave it" — see src/pricing/house-pricing.js.
+// The unit is checked against the ledger's vocabulary by createFreightRate, so
+// a typo is its 422 rather than a second list here.
+const HOUSE_PRICING_BODY = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['parameters'],
+  properties: {
+    parameters: PARAMETERS_BODY,
+    discount_percent: { type: ['number', 'null'], minimum: 0, exclusiveMaximum: 100 },
+    freight: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['rate', 'unit'],
+      properties: {
+        rate: { type: 'number', minimum: 0 },
+        unit: { type: 'string', minLength: 1, maxLength: 20 },
+        effective_from: { type: ['string', 'null'], pattern: ISO_DAY },
+        note: { type: ['string', 'null'], maxLength: 1000 },
+      },
+    },
+  },
+}
+
+// The upload is the workbook's raw bytes, like the price-list import and the
+// product sheet — no multipart parser in this API. A browser reports a .xlsx
+// as the first type; a client that will not guess sends octet-stream. The
+// parser is encapsulated to this plugin, so no other route's body changes.
+const IMPORT_CONTENT_TYPES = Object.freeze([
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/octet-stream',
+])
+// The export is a few dozen rows (16 KB on 25 Sep 2026); 2 MB is generous.
+const IMPORT_BODY_LIMIT = 2 * 1024 * 1024
+
+const IMPORT_QUERY = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    // Replace saved values the export disagrees with (default: fill blanks only).
+    overwrite: { type: 'boolean' },
+    // Read for the export stamp only; bounded and free of control characters
+    // and path separators, the price-list import's rule.
+    filename: { type: 'string', minLength: 1, maxLength: 200, pattern: '^[^\\u0000-\\u001f/\\\\]+$' },
   },
 }
 
@@ -168,4 +224,72 @@ export const adminPricingRoutes = async (app, { pool }) => {
       rate: await upsertFxRate(pool, request.params.currency, request.body),
     })
   )
+
+  // --- one house, as its own page shows it ---------------------------------------
+  app.get('/admin/pricing/houses/:id', { preHandler: guarded, schema: { params: ID_PARAMS } },
+    async (request) => ({ pricing: await getHousePricing(pool, request.params.id) })
+  )
+
+  // Three homes, one transaction: a refused discount must not leave the
+  // parameter set saved without it.
+  app.put(
+    '/admin/pricing/houses/:id',
+    { preHandler: guarded, schema: { params: ID_PARAMS, body: HOUSE_PRICING_BODY } },
+    async (request) => {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const pricing = await saveHousePricing(client, request.params.id, request.body ?? {})
+        await client.query('COMMIT')
+        return { pricing }
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK')
+        } catch {
+          // surface the original failure
+        }
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+  )
+
+  // --- the Dynamics tracking-options export, uploaded ------------------------------
+  // Validate and apply are two routes, never a `?dry_run=` flag: a request that
+  // can write must not be one query parameter away from one that cannot. Apply
+  // takes the FILE again and re-plans against the live state — never a plan the
+  // client sends back.
+  app.addContentTypeParser(
+    [...IMPORT_CONTENT_TYPES],
+    { parseAs: 'buffer', bodyLimit: IMPORT_BODY_LIMIT },
+    (request, body, done) => done(null, body)
+  )
+
+  const importFile = (dryRun) => async (request, reply) => {
+    let read
+    try {
+      read = readTrackingOptionsWorkbook(request.body, request.query.filename)
+    } catch (error) {
+      if (error.statusCode !== 422) throw error
+      // Fastify's default serialiser would drop the per-cell list; the office
+      // needs it to find the row again.
+      reply.code(422)
+      return { message: error.message, errors: error.errors ?? [], error_count: error.error_count ?? 0 }
+    }
+    const result = await backfillPricingParameters(pool, {
+      rangeParameters: read.ranges,
+      overwrite: request.query.overwrite === true,
+      dryRun,
+    })
+    return { exported_at: read.exported_at, ...result }
+  }
+
+  for (const [step, dryRun] of [['validate', true], ['apply', false]]) {
+    app.post(
+      `/admin/pricing/houses/import/${step}`,
+      { preHandler: guarded, bodyLimit: IMPORT_BODY_LIMIT, schema: { querystring: IMPORT_QUERY } },
+      importFile(dryRun)
+    )
+  }
 }

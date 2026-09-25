@@ -365,7 +365,10 @@ describe('the purchase-order statement and its PDF', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json().statement.purchase_order_count).toBe(1)
     const letter = to(PO_EMAIL)[0]
-    expect(letter.text.split(order.po_number)).toHaveLength(2)
+    // Count the order's lines, not every mention: one order's statement PDF is
+    // named after it, and the letter quotes that file name too.
+    const orderLines = letter.text.split('\n').filter((line) => line.trim().startsWith(order.po_number))
+    expect(orderLines).toHaveLength(1)
   })
 
   // The letter IS the act: a relay that delivers nowhere is a 503, never a 200.

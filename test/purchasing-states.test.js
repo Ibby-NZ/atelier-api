@@ -13,6 +13,8 @@ import {
   SOURCE_STATUSES,
   STATUS_STAMPS,
   LIVE_PURCHASE_ORDER_STATUSES,
+  UNSENT_PURCHASE_ORDER_STATUSES,
+  BULKABLE_PURCHASE_ORDER_STATUS,
   RECEIPT_STATES,
   receiptState,
   rollUpReceiptState,
@@ -29,6 +31,7 @@ describe('the purchase-order machine', () => {
     // "fully received" beside it gives two answers to one question.
     expect(PURCHASE_ORDER_STATUSES).toEqual([
       'draft',
+      'ready_to_send',
       'pending_payment',
       'paid',
       'awaiting_delivery',
@@ -50,22 +53,39 @@ describe('the purchase-order machine', () => {
       expect(typeof STATUS_STAMPS[status]).toBe('string')
     }
     // The send moment and the finish keep their columns under the new words.
+    expect(STATUS_STAMPS.ready_to_send).toBe('ready_at')
     expect(STATUS_STAMPS.pending_payment).toBe('sent_at')
     expect(STATUS_STAMPS.completed).toBe('closed_at')
   })
 
   it('sends a draft to pending payment, and cancels only before money has left', () => {
-    expect(ALLOWED_TRANSITIONS.draft).toEqual(['pending_payment', 'cancelled'])
-    expect(SOURCE_STATUSES.cancelled).toEqual(['draft', 'pending_payment'])
+    expect(ALLOWED_TRANSITIONS.draft).toEqual(['ready_to_send', 'pending_payment', 'cancelled'])
+    expect(SOURCE_STATUSES.cancelled).toEqual(['draft', 'ready_to_send', 'pending_payment'])
     expect(ALLOWED_TRANSITIONS.completed).toEqual([])
     expect(ALLOWED_TRANSITIONS.cancelled).toEqual([])
     expect(LIVE_PURCHASE_ORDER_STATUSES).toEqual([
       'draft',
+      'ready_to_send',
       'pending_payment',
       'paid',
       'awaiting_delivery',
       'received',
     ])
+  })
+
+  // 25 Sep 2026: Ready to send sits after draft — the office saying the order
+  // is finished and may go in a Bulk purchase order. It sends nothing, may go
+  // back to draft, and is Send PO's other starting point.
+  it('marks a draft ready to send, and takes it back, without sending anything', () => {
+    expect(ALLOWED_TRANSITIONS.ready_to_send).toEqual(['draft', 'pending_payment', 'cancelled'])
+    expect(SOURCE_STATUSES.ready_to_send).toEqual(['draft'])
+    expect(SOURCE_STATUSES.draft).toEqual(['ready_to_send'])
+    expect(SOURCE_STATUSES.pending_payment).toEqual(['draft', 'ready_to_send'])
+    expect(UNSENT_PURCHASE_ORDER_STATUSES).toEqual(['draft', 'ready_to_send'])
+    expect(BULKABLE_PURCHASE_ORDER_STATUS).toBe('ready_to_send')
+    // Money has not left, so there is nothing for Xero to mark paid.
+    expect(canTransition('ready_to_send', 'paid')).toBe(false)
+    expect(canTransition('ready_to_send', 'received')).toBe(false)
   })
 
   it('lets goods arrive before the house is paid, and payment follow', () => {

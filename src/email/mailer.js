@@ -78,10 +78,17 @@ export const createMailer = ({
    * person the alert is ABOUT, so a staffer answering from the inbox reaches
    * them rather than the no-reply sender.
    *
-   * @param {{ template?: string, to: string, data?: object, subject?: string, text?: string, replyTo?: string|null }} args
+   * `attachments` is optional and passed to the transport as nodemailer takes
+   * it (`{ filename, content, contentType }`) — the purchase-order PDF and the
+   * statement (25 Sep 2026). The redirect valve keeps them: the reader of a
+   * redirected letter sees what the house would have received.
+   *
+   * @param {{ template?: string, to: string, data?: object, subject?: string, text?: string,
+   *           replyTo?: string|null, attachments?: Array<{ filename: string, content: Buffer|string,
+   *           contentType?: string }> }} args
    * @returns {Promise<{ ok: boolean, error?: Error }>}
    */
-  const send = async ({ template, to, data = {}, replyTo = null, ...rendered }) => {
+  const send = async ({ template, to, data = {}, replyTo = null, attachments = [], ...rendered }) => {
     try {
       const message = template ? renderTemplate(template, data) : rendered
       if (!message.subject || !message.text) {
@@ -98,10 +105,16 @@ export const createMailer = ({
         subject: message.subject,
         text: message.text,
         ...(safeReplyTo ? { replyTo: safeReplyTo } : {}),
+        ...(attachments?.length ? { attachments } : {}),
       })
       await transport.sendMail(outgoing)
       log.info(
-        { template: template ?? null, to: outgoing.to, addressed_to: to },
+        {
+          template: template ?? null,
+          to: outgoing.to,
+          addressed_to: to,
+          ...(attachments?.length ? { attachments: attachments.map((file) => file.filename) } : {}),
+        },
         'transactional email sent'
       )
       return { ok: true }

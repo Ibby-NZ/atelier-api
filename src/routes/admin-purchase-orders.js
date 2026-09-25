@@ -37,13 +37,24 @@ import {
   allocatePurchaseOrderLine,
 } from '../purchasing/admin-purchase-orders.js'
 import { createReceipt } from '../purchasing/receipts.js'
-import { PURCHASE_ORDER_STATUSES, canTransition } from '../purchasing/po-states.js'
+import {
+  PURCHASE_ORDER_STATUSES,
+  UNSENT_PURCHASE_ORDER_STATUSES,
+  canTransition,
+} from '../purchasing/po-states.js'
 import {
   MAX_BULK_SIZE,
   sendBulkOrder,
   getBulkOrder,
   listBulkOrders,
 } from '../purchasing/bulk-orders.js'
+import { PDF_DOCUMENTS, documentFilename, renderPurchaseOrderPdf } from '../purchasing/po-pdf.js'
+import {
+  MAX_DOCUMENT_PURCHASE_ORDERS,
+  buildPurchaseOrderDocument,
+  documentRecipients,
+  requestConsolidatedInvoice,
+} from '../purchasing/invoice-statements.js'
 import { NOTIFY_EMAILS_MAX, NOTIFY_EMAIL_PATTERN } from '../orders/notify-emails.js'
 import { loadReportAccess } from '../reports/access.js'
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
@@ -53,6 +64,7 @@ import {
   notifyPurchaseOrderEnded,
   notifyPurchaseOrderReceipt,
   notifyBulkOrderSent,
+  pdfAttachments,
   purchaseOrderStatusTemplate,
   sendPurchaseOrderLetter,
 } from '../email/purchasing-notifications.js'
@@ -256,6 +268,39 @@ const receiptBodySchema = {
   },
 }
 
+// The purchase orders a PDF or a statement is drawn from — one supplier's, the
+// module refuses a mix (src/purchasing/invoice-statements.js).
+const documentIdsProp = {
+  type: 'array',
+  minItems: 1,
+  maxItems: MAX_DOCUMENT_PURCHASE_ORDERS,
+  items: { type: 'integer', minimum: 1 },
+}
+
+const pdfBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['purchase_order_ids'],
+  properties: {
+    purchase_order_ids: documentIdsProp,
+    document: { type: 'string', enum: [...PDF_DOCUMENTS], default: 'order' },
+  },
+}
+
+// The body is the tick list and nothing about the bill itself, which does not
+// exist yet and whose number, date and total only the house can state.
+const statementBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['purchase_order_ids'],
+  properties: {
+    purchase_order_ids: documentIdsProp,
+    // Anything the office wants to say alongside — a cycle, a reference, a
+    // reason. Optional, and it is the only free text that reaches the house.
+    notes: nullableText,
+  },
+}
+
 export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero = null }) => {
   const backoffice = app.guards.requireRole('backoffice')
 
@@ -379,20 +424,48 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
       .then((result) => ({ bill: { raised: true, ...result.bill }, purchase_order: result.purchase_order }))
       .catch((error) => ({ bill: { raised: false, reason: error.message }, purchase_order: null }))
 
+  // The purchase order as a PDF for a letter to the house — the same document
+  // the CRM previews before Send (src/purchasing/po-pdf.js), drawn from the
+  // finance view the letter itself is composed from. NEVER fails the send: a
+  // render failure is logged and the letter goes without its attachment, the
+  // posture every purchasing letter takes towards its move.
+  const letterPdf = async (purchaseOrders, reference = null) => {
+    try {
+      const supplierName = purchaseOrders[0]?.supplier_name ?? null
+      const issuedAt = new Date()
+      const content = await renderPurchaseOrderPdf({
+        document: 'order',
+        purchaseOrders,
+        supplierName,
+        recipients: documentRecipients(null, purchaseOrders),
+        reference,
+        issuedAt,
+      })
+      return pdfAttachments({
+        filename: documentFilename({ document: 'order', purchaseOrders, reference, supplierName, issuedAt }),
+        content,
+      })
+    } catch (error) {
+      app.log.error({ err: error }, 'the purchase-order PDF could not be drawn; the letter goes without it')
+      return []
+    }
+  }
+
   // The letter each move sends the house (and the purchase order's Emails
-  // list): Send PO the purchase order itself, paid a release note, completed
-  // only when SHORT, cancelled always. The others — awaiting delivery,
-  // received — are the office's own bookkeeping.
+  // list): Send PO the purchase order itself (its PDF attached), paid a release
+  // note, completed only when SHORT, cancelled always. The others — ready to
+  // send, awaiting delivery, received — are the office's own bookkeeping.
   const LETTERS = Object.freeze({
-    pending_payment: notifyPurchaseOrderSent,
+    pending_payment: async (m, po) => notifyPurchaseOrderSent(m, po, { attachments: await letterPdf([po]) }),
     paid: notifyPurchaseOrderPaid,
     completed: (m, po) => notifyPurchaseOrderEnded(m, po, 'completed'),
     cancelled: (m, po) => notifyPurchaseOrderEnded(m, po, 'cancelled'),
   })
 
-  // Every move a purchase order makes (24 Sep 2026): Draft → Pending payment
-  // (Send PO) → Paid / Awaiting delivery → Received → Completed, or Cancelled.
-  // The machine in src/purchasing/po-states.js answers 409.
+  // Every move a purchase order makes (24 Sep 2026): Draft → Ready to send
+  // (25 Sep 2026) → Pending payment (Send PO) → Paid / Awaiting delivery →
+  // Received → Completed, or Cancelled. Send PO may also go straight from a
+  // draft. The machine in src/purchasing/po-states.js answers 409.
   //
   // **The letter re-reads the order with `finance: true`, whatever the staffer
   // may see.** A purchase order without prices is not a purchase order, and the
@@ -439,8 +512,9 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
   // order itself, `status` re-sends the letter for where it stands — to the
   // house and the Emails list. The letter IS the act, so it refuses rather than
   // no-ops (the sales order's rule): 503 with no delivering mailer, 409 on a
-  // draft (Send PO is what first sends it), 422 at a status with no letter,
-  // 502 when every address failed.
+  // draft or a ready-to-send order (Send PO is what first sends it), 422 at a
+  // status with no letter, 502 when every address failed. `details` carries
+  // the purchase order's PDF, as Send PO's letter does.
   app.post(
     '/admin/purchase-orders/:id/email',
     {
@@ -468,11 +542,11 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
         reply.code(404)
         return { error: 'Not Found', message: `Purchase order ${request.params.id} not found.` }
       }
-      if (purchaseOrder.status === 'draft') {
+      if (UNSENT_PURCHASE_ORDER_STATUSES.includes(purchaseOrder.status)) {
         reply.code(409)
         return {
           error: 'Conflict',
-          message: `${purchaseOrder.po_number} is still a draft — Send PO is what emails it to the house.`,
+          message: `${purchaseOrder.po_number} has not been sent yet — Send PO is what emails it to the house.`,
         }
       }
       const { letter } = request.body
@@ -483,7 +557,9 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
           message: `${purchaseOrder.po_number} is ${purchaseOrder.status.replaceAll('_', ' ')} — the house is sent no letter for that status.`,
         }
       }
-      const { template, sent, failed } = await sendPurchaseOrderLetter(mailer, purchaseOrder, letter)
+      const { template, sent, failed } = await sendPurchaseOrderLetter(mailer, purchaseOrder, letter, {
+        attachments: letter === 'details' ? await letterPdf([purchaseOrder]) : [],
+      })
       if (sent.length === 0) {
         reply.code(failed.length ? 502 : 422)
         return {
@@ -498,6 +574,55 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
       }
       return { template, sent, failed }
     }
+  )
+
+  // ---- The PDF, and the statement that asks for one invoice ---------------
+  // (25 Sep 2026: "a preview ability for purchase orders before sending it —
+  // generate statement creates a PDF, attaches that PDF and sends it as an
+  // email"; src/purchasing/invoice-statements.js). Static paths.
+
+  // THE PREVIEW. The PDF the office reads before pressing Send: `order` is the
+  // purchase order itself (one, or a bulk order's members — what Send PO and
+  // the bulk letter attach), `statement` the request for one invoice (what the
+  // statement attaches). It writes nothing, and a statement preview runs every
+  // refusal the send runs, so a preview that draws is a statement that will
+  // go. Drawn with the CALLER's finance grant: a login that may not see costs
+  // gets the quantities and a line saying the prices are withheld.
+  app.post(
+    '/admin/purchase-orders/pdf',
+    { preHandler: backoffice, schema: { body: pdfBodySchema } },
+    async (request, reply) => {
+      const { pdf, filename } = await buildPurchaseOrderDocument(pool, {
+        purchaseOrderIds: request.body.purchase_order_ids,
+        document: request.body.document ?? 'order',
+        finance: await financeFor(request),
+        replyTo: mailer?.backofficeEmail ?? null,
+      })
+      reply
+        .type('application/pdf')
+        .header('Content-Disposition', `inline; filename="${filename}"`)
+        .header('Cache-Control', 'no-store')
+      return pdf
+    }
+  )
+
+  // Ask one house for ONE invoice covering the purchase orders named, with the
+  // statement attached as a PDF — what the supplier-invoice screens' "Ask for
+  // one invoice" did, moved beside the bulk order (25 Sep 2026). A VERB AND
+  // NOT A CREATE: it writes no invoice, only the contact-log entry that records
+  // the office asked. Refused whole, never narrowed; 503 with no delivering
+  // mailer, 502 when every address failed.
+  app.post(
+    '/admin/purchase-orders/statement',
+    { preHandler: backoffice, schema: { body: statementBodySchema } },
+    async (request) =>
+      requestConsolidatedInvoice(pool, mailer, {
+        purchaseOrderIds: request.body.purchase_order_ids,
+        notes: request.body.notes ?? null,
+        // The session, never the body — who chased a house is not the caller's
+        // to state.
+        user: request.user,
+      })
   )
 
   // ---- Bulk orders: one letter to a house for several purchase orders ------
@@ -522,10 +647,11 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
     }
   )
 
-  // Send the chosen drafts of ONE supplier as a bulk order: every member moves
-  // to Pending payment in one transaction, then each member's Xero bill is
-  // raised and ONE combined letter goes to the house (+ every member's Emails
-  // list, + the office's copy). 201.
+  // Send the chosen ready-to-send purchase orders of ONE supplier as a bulk
+  // order: every member moves to Pending payment in one transaction, then each
+  // member's Xero bill is raised and ONE combined letter goes to the house
+  // (+ every member's Emails list, + the office's copy), the bulk order's PDF
+  // attached. 201.
   app.post(
     '/admin/purchase-orders/bulk',
     {
@@ -562,7 +688,9 @@ export const adminPurchaseOrderRoutes = async (app, { pool, mailer = null, xero 
       // Read after the bills, so the letter and the answer carry each bill ref.
       const bulk = await getBulkOrder(pool, bulkId, { finance: true })
       if (mailer) {
-        await notifyBulkOrderSent(mailer, bulk, bulk.purchase_orders)
+        await notifyBulkOrderSent(mailer, bulk, bulk.purchase_orders, {
+          attachments: await letterPdf(bulk.purchase_orders, bulk.bulk_number),
+        })
       }
       reply.code(201)
       return {

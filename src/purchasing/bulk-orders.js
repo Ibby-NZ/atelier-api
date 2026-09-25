@@ -8,13 +8,14 @@
 // receiving stays line by line on the members — which is what lets the receive
 // screen split a delivery back to the sales orders it was bought for.
 //
-// Only DRAFTS go into a bulk, all for ONE supplier, and sending the bulk is
-// Send PO for every member at once (draft → pending_payment, in ONE
+// Only purchase orders marked READY TO SEND go into a bulk (25 Sep 2026 — a
+// draft is still being written), all for ONE supplier, and sending the bulk is
+// Send PO for every member at once (ready_to_send → pending_payment, in ONE
 // transaction: either the whole bulk went or none of it did). The route raises
 // each member's Xero bill and sends the one combined letter afterwards, exactly
 // as a single Send PO does — neither can un-send the bulk.
 
-import { STATUS_STAMPS, canTransition } from './po-states.js'
+import { BULKABLE_PURCHASE_ORDER_STATUS, STATUS_STAMPS } from './po-states.js'
 import { listPurchaseOrders } from './admin-purchase-orders.js'
 
 const httpError = (statusCode, message) =>
@@ -29,8 +30,8 @@ const BULK_NUMBER = `'BULK-' || lpad(nextval('purchase_order_bulks_number_seq'):
 export const MAX_BULK_SIZE = 100
 
 /**
- * Send several draft purchase orders to their supplier as one bulk order.
- * Returns the new bulk's id.
+ * Send several ready-to-send purchase orders to their supplier as one bulk
+ * order. Returns the new bulk's id.
  *
  * @param {import('pg').Pool} pool
  * @param {{ purchaseOrderIds: number[], user?: { id: number }|null }} input
@@ -56,11 +57,13 @@ export const sendBulkOrder = async (pool, { purchaseOrderIds, user = null }) => 
       const found = new Set(rows.map((row) => row.id))
       throw httpError(404, `Purchase order ${ids.find((id) => !found.has(id))} not found.`)
     }
-    const sent = rows.find((row) => !canTransition(row.status, 'pending_payment'))
-    if (sent) {
+    const notReady = rows.find((row) => row.status !== BULKABLE_PURCHASE_ORDER_STATUS)
+    if (notReady) {
       throw httpError(
         409,
-        `${sent.po_number} is "${sent.status}" — a bulk order sends drafts that have not gone to the house yet.`
+        notReady.status === 'draft'
+          ? `${notReady.po_number} is still a draft — mark it Ready to send before it goes in a bulk order.`
+          : `${notReady.po_number} is "${notReady.status}" — a bulk order sends purchase orders that are ready to send and have not gone to the house yet.`
       )
     }
     const suppliers = [...new Set(rows.map((row) => row.supplier_id))]

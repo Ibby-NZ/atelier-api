@@ -51,7 +51,7 @@ export const NO_RATE_REASONS = Object.freeze({
   NOT_YET_EFFECTIVE: 'not_yet_effective',
 })
 
-const RATE_COLUMNS = `id, supplier_id, range_name, category, basis,
+const RATE_COLUMNS = `id, supplier_id, range_name, category, freight_class, basis,
   rate, unit, to_char(effective_from, 'YYYY-MM-DD') AS effective_from, note, created_at`
 
 // `effective_from` is selected as text on purpose: pg turns a `date` into a JS
@@ -64,6 +64,9 @@ const toRate = (row) =>
     supplier_id: row.supplier_id,
     range_name: row.range_name,
     category: row.category,
+    // The freight LETTER the rate is for (migration 1792012800000); null is
+    // every class.
+    freight_class: row.freight_class ?? null,
     basis: row.basis,
     rate: Number(row.rate),
     unit: row.unit,
@@ -73,6 +76,20 @@ const toRate = (row) =>
   })
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/
+
+/** A freight class is one letter, as `price_list_items.freight_class` states it. */
+export const FREIGHT_CLASS_PATTERN = /^[A-Z]$/
+
+/**
+ * A caller's freight class as the letter the ledger stores, or null for "no
+ * class" (blank, absent). Lower case is raised; anything else is returned as-is
+ * for the validator to refuse in words.
+ */
+export const freightClassOf = (value) => {
+  if (value == null) return null
+  const text = String(value).trim()
+  return text === '' ? null : text.toUpperCase()
+}
 
 /** Today as an ISO day, in the server's own timezone — the resolver's default. */
 export const today = () => new Date().toISOString().slice(0, 10)
@@ -91,16 +108,20 @@ const scopeOf = ({ supplier_id: supplierId = null, range_name: rangeName = null 
 /**
  * The rate in force for a scope on a day, or null with a reason.
  *
- * Precedence: a rate stated for the LINE'S OWN CATEGORY beats one stated for
- * every category (`category IS NULL`), and among equals the latest
+ * Precedence: a rate stated for the LINE'S OWN FREIGHT CLASS beats the rate for
+ * every class (`freight_class IS NULL`); then a rate for the line's own
+ * CATEGORY beats one for every category; among equals the latest
  * `effective_from` wins — which is what makes appending a new row a change of
- * rate rather than a second answer. A caller that names no category is asking
- * for the catch-all and gets only the catch-all: answering it with some
- * category's rate would be picking one of four.
+ * rate rather than a second answer. The class outranks the category because the
+ * letter is the line's own statement of how it ships (a full roll by air
+ * against a trimming), where a category is a merchandising axis. A caller that
+ * names no class, or no category, is asking for the catch-all on that axis and
+ * gets only the catch-all: answering it with some letter's rate would be
+ * picking one of five.
  *
  * @param {{ query: Function }} db pool or open client
  * @param {{ supplier_id?: number|null, range_name?: string|null,
- *           category?: string|null, on?: string }} query
+ *           category?: string|null, freight_class?: string|null, on?: string }} query
  * @returns {Promise<{ rate: object|null, reason: string|null }>}
  */
 export const resolveFreightRate = async (db, query = {}) => {
@@ -109,15 +130,26 @@ export const resolveFreightRate = async (db, query = {}) => {
     return { rate: null, reason: NO_RATE_REASONS.NO_SCOPE }
   }
   const category = typeof query.category === 'string' && query.category !== '' ? query.category : null
+  const freightClass = freightClassOf(query.freight_class)
   const on = ISO_DAY.test(query.on ?? '') ? query.on : today()
 
+  const params = [scope.supplierId ?? scope.rangeName]
+  const clauses = [scope.supplierId === null ? 'lower(range_name) = lower($1)' : 'supplier_id = $1']
+  if (category === null) {
+    clauses.push('category IS NULL')
+  } else {
+    params.push(category)
+    clauses.push(`(category = $${params.length} OR category IS NULL)`)
+  }
+  if (freightClass === null) {
+    clauses.push('freight_class IS NULL')
+  } else {
+    params.push(freightClass)
+    clauses.push(`(freight_class = $${params.length} OR freight_class IS NULL)`)
+  }
   const { rows } = await db.query(
-    `SELECT ${RATE_COLUMNS} FROM supplier_freight_rates
-      WHERE ${scope.supplierId === null ? 'lower(range_name) = lower($1)' : 'supplier_id = $1'}
-        AND ${category === null ? 'category IS NULL' : '(category = $2 OR category IS NULL)'}`,
-    category === null
-      ? [scope.supplierId ?? scope.rangeName]
-      : [scope.supplierId ?? scope.rangeName, category]
+    `SELECT ${RATE_COLUMNS} FROM supplier_freight_rates WHERE ${clauses.join(' AND ')}`,
+    params
   )
 
   if (rows.length === 0) {
@@ -126,10 +158,12 @@ export const resolveFreightRate = async (db, query = {}) => {
 
   const effective = rows
     .filter((row) => row.effective_from <= on)
-    // Specific category first, then newest; `id` breaks a tie the unique index
-    // makes unreachable, so one corpus always resolves to one rate.
+    // Specific class first, then specific category, then newest; `id` breaks a
+    // tie the unique index makes unreachable, so one corpus always resolves to
+    // one rate.
     .sort(
       (left, right) =>
+        Number(left.freight_class === null) - Number(right.freight_class === null) ||
         Number(left.category === null) - Number(right.category === null) ||
         right.effective_from.localeCompare(left.effective_from) ||
         right.id - left.id
@@ -150,8 +184,9 @@ export const resolveFreightRate = async (db, query = {}) => {
  * them at once. The pricing import compares a whole export against it, and 60
  * resolves in a loop would be 60 round trips inside one transaction.
  *
- * Same precedence as the resolver for that case: rows for every category only
- * (a category-specific rate is not the house's rate), effective on or before
+ * Same precedence as the resolver for that case: rows for every category and
+ * every freight class only (a category's or a letter's rate is not the house's
+ * default), effective on or before
  * `on`, newest `effective_from` first, `id` breaking the tie the unique index
  * makes unreachable. A house with no such row is simply absent — never a zero.
  *
@@ -166,9 +201,37 @@ export const currentRangeRates = async (db, on) => {
        FROM supplier_freight_rates
       WHERE range_name IS NOT NULL
         AND category IS NULL
+        AND freight_class IS NULL
         AND effective_from <= $1::date
       ORDER BY lower(range_name), effective_from DESC, id DESC`,
     [day]
+  )
+  return rows.map(toRate)
+}
+
+/**
+ * The rate in force for each FREIGHT CLASS of one scope, on a day — the house
+ * page's class rows. Every-category rows only, the letter's newest dated rate
+ * each, ordered by letter. The every-class default is not here; that is
+ * `resolveFreightRate` with no class.
+ *
+ * @param {{ query: Function }} db pool or open client
+ * @param {{ supplier_id?: number|null, range_name?: string|null, on?: string }} query
+ * @returns {Promise<object[]>} one rate per letter, in the ledger's shape
+ */
+export const currentClassRates = async (db, query = {}) => {
+  const scope = scopeOf(query)
+  if (!scope) return []
+  const day = ISO_DAY.test(query.on ?? '') ? query.on : today()
+  const { rows } = await db.query(
+    `SELECT DISTINCT ON (freight_class) ${RATE_COLUMNS}
+       FROM supplier_freight_rates
+      WHERE ${scope.supplierId === null ? 'lower(range_name) = lower($1)' : 'supplier_id = $1'}
+        AND category IS NULL
+        AND freight_class IS NOT NULL
+        AND effective_from <= $2::date
+      ORDER BY freight_class, effective_from DESC, id DESC`,
+    [scope.supplierId ?? scope.rangeName, day]
   )
   return rows.map(toRate)
 }
@@ -262,6 +325,10 @@ export const validateFreightRate = (input = {}, vocabulary = FREIGHT_CATEGORIES)
     return `"${input.category}" is not a category. Use one of: ${categories.join(', ')}, or leave it blank for every category.`
   }
 
+  if (input.freight_class != null && !FREIGHT_CLASS_PATTERN.test(input.freight_class)) {
+    return `"${input.freight_class}" is not a freight class. Use one letter, A to Z, or leave it blank for every class.`
+  }
+
   if (!ISO_DAY.test(input.effective_from ?? '')) {
     return 'Effective from must be a date as YYYY-MM-DD.'
   }
@@ -295,15 +362,16 @@ export const unknownHouseMessage = (name) =>
   `"${name}" is not a house. A range rate is keyed on the house's name exactly as the Houses screen spells it.`
 
 /**
- * Append a rate. Never an overwrite: a duplicate scope + category + date is a
- * 409 telling the caller to date the correction, not a silent replacement of
- * the figure last year's landed costs were built on.
+ * Append a rate. Never an overwrite: a duplicate scope + category + freight
+ * class + date is a 409 telling the caller to date the correction, not a
+ * silent replacement of the figure last year's landed costs were built on.
  *
  * @param {{ query: Function }} db pool or open client
  * @param {object} input
  * @returns {Promise<object>}
  */
-export const createFreightRate = async (db, input) => {
+export const createFreightRate = async (db, rawInput) => {
+  const input = { ...rawInput, freight_class: freightClassOf(rawInput?.freight_class) }
   // The vocabulary is read per write rather than cached: the office adds a
   // category on one screen and files a rate under it on the next.
   const problem = validateFreightRate(input, await categorySlugs(db))
@@ -316,13 +384,14 @@ export const createFreightRate = async (db, input) => {
   try {
     const { rows } = await db.query(
       `INSERT INTO supplier_freight_rates
-         (supplier_id, range_name, category, basis, rate, unit, effective_from, note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         (supplier_id, range_name, category, freight_class, basis, rate, unit, effective_from, note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING ${RATE_COLUMNS}`,
       [
         scope.supplierId,
         scope.rangeName,
         input.category ?? null,
+        input.freight_class,
         input.basis ?? 'dollar',
         Number(input.rate),
         input.unit ?? null,
@@ -335,8 +404,8 @@ export const createFreightRate = async (db, input) => {
     if (error?.code === '23505') {
       throw httpError(
         409,
-        'A rate already applies to that scope and category from that date. Rates are ' +
-          'append-only — date the correction from the day it takes effect.'
+        `A rate already applies to that scope, category${input.freight_class ? ` and freight class ${input.freight_class}` : ''} ` +
+          'from that date. Rates are append-only — date the correction from the day it takes effect.'
       )
     }
     // Two foreign keys can raise this now, so the message is chosen by which

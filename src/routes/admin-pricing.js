@@ -1,7 +1,7 @@
 // /admin/pricing/* — the platform's own pricing waterfall and the parameters
 // behind it (src/pricing/pricing-parameters.js).
 //
-//   GET    /admin/pricing/waterfall?brand_id&wholesale_rate[&category&duty_class&on]
+//   GET    /admin/pricing/waterfall?brand_id&wholesale_rate[&category&duty_class&freight_class&on]
 //   GET    /admin/pricing/parameters/suppliers/:id      the supplier's default set
 //   PUT    /admin/pricing/parameters/suppliers/:id      replace it (PUT, not PATCH — see module)
 //   DELETE /admin/pricing/parameters/suppliers/:id
@@ -9,7 +9,8 @@
 //   GET    /admin/pricing/fx-rates
 //   PUT    /admin/pricing/fx-rates/:currency            { rate, set_on?, note? }
 //   GET    /admin/pricing/houses/:id                    one house's pricing, as the house page shows it
-//   PUT    /admin/pricing/houses/:id                    { parameters, discount_percent?, freight? }
+//   PUT    /admin/pricing/houses/:id                    { parameters, discount_percent?, discount_classes?,
+//                                                          freight?, freight_classes? }
 //   POST   /admin/pricing/houses/import/validate        the Dynamics tracking-options .xlsx — dry run
 //   POST   /admin/pricing/houses/import/apply           the same file — one transaction
 //
@@ -60,6 +61,19 @@ const PARAMETERS_BODY = {
   },
 }
 
+// One freight rate as the house page sends it: dollars per unit, dated.
+const FREIGHT_RATE_BODY = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  required: ['rate', 'unit'],
+  properties: {
+    rate: { type: 'number', minimum: 0 },
+    unit: { type: 'string', minLength: 1, maxLength: 20 },
+    effective_from: { type: ['string', 'null'], pattern: ISO_DAY },
+    note: { type: ['string', 'null'], maxLength: 1000 },
+  },
+}
+
 // One house's pricing in one body. `parameters` is the whole override set (PUT
 // semantics); the discount and the freight are optional because each lives
 // somewhere else and absent means "leave it" — see src/pricing/house-pricing.js.
@@ -72,15 +86,39 @@ const HOUSE_PRICING_BODY = {
   properties: {
     parameters: PARAMETERS_BODY,
     discount_percent: { type: ['number', 'null'], minimum: 0, exclusiveMaximum: 100 },
-    freight: {
-      type: ['object', 'null'],
-      additionalProperties: false,
-      required: ['rate', 'unit'],
-      properties: {
-        rate: { type: 'number', minimum: 0 },
-        unit: { type: 'string', minLength: 1, maxLength: 20 },
-        effective_from: { type: ['string', 'null'], pattern: ISO_DAY },
-        note: { type: ['string', 'null'], maxLength: 1000 },
+    freight: FREIGHT_RATE_BODY,
+    // A rate per freight letter; each is appended only where it differs from
+    // the letter's current rate. Letters left out are left alone — the ledger
+    // cannot forget a rate.
+    freight_classes: {
+      type: 'array',
+      maxItems: 26,
+      items: {
+        ...FREIGHT_RATE_BODY,
+        type: 'object',
+        required: ['freight_class', 'rate', 'unit'],
+        properties: {
+          ...FREIGHT_RATE_BODY.properties,
+          freight_class: { type: 'string', pattern: '^[A-Za-z]$' },
+        },
+      },
+    },
+    // The house's discount classes as a whole set (PUT): an entry with an `id`
+    // is that class kept or edited, one without is new, and a class left out
+    // is removed. Absent leaves the classes alone.
+    discount_classes: {
+      type: 'array',
+      maxItems: 50,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['label', 'percent'],
+        properties: {
+          id: { type: 'integer', minimum: 1 },
+          label: { type: 'string', minLength: 1, maxLength: 120 },
+          percent: { type: 'number', minimum: 0, exclusiveMaximum: 100 },
+          is_default: { type: 'boolean' },
+        },
       },
     },
   },
@@ -139,6 +177,9 @@ export const adminPricingRoutes = async (app, { pool }) => {
             // and the freight ledger's category enum is checked by the resolver.
             category: { type: 'string', maxLength: 40 },
             duty_class: { type: 'string', pattern: '^[A-Za-z]$' },
+            // The line's freight letter: the house's rate for it wins over the
+            // house's every-class rate.
+            freight_class: { type: 'string', pattern: '^[A-Za-z]$' },
             on: { type: 'string', pattern: ISO_DAY },
             // What-if values for this preview only (the screen's Manual mode).
             // They stand in for the resolved input, source `manual`, and
@@ -151,7 +192,8 @@ export const adminPricingRoutes = async (app, { pool }) => {
       },
     },
     async (request) => {
-      const { brand_id, wholesale_rate, supplier_id, product_id, category, duty_class, on, ...rest } = request.query
+      const { brand_id, wholesale_rate, supplier_id, product_id, category, duty_class, freight_class, on, ...rest } =
+        request.query
       const overrides = Object.fromEntries(
         OVERRIDABLE_INPUTS.filter((key) => rest[key] !== undefined).map((key) => [key, rest[key]])
       )
@@ -162,6 +204,7 @@ export const adminPricingRoutes = async (app, { pool }) => {
         productId: product_id ?? null,
         category: category ?? null,
         dutyClass: duty_class ?? null,
+        freightClass: freight_class ? freight_class.toUpperCase() : null,
         on: on ?? null,
         overrides,
       })

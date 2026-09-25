@@ -25,7 +25,9 @@ import {
 import { computeWaterfall } from '../src/pricing/waterfall.js'
 import {
   FREIGHT_RATE_SHEET_HEADER,
+  FREIGHT_RATE_SHEET_HEADER_V1,
   applyFreightRateSheet,
+  getFreightRateSheet,
   parseFreightRateSheet,
   toFreightRateCsv,
   validateFreightRateSheet,
@@ -181,13 +183,22 @@ describe('W16-US-004 — supplier_freight_rates (schema only, no rate)', () => {
           AND column_name = 'freight_class'`
     )
     expect(rows).toEqual([{ data_type: 'text', is_nullable: 'YES' }])
-    // ...and nothing in this table is keyed by one.
+    // The ledger is keyed by the SAME letter since the office asked for freight
+    // classes (Sept 2026, migration 1792012800000): one text column, nullable
+    // (NULL = every class), held to the price line's own one-letter CHECK.
     const { rows: freightColumns } = await pool.query(
-      `SELECT column_name FROM information_schema.columns
+      `SELECT column_name, data_type, is_nullable FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = 'supplier_freight_rates'
           AND column_name LIKE '%class%'`
     )
-    expect(freightColumns).toEqual([])
+    expect(freightColumns).toEqual([{ column_name: 'freight_class', data_type: 'text', is_nullable: 'YES' }])
+    await expect(
+      pool.query(
+        `INSERT INTO supplier_freight_rates (range_name, freight_class, basis, rate, unit, effective_from)
+         VALUES ($1, 'ab', 'dollar', 1, 'metre', '2026-01-01')`,
+        [`${PREFIX} RANGE`]
+      )
+    ).rejects.toThrow(/freight_class_check/)
   })
 
   it('accepts a supplier-scoped rate and a range-scoped rate', async () => {
@@ -675,6 +686,34 @@ describe('W16-US-005 — the freight rate resolver', () => {
     ).toBe(30)
   })
 
+  it("prefers the line's freight class over the every-class rate, and the class over the category", async () => {
+    const rate = (over) =>
+      createFreightRate(pool, { supplier_id: supplierId, unit: 'metre', effective_from: '2025-01-01', ...over })
+    await rate({ rate: 23 })
+    await rate({ freight_class: 'b', rate: 3 })
+    await rate({ category: 'wallpaper', rate: 40 })
+    const at = (query) => resolveFreightRate(pool, { supplier_id: supplierId, on: '2026-06-01', ...query })
+
+    const b = await at({ freight_class: 'B' })
+    expect(b.rate).toMatchObject({ rate: 3, freight_class: 'B' })
+    // A letter with no rate of its own falls back to every class.
+    expect((await at({ freight_class: 'C' })).rate).toMatchObject({ rate: 23, freight_class: null })
+    // A caller naming no class gets only the every-class rate, never a letter's.
+    expect((await at({})).rate.rate).toBe(23)
+    // The letter outranks the category: a B wallpaper line ships as a B.
+    expect((await at({ freight_class: 'B', category: 'wallpaper' })).rate.rate).toBe(3)
+    expect((await at({ freight_class: 'C', category: 'wallpaper' })).rate.rate).toBe(40)
+  })
+
+  it('refuses a freight class that is not one letter', async () => {
+    expect(validateFreightRate({ range_name: 'X', freight_class: 'AB', rate: 1, unit: 'metre', effective_from: '2026-01-01' })).toMatch(
+      /not a freight class/
+    )
+    await expect(
+      createFreightRate(pool, { supplier_id: supplierId, freight_class: '7', rate: 1, unit: 'metre', effective_from: '2026-01-01' })
+    ).rejects.toMatchObject({ statusCode: 422 })
+  })
+
   it('refuses a range rate for a name no house carries', async () => {
     await expect(
       createFreightRate(pool, {
@@ -792,8 +831,8 @@ describe('W16-US-009 — the rate CSV round trip', () => {
       'utf8'
     )
 
-  const line = ({ id = '', name = '', range = '', category = '', basis = 'dollar', rate = '', unit = '', from = '', note = '' }) =>
-    [id, name, range, category, basis, rate, unit, from, note]
+  const line = ({ id = '', name = '', range = '', category = '', freightClass = '', basis = 'dollar', rate = '', unit = '', from = '', note = '' }) =>
+    [id, name, range, category, freightClass, basis, rate, unit, from, note]
 
   beforeAll(async () => {
     const config = loadConfig()
@@ -827,12 +866,62 @@ describe('W16-US-009 — the rate CSV round trip', () => {
       'Supplier',
       'Range',
       'Category',
+      'Freight Class',
       'Basis',
       'Rate',
       'Unit',
       'Effective From',
       'Note',
     ])
+    // The pre-class header is still read — a sheet on somebody's desk keeps importing.
+    expect(FREIGHT_RATE_SHEET_HEADER_V1).toEqual([
+      'Supplier ID',
+      'Supplier',
+      'Range',
+      'Category',
+      'Basis',
+      'Rate',
+      'Unit',
+      'Effective From',
+      'Note',
+    ])
+  })
+
+  it('still imports a sheet written before freight classes, as every-class rates', async () => {
+    const legacy = Buffer.from(
+      [
+        FREIGHT_RATE_SHEET_HEADER_V1.join(','),
+        ['', '', `${PREFIX} A`, '', 'dollar', '30', 'metre', '2026-01-01', ''].join(','),
+      ].join('\r\n') + '\r\n',
+      'utf8'
+    )
+    const applied = await applyFreightRateSheet(pool, legacy)
+    expect(applied).toMatchObject({ applied: 1, errors: [] })
+    const { rows } = await pool.query(
+      `SELECT freight_class, rate::float AS rate FROM supplier_freight_rates WHERE range_name = $1`,
+      [`${PREFIX} A`]
+    )
+    expect(rows).toEqual([{ freight_class: null, rate: 30 }])
+  })
+
+  it('carries a freight class: a default and a letter from the same day are two rates, and round-trip', async () => {
+    const file = sheet([
+      line({ range: `${PREFIX} A`, rate: '23', unit: 'metre', from: '2026-01-01' }),
+      line({ range: `${PREFIX} A`, freightClass: 'b', rate: '3', unit: 'metre', from: '2026-01-01' }),
+      line({ range: `${PREFIX} B`, freightClass: 'AB', rate: '3', unit: 'metre', from: '2026-01-01' }),
+    ])
+    const refused = await validateFreightRateSheet(pool, file)
+    expect(refused.errors).toEqual([{ row: 4, message: expect.stringMatching(/"AB" is not a freight class/) }])
+
+    const good = sheet([
+      line({ range: `${PREFIX} A`, rate: '23', unit: 'metre', from: '2026-01-01' }),
+      line({ range: `${PREFIX} A`, freightClass: 'b', rate: '3', unit: 'metre', from: '2026-01-01' }),
+    ])
+    expect((await applyFreightRateSheet(pool, good)).applied).toBe(2)
+    // Exported and read back, the letter survives and nothing is new.
+    const csv = toFreightRateCsv(await getFreightRateSheet(pool))
+    expect(csv).toMatch(new RegExp(`${PREFIX} A,,B,dollar,3,metre,2026-01-01`))
+    expect((await applyFreightRateSheet(pool, Buffer.from(csv, 'utf8'))).summary.created).toBe(0)
   })
 
   it('exports the header alone while no rate is stored — a true empty sheet', () => {

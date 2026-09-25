@@ -283,22 +283,26 @@ const dutyInput = (dutyClass, house, supplierDefaults) => {
   return input(picked.value, picked.source, { duty_class: letter })
 }
 
-const freightInput = async (db, { supplierId, brandName, category, on }) => {
+const freightInput = async (db, { supplierId, brandName, category, freightClass, on }) => {
   // The HOUSE's own rate first — freight is set per house (a range rate keyed
   // on the house's name, which is also the range name Dynamics used) — then
-  // the supplier-wide rate for houses that have none of their own.
+  // the supplier-wide rate for houses that have none of their own. Within each
+  // scope the line's freight CLASS picks the letter's rate over the house's
+  // every-class one (resolveFreightRate's precedence).
   const scopes = [
     { range_name: brandName },
     ...(supplierId ? [{ supplier_id: supplierId }] : []),
   ]
   for (const scope of scopes) {
-    const found = await resolveFreightRate(db, { ...scope, category, on })
+    const found = await resolveFreightRate(db, { ...scope, category, freight_class: freightClass, on })
     if (found.rate) {
       return input(found.rate.rate, 'freight-ledger', {
         basis: found.rate.basis,
         unit: found.rate.unit,
         effective_from: found.rate.effective_from,
         scope: scope.supplier_id ? 'supplier' : 'range',
+        // Which rate answered: the letter's own, or every class (null).
+        freight_class: found.rate.freight_class,
       })
     }
   }
@@ -312,13 +316,24 @@ const freightInput = async (db, { supplierId, brandName, category, on }) => {
  * `supplierId` picks which of the house's suppliers to price through (main when
  * absent, 422 when it does not invoice the house); `productId` brings in the
  * discount tier staff chose for that product (422 when it is another house's).
+ * `freightClass` is the line's freight letter (`price_list_items.freight_class`):
+ * the house's rate for that letter wins over its every-class rate.
  *
  * @param {{ brandId: number, supplierId?: number|null, productId?: number|null,
- *           category?: string|null, dutyClass?: string|null, on?: string|null }} query
+ *           category?: string|null, dutyClass?: string|null,
+ *           freightClass?: string|null, on?: string|null }} query
  */
 export const resolveWaterfallInputs = async (
   db,
-  { brandId, supplierId = null, productId = null, category = null, dutyClass = null, on = null }
+  {
+    brandId,
+    supplierId = null,
+    productId = null,
+    category = null,
+    dutyClass = null,
+    freightClass = null,
+    on = null,
+  }
 ) => {
   const brand = await loadBrand(db, brandId)
   const supplier = await supplierForBrand(db, brand.id, supplierId)
@@ -336,6 +351,7 @@ export const resolveWaterfallInputs = async (
     supplierId: supplier?.id ?? null,
     brandName: brand.name,
     category,
+    freightClass,
     on,
   })
 
@@ -392,13 +408,32 @@ const applyOverrides = (inputs, overrides = {}) => {
  * @param {{ query: Function }} db
  * @param {{ brandId: number, wholesaleRate: number, supplierId?: number|null,
  *           productId?: number|null, category?: string|null,
- *           dutyClass?: string|null, on?: string|null, overrides?: object }} query
+ *           dutyClass?: string|null, freightClass?: string|null,
+ *           on?: string|null, overrides?: object }} query
  */
 export const previewWaterfall = async (
   db,
-  { brandId, wholesaleRate, supplierId = null, productId = null, category = null, dutyClass = null, on = null, overrides = {} }
+  {
+    brandId,
+    wholesaleRate,
+    supplierId = null,
+    productId = null,
+    category = null,
+    dutyClass = null,
+    freightClass = null,
+    on = null,
+    overrides = {},
+  }
 ) => {
-  const resolved = await resolveWaterfallInputs(db, { brandId, supplierId, productId, category, dutyClass, on })
+  const resolved = await resolveWaterfallInputs(db, {
+    brandId,
+    supplierId,
+    productId,
+    category,
+    dutyClass,
+    freightClass,
+    on,
+  })
   const inputs = applyOverrides(resolved.inputs, overrides)
   const waterfall = computeWaterfall({
     wholesale_rate: wholesaleRate,

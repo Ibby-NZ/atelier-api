@@ -36,6 +36,8 @@ const runMigrations = (databaseUrl) =>
 const cleanup = async (pool) => {
   await pool.query(`DELETE FROM supplier_freight_rates WHERE range_name ILIKE $1`, [`${PREFIX}%`])
   await pool.query(`DELETE FROM price_list_items WHERE supplier LIKE $1`, [`${PREFIX}%`])
+  // A product left behind by a failed test would hold its house.
+  await pool.query(`DELETE FROM products WHERE slug LIKE $1`, [`${PREFIX}-%`])
   // parameters and terms CASCADE from brands and suppliers
   await pool.query(`DELETE FROM brands WHERE slug LIKE $1`, [`${PREFIX}-%`])
   await pool.query(`DELETE FROM suppliers WHERE slug LIKE $1`, [`${PREFIX}-%`])
@@ -68,14 +70,15 @@ const insertTerms = (pool, { supplierId, brandId, discount = null, chain = null 
     [supplierId, brandId, discount, chain]
   )
 
-// Price lines give a house its unit: `count` lines in `unit`.
-const insertPriceLines = async (pool, suffix, unit, count = 1) => {
+// Price lines give a house its unit: `count` lines in `unit`, carrying a
+// freight letter when one is given.
+const insertPriceLines = async (pool, suffix, unit, count = 1, freightClass = null) => {
   for (let at = 0; at < count; at += 1) {
     await pool.query(
       `INSERT INTO price_list_items
-         (supplier, category, code, code_normalized, unit, wholesale_rate, currency, source_file, product_range)
-       VALUES ($1, 'fabric', $2, $2, $3, 10, 'EUR', 'fixture.xlsx', $4)`,
-      [`${PREFIX} ${suffix}`, `${suffix}-${unit}-${at}`, unit, houseName(suffix)]
+         (supplier, category, code, code_normalized, unit, wholesale_rate, currency, source_file, product_range, freight_class)
+       VALUES ($1, 'fabric', $2, $2, $3, 10, 'EUR', 'fixture.xlsx', $4, $5)`,
+      [`${PREFIX} ${suffix}`, `${suffix}-${unit}-${freightClass ?? 'x'}-${at}`, unit, houseName(suffix), freightClass]
     )
   }
 }
@@ -427,7 +430,7 @@ describe('/admin/pricing/houses', () => {
       payload: { parameters: fullSet(), discount_percent: 10 },
     })
     expect(chain.statusCode).toBe(422)
-    expect(chain.json().message).toMatch(/chain or a set of tiers/)
+    expect(chain.json().message).toMatch(/compounded chain/)
     expect(await getBrandParameters(pool, chainId)).toBe(null)
     expect(await houseTerms(pool, chainId)).toMatchObject({ discount: null, chain: 2 })
 
@@ -440,6 +443,137 @@ describe('/admin/pricing/houses', () => {
     expect(orphan.statusCode).toBe(422)
     expect(orphan.json().message).toMatch(/Link this house to the supplier/)
     expect(await getBrandParameters(pool, bareId)).toBe(null)
+  })
+
+  it('sets a freight rate per class — the letters the price lines carry — and the waterfall prices a line by its letter', async () => {
+    await insertPriceLines(pool, 'house', 'metre', 2, 'A')
+    await insertPriceLines(pool, 'house', 'metre', 1, 'B')
+    const put = (freightClasses, freight = { rate: 23, unit: 'metre', effective_from: '2026-01-01' }) =>
+      inject('PUT', `/admin/pricing/houses/${houseId}`, {
+        payload: { parameters: fullSet(), freight, freight_classes: freightClasses },
+      })
+
+    const res = await put([
+      { freight_class: 'a', rate: 30, unit: 'metre', effective_from: '2026-01-01' },
+      { freight_class: 'B', rate: 3, unit: 'metre', effective_from: '2026-01-01' },
+    ])
+    expect(res.statusCode).toBe(200)
+    const { pricing } = res.json()
+    expect(pricing.freight).toMatchObject({ rate: 23, freight_class: null })
+    expect(pricing.freight_classes).toEqual([
+      expect.objectContaining({ freight_class: 'A', rate: 30, unit: 'metre' }),
+      expect.objectContaining({ freight_class: 'B', rate: 3, unit: 'metre' }),
+    ])
+    expect(pricing.freight_class_lines).toEqual([
+      { freight_class: 'A', lines: 2 },
+      { freight_class: 'B', lines: 1 },
+    ])
+
+    // The same rates again append nothing; a changed letter is one new dated row.
+    await put([{ freight_class: 'A', rate: 30, unit: 'metre', effective_from: '2026-02-01' }])
+    expect(await houseFreight(pool, houseName('house'))).toHaveLength(3)
+    await put([{ freight_class: 'B', rate: 4, unit: 'metre', effective_from: '2026-03-01' }])
+    expect(await houseFreight(pool, houseName('house'))).toHaveLength(4)
+
+    // A line is priced by its letter; a letter with no rate takes the house's default.
+    const freightFor = async (letter) => {
+      const query = `brand_id=${houseId}&wholesale_rate=100&on=2026-06-01${letter ? `&freight_class=${letter}` : ''}`
+      return (await inject('GET', `/admin/pricing/waterfall?${query}`)).json().inputs.freight
+    }
+    expect(await freightFor('b')).toMatchObject({ value: 4, detail: { freight_class: 'B' } })
+    expect(await freightFor('A')).toMatchObject({ value: 30 })
+    expect(await freightFor('C')).toMatchObject({ value: 23, detail: { freight_class: null } })
+    expect(await freightFor(null)).toMatchObject({ value: 23 })
+
+    const twice = await put([
+      { freight_class: 'A', rate: 30, unit: 'metre' },
+      { freight_class: 'a', rate: 31, unit: 'metre' },
+    ])
+    expect(twice.statusCode).toBe(422)
+    expect(twice.json().message).toMatch(/listed twice/)
+  })
+
+  it('keeps discount classes on the house: created with its terms, edited as a set, one default, products counted before a removal', async () => {
+    const put = (discountClasses, over = {}) =>
+      inject('PUT', `/admin/pricing/houses/${houseId}`, {
+        payload: { parameters: fullSet(), discount_classes: discountClasses, ...over },
+      })
+
+    const first = await put([
+      { label: 'wallpaper', percent: 40 },
+      { label: 'All other collections', percent: 50, is_default: true },
+    ])
+    expect(first.statusCode).toBe(200)
+    let discount = first.json().pricing.discount
+    expect(discount).toMatchObject({ shape: 'tiers', editable: true, percent: null })
+    expect(discount.classes).toEqual([
+      expect.objectContaining({ label: 'wallpaper', percent: 40, is_default: false, matches_category: true, products: 0 }),
+      expect.objectContaining({ label: 'All other collections', percent: 50, is_default: true, matches_category: false }),
+    ])
+    const [wallpaper, others] = discount.classes
+
+    // The waterfall picks the class by the line's category, else the default class.
+    const discountFor = async (category) =>
+      (await inject('GET', `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100&category=${category}`)).json()
+        .inputs.discount_percent
+    expect(await discountFor('wallpaper')).toMatchObject({ value: 40, detail: { shape: 'tier', label: 'wallpaper' } })
+    expect(await discountFor('fabric')).toMatchObject({ value: 50, detail: { label: 'All other collections' } })
+
+    // A product chose the default class; the read counts it.
+    const { rows } = await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency)
+       VALUES ($1, $2, $3, 'fabric', 'NZD') RETURNING id`,
+      [houseId, `${PREFIX} product`, `${PREFIX}-product`]
+    )
+    await pool.query(`INSERT INTO product_discount_tiers (product_id, tier_id) VALUES ($1, $2)`, [rows[0].id, others.id])
+    discount = (await inject('GET', `/admin/pricing/houses/${houseId}`)).json().pricing.discount
+    expect(discount.classes.find((entry) => entry.id === others.id).products).toBe(1)
+
+    // Edit as a set: rename and re-rate one, move the default onto it, drop the
+    // other, add a new one — with a flat rate beside them for everything else.
+    const second = await put(
+      [
+        { id: wallpaper.id, label: 'Wallpaper', percent: 42, is_default: true },
+        { label: 'New collections', percent: 45 },
+      ],
+      { discount_percent: 30 }
+    )
+    expect(second.statusCode).toBe(200)
+    discount = second.json().pricing.discount
+    expect(discount).toMatchObject({ percent: 30, source: 'house', shape: 'tiers' })
+    expect(discount.classes.map((entry) => [entry.label, entry.percent, entry.is_default])).toEqual([
+      ['New collections', 45, false],
+      ['Wallpaper', 42, true],
+    ])
+    // The removed class's product fell back — its choice went with the class.
+    const { rows: choices } = await pool.query(`SELECT 1 FROM product_discount_tiers WHERE product_id = $1`, [rows[0].id])
+    expect(choices).toEqual([])
+    await pool.query(`DELETE FROM products WHERE id = $1`, [rows[0].id])
+
+    // An empty set removes them all; the flat rate stays.
+    const none = await put([])
+    expect(none.json().pricing.discount).toMatchObject({ percent: 30, shape: 'flat', classes: [] })
+  })
+
+  it('refuses discount classes it cannot write, and writes nothing else', async () => {
+    const refusal = async (id, discountClasses) => {
+      const res = await inject('PUT', `/admin/pricing/houses/${id}`, {
+        payload: { parameters: fullSet({ clearance_percent: 99 }), discount_classes: discountClasses },
+      })
+      expect(res.statusCode).toBe(422)
+      expect(await getBrandParameters(pool, id)).toBe(null)
+      return res.json().message
+    }
+    expect(await refusal(houseId, [{ label: 'A', percent: 10 }, { label: ' a ', percent: 20 }])).toMatch(/Two discount classes/)
+    expect(
+      await refusal(houseId, [
+        { label: 'A', percent: 10, is_default: true },
+        { label: 'B', percent: 20, is_default: true },
+      ])
+    ).toMatch(/Only one discount class/)
+    expect(await refusal(houseId, [{ id: 2147483646, label: 'A', percent: 10 }])).toMatch(/not one of this house/)
+    expect(await refusal(chainId, [{ label: 'A', percent: 10 }])).toMatch(/compounded chain/)
+    expect(await refusal(bareId, [{ label: 'A', percent: 10 }])).toMatch(/Link this house to the supplier/)
   })
 
   it('refuses a freight rate with no unit the ledger knows, and a discount of 100%', async () => {

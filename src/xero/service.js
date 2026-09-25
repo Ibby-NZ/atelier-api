@@ -118,6 +118,10 @@ export const createXeroService = ({
   // push's `pending_payment`. server.js wires the status letter here so a move
   // Xero makes writes the same letter the CRM's status dropdown does.
   notifyOrderTransition = async () => {},
+  // EMAIL_REDIRECT_TO (config.emailRedirectTo). While it is set, Xero is never
+  // asked to email an invoice: that letter goes from Xero to the client's
+  // contact directly and cannot be redirected like the mailer's can.
+  emailRedirectTo = null,
 }) => {
   // client_credentials keeps its short-lived token in memory only: it can be
   // re-minted at will, so persisting it buys nothing and staleness bugs.
@@ -835,7 +839,10 @@ export const createXeroService = ({
       }
     }
 
-    if (sendEmail) {
+    if (sendEmail && emailRedirectTo) {
+      warning =
+        'Invoice created but not emailed: EMAIL_REDIRECT_TO is set, and Xero emails the client directly. Send it from Xero once testing is over.'
+    } else if (sendEmail) {
       // Xero sends its own branded invoice email to the contact. Only an
       // AUTHORISED invoice can be emailed; a DRAFT deployment answers with a
       // warning rather than an error — the push itself succeeded.

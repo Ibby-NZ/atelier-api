@@ -40,7 +40,7 @@ export const MAX_LIMIT = 200
 
 // Qualified, because every statement below joins `brands` for the house name a
 // terms list is unreadable without.
-const TERMS_COLUMNS = `supplier_brand_terms.id, supplier_brand_terms.brand_id,
+const TERMS_COLUMNS = `supplier_brand_terms.id, supplier_brand_terms.supplier_id, supplier_brand_terms.brand_id,
   supplier_brand_terms.discount, supplier_brand_terms.discount_chain,
   supplier_brand_terms.markup, supplier_brand_terms.indicative,
   supplier_brand_terms.note, supplier_brand_terms.created_at,
@@ -206,6 +206,10 @@ const netOf = (terms, tiers) => {
 const toTerms = (row, tiers) => {
   const base = {
     id: row.id,
+    // Which supplier owns the row — not always the house's main one (terms
+    // stay one set per house, "whichever supplier owns it"), and every terms
+    // write is scoped by it.
+    supplier_id: row.supplier_id,
     brand_id: row.brand_id,
     brand_name: row.brand_name,
     brand_slug: row.brand_slug,
@@ -292,6 +296,39 @@ export const getBrandTerms = async (db, brandId) => {
 export const listBrandIdsWithTerms = async (db) => {
   const { rows } = await db.query(`SELECT brand_id FROM supplier_brand_terms`)
   return rows.map((row) => row.brand_id)
+}
+
+/**
+ * Every house's terms reduced to their SHAPE: whether a flat discount could be
+ * written over them without changing what kind of terms they are. The pricing
+ * import (src/pricing/parameters-backfill.js) replaces a flat discount that
+ * disagrees with the Dynamics export and leaves a chain or a set of tiers
+ * alone — merging a flat rate into either is not an edit, it is a different
+ * agreement. Asked here, not joined there, because the terms tables are named
+ * only inside src/suppliers/ (see the header).
+ *
+ * @param {{ query: Function }} db
+ * @returns {Promise<{ id: number, brand_id: number, supplier_id: number,
+ *                     discount: number|null, chain_length: number, tier_count: number }[]>}
+ */
+export const listBrandTermsShapes = async (db) => {
+  const { rows } = await db.query(
+    `SELECT t.id, t.brand_id, t.supplier_id, t.discount,
+            cardinality(t.discount_chain) AS chain_length,
+            (SELECT count(*)::int FROM supplier_discount_tiers d
+              WHERE d.supplier_brand_term_id = t.id) AS tier_count
+       FROM supplier_brand_terms t`
+  )
+  return rows.map((row) =>
+    Object.freeze({
+      id: row.id,
+      brand_id: row.brand_id,
+      supplier_id: row.supplier_id,
+      discount: rateOrNull(row.discount),
+      chain_length: Number(row.chain_length ?? 0),
+      tier_count: Number(row.tier_count ?? 0),
+    })
+  )
 }
 
 /**

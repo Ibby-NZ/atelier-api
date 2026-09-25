@@ -58,8 +58,13 @@ const PARAMETER_COLUMNS = `guid, tracking_category, name, supplier,
 /**
  * One staged row as a parameter set. Frozen, and built fresh — never a mutation
  * of the row pg handed back.
+ *
+ * Exported for the house-pricing upload (src/pricing/house-pricing-import.js):
+ * a record read out of the export by scripts/lib/d365-workbook.js carries the
+ * staging column names, so an uploaded file is read by this one rule rather
+ * than a second copy of it.
  */
-const toParameters = (row) =>
+export const toRangeParameters = (row) =>
   Object.freeze({
     guid: row.guid,
     name: row.name,
@@ -131,7 +136,7 @@ export const listRangeParameters = async (pool, { q, page, limit } = {}) => {
     [...params, safeLimit, (safePage - 1) * safeLimit]
   )
 
-  return { parameters: rows.map(toParameters), total: counted[0].total }
+  return { parameters: rows.map(toRangeParameters), total: counted[0].total }
 }
 
 /**
@@ -152,7 +157,7 @@ export const getRangeParameters = async (db, name) => {
       LIMIT 1`,
     [RANGE_CATEGORY, String(name ?? '')]
   )
-  return rows[0] ? toParameters(rows[0]) : null
+  return rows[0] ? toRangeParameters(rows[0]) : null
 }
 
 /**

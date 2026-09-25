@@ -17,12 +17,14 @@
 // to call one. The unique index is what stops two rates claiming one day, which
 // would otherwise make this resolver pick at random.
 //
-// THE TABLE IS EMPTY AND STAYS EMPTY UNTIL F1 IS ANSWERED. The grain is
-// unresolved — the exported `Freight` column agrees with the rate the price
-// rows imply in only 30 of 43 ranges — so nothing seeds this table and nothing
-// derives a rate from the corpus. `src/pricing/freight-recovery.js` reports the
-// evidence; a person types the answer in. Consequence to expect in a test or a
-// preview today: every resolve is a miss, and that is the mechanism working.
+// NOTHING DERIVES A RATE FROM THE PRICE CORPUS. The exported `Freight` column
+// agrees with the rate the price rows imply in only 30 of 43 ranges, and
+// `src/pricing/freight-recovery.js` reports that evidence rather than acting on
+// it. F1 was answered in Sept 2026 — freight is per HOUSE — so the rows here
+// are what a person types (the form, the yearly sheet, the house page) or the
+// Dynamics export's own per-house figure, applied by the pricing import
+// (src/pricing/parameters-backfill.js) as a dated range rate. A house nobody
+// has set is still a miss, never a zero.
 
 import { CATEGORIES, UNITS } from '../../scripts/lib/price-template.js'
 import { categorySlugs } from '../catalogue/categories.js'
@@ -140,6 +142,35 @@ export const resolveFreightRate = async (db, query = {}) => {
     return { rate: null, reason: NO_RATE_REASONS.NOT_YET_EFFECTIVE }
   }
   return { rate: toRate(effective[0]), reason: null }
+}
+
+/**
+ * The catch-all rate in force for every HOUSE on a day, in one read — what
+ * `resolveFreightRate({ range_name, on })` with no category answers, for all of
+ * them at once. The pricing import compares a whole export against it, and 60
+ * resolves in a loop would be 60 round trips inside one transaction.
+ *
+ * Same precedence as the resolver for that case: rows for every category only
+ * (a category-specific rate is not the house's rate), effective on or before
+ * `on`, newest `effective_from` first, `id` breaking the tie the unique index
+ * makes unreachable. A house with no such row is simply absent — never a zero.
+ *
+ * @param {{ query: Function }} db pool or open client
+ * @param {string} [on] ISO day; today when absent or malformed
+ * @returns {Promise<object[]>} one rate per range name, in the ledger's shape
+ */
+export const currentRangeRates = async (db, on) => {
+  const day = ISO_DAY.test(on ?? '') ? on : today()
+  const { rows } = await db.query(
+    `SELECT DISTINCT ON (lower(range_name)) ${RATE_COLUMNS}
+       FROM supplier_freight_rates
+      WHERE range_name IS NOT NULL
+        AND category IS NULL
+        AND effective_from <= $1::date
+      ORDER BY lower(range_name), effective_from DESC, id DESC`,
+    [day]
+  )
+  return rows.map(toRate)
 }
 
 /**

@@ -44,6 +44,11 @@ export const PARAMETER_COLUMNS = Object.freeze([
   'trade_markup_percent',
   'fx_margin_percent',
   'handling',
+  // The small-order surcharge (migration 1791811200000). Not waterfall inputs
+  // — the resolver never reads them — but a house parameter all the same, with
+  // the same house-over-supplier precedence and the same PUT semantics.
+  'surcharge_min_qty',
+  'surcharge_per_unit',
   'note',
 ])
 

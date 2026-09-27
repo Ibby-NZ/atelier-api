@@ -1,8 +1,8 @@
 // The Supplier Colours workbook, uploaded (25 Sep 2026): read by its header,
-// planned and landed through the existing colourway import.
+// and (28 Sep 2026) hung under the products the product prices built.
 //   1. reading the workbook — the data sheet found by its five labels
 //   2. /admin/catalogue/colours/import/* — director-only, dry run then apply,
-//      a re-run changes nothing, an unknown house is reported and never created
+//      a re-run changes nothing, no product or house is ever created
 //
 // Real Postgres, prefixed fixtures.
 
@@ -54,6 +54,14 @@ describe('reading the Supplier Colours workbook', () => {
     })
     // No colour name is the importer's to resolve (it shows the code), not an error.
     expect(read.rows[1]).toMatchObject({ colour_code: '4711', colour_name: '' })
+  })
+
+  it('reads the optional Design Code column beside the five', () => {
+    const read = readSupplierColoursWorkbook(
+      buildWorkbook([{ name: 'Supplier Colours', rows: [[...HEADER, 'Design Code'], ['Fabricut', 'Stroheim', 'ACONITUM', '4539301', 'Ivory', '45393']] }]),
+      FILENAME
+    )
+    expect(read.rows[0]).toMatchObject({ design: 'ACONITUM', design_code: '45393', colour_code: '4539301' })
   })
 
   it('refuses what is not the workbook, and a row with no house, in words the office can act on', () => {
@@ -156,24 +164,31 @@ describe('/admin/catalogue/colours/import', () => {
     expect(rows[0].n).toBe(0)
   })
 
-  it('checks without writing, lands one design and one colourway, and a re-run changes nothing', async () => {
+  it('hangs a colour under the product its price row built, never creates one, and a re-run changes nothing', async () => {
+    const { rows: price } = await pool.query(`SELECT id FROM product_prices WHERE guid = '00000000-0000-4000-9000-000000000001'`)
+    const { rows: made } = await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, product_price_id)
+       VALUES ($1, 'ELLA STRIPE', $2, 'fabric', 'GBP', $3) RETURNING id`,
+      [houseId, `${HOUSE_SLUG}-ella-stripe`, price[0].id]
+    )
     const book = colours([
       ['Madeaux', HOUSE, 'ELLA STRIPE', '01', 'Sky'],
+      ['Madeaux', HOUSE, 'NO SUCH DESIGN', '02', 'Straw'],
       ['Nobody', `${PREFIX} Nobody`, 'GHOST', '1', 'Grey'],
     ])
     const dry = await upload('validate', book)
     expect(dry.statusCode).toBe(200)
     const sku = `${HOUSE_SLUG}-ella-stripe-01`.toUpperCase()
     expect(dry.json()).toMatchObject({
-      rows_read: 2,
+      rows_read: 3,
       products: 1,
-      products_new: 1,
-      products_priced: 1,
+      products_new: 0,
       colourways: 1,
       colourways_new: 1,
       unknown_brands: [{ brand: `${PREFIX} Nobody`, rows: 1 }],
+      skips: [{ reason: 'no product in its house has this design or code', rows: 1 }],
       sample: [{ sku, name: 'Sky', is_new: true }],
-      houses: [{ house: { id: houseId }, products: 1, products_new: 1, colourways: 1, priced: 1 }],
+      houses: [{ house: { id: houseId }, products: 1, products_new: 0, colourways: 1 }],
     })
     expect((await pool.query(`SELECT 1 FROM colourways WHERE sku = $1`, [sku])).rows).toHaveLength(0)
 
@@ -181,17 +196,18 @@ describe('/admin/catalogue/colours/import', () => {
     expect(applied.statusCode).toBe(200)
     expect(applied.json()).toMatchObject({ colourways_new: 1, applied: { colourways: 1, products: 1, stock_rows_created: 1 } })
     const { rows } = await pool.query(
-      `SELECT p.name AS design, p.product_type, c.name AS colour, i.qty_available::float AS qty, i.unit
-         FROM colourways c JOIN products p ON p.id = c.product_id JOIN inventory i ON i.colourway_id = c.id
+      `SELECT c.product_id, c.name AS colour, i.qty_available::float AS qty, i.unit
+         FROM colourways c JOIN inventory i ON i.colourway_id = c.id
         WHERE c.sku = $1`,
       [sku]
     )
-    expect(rows).toEqual([{ design: 'ELLA STRIPE', product_type: 'fabric', colour: 'Sky', qty: 0, unit: 'metres' }])
-    // The unknown house was reported, never created.
+    expect(rows).toEqual([{ product_id: made[0].id, colour: 'Sky', qty: 0, unit: 'metres' }])
+    // No product was made for the design nothing names, and no house for the unknown brand.
+    expect((await pool.query(`SELECT count(*)::int AS n FROM products WHERE brand_id = $1`, [houseId])).rows[0].n).toBe(1)
     expect((await pool.query(`SELECT 1 FROM brands WHERE slug = $1`, [`${PREFIX}-nobody`])).rows).toHaveLength(0)
 
     const again = await upload('apply', book)
-    expect(again.json()).toMatchObject({ products_new: 0, colourways_new: 0, applied: { stock_rows_created: 0 } })
+    expect(again.json()).toMatchObject({ colourways_new: 0, applied: { stock_rows_created: 0 } })
   })
 
   it('answers a bad file with the per-row reasons', async () => {

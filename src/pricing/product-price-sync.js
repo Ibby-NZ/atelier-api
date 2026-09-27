@@ -7,10 +7,11 @@
 // "I can see the ELLA STRIPE product price, but that isn't being reflected onto
 // the product itself in Catalogue → Products." This module is that reflection.
 //
-// WHICH PRODUCT. A catalogue design is named by the Dynamics description (the
-// cutover merge and the colour import both name it so) under the house the
-// range prices through — the pricer's own `houseFor`, so the match cannot fork
-// from the price. Description or code, trimmed, case-insensitive.
+// WHICH PRODUCT. A product built from a row (`products.product_price_id`,
+// src/catalogue/product-price-catalogue.js) takes THAT row, and only it. Any
+// other is matched by name: the Dynamics description under the house the range
+// prices through — the pricer's own `houseFor`, so the match cannot fork from
+// the price. Description or code, trimmed, case-insensitive.
 //
 // WHAT IS WRITTEN, per product:
 //   trade_price_cents  the range calculation's trade sell (NZ$ — the store's
@@ -91,9 +92,10 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
     }
   }
 
+  const rowById = new Map(priceRows.map((row) => [row.id, row]))
   const { rows: products } = await db.query(
     `SELECT p.id, p.name, p.slug, p.brand_id, b.name AS house, p.currency, p.category,
-            p.trade_price_cents, p.wholesale_rate
+            p.trade_price_cents, p.wholesale_rate, p.product_price_id
        FROM products p JOIN brands b ON b.id = p.brand_id
       WHERE p.archived_at IS NULL AND ($1::int IS NULL OR p.id = $1::int)
       ORDER BY p.id`,
@@ -104,7 +106,10 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
   const changes = []
   const report = { matched: 0, ambiguous: [], unpriced: [], currency_mismatch: [], kept: [] }
   for (const product of products) {
-    const matches = rowsByKey.get(`${product.brand_id}\u0000${nameKey(product.name).replace(/\s+/g, ' ')}`)
+    const linked = product.product_price_id == null ? null : rowById.get(product.product_price_id)
+    const matches = product.product_price_id != null
+      ? (linked ? [linked] : null)
+      : rowsByKey.get(`${product.brand_id}\u0000${nameKey(product.name).replace(/\s+/g, ' ')}`)
     if (!matches) continue
     report.matched += 1
     const priced = []
@@ -115,9 +120,10 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
       continue
     }
     const [{ row, pricing }] = priced
+    // An unpriced row (its house lacks a figure) still carries the export's
+    // wholesale rate and type, and those land; only the trade sell waits.
     if (pricing.trade_sell == null) {
       report.unpriced.push({ product_id: product.id, product: product.name, why: pricing.reason ?? `${pricing.missing.join(', ')} not set` })
-      continue
     }
 
     const trade = { from: product.trade_price_cents, to: cents(pricing.trade_sell) }

@@ -292,7 +292,7 @@ const unitFor = (product) => {
  * Inventory is INSERT … DO NOTHING at zero, like the seed and like the admin
  * colourway create: stock is live operational data from the first run on.
  */
-const upsertColourways = async (client, colourways, products) => {
+export const upsertColourways = async (client, colourways, products) => {
   let inventory = 0
   for (const chunk of chunks(colourways)) {
     const productRows = chunk.map((colourway) => requireProduct(products, colourway.productSlug))

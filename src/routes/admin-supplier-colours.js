@@ -4,8 +4,8 @@
 //   POST /admin/catalogue/colours/import/validate?filename=   the dry run; writes nothing
 //   POST /admin/catalogue/colours/import/apply?filename=      the colourway import, one transaction
 //
-// DIRECTOR-ONLY. One file creates thousands of designs and colourways in the
-// catalogue — the same bulk-write posture as the Dynamics import and the
+// DIRECTOR-ONLY. One file hangs thousands of colourways under the catalogue's
+// products — the same bulk-write posture as the Dynamics import and the
 // cutover merge (back office may browse and edit; a director loads in bulk).
 // Nothing here is a cost figure, so the finance grant is not asked for.
 //
@@ -17,7 +17,6 @@ import {
   planSupplierColours,
   readSupplierColoursWorkbook,
 } from '../catalogue/supplier-colours-import.js'
-import { applyProductSync } from '../pricing/product-price-sync.js'
 
 const IMPORT_CONTENT_TYPES = Object.freeze([
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -65,12 +64,9 @@ export const adminSupplierColourRoutes = async (app, { pool }) => {
   app.post('/admin/catalogue/colours/import/apply', options, async (request, reply) => {
     const { read, filename, refusal } = readUpload(request, reply)
     if (refusal) return refusal
+    // The products are the product prices' own, priced by that upload; this
+    // only hangs colourways under them.
     const { plan, summary } = await applySupplierColours(pool, read)
-    // A design this file just created has no price; one a product price names
-    // takes its trade price, wholesale rate and category from it — fill-only,
-    // the same step the product-prices upload ends with. Only counts travel
-    // back: this route is not finance-gated.
-    const synced = await applyProductSync(pool, { sourceFile: filename, userId: request.user?.id ?? null })
     return {
       filename,
       sheet: read.sheet,
@@ -79,7 +75,7 @@ export const adminSupplierColourRoutes = async (app, { pool }) => {
         colourways: summary.colourways,
         products: summary.products,
         stock_rows_created: summary.inventoryCreated,
-        products_priced: synced.trade_filled,
+        products_priced: 0,
       },
     }
   })

@@ -142,6 +142,7 @@ export const adminProductPriceRoutes = async (app, { pool }) => {
       exported_at: read.exported_at,
       import_id: applied.import_id,
       fx_filled: applied.fx_filled,
+      fx_updated: applied.fx_updated,
       ...report(applied.plan),
       catalogue,
     }

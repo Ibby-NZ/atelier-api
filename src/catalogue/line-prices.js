@@ -24,7 +24,9 @@ export const resolveCartLines = async (client, cart, trade) => {
   const lines = []
   for (const { sku, qty } of cart) {
     const { rows } = await client.query(
-      `SELECT c.id AS colourway_id, p.name, p.retail_price_cents, p.trade_price_cents
+      `SELECT c.id AS colourway_id, p.name,
+              COALESCE(c.retail_price_cents, p.retail_price_cents) AS retail_price_cents,
+              COALESCE(c.trade_price_cents, p.trade_price_cents) AS trade_price_cents
          FROM colourways c
          JOIN products p ON p.id = c.product_id
         WHERE c.sku = $1`,

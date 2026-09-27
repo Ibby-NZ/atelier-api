@@ -21,13 +21,20 @@
 // row: the product lands and prices the moment the house exists, and the plan
 // lists every such range.
 //
-// THE EXCHANGE RATES COME FROM THE EXPORT. It has no rate column, but every
-// row states both ends of the exchange: price ex duty = wholesale × (1 −
-// range discount) ÷ rate. Voting that per currency, over rows whose house has
-// a resolved discount, gives EUR 0.45, USD 0.51 and GBP 0.38 on 97–100% of
-// rows — Dynamics' annual table. A currency with no rate on the platform gets
-// the voted one (fill-only); a rate finance has set is never replaced, and a
-// disagreement is reported for them to decide on the Pricing screen.
+// THE EXCHANGE RATES COME FROM THE EXPORT. Since 28 Sep 2026 the export
+// carries an Exchange Rate column (`exchangerate`: EUR 0.45, USD 0.51, GBP 0.38
+// — Dynamics' own table), and that column IS the platform's rate: the one the
+// house and product pages show beside their currency (the client: "the data
+// pertaining to that exchange rate is tied to the product price import"). So a
+// rate the file states is filled where the platform has none and REPLACES one
+// that differs — the validate step says so first, currency by currency.
+//
+// An older export without the column still votes: every row states both ends
+// of the exchange (price ex duty = wholesale × (1 − range discount) ÷ rate),
+// so voting that per currency, over rows whose house has a resolved discount,
+// recovers the same table on 97–100% of rows. A voted rate is only an
+// inference, so it fills a missing rate and never replaces a set one — a
+// disagreement is reported instead.
 
 import { openWorkbook, sharedStrings, sheetRows, excelDate, excelTimestamp } from '../../scripts/lib/xlsx.js'
 import { parseNumber } from '../../scripts/lib/python-format.js'
@@ -74,6 +81,8 @@ export const PRODUCT_PRICE_COLUMNS = Object.freeze({
   atelier_priceexdutynz: ['dynamics_price_ex_duty', NUM],
   atelier_priceincldutynz: ['dynamics_price_incl_duty', NUM],
   atelier_freightrate: ['freight_letter', TEXT],
+  // Read for the exchange rates only; not a stored column (see the header).
+  exchangerate: ['exchange_rate', NUM],
 })
 
 /** Without these a row cannot be stored or priced. The rest are optional. */
@@ -283,6 +292,7 @@ export const readProductPricesWorkbook = (buffer, filename = 'product-prices.xls
           dynamics_trade_sell: record.dynamics_trade_sell == null ? null : round2(record.dynamics_trade_sell),
           dynamics_modified_on: record.dynamics_modified_on ?? null,
           row_checksum: record.row_checksum ?? null,
+          exchange_rate: record.exchange_rate > 0 ? record.exchange_rate : null,
         })
       )
     }
@@ -351,6 +361,24 @@ const voteRates = (priced) => {
   return result
 }
 
+/** The rate the file's Exchange Rate column states per currency, by majority. */
+const statedRates = (rows) => {
+  const tallies = new Map()
+  for (const row of rows) {
+    if (row.exchange_rate == null) continue
+    const tally = tallies.get(row.currency) ?? new Map()
+    tally.set(row.exchange_rate, (tally.get(row.exchange_rate) ?? 0) + 1)
+    tallies.set(row.currency, tally)
+  }
+  const result = new Map()
+  for (const [currency, tally] of tallies) {
+    const total = [...tally.values()].reduce((sum, count) => sum + count, 0)
+    const [rate, count] = [...tally].sort((left, right) => right[1] - left[1] || left[0] - right[0])[0]
+    result.set(currency, { rate, share: count / total })
+  }
+  return result
+}
+
 /**
  * What applying the file would do. Reads only.
  *
@@ -398,17 +426,22 @@ export const planProductPricesImport = async (db, read) => {
   // --- the exchange rates the export implies, against the platform's
   const current = await pricer.loadRates()
   const voted = voteRates(priced)
+  const stated = statedRates(read.rows)
   const currencies = [...new Set(read.rows.map((row) => row.currency))].sort()
   const fx = currencies.map((currency) => {
     const rows = read.rows.filter((row) => row.currency === currency).length
     if (currency === HOME_CURRENCY) {
       return Object.freeze({ currency, rows, implied: 1, share: 1, current: 1, action: 'home' })
     }
-    const vote = voted.get(currency) ?? null
+    // The file's own column first; the vote only for an export without it.
+    const fromFile = stated.get(currency)?.share >= FX_AGREEMENT
+    const source = fromFile ? 'file' : 'vote'
+    const vote = fromFile ? stated.get(currency) : voted.get(currency) ?? null
     const rate = current.get(currency) ?? null
     const clear = vote != null && vote.share >= FX_AGREEMENT
+    const differs = clear && rate != null && Math.abs(rate.rate - vote.rate) > 0.0005
     let action
-    if (rate) action = clear && Math.abs(rate.rate - vote.rate) > 0.0005 ? 'differs' : 'keep'
+    if (rate) action = differs ? (fromFile ? 'update' : 'differs') : 'keep'
     else action = clear ? 'fill' : 'unclear'
     return Object.freeze({
       currency,
@@ -417,9 +450,10 @@ export const planProductPricesImport = async (db, read) => {
       share: vote ? round3(vote.share) : null,
       current: rate?.rate ?? null,
       action,
+      source,
     })
   })
-  const fxFills = fx.filter((line) => line.action === 'fill')
+  const fxFills = fx.filter((line) => line.action === 'fill' || line.action === 'update')
 
   // --- re-price with the rates this import would fill, so the comparison below
   // is what the office will see after applying
@@ -521,8 +555,8 @@ const upsertRows = async (client, rows, importId) => {
 
 /**
  * Apply the file: one transaction — the import log, every new and changed row,
- * the unchanged rows marked as seen, and the exchange rates the platform had
- * none for.
+ * the unchanged rows marked as seen, and the exchange rates (filled, or
+ * replaced by the file's stated rate).
  *
  * @param {import('pg').Pool} pool
  * @param {{ rows: object[], rows_read: number, exported_at: string|null }} read
@@ -550,20 +584,30 @@ export const applyProductPricesImport = async (pool, read, { filename, userId = 
         [importId, plan.writes.unchangedGuids]
       )
     }
-    // Fill-only, and re-checked here inside the lock: the plan read the rates
-    // before this transaction could see a rate finance saved a second ago.
+    // A fill is re-checked here inside the lock: the plan read the rates before
+    // this transaction could see a rate finance saved a second ago. An update
+    // is the file's stated rate, which wins either way.
     const filled = []
+    const updated = []
     for (const line of plan.writes.fxFills) {
-      const { rows } = await client.query(`SELECT 1 FROM fx_rates WHERE currency = $1`, [line.currency])
-      if (rows.length > 0) continue
+      if (line.action === 'fill') {
+        const { rows } = await client.query(`SELECT 1 FROM fx_rates WHERE currency = $1`, [line.currency])
+        if (rows.length > 0) continue
+      }
       await upsertFxRate(client, line.currency, {
         rate: line.implied,
         note: `From the Dynamics product prices export (${filename})`,
       })
-      filled.push(line.currency)
+      if (line.action === 'fill') filled.push(line.currency)
+      else updated.push(line.currency)
     }
     await client.query('COMMIT')
-    return Object.freeze({ import_id: importId, fx_filled: Object.freeze(filled), plan })
+    return Object.freeze({
+      import_id: importId,
+      fx_filled: Object.freeze(filled),
+      fx_updated: Object.freeze(updated),
+      plan,
+    })
   } catch (error) {
     try {
       await client.query('ROLLBACK')

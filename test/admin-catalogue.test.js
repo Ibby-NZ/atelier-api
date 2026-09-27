@@ -4,6 +4,7 @@ import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
 import { deleteOrExplain } from '../src/lifecycle/delete.js'
+import { resolveCartLines } from '../src/catalogue/line-prices.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'admin-cat-test'
@@ -1455,6 +1456,35 @@ describe('back-office catalogue admin', () => {
       expect(updated.hex_tones).toEqual(['#000011'])
       // The inventory row follows the colourway, not the SKU.
       expect(updated.inventory.unit).toBe('metres')
+    })
+
+    // A variation sells at its own price when it has one, else its product's —
+    // each figure on its own, on every read that prices a line.
+    it('sets and clears a variation\'s own prices', async () => {
+      const brand = await createBrandFixture('House')
+      const product = await createProductFixture(brand.id, { retail_price_cents: 10000, trade_price_cents: 8000 })
+      const colourway = await createColourwayFixture(product.id, { retail_price_cents: 12000 })
+      expect(colourway.retail_price_cents).toBe(12000)
+      // A context read gives the price the variation sells at.
+      expect(colourway.trade_price_cents).toBe(8000)
+
+      const detail = async () =>
+        (await inject('GET', `/admin/products/${product.id}`, backofficeCookie)).json().product.colourways[0]
+      expect(await detail()).toMatchObject({ retail_price_cents: 12000, trade_price_cents: null })
+      expect(await resolveCartLines(pool, [{ sku: colourway.sku, qty: 1 }], false)).toMatchObject([{ unit_price_cents: 12000 }])
+      expect(await resolveCartLines(pool, [{ sku: colourway.sku, qty: 1 }], true)).toMatchObject([{ unit_price_cents: 8000 }])
+
+      const patched = await inject('PATCH', `/admin/colourways/${colourway.id}`, backofficeCookie, {
+        retail_price_cents: null,
+        trade_price_cents: 7000,
+      })
+      expect(patched.statusCode).toBe(200)
+      expect(await detail()).toMatchObject({ retail_price_cents: null, trade_price_cents: 7000 })
+      expect(await resolveCartLines(pool, [{ sku: colourway.sku, qty: 1 }], false)).toMatchObject([{ unit_price_cents: 10000 }])
+      expect(await resolveCartLines(pool, [{ sku: colourway.sku, qty: 1 }], true)).toMatchObject([{ unit_price_cents: 7000 }])
+
+      const negative = await inject('PATCH', `/admin/colourways/${colourway.id}`, backofficeCookie, { retail_price_cents: -1 })
+      expect(negative.statusCode).toBe(400)
     })
 
     it('rejects a duplicate sku with 409', async () => {

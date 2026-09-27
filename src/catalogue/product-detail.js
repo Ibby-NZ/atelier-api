@@ -60,14 +60,28 @@ const isInStock = (row) => {
   return available - reserved > 0
 }
 
-const toColourway = (row) =>
-  Object.freeze({
+// A colourway's prices are the ones it SELLS at — its own, else its product's
+// (COALESCE in the query) — under the product's own rules: no retail from an
+// international house, trade only to approved trade. The storefront shows the
+// selected colourway's figure, so a variation priced apart is quoted right.
+const toColourway = (row, { hideRetail, includeTrade }) => {
+  const base = {
     name: row.name,
     sku: row.sku,
     hex_tones: row.hex_tones ?? null,
     image_url: row.image_url ?? null,
     in_stock: isInStock(row),
-  })
+  }
+  const withRetail =
+    !hideRetail && row.retail_price_cents !== null
+      ? { ...base, retail_price_cents: row.retail_price_cents }
+      : base
+  return Object.freeze(
+    includeTrade && row.trade_price_cents !== null
+      ? { ...withRetail, trade_price_cents: row.trade_price_cents }
+      : withRetail
+  )
+}
 
 // Builds the public product shape. Pricing mirrors the list endpoint: domestic
 // brands expose retail_price_cents when set, international brands hide price.
@@ -101,7 +115,9 @@ const toProductDetail = (row, colourways, includeTrade) => {
     collection: row.collection_slug
       ? { slug: row.collection_slug, name: row.collection_name }
       : null,
-    colourways: colourways.map(toColourway),
+    colourways: colourways.map((colourway) =>
+      toColourway(colourway, { hideRetail: row.is_international, includeTrade })
+    ),
   }
 
   const withRetail =
@@ -154,6 +170,8 @@ export const getProductDetail = async (
 
   const { rows: colourways } = await pool.query(
     `SELECT c.name, c.sku, c.hex_tones, c.image_url,
+            COALESCE(c.retail_price_cents, p.retail_price_cents) AS retail_price_cents,
+            COALESCE(c.trade_price_cents, p.trade_price_cents) AS trade_price_cents,
             i.qty_available, i.qty_reserved
      FROM colourways c
      JOIN products p ON p.id = c.product_id

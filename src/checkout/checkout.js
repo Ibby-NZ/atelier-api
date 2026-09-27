@@ -73,8 +73,8 @@ export const validateCheckoutLines = async (
               p.name,
               p.slug AS product_slug,
               p.product_type,
-              p.retail_price_cents,
-              p.trade_price_cents,
+              COALESCE(c.retail_price_cents, p.retail_price_cents) AS retail_price_cents,
+              COALESCE(c.trade_price_cents, p.trade_price_cents) AS trade_price_cents,
               b.trade_only,
               i.qty_available,
               i.qty_reserved

@@ -338,6 +338,9 @@ const colourwayProps = {
   sku: { type: 'string', minLength: 1, maxLength: 100 },
   hex_tones: hexTonesProp,
   image_url: nullableUrl,
+  // Null (or absent) sells at the product's price.
+  retail_price_cents: nullableCents,
+  trade_price_cents: nullableCents,
 }
 
 const colourwayCreateSchema = {

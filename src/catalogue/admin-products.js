@@ -157,6 +157,8 @@ const COLOURWAY_UPDATE_COLUMNS = Object.freeze([
   'sku',
   'hex_tones',
   'image_url',
+  'retail_price_cents',
+  'trade_price_cents',
 ])
 
 const toProduct = (row, extra) =>
@@ -204,6 +206,10 @@ const toColourway = (row, extra) =>
     sku: row.sku,
     hex_tones: row.hex_tones ?? null,
     image_url: row.image_url ?? null,
+    // The variation's OWN prices; null sells at the product's. A context read
+    // (colourwayContext) replaces both with the price the variation sells at.
+    retail_price_cents: row.own_retail_price_cents ?? null,
+    trade_price_cents: row.own_trade_price_cents ?? null,
     archived_at: row.archived_at ?? null,
     inventory:
       row.unit === null || row.unit === undefined
@@ -217,6 +223,8 @@ const toColourway = (row, extra) =>
   })
 
 const COLOURWAY_COLUMNS = `c.id, c.product_id, c.name, c.sku, c.hex_tones, c.image_url,
+              c.retail_price_cents AS own_retail_price_cents,
+              c.trade_price_cents AS own_trade_price_cents,
               c.archived_at, i.qty_available, i.qty_reserved, i.unit`
 
 const COLOURWAY_SELECT = `SELECT ${COLOURWAY_COLUMNS}
@@ -232,8 +240,8 @@ const COLOURWAY_CONTEXT_COLUMNS = `p.name AS product_name,
               p.product_type,
               p.brand_id,
               b.name AS brand_name,
-              p.trade_price_cents,
-              p.retail_price_cents`
+              COALESCE(c.trade_price_cents, p.trade_price_cents) AS trade_price_cents,
+              COALESCE(c.retail_price_cents, p.retail_price_cents) AS retail_price_cents`
 
 // Both joins are inner: product_id and brand_id are NOT NULL, so a colourway
 // always has both. inventory stays a LEFT JOIN and cannot multiply rows —
@@ -249,8 +257,9 @@ const colourwayContext = (row) => ({
   product_type: row.product_type,
   brand_id: row.brand_id,
   brand_name: row.brand_name,
-  // The design's catalogue prices, so a line added to a sales order is priced
-  // on the order's own basis (trade or retail) without anyone retyping it.
+  // The prices the variation sells at (its own, else its design's), so a line
+  // added to a sales order is priced on the order's own basis (trade or retail)
+  // without anyone retyping it.
   // The CRM always lets the office override; null means the design is quoted
   // per job.
   trade_price_cents: row.trade_price_cents ?? null,
@@ -702,8 +711,8 @@ export const createColourway = async (pool, productId, input) => {
     }
 
     const { rows: created } = await client.query(
-      `INSERT INTO colourways (product_id, name, sku, hex_tones, image_url)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO colourways (product_id, name, sku, hex_tones, image_url, retail_price_cents, trade_price_cents)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id`,
       [
         product.id,
@@ -711,6 +720,8 @@ export const createColourway = async (pool, productId, input) => {
         input.sku.trim(),
         serialiseTones(input.hex_tones),
         input.image_url ?? null,
+        input.retail_price_cents ?? null,
+        input.trade_price_cents ?? null,
       ]
     )
     colourwayId = created[0].id

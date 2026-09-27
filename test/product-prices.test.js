@@ -480,6 +480,39 @@ describe('/admin/product-prices', () => {
       expect(imports.json().imports[0].imported_by).toMatchObject({ email: `${PREFIX}-finance@example.test` })
     })
 
+    it("takes the rate from the export's Exchange Rate column — fills it, and replaces a set rate the file disagrees with", async () => {
+      await pool.query(`DELETE FROM fx_rates WHERE currency = 'GBP'`)
+      // A range with no house: no discount, so no vote — the column alone answers.
+      const range = `${PREFIX} NO HOUSE`
+      const columns = [...PRODUCT_PRICE_COLUMNS, ['exchangerate', 'Exchange Rate']]
+      const book = productWorkbook(
+        [
+          [...priceRow(1, { range, wholesale: 10, exDuty: 26.32 }), 0.38],
+          [...priceRow(2, { range, wholesale: 20, exDuty: 52.63 }), 0.38],
+          [...priceRow(3, { range, currency: 'New Zealand Dollar', wholesale: 20 }), 1],
+        ],
+        columns
+      )
+
+      const plan = (await upload('validate', book)).json()
+      expect(plan.fx).toEqual([
+        expect.objectContaining({ currency: 'GBP', implied: 0.38, current: null, action: 'fill', source: 'file', share: 1 }),
+        expect.objectContaining({ currency: 'NZD', action: 'home' }),
+      ])
+      const applied = (await upload('apply', book)).json()
+      expect(applied).toMatchObject({ fx_filled: ['GBP'], fx_updated: [] })
+
+      // Finance changed it on a house page since; the next export says 0.38.
+      await pool.query(`UPDATE fx_rates SET rate = 0.4, note = 'typed' WHERE currency = 'GBP'`)
+      const again = (await upload('validate', book)).json()
+      expect(again.fx[0]).toMatchObject({ currency: 'GBP', implied: 0.38, current: 0.4, action: 'update', source: 'file' })
+      expect((await pool.query(`SELECT rate::float AS rate FROM fx_rates WHERE currency = 'GBP'`)).rows[0].rate).toBe(0.4)
+      const reapplied = (await upload('apply', book)).json()
+      expect(reapplied).toMatchObject({ fx_filled: [], fx_updated: ['GBP'] })
+      const gbp = (await pool.query(`SELECT rate::float AS rate, note FROM fx_rates WHERE currency = 'GBP'`)).rows[0]
+      expect(gbp).toEqual({ rate: 0.38, note: `From the Dynamics product prices export (${FILENAME})` })
+    })
+
     it('lists each row with its price, filters, and keeps a row a later export dropped — flagged, not deleted', async () => {
       const range = houseName('madeaux')
       const first = productWorkbook([

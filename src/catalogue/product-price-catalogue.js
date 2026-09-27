@@ -6,7 +6,7 @@
 // So:
 //
 //   PRODUCTS  one per product-price row, linked by `products.product_price_id`
-//             (migration 1792099200000). A row already linked is never touched
+//             (migration 1792185600000). A row already linked is never touched
 //             here; its price reaches the product through product-price-sync.js.
 //             New products are hidden from the website.
 //   COLOURS   the Supplier Colours workbook attaches colourways UNDER those

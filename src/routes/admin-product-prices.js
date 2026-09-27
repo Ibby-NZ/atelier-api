@@ -8,7 +8,8 @@
 //   GET  /admin/product-prices/:id             one row with its full waterfall
 //   POST /admin/product-prices/import/validate the "Active Product Prices" .xlsx — dry run
 //   POST /admin/product-prices/import/apply    the same file — one transaction, then
-//                                              the prices onto the catalogue, fill-only
+//                                              a product for every row the catalogue
+//                                              lacks, then the prices onto them, fill-only
 //   POST /admin/product-prices/:id/apply-to-product  { product_id } — replace one
 //                                              product's prices with this row's
 //
@@ -30,6 +31,7 @@ import {
   listProductPrices,
 } from '../pricing/product-prices.js'
 import { applyPriceToProduct, applyProductSync } from '../pricing/product-price-sync.js'
+import { createProductsFromPrices, omitWrites, planPriceCatalogue } from '../catalogue/product-price-catalogue.js'
 import {
   applyProductPricesImport,
   planProductPricesImport,
@@ -126,13 +128,17 @@ export const adminProductPriceRoutes = async (app, { pool }) => {
     const { read, filename, refusal } = readUpload(request, reply)
     if (refusal) return refusal
     const plan = await planProductPricesImport(pool, read)
-    return { filename, exported_at: read.exported_at, ...report(plan) }
+    const products = await planPriceCatalogue(pool, read.rows)
+    return { filename, exported_at: read.exported_at, ...report(plan), products: omitWrites(products) }
   })
 
   app.post('/admin/product-prices/import/apply', importOptions, async (request, reply) => {
     const { read, filename, refusal } = readUpload(request, reply)
     if (refusal) return refusal
     const applied = await applyProductPricesImport(pool, read, { filename, userId: request.user?.id ?? null })
+    // Every row is a product (product-price-catalogue.js): the ones the
+    // catalogue does not hold yet are created, hidden.
+    const products = await createProductsFromPrices(pool, read.rows)
     // Then onto the catalogue: every product a row names gets its trade price,
     // wholesale rate and category where it has none (fill-only — a price the
     // office typed is kept and reported).
@@ -143,6 +149,7 @@ export const adminProductPriceRoutes = async (app, { pool }) => {
       import_id: applied.import_id,
       fx_filled: applied.fx_filled,
       ...report(applied.plan),
+      products,
       catalogue,
     }
   })

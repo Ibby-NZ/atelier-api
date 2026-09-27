@@ -533,11 +533,8 @@ describe('/admin/product-prices', () => {
 
     it('reads one row with its full waterfall and the catalogue product it names', async () => {
       const range = houseName('madeaux')
+      // The upload itself creates the row's product (product-price-catalogue.js).
       await upload('apply', productWorkbook([priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })]))
-      await pool.query(
-        `INSERT INTO products (brand_id, name, slug, product_type, currency) VALUES ($1, 'Ella Stripe', $2, 'fabric', 'NZD')`,
-        [madeauxId, `${PREFIX}-ella-stripe`]
-      )
       const { rows } = await pool.query(`SELECT id FROM product_prices WHERE guid = $1`, [guid(1)])
       const detail = (await inject('GET', `/admin/product-prices/${rows[0].id}`)).json().product_price
       expect(detail).toMatchObject({ code: 'ELLA STRIPE', currency: 'GBP', in_latest_export: true })
@@ -546,7 +543,7 @@ describe('/admin/product-prices', () => {
         'landed_ex_handling', 'landed', 'trade_sell', 'retail_sell',
       ])
       expect(detail.pricing.trade_sell).toBe(360.52)
-      expect(detail.catalogue_products).toEqual([expect.objectContaining({ name: 'Ella Stripe', slug: `${PREFIX}-ella-stripe` })])
+      expect(detail.catalogue_products).toEqual([expect.objectContaining({ name: 'ELLA STRIPE', slug: `${PREFIX}-madeaux-ella-stripe` })])
       expect((await inject('GET', '/admin/product-prices/999999999')).statusCode).toBe(404)
     })
 
@@ -578,11 +575,14 @@ describe('/admin/product-prices', () => {
         ])
       )
       expect(applied.statusCode).toBe(200)
+      // The three hand-made products above, matched by name, plus the three
+      // the upload created from the rows and linked to them.
+      expect(applied.json().products).toMatchObject({ products_created: 3 })
       expect(applied.json().catalogue).toMatchObject({
-        products_matched: 3,
-        trade_filled: 2,
+        products_matched: 6,
+        trade_filled: 5,
         trade_replaced: 0,
-        wholesale_filled: 2,
+        wholesale_filled: 5,
         kept_count: 1,
         kept: [{ product_id: typed, trade_price_cents: { from: 40000, to: 38704, action: 'kept' } }],
         currency_mismatch: [{ product_id: euro, product_currency: 'EUR', price_currency: 'GBP' }],

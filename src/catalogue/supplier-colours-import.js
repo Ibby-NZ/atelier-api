@@ -10,24 +10,20 @@
 // (50,575 rows across 37 brands in the 25 Sep 2026 file; a second "Notes"
 // sheet says how each supplier's file was read and is not data.)
 //
-// ONE LANDING PATH. Every row is turned into the normalised colourway record
-// `npm run import:colour` already takes — { supplier, brand, design,
-// colour_code, colour_name, source_file/sheet/row } — and planned and written
-// by src/seed/colourways-import.js, unchanged: a house is resolved by SLUG and
-// an unknown one is REPORTED, never created; one product per (house, design),
-// DO NOTHING on an existing product; one colourway per SKU
-// (`<house slug>-<design>-<code>`), upserted; a zeroed stock row, DO NOTHING.
-// A second reader here, a first-class import there — the rules cannot fork.
-//
-// The dry run also says how many of the designs it would land have a product
-// price behind them (src/pricing/product-prices.js prices them), because that
-// is the question the office is testing the import to answer.
+// UNDER THE PRODUCTS, NEVER AS PRODUCTS (28 Sep 2026). The catalogue is the
+// product prices export, one product per row (product-price-catalogue.js); a
+// colour row is attached as a colourway under the product its design code,
+// colour code or design name names in its house, and a row no product names
+// is reported. This upload creates no product and no house.
 
 import { openWorkbook, sharedStrings, sheetRows } from '../../scripts/lib/xlsx.js'
-import { importColourways, prepareColourwayImport } from '../seed/colourways-import.js'
-import { createProductPricer, nameKey } from '../pricing/product-prices.js'
+import { applyColourAttach, planColourAttach } from './product-price-catalogue.js'
 
 export const COLOUR_HEADER = Object.freeze(['supplier', 'brand', 'product name', 'code', 'colour'])
+// Optional, beside the five: the supplier's code for the DESIGN (Fabricut's
+// 32774, Colefax's F4613), which is what a product price's code usually is —
+// `npm run convert:colour` writes it; a hand-made workbook may leave it out.
+export const DESIGN_CODE_LABEL = 'design code'
 export const MAX_REPORTED = 50
 const MAX_SHEETS = 50
 const ZIP_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04])
@@ -86,15 +82,18 @@ export const readSupplierColoursWorkbook = (buffer, filename = 'supplier-colours
     const rows = []
     const errors = []
     let header = null
+    let designCodeAt = null
     let rowsRead = 0
     for (const [line, cells] of sheetRows(zip, path, strings)) {
       if (header === null) {
         const labels = COLOUR_HEADER.map((_, at) => label(cells.get(at)))
         if (labels.join('|') !== COLOUR_HEADER.join('|')) break
         header = line
+        designCodeAt = label(cells.get(COLOUR_HEADER.length)) === DESIGN_CODE_LABEL ? COLOUR_HEADER.length : null
         continue
       }
       const [supplier, brand, design, code, colour] = COLOUR_HEADER.map((_, at) => cellText(cells, at))
+      const designCode = designCodeAt === null ? '' : cellText(cells, designCodeAt)
       // A trailing blank row is formatting, not a colourway.
       if (!supplier && !brand && !design && !code && !colour) continue
       rowsRead += 1
@@ -107,7 +106,7 @@ export const readSupplierColoursWorkbook = (buffer, filename = 'supplier-colours
           supplier,
           brand,
           design,
-          design_code: '',
+          design_code: designCode,
           colour_code: code,
           colour_name: colour,
           source_file: filename,
@@ -129,98 +128,80 @@ export const readSupplierColoursWorkbook = (buffer, filename = 'supplier-colours
   )
 }
 
-/**
- * What applying the file would do. Reads only.
- *
- * @param {{ query: Function }} db
- * @param {{ rows: object[], rows_read: number }} read
- */
-export const planSupplierColours = async (db, read) => {
-  // The same brand set the import plans against (archived houses included).
-  const { rows: brands } = await db.query('SELECT id, name, slug, currency FROM brands')
-  const plan = prepareColourwayImport(read.rows, brands)
-
+/** The upload's report, from a colour-attach plan (product-price-catalogue.js). */
+const report = async (db, read, plan) => {
   const skus = plan.colourways.map((colourway) => colourway.sku)
-  const slugs = plan.products.map((product) => product.slug)
-  const { rows: knownSkus } = await db.query('SELECT sku FROM colourways WHERE sku = ANY($1::text[])', [skus])
-  const { rows: knownSlugs } = await db.query('SELECT slug FROM products WHERE slug = ANY($1::text[])', [slugs])
-  const existingSkus = new Set(knownSkus.map((row) => row.sku))
-  const existingSlugs = new Set(knownSlugs.map((row) => row.slug))
+  const { rows: known } = await db.query('SELECT sku FROM colourways WHERE sku = ANY($1::text[])', [skus])
+  const existing = new Set(known.map((row) => row.sku))
+  const { rows: houses } = await db.query('SELECT id, name FROM brands')
+  const houseName = new Map(houses.map((house) => [house.id, house.name]))
+  const bySlug = new Map(plan.products.map((product) => [product.slug, product]))
 
-  // Which designs a product price stands behind: the price row's range must
-  // price through THIS house (the pricer's own rule) and its description or
-  // code must be the design's name.
-  const pricer = createProductPricer(db)
-  const { rows: priceRows } = await db.query(
-    `SELECT DISTINCT range_name, lower(btrim(description)) AS description, lower(btrim(code)) AS code
-       FROM product_prices
-      WHERE last_import_id = (SELECT max(id) FROM product_price_imports)`
-  )
-  const priced = new Set()
-  for (const row of priceRows) {
-    const house = await pricer.houseFor(row.range_name)
-    if (!house) continue
-    for (const name of [row.description, row.code]) if (name) priced.add(`${house.id}\u0000${name}`)
-  }
-
-  const brandById = new Map(brands.map((brand) => [brand.id, brand]))
   const byHouse = new Map()
-  const colourwaysByProduct = new Map()
-  for (const colourway of plan.colourways) {
-    colourwaysByProduct.set(colourway.productSlug, (colourwaysByProduct.get(colourway.productSlug) ?? 0) + 1)
-  }
-  let pricedProducts = 0
   for (const product of plan.products) {
-    const hasPrice = priced.has(`${product.brand_id}\u0000${nameKey(product.name)}`)
-    if (hasPrice) pricedProducts += 1
     const entry = byHouse.get(product.brand_id) ?? {
-      house: { id: product.brand_id, name: brandById.get(product.brand_id)?.name ?? null },
+      house: { id: product.brand_id, name: houseName.get(product.brand_id) ?? null },
       products: 0,
+      // Kept for the CRM's table: this upload never creates a product.
       products_new: 0,
       colourways: 0,
       priced: 0,
     }
     entry.products += 1
-    if (!existingSlugs.has(product.slug)) entry.products_new += 1
-    entry.colourways += colourwaysByProduct.get(product.slug) ?? 0
-    if (hasPrice) entry.priced += 1
+    if (product.trade_price_cents != null) entry.priced += 1
     byHouse.set(product.brand_id, entry)
   }
+  for (const colourway of plan.colourways) byHouse.get(bySlug.get(colourway.productSlug).brand_id).colourways += 1
 
-  const colourwaysNew = plan.colourways.filter((colourway) => !existingSkus.has(colourway.sku)).length
+  const colourwaysNew = plan.colourways.filter((colourway) => !existing.has(colourway.sku)).length
+  const skipped =
+    plan.unknownBrands.reduce((total, entry) => total + entry.rows, 0) +
+    plan.skips.reduce((total, entry) => total + entry.rows, 0)
   return Object.freeze({
     rows_read: read.rows_read,
     products: plan.products.length,
-    products_new: plan.products.filter((product) => !existingSlugs.has(product.slug)).length,
-    products_priced: pricedProducts,
+    products_new: 0,
+    products_priced: plan.products.filter((product) => product.trade_price_cents != null).length,
     colourways: plan.colourways.length,
     colourways_new: colourwaysNew,
     colourways_existing: plan.colourways.length - colourwaysNew,
-    skipped: plan.skipped,
+    rows_under_several_products: plan.rows_under_several_products,
+    skipped,
     duplicates: plan.duplicates,
     houses: Object.freeze(
       [...byHouse.values()].sort((left, right) => String(left.house.name).localeCompare(String(right.house.name)))
     ),
-    unknown_brands: Object.freeze(plan.unknownBrands),
-    skips: Object.freeze(plan.skips),
+    unknown_brands: plan.unknownBrands,
+    skips: plan.skips,
     conflicts: Object.freeze(plan.conflicts.slice(0, MAX_REPORTED)),
     conflict_count: plan.conflicts.length,
     // A sample of what would land, so a one-row test can be read off the report.
     sample: Object.freeze(
       plan.colourways.slice(0, 10).map((colourway) =>
-        Object.freeze({ sku: colourway.sku, name: colourway.name, product: colourway.productSlug, is_new: !existingSkus.has(colourway.sku) })
+        Object.freeze({ sku: colourway.sku, name: colourway.name, product: colourway.productSlug, is_new: !existing.has(colourway.sku) })
       )
     ),
   })
 }
 
 /**
- * Apply the file: the existing colourway import, in its one transaction. The
- * plan is recomputed first so the response reports what was new BEFORE this
+ * What applying the file would do. Reads only.
+ *
+ * @param {{ query: Function }} db
+ * @param {{ rows: object[], rows_read: number }} read
+ */
+export const planSupplierColours = async (db, read) => report(db, read, await planColourAttach(db, read.rows))
+
+/**
+ * Apply the file: every colour under the products it names, in one
+ * transaction. The report is taken first so it says what was new BEFORE this
  * run wrote it.
  */
 export const applySupplierColours = async (pool, read) => {
   const plan = await planSupplierColours(pool, read)
-  const summary = await importColourways(pool, read.rows)
-  return Object.freeze({ plan, summary })
+  const { plan: attached, stockRowsCreated } = await applyColourAttach(pool, read.rows)
+  return Object.freeze({
+    plan,
+    summary: { colourways: attached.colourways.length, products: attached.products.length, inventoryCreated: stockRowsCreated },
+  })
 }

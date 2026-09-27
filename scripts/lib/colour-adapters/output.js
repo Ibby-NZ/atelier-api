@@ -88,17 +88,18 @@ export const serialiseColourways = (records) => (records.length === 0
  * the five headings `src/catalogue/supplier-colours-import.js` finds it by, one
  * row per colourway. That upload lands rows through the same importer as
  * `npm run import:colour`, so this is how a converted drop reaches a database
- * the converter cannot connect to (production). The coordinates and the design
- * code do not survive the trip — the upload has no column for either.
+ * the converter cannot connect to (production). A sixth column carries the
+ * design code, which is what a product price's code usually is; the
+ * coordinates do not survive the trip.
  */
 export const SUPPLIER_COLOURS_HEADER = Object.freeze([
-  'Supplier', 'Brand', 'Product Name', 'Code', 'Colour',
+  'Supplier', 'Brand', 'Product Name', 'Code', 'Colour', 'Design Code',
 ])
 
 export const supplierColoursSheet = (records) => Object.freeze({
   name: 'Supplier Colours',
   rows: [
     SUPPLIER_COLOURS_HEADER,
-    ...records.map((row) => [row.supplier, row.brand, row.design, row.colour_code, row.colour_name]),
+    ...records.map((row) => [row.supplier, row.brand, row.design, row.colour_code, row.colour_name, row.design_code]),
   ],
 })

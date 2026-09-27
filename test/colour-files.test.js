@@ -19,8 +19,10 @@ import {
 } from '../scripts/lib/colour-adapters/records.js'
 import { readSheet, readColourFile, readRateSheet } from '../scripts/lib/colour-adapters/reading.js'
 import {
-  colourwayRow, collectColourways, serialiseColourways, rowSource,
+  colourwayRow, collectColourways, serialiseColourways, rowSource, supplierColoursSheet,
 } from '../scripts/lib/colour-adapters/output.js'
+import { buildWorkbook as writeWorkbook } from '../scripts/lib/xlsx-write.js'
+import { readSupplierColoursWorkbook } from '../src/catalogue/supplier-colours-import.js'
 import {
   assertRateSheet, stated, NO_RATE, ZERO_RATE,
 } from '../scripts/lib/colour-adapters/rates.js'
@@ -380,6 +382,14 @@ describe('colour-adapters — matching a filename', () => {
     expect(selectAdapter(registry, name)).toBe(season)
     expect(selectAdapter([...registry].reverse(), name)).toBe(season)
   })
+
+  it('reads an apostrophe a Google Drive download wrote as "_" as the apostrophe', () => {
+    // The Sep 2026 drop arrived as a Drive zip, which renames "SS'26" to
+    // "SS_26"; the annual entry must not claim it.
+    expect(selectAdapter(registry, 'Jim Thompson Export Price List_USD_2026 - SS_26.xlsx')).toBe(season)
+    expect(() => assertRegistry([season, { ...season, prefix: 'Jim Thompson Export Price List_USD_2026 - SS_26' }]))
+      .toThrow(/registered twice/)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -691,6 +701,71 @@ describe('colour-adapters — Maria Flora', () => {
     }])
     expect(found.get('Foglio1').map((record) => record.brand))
       .toEqual(['Filippo Uecher', 'Maison Nobody Knows'])
+  })
+})
+
+describe('colour-adapters — Fine', () => {
+  const FILE = 'FINE Artikelliste_2026.xlsx'
+  // The real sheet carries thirteen columns; the eight after the colour
+  // (width, repeats, weight, tariff, origin, washable) are dropped here.
+  const HEADER = ['Artikelnummer\nArticle number', 'Artikel\nArticle', 'EK-Preis €\nTrade price €',
+    'empf. VK-Preis €\nrec. Retail price €', 'Farbe\nColor']
+  const TITLE = ['ARTIKELLISTE 2026 / ARTICLE LIST 2026']
+  const fine = (design, colourCode, colourName) => colourway({ brand: 'Fine', design, colourCode, colourName })
+
+  it('splits the article into the design and its colour number', () => {
+    const found = firstRecords(FILE, [{
+      name: 'Tabelle1',
+      rows: [
+        TITLE,
+        HEADER,
+        ['AAR00100', 'Celia 060', '71.099999999999994', '171', 'Orange | Terrakotta'],
+        ['AAR00101', 'Celia 070', '71.099999999999994', '171', 'Grau | Anthrazit'],
+        ['AAR00102', 'Celia 071', '71.099999999999994', '171', 'Grau | Anthrazit'],
+      ],
+    }])
+    expect(found.get('Tabelle1')).toEqual([
+      fine('Celia', '060', 'Orange | Terrakotta'),
+      fine('Celia', '070', 'Grau | Anthrazit'),
+      fine('Celia', '071', 'Grau | Anthrazit'),
+    ])
+  })
+
+  it('drops a footnote mark, and takes the number out from before a qualifier', () => {
+    const found = firstRecords(FILE, [{
+      name: 'Tabelle1',
+      rows: [
+        TITLE,
+        HEADER,
+        ['BEL00100', 'Bad Aussee 010 °', '87.3', '210', 'Beige | Natur'],
+        ['DAU00101', 'Duca 040*', '34.799999999999997', '84', 'Braun'],
+        // The price list files this design as "Comfy FR", as the sheet spells
+        // every other FR design ("Blando FR 010").
+        ['SEU00101', 'Comfy 030 FR', '29.6', '71', 'Grün hell'],
+      ],
+    }])
+    expect(found.get('Tabelle1')).toEqual([
+      fine('Bad Aussee', '010', 'Beige | Natur'),
+      fine('Duca', '040', 'Braun'),
+      fine('Comfy FR', '030', 'Grün hell'),
+    ])
+  })
+
+  it('declines the cancelled article and the zero-priced line, and throws on anything else', () => {
+    const reading = sheetReading(FILE, 'Tabelle1', [
+      TITLE,
+      HEADER,
+      ['DN009999', 'Darklin PFP ', '0', '0', ' '],
+      ['STE00115', 'Gleamy Fleur 040 - STORNO 3.8. FIX', '41.7', '100', 'Beige | Natur'],
+      ['WY00140', 'Wooly 054', '53.2', '128', 'Rosa'],
+    ])
+    expect(reading.skips).toEqual([
+      ['zero-priced line with no colour number', 1], ['cancelled by the supplier (STORNO)', 1],
+    ])
+    expect(reading.records).toBe(1)
+    expect(() => sheetRecords(FILE, 'Tabelle1', [
+      HEADER, ['XX00001', 'Nameless', '12', '30', 'Rot'],
+    ])).toThrow(/Tabelle1:2: cannot split "Nameless"/)
   })
 })
 
@@ -1126,12 +1201,13 @@ describe('colour-adapters — C & C Milano', () => {
 })
 
 describe('colour-adapters — the corpus', () => {
-  // The eighteen drops as the client named them. No test may read incoming/ —
+  // The nineteen drops as the client named them. No test may read incoming/ —
   // this asserts the registry claims each name, not that the file is there.
   const CORPUS = Object.freeze([
     'C&C Milano 2026 Pricelist.xlsx',
     'ClarenceHouse 2026 Price List.xlsx',
     'Colefax Group 2026 pricelist Colefax Larsen Manuel Canovas Jane Churchill.xlsx',
+    'FINE Artikelliste_2026.xlsx',
     'JV_EXPORT DEALER_SET_TV8_1 JUN 2026_agg 19062026.xlsx',
     'Jean Monro Ltd Distributor 2026.xlsx',
     "Jim Thompson Export Price List_USD_2026 - SS'26.xlsx",
@@ -1401,6 +1477,15 @@ describe('colour-files — the normalised output', () => {
     expect(records).toEqual([first, second])
     expect(duplicates).toBe(0)
     expect(clashes).toEqual([{ row: second, earlier: first }])
+  })
+
+  it('writes the Supplier Colours upload the CRM takes, row for row', () => {
+    const rows = [colourwayRow('f.xlsx', 'Clarence House', entry()), colourwayRow('f.xlsx', 'Clarence House',
+      entry({ colourCode: '6978402', colourName: '' }))]
+    const read = readSupplierColoursWorkbook(writeWorkbook([supplierColoursSheet(rows)]), 'upload.xlsx')
+    expect(read.rows.map(({ supplier, brand, design, colour_code, colour_name }) =>
+      ({ supplier, brand, design, colour_code, colour_name }))).toEqual(rows.map(({ supplier, brand, design, colour_code, colour_name }) =>
+      ({ supplier, brand, design, colour_code, colour_name })))
   })
 
   it('writes one record per line, and nothing but records', () => {

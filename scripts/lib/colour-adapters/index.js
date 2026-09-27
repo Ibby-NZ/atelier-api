@@ -23,6 +23,7 @@ import { assertRateSheet } from './rates.js'
 import { CC_MILANO } from './cc-milano.js'
 import { COLEFAX } from './colefax.js'
 import { DE_LE_CUONA } from './de-le-cuona.js'
+import { FINE } from './fine.js'
 import { JANNELLI_VOLPI } from './jannelli-volpi.js'
 import { JEAN_MONRO } from './jean-monro.js'
 import { JIM_THOMPSON, JIM_THOMPSON_SS26 } from './jim-thompson.js'
@@ -106,23 +107,32 @@ export const assertAdapter = (adapter) => {
 }
 
 /**
- * Validate the whole registry. Prefixes are unique case-insensitively, because
- * that is how `matchAdapter` compares them — two entries differing only in case
+ * A filename or prefix as `selectAdapter` compares it: case-insensitively, and
+ * with an apostrophe and an underscore read as the same character. A Google
+ * Drive zip download writes every apostrophe in a filename as "_", so the drop
+ * the client names "… SS'26.xlsx" arrives as "… SS_26.xlsx" (Sep 2026); without
+ * this it matched the annual Jim Thompson entry instead and aborted the run.
+ */
+const matchKey = (name) => String(name).toLowerCase().replaceAll("'", '_')
+
+/**
+ * Validate the whole registry. Prefixes are unique by `matchKey`, because that
+ * is how `matchAdapter` compares them — two entries differing only in case
  * would make which one wins depend on array order.
  */
 export const assertRegistry = (adapters) => {
   const seen = new Set()
   for (const adapter of adapters) {
     assertAdapter(adapter)
-    const prefix = adapter.prefix.toLowerCase()
+    const prefix = matchKey(adapter.prefix)
     if (seen.has(prefix)) throw new Error(`adapter prefix "${adapter.prefix}" is registered twice`)
     seen.add(prefix)
   }
   return adapters
 }
 
-// One module per layout family, and every one of the eighteen drops is claimed
-// by exactly one entry: the seventeen workbooks by an adapter and the de Le
+// One module per layout family, and every one of the nineteen drops is claimed
+// by exactly one entry: the eighteen workbooks by an adapter and the de Le
 // Cuona PDF by a declared refusal. A drop nothing claims stays an unknown file
 // and the converter says so and exits non-zero — never a silent skip.
 export const ADAPTERS = assertRegistry(Object.freeze([
@@ -130,6 +140,7 @@ export const ADAPTERS = assertRegistry(Object.freeze([
   CLARENCE_HOUSE,
   COLEFAX,
   DE_LE_CUONA,
+  FINE,
   JANNELLI_VOLPI,
   JEAN_MONRO,
   JIM_THOMPSON,
@@ -156,10 +167,10 @@ export const ADAPTERS = assertRegistry(Object.freeze([
  * being filled in.
  */
 export const selectAdapter = (adapters, filename) => {
-  const name = String(filename).toLowerCase()
+  const name = matchKey(filename)
   let best = null
   for (const adapter of adapters) {
-    const prefix = adapter.prefix.toLowerCase()
+    const prefix = matchKey(adapter.prefix)
     if (!name.startsWith(prefix)) continue
     if (best === null || prefix.length > best.prefix.length) best = adapter
   }

@@ -3,6 +3,9 @@
  * Convert the supplier colour spreadsheets in incoming/colour-files/ into the
  * normalised colourway file incoming/colour-files/normalized/colourways.json,
  * and the 2026 rates they carry into incoming/colour-files/normalized/rates.csv.
+ * The colourways are also written as supplier-colours.xlsx beside the json: the
+ * workbook the CRM's Supplier Colours upload takes, so a drop converted here can
+ * be landed on a database this script cannot reach.
  *
  * Two outputs, because these files are price lists as well as colour lists.
  * The colourways are the primary output and their shape is this pipeline's own;
@@ -38,7 +41,10 @@ import { fileURLToPath } from 'node:url'
 import { openColourWorkbook } from './lib/colour-sheet.js'
 import { matchAdapter, registeredPrefixes } from './lib/colour-adapters/index.js'
 import { readColourFile, readRateFile } from './lib/colour-adapters/reading.js'
-import { colourwayRow, collectColourways, serialiseColourways, rowSource } from './lib/colour-adapters/output.js'
+import {
+  colourwayRow, collectColourways, serialiseColourways, rowSource, supplierColoursSheet,
+} from './lib/colour-adapters/output.js'
+import { buildWorkbook } from './lib/xlsx-write.js'
 import { collectRates, serialiseRates, verifyRates } from './lib/colour-adapters/rate-template.js'
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -228,6 +234,9 @@ const convert = (inputDir, outputPath, ratesPath) => {
   mkdirSync(dirname(outputPath), { recursive: true })
   writeFileSync(outputPath, serialiseColourways(records), 'utf8')
   process.stdout.write(`Wrote ${records.length} colourway(s) -> ${outputPath}\n`)
+  const uploadPath = join(dirname(outputPath), 'supplier-colours.xlsx')
+  writeFileSync(uploadPath, buildWorkbook([supplierColoursSheet(records)]))
+  process.stdout.write(`Wrote the Supplier Colours upload -> ${uploadPath}\n`)
   mkdirSync(dirname(ratesPath), { recursive: true })
   writeFileSync(ratesPath, serialiseRates(rated.records), 'utf8')
   process.stdout.write(`Wrote ${rated.records.length} rate(s) -> ${ratesPath}\n`)

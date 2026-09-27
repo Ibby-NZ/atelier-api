@@ -206,6 +206,33 @@ describe('product detail and brand endpoints', () => {
       expect(response.json().product.trade_price_cents).toBe(18776)
     })
 
+    it('prices each colourway at its own figure, else the product\'s', async () => {
+      await pool.query(
+        `UPDATE colourways SET retail_price_cents = 25000, trade_price_cents = 20000 WHERE sku = $1`,
+        [`${PREFIX}-SKU-B`]
+      )
+      try {
+        const byName = async (cookie) =>
+          Object.fromEntries(
+            (await get(app, `/catalogue/products/${PREFIX}-fabric`, cookie)).json().product.colourways.map((c) => [c.name, c])
+          )
+        const anonymous = await byName()
+        expect(anonymous.Reserved.retail_price_cents).toBe(25000)
+        // The product has no retail price, so an un-priced variation shows none.
+        expect(anonymous.Stocked).not.toHaveProperty('retail_price_cents')
+        expect(anonymous.Reserved).not.toHaveProperty('trade_price_cents')
+
+        const trade = await byName(cookies.trader)
+        expect(trade.Reserved.trade_price_cents).toBe(20000)
+        expect(trade.Stocked.trade_price_cents).toBe(18776)
+      } finally {
+        await pool.query(
+          `UPDATE colourways SET retail_price_cents = NULL, trade_price_cents = NULL WHERE sku = $1`,
+          [`${PREFIX}-SKU-B`]
+        )
+      }
+    })
+
     it('withholds trade_price_cents from an unapproved trade user', async () => {
       // Same account, approval revoked: the session resolves to nobody now
       // (a pending trade account cannot authenticate), so no trade pricing.

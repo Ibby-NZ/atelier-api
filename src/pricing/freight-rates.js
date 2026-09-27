@@ -77,8 +77,12 @@ const toRate = (row) =>
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/
 
-/** A freight class is one letter, as `price_list_items.freight_class` states it. */
-export const FREIGHT_CLASS_PATTERN = /^[A-Z]$/
+/**
+ * A house carries at most five freight classes, A to E — the letters the price
+ * lines carry in the corpus (the office's cap, Sept 2026). Price lines still
+ * store any letter; one past E simply prices on the every-class rate.
+ */
+export const FREIGHT_CLASS_PATTERN = /^[A-E]$/
 
 /**
  * A caller's freight class as the letter the ledger stores, or null for "no
@@ -326,7 +330,7 @@ export const validateFreightRate = (input = {}, vocabulary = FREIGHT_CATEGORIES)
   }
 
   if (input.freight_class != null && !FREIGHT_CLASS_PATTERN.test(input.freight_class)) {
-    return `"${input.freight_class}" is not a freight class. Use one letter, A to Z, or leave it blank for every class.`
+    return `"${input.freight_class}" is not a freight class. Use one letter, A to E, or leave it blank for every class.`
   }
 
   if (!ISO_DAY.test(input.effective_from ?? '')) {

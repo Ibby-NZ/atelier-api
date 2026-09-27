@@ -705,10 +705,14 @@ describe('W16-US-005 — the freight rate resolver', () => {
     expect((await at({ freight_class: 'C', category: 'wallpaper' })).rate.rate).toBe(40)
   })
 
-  it('refuses a freight class that is not one letter', async () => {
+  it('refuses a freight class that is not one letter from A to E', async () => {
     expect(validateFreightRate({ range_name: 'X', freight_class: 'AB', rate: 1, unit: 'metre', effective_from: '2026-01-01' })).toMatch(
       /not a freight class/
     )
+    expect(validateFreightRate({ range_name: 'X', freight_class: 'F', rate: 1, unit: 'metre', effective_from: '2026-01-01' })).toMatch(
+      /A to E/
+    )
+    expect(validateFreightRate({ range_name: 'X', freight_class: 'E', rate: 1, unit: 'metre', effective_from: '2026-01-01' })).toBeNull()
     await expect(
       createFreightRate(pool, { supplier_id: supplierId, freight_class: '7', rate: 1, unit: 'metre', effective_from: '2026-01-01' })
     ).rejects.toMatchObject({ statusCode: 422 })

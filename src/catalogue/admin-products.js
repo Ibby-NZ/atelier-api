@@ -16,6 +16,7 @@ import {
   reportingLabelFrom,
 } from './admin-brands.js'
 import { setArchived } from '../lifecycle/archive.js'
+import { repriceFromWholesale } from '../pricing/product-reprice.js'
 import {
   withChangeContext,
   requireChangeReason,
@@ -641,7 +642,7 @@ export const createProduct = async (pool, input) => {
  */
 export const updateProduct = async (pool, id, input, ctx = {}) => {
   const { rows } = await pool.query(
-    `SELECT id, brand_id, retail_price_cents, trade_price_cents
+    `SELECT id, brand_id, retail_price_cents, trade_price_cents, wholesale_rate, currency, product_price_id
        FROM products WHERE id = $1`,
     [id]
   )
@@ -659,20 +660,39 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
   if (Object.hasOwn(patch, 'product_range')) {
     patch = { ...patch, product_range: reportingLabelFrom(patch.product_range) }
   }
-  const { sets, params } = buildUpdate(patch, PRODUCT_UPDATE_COLUMNS)
-
   // Advisory: the table's CHECK is the real gate, so a figure that moved under
   // this read simply reaches the database and is refused there.
-  const moving = PRICE_COLUMNS.some(
-    (column) =>
-      Object.hasOwn(patch, column) && (patch[column] ?? null) !== (existing[column] ?? null)
-  )
+  const typed = (column) => Object.hasOwn(patch, column) && (patch[column] ?? null) !== (existing[column] ?? null)
+  const moving = PRICE_COLUMNS.some(typed)
   const reason = moving ? requireChangeReason(input.reason) : null
+
+  // A new wholesale rate re-prices the product through its range (28 Sep
+  // 2026); a price typed in the same save is the person's and is kept.
+  const wholesaleFrom = existing.wholesale_rate == null ? null : Number(existing.wholesale_rate)
+  const wholesaleTo = Object.hasOwn(patch, 'wholesale_rate') ? patch.wholesale_rate : wholesaleFrom
+  let repricing = null
+  if (wholesaleTo != null && wholesaleTo !== wholesaleFrom) {
+    const currency = patch.currency ?? existing.currency
+    repricing = await repriceFromWholesale(pool, { ...existing, currency }, wholesaleTo)
+    if (repricing.repriced) {
+      const filled = Object.fromEntries(
+        PRICE_COLUMNS.filter((column) => !typed(column) && repricing[column] != null).map((column) => [column, repricing[column]])
+      )
+      patch = { ...patch, ...filled }
+    }
+  }
+  const { sets, params } = buildUpdate(patch, PRODUCT_UPDATE_COLUMNS)
+  // A price the recalculation moved (not one the person typed) is recorded
+  // under the recalculation's own reason when none was given.
+  const recalculated = PRICE_COLUMNS.some(
+    (column) => !Object.hasOwn(input, column) && Object.hasOwn(patch, column) && patch[column] !== (existing[column] ?? null)
+  )
+  const autoReason = `Recalculated from the wholesale rate (${wholesaleFrom ?? '—'} → ${wholesaleTo} ${patch.currency ?? existing.currency})`
 
   try {
     await withChangeContext(
       pool,
-      { source: 'manual', reason, userId: ctx.user?.id ?? null },
+      { source: 'manual', reason: reason ?? (recalculated ? autoReason : null), userId: ctx.user?.id ?? null },
       (client) =>
         client.query(
           `UPDATE products SET ${sets.join(', ')} WHERE id = $${params.length + 1}`,
@@ -683,7 +703,10 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
     raisePriceHistoryError(error)
     return rethrowConflict(error)
   }
-  return getAdminProduct(pool, id)
+  const product = await getAdminProduct(pool, id)
+  // What the new wholesale rate did to the prices, when there was one — the CRM
+  // says so on save, including why a price did NOT move.
+  return repricing ? { ...product, repricing } : product
 }
 
 /**

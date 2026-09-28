@@ -648,6 +648,54 @@ describe('/admin/product-prices', () => {
         .toMatchObject({ products_changing: 0 })
     })
 
+    it('re-prices a product when its wholesale rate is edited, keeps a price typed in the same save, and says why when it cannot', async () => {
+      const range = houseName('madeaux')
+      await upload('apply', productWorkbook([priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })]))
+      await upsertBrandParameters(pool, madeauxId, {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, retail_markup_percent: 30, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      })
+      const { rows } = await pool.query(
+        `SELECT p.id FROM products p JOIN product_prices pp ON pp.id = p.product_price_id WHERE pp.guid = $1`, [guid(1)]
+      )
+      const id = rows[0].id
+      const patch = (payload) => inject('PATCH', `/admin/products/${id}`, { payload })
+      const prices = async () => (await pool.query(
+        `SELECT trade_price_cents, retail_price_cents, wholesale_rate::float AS wholesale FROM products WHERE id = $1`, [id]
+      )).rows[0]
+
+      // 50 GBP ÷ 0.38 = 131.58; + 50 freight; × 1.10 = 199.74 landed; × 1.87 = 373.51 trade; × 1.30 = 485.56 retail (on the unrounded trade).
+      const moved = await patch({ wholesale_rate: 50 })
+      expect(moved.statusCode).toBe(200)
+      expect(moved.json().product.repricing).toMatchObject({ repriced: true, trade_price_cents: 37351, retail_price_cents: 48556 })
+      expect(await prices()).toEqual({ trade_price_cents: 37351, retail_price_cents: 48556, wholesale: 50 })
+      const history = (await pool.query(
+        `SELECT source, reason, new_trade_price_cents FROM product_price_history WHERE product_id = $1 ORDER BY id DESC LIMIT 1`, [id]
+      )).rows[0]
+      expect(history).toMatchObject({ source: 'manual', new_trade_price_cents: 37351 })
+      expect(history.reason).toMatch(/Recalculated from the wholesale rate \(47\.6 → 50 GBP\)/)
+
+      // A price typed in the same save wins; the other is still recalculated.
+      const typed = await patch({ wholesale_rate: 47.6, trade_price_cents: 40000, reason: 'agreed with the client' })
+      expect(typed.statusCode).toBe(200)
+      expect(await prices()).toMatchObject({ trade_price_cents: 40000, retail_price_cents: Math.round(360.5163 * 1.3 * 100) })
+
+      // The house cannot price it (no freight): the prices stay, and the reason says so.
+      await pool.query(`UPDATE supplier_freight_rates SET effective_from = '2999-01-01' WHERE range_name = $1`, [range])
+      const stuck = await patch({ wholesale_rate: 60 })
+      expect(stuck.json().product.repricing).toMatchObject({ repriced: false })
+      expect(stuck.json().product.repricing.reason).toMatch(/freight/)
+      expect(await prices()).toMatchObject({ trade_price_cents: 40000, wholesale: 60 })
+      await pool.query(`UPDATE supplier_freight_rates SET effective_from = '2020-01-01' WHERE range_name = $1`, [range])
+
+      // Restating the same rate is not a change and re-prices nothing.
+      expect((await patch({ wholesale_rate: 60, name: 'ELLA STRIPE' })).json().product).not.toHaveProperty('repricing')
+      await upsertBrandParameters(pool, madeauxId, {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      })
+    })
+
     it('reads a "Markup to Trade %" export for the markups alone, re-prices what it moves, and keeps them through a prices re-upload', async () => {
       const range = houseName('madeaux')
       const ellaRow = priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })

@@ -16,13 +16,14 @@
 // WHAT IS WRITTEN, per product:
 //   trade_price_cents  the range calculation's trade sell (NZ$ — the store's
 //                      selling currency, which every product price is in)
+//   retail_price_cents the retail sell: the trade sell × (1 + the house's
+//                      retail markup), where the house has one (28 Sep 2026)
 //   wholesale_rate     the export's wholesale rate, in the SUPPLIER's currency
 //                      — only where the product's own `currency` is that one;
 //                      a product in another currency is reported, never
 //                      converted
 //   category           from the export's Type (Fabrics → fabric), where the
 //                      product has none and the word is in the vocabulary
-// Retail is not written: the range formula stops at trade.
 //
 // FILL-ONLY UNLESS ASKED — the cutover merge's rule for prices. An import
 // fills what is BLANK and reports every price the product already carries
@@ -64,19 +65,22 @@ const decide = (current, next, overwrite) => {
  * What writing the range prices onto the catalogue would do. Reads only.
  *
  * @param {{ query: Function }} db
- * @param {{ overwrite?: boolean, productPriceId?: number|null, productId?: number|null }} [scope]
+ * @param {{ overwrite?: boolean, productPriceId?: number|null, productPriceIds?: number[]|null,
+ *           productId?: number|null }} [scope]
  *   `productPriceId` and/or `productId` narrow it to one price row and/or one
- *   product; absent, every row of the latest export against every product.
+ *   product; `productPriceIds` to a set of rows (the markups an upload moved);
+ *   absent, every row of the latest export against every product.
  */
-export const planProductSync = async (db, { overwrite = false, productPriceId = null, productId = null } = {}) => {
+export const planProductSync = async (db, { overwrite = false, productPriceId = null, productPriceIds = null, productId = null } = {}) => {
   const { rows: priceRows } = await db.query(
     `SELECT id, guid::text AS guid, code, description, range_name, item_type, currency,
-            wholesale_rate, duty_class, freight_letter,
+            wholesale_rate, duty_class, freight_letter, trade_markup_percent,
             dynamics_price_ex_duty, dynamics_price_incl_duty, dynamics_trade_sell
        FROM product_prices
-      WHERE ($1::int IS NULL AND last_import_id = (SELECT max(id) FROM product_price_imports))
-         OR id = $1::int`,
-    [productPriceId]
+      WHERE ($2::int[] IS NOT NULL AND id = ANY($2::int[]))
+         OR ($2::int[] IS NULL AND (($1::int IS NULL AND last_import_id = (SELECT max(id) FROM product_price_imports))
+                                  OR id = $1::int))`,
+    [productPriceId, productPriceIds]
   )
   const pricer = createProductPricer(db)
 
@@ -95,7 +99,7 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
   const rowById = new Map(priceRows.map((row) => [row.id, row]))
   const { rows: products } = await db.query(
     `SELECT p.id, p.name, p.slug, p.brand_id, b.name AS house, p.currency, p.category,
-            p.trade_price_cents, p.wholesale_rate, p.product_price_id
+            p.trade_price_cents, p.retail_price_cents, p.wholesale_rate, p.product_price_id
        FROM products p JOIN brands b ON b.id = p.brand_id
       WHERE p.archived_at IS NULL AND ($1::int IS NULL OR p.id = $1::int)
       ORDER BY p.id`,
@@ -128,6 +132,8 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
 
     const trade = { from: product.trade_price_cents, to: cents(pricing.trade_sell) }
     trade.action = decide(trade.from, trade.to, overwrite)
+    const retail = { from: product.retail_price_cents, to: cents(pricing.retail_sell) }
+    retail.action = decide(retail.from, retail.to, overwrite)
 
     let wholesale = null
     if (product.currency === row.currency) {
@@ -144,12 +150,14 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
     const category = categoryForItemType(row.item_type)
     const categoryFill = product.category == null && category && vocabulary.has(category) ? category : null
 
-    const writes = trade.action === 'fill' || trade.action === 'replace' || ['fill', 'replace'].includes(wholesale?.action) || categoryFill
-    if (trade.action === 'kept' || wholesale?.action === 'kept') {
+    const moves = (field) => ['fill', 'replace'].includes(field?.action)
+    const writes = moves(trade) || moves(retail) || moves(wholesale) || categoryFill
+    if (trade.action === 'kept' || retail.action === 'kept' || wholesale?.action === 'kept') {
       report.kept.push({
         product_id: product.id,
         product: product.name,
         trade_price_cents: trade.action === 'kept' ? trade : undefined,
+        retail_price_cents: retail.action === 'kept' ? retail : undefined,
         wholesale_rate: wholesale?.action === 'kept' ? wholesale : undefined,
       })
     }
@@ -161,6 +169,7 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
         house: product.house,
         product_price_id: row.id,
         trade,
+        retail,
         wholesale,
         category: categoryFill,
       })
@@ -174,6 +183,8 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
     products_changing: changes.length,
     trade_filled: count('trade', 'fill'),
     trade_replaced: count('trade', 'replace'),
+    retail_filled: count('retail', 'fill'),
+    retail_replaced: count('retail', 'replace'),
     wholesale_filled: count('wholesale', 'fill'),
     wholesale_replaced: count('wholesale', 'replace'),
     category_filled: changes.filter((change) => change.category).length,
@@ -199,27 +210,35 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
  * @param {{ overwrite?: boolean, productPriceId?: number|null, productId?: number|null,
  *           userId?: number|null, sourceFile?: string|null, reason?: string|null }} options
  */
-export const applyProductSync = async (pool, { overwrite = false, productPriceId = null, productId = null, userId = null, sourceFile = null, reason = null } = {}) => {
-  const context = overwrite
+export const applyProductSync = async (
+  pool,
+  { overwrite = false, productPriceId = null, productPriceIds = null, productId = null, userId = null, sourceFile = null, reason = null } = {}
+) => {
+  // A person's replace is `manual`; an upload's — even one that replaces, as a
+  // markup file does for the rows it moved — is an `import` of that file.
+  const context = overwrite && !sourceFile
     ? { source: 'manual', reason: reason ?? 'Set to the price from its range', userId }
     : { source: 'import', sourceFile: sourceFile ?? 'product prices', userId }
   return withChangeContext(pool, context, async (client) => {
-    const plan = await planProductSync(client, { overwrite, productPriceId, productId })
+    const plan = await planProductSync(client, { overwrite, productPriceId, productPriceIds, productId })
     const writes = plan.writes
     if (writes.length > 0) {
       const set = (change, field) => (['fill', 'replace'].includes(change[field]?.action) ? change[field].to : null)
       await client.query(
         `UPDATE products p
             SET trade_price_cents = COALESCE(s.trade, p.trade_price_cents),
+                retail_price_cents = COALESCE(s.retail, p.retail_price_cents),
                 wholesale_rate = COALESCE(s.wholesale, p.wholesale_rate),
                 category = COALESCE(p.category, s.category)
-           FROM unnest($1::int[], $2::int[], $3::numeric[], $4::text[]) AS s(id, trade, wholesale, category)
+           FROM unnest($1::int[], $2::int[], $3::numeric[], $4::text[], $5::int[])
+             AS s(id, trade, wholesale, category, retail)
           WHERE p.id = s.id`,
         [
           writes.map((change) => change.product_id),
           writes.map((change) => set(change, 'trade')),
           writes.map((change) => set(change, 'wholesale')),
           writes.map((change) => change.category),
+          writes.map((change) => set(change, 'retail')),
         ]
       )
     }

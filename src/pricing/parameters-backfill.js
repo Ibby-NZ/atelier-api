@@ -65,7 +65,12 @@ const PARAMETER_FROM_RANGE = Object.freeze({
   surcharge_per_unit: 'surcharge_per_unit',
 })
 
-const FILLABLE = Object.freeze(Object.keys(PARAMETER_FROM_RANGE))
+// The retail markup is not in the ranges export — Dynamics' tracking option
+// has no such field — so it comes from Dynamics' own prices instead: each
+// house's majority retail ÷ trade over its product-price rows (`retailRatios`).
+export const RETAIL_MARKUP = 'retail_markup_percent'
+export const MIN_RETAIL_ROWS = 5
+const FILLABLE = Object.freeze([...Object.keys(PARAMETER_FROM_RANGE), RETAIL_MARKUP])
 
 export const BACKFILL_NOTE = 'From the Dynamics parameter export'
 
@@ -106,10 +111,12 @@ const numeric = (value) => (value == null ? null : Number(value))
  * @param {object[]} [input.freight]   each house's current catch-all rate (currentRangeRates)
  * @param {Map<number,string|null>|[number,string|null][]} [input.units]
  *                                     the unit each house's price lines are quoted in
+ * @param {{range_name:string, ratio:number, rows:number}[]} [input.retailRatios]
+ *                                     Dynamics' retail ÷ trade, counted per range
  * @param {{ overwrite?: boolean, on?: string }} [options]
  */
 export const planParametersBackfill = (
-  { parameters = [], brands = [], existing = [], terms = [], freight = [], units = [] },
+  { parameters = [], brands = [], existing = [], terms = [], freight = [], units = [], retailRatios = [] },
   { overwrite = false, on = today() } = {}
 ) => {
   const reports = {
@@ -120,6 +127,7 @@ export const planParametersBackfill = (
     inactiveRanges: [],
     freightWithoutUnit: [],
     freightDatedToday: [],
+    retailMarkupUnclear: [],
   }
   const brandByName = new Map(brands.map((b) => [nameKey(b.name), b]))
   const brandBySlug = new Map(brands.map((b) => [b.slug, b]))
@@ -135,6 +143,31 @@ export const planParametersBackfill = (
     if (named) return named
     const slug = sluggable(range)
     return slug ? (brandBySlug.get(slug) ?? null) : null
+  }
+
+  // A house's retail markup: the ratio most of its rows share, as a percentage
+  // on trade (1.30 → 30). A house whose rows are split with no majority, or
+  // that has fewer than MIN_RETAIL_ROWS, is left for a person, and reported.
+  const ratiosByBrand = new Map()
+  for (const { range_name: rangeName, ratio, rows } of retailRatios) {
+    const brand = brandFor(rangeName)
+    if (!brand) continue
+    const counts = ratiosByBrand.get(brand.id) ?? new Map()
+    counts.set(Number(ratio), (counts.get(Number(ratio)) ?? 0) + Number(rows))
+    ratiosByBrand.set(brand.id, counts)
+  }
+  const retailMarkupFor = (brand) => {
+    const counts = ratiosByBrand.get(brand.id)
+    if (!counts) return null
+    const total = [...counts.values()].reduce((sum, n) => sum + n, 0)
+    const [ratio, rows] = [...counts].sort((a, b) => b[1] - a[1])[0]
+    // A handful of rows is an anecdote, not a house's rule (Jean Monro's archive
+    // prices one product, 28 Sep 2026).
+    if (rows * 2 <= total || total < MIN_RETAIL_ROWS) {
+      reports.retailMarkupUnclear.push(Object.freeze({ brand: brand.name, rows: total, largest_share: Math.round((rows / total) * 100) / 100 }))
+      return null
+    }
+    return Math.round((ratio - 1) * 10000) / 100
   }
 
   const inserts = []
@@ -174,7 +207,10 @@ export const planParametersBackfill = (
 
     // --- the parameter set ---------------------------------------------------
     const values = Object.fromEntries(
-      FILLABLE.map((column) => [column, numeric(parameter[PARAMETER_FROM_RANGE[column]])])
+      FILLABLE.map((column) => [
+        column,
+        column === RETAIL_MARKUP ? retailMarkupFor(brand) : numeric(parameter[PARAMETER_FROM_RANGE[column]]),
+      ])
     )
     const current = existingByBrand.get(brand.id)
     if (!current) {
@@ -324,7 +360,30 @@ const readSources = async (client, rangeParameters, on) => {
   const terms = await listBrandTermsShapes(client)
   const freight = await currentRangeRates(client, on)
   const units = await houseUnits(client)
-  return { parameters, brands, existing, terms, freight, units }
+  // Dynamics' retail ÷ trade, read off its product-price archive: for each row of
+  // the latest product-prices import by its guid (so a range the office renamed
+  // on the way in counts under its new name), and — for a range none of whose
+  // rows match, because Dynamics re-created them since the archive (Stroheim,
+  // S. Harris, Clarence House, Vervain on 28 Sep 2026) — the archive's own rows
+  // under that range's name. Empty until both are imported.
+  const { rows: retailRatios } = await client.query(
+    `WITH joined AS (
+       SELECT pp.range_name, round(lp.retail_sell_price_nz / lp.trade_sell_price_nz, 2) AS ratio
+         FROM product_prices pp
+         JOIN legacy_product_prices lp ON lp.guid = pp.guid
+        WHERE pp.last_import_id = (SELECT max(id) FROM product_price_imports)
+          AND lp.retail_sell_price_nz > 0 AND lp.trade_sell_price_nz > 0
+     ), archive AS (
+       SELECT lp.range_name, round(lp.retail_sell_price_nz / lp.trade_sell_price_nz, 2) AS ratio
+         FROM legacy_product_prices lp
+        WHERE lp.retail_sell_price_nz > 0 AND lp.trade_sell_price_nz > 0
+          AND NOT EXISTS (SELECT 1 FROM joined j WHERE j.range_name = lp.range_name)
+     )
+     SELECT range_name, ratio, count(*)::int AS rows
+       FROM (SELECT * FROM joined UNION ALL SELECT * FROM archive) r
+      GROUP BY 1, 2`
+  )
+  return { parameters, brands, existing, terms, freight, units, retailRatios }
 }
 
 const applyInserts = async (client, inserts) => {

@@ -33,8 +33,12 @@ import {
 import { applyPriceToProduct, applyProductSync } from '../pricing/product-price-sync.js'
 import { createProductsFromPrices, omitWrites, planPriceCatalogue } from '../catalogue/product-price-catalogue.js'
 import {
+  applyProductMarkups,
   applyProductPricesImport,
+  isMarkupExport,
+  planProductMarkups,
   planProductPricesImport,
+  readProductMarkupsWorkbook,
   readProductPricesWorkbook,
 } from '../pricing/product-prices-import.js'
 
@@ -112,6 +116,11 @@ export const adminProductPriceRoutes = async (app, { pool }) => {
   const readUpload = (request, reply) => {
     const filename = request.query?.filename ?? 'product-prices.xlsx'
     try {
+      // The "Markup to Trade %" view carries no prices; it is read for the
+      // markups alone (28 Sep 2026).
+      if (isMarkupExport(request.body)) {
+        return { filename, markups: readProductMarkupsWorkbook(request.body) }
+      }
       return { filename, read: readProductPricesWorkbook(request.body, filename) }
     } catch (error) {
       if (error.statusCode !== 422) throw error
@@ -124,17 +133,53 @@ export const adminProductPriceRoutes = async (app, { pool }) => {
 
   const importOptions = { preHandler: guarded, bodyLimit: IMPORT_BODY_LIMIT, schema: { querystring: IMPORT_QUERY } }
 
+  // A markup file's report, in the shape the CRM's upload panel already draws
+  // (rows read / changed, an empty comparison) plus `markups`.
+  const markupReport = (filename, plan, extra = {}) => ({
+    filename,
+    kind: 'markups',
+    exported_at: null,
+    import_id: null,
+    rows_read: plan.rows_read,
+    rows_new: 0,
+    rows_changed: plan.changed,
+    rows_unchanged: plan.matched - plan.changed,
+    rows_not_in_file: 0,
+    wholesale_changes: [],
+    wholesale_change_count: 0,
+    ranges_without_house: [],
+    fx: [],
+    comparison: { products: plan.rows_read, priced: 0, agree: 0, differ: 0, tolerance: 0, ranges: [] },
+    markups: omitMarkupWrites(plan),
+    ...extra,
+  })
+  const omitMarkupWrites = (plan) => Object.fromEntries(Object.entries(plan).filter(([field]) => field !== 'writes'))
+
+  // The markups a file moved, onto their products: those rows' trade (and
+  // retail) prices REPLACE what the product carries — the import wrote them
+  // from the range's markup, and the product's own is the answer.
+  const repriceMarkups = (ids, filename, userId) =>
+    ids.length === 0
+      ? null
+      : applyProductSync(pool, { overwrite: true, productPriceIds: ids, sourceFile: filename, userId })
+
   app.post('/admin/product-prices/import/validate', importOptions, async (request, reply) => {
-    const { read, filename, refusal } = readUpload(request, reply)
+    const { read, markups, filename, refusal } = readUpload(request, reply)
     if (refusal) return refusal
+    if (markups) return markupReport(filename, await planProductMarkups(pool, markups.rows))
     const plan = await planProductPricesImport(pool, read)
     const products = await planPriceCatalogue(pool, read.rows)
     return { filename, exported_at: read.exported_at, ...report(plan), products: omitWrites(products) }
   })
 
   app.post('/admin/product-prices/import/apply', importOptions, async (request, reply) => {
-    const { read, filename, refusal } = readUpload(request, reply)
+    const { read, markups, filename, refusal } = readUpload(request, reply)
     if (refusal) return refusal
+    const userId = request.user?.id ?? null
+    if (markups) {
+      const { plan, changedIds } = await applyProductMarkups(pool, markups.rows)
+      return markupReport(filename, plan, { applied: true, catalogue: await repriceMarkups(changedIds, filename, userId) })
+    }
     const applied = await applyProductPricesImport(pool, read, { filename, userId: request.user?.id ?? null })
     // Every row is a product (product-price-catalogue.js): the ones the
     // catalogue does not hold yet are created, hidden.
@@ -143,6 +188,9 @@ export const adminProductPriceRoutes = async (app, { pool }) => {
     // wholesale rate and category where it has none (fill-only — a price the
     // office typed is kept and reported).
     const catalogue = await applyProductSync(pool, { sourceFile: filename, userId: request.user?.id ?? null })
+    // An export carrying "Markup to Trade %" sets the products' own markups too.
+    const marked = read.markups_stated ? await applyProductMarkups(pool, read.rows) : null
+    const markupCatalogue = marked ? await repriceMarkups(marked.changedIds, filename, userId) : null
     return {
       filename,
       exported_at: read.exported_at,
@@ -152,6 +200,7 @@ export const adminProductPriceRoutes = async (app, { pool }) => {
       ...report(applied.plan),
       products,
       catalogue,
+      ...(marked ? { markups: { ...omitMarkupWrites(marked.plan), catalogue: markupCatalogue } } : {}),
     }
   })
 

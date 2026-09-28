@@ -648,6 +648,67 @@ describe('/admin/product-prices', () => {
         .toMatchObject({ products_changing: 0 })
     })
 
+    it('reads a "Markup to Trade %" export for the markups alone, re-prices what it moves, and keeps them through a prices re-upload', async () => {
+      const range = houseName('madeaux')
+      const ellaRow = priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })
+      await upload('apply', productWorkbook([ellaRow]))
+      const MARKUP_COLUMNS = [
+        ['atelier_productpricesid', '(Do Not Modify) Product Prices'],
+        ['checksumLogicalName', '(Do Not Modify) Row Checksum'],
+        ['modifiedon', '(Do Not Modify) Modified On'],
+        ['atelier_description', 'Description'],
+        ['atelier_manualmarkuptotrade', 'Markup to Trade %'],
+        ['atelier_code', 'Code'],
+        ['fulmxero_trackingoption1id', 'Range'],
+      ]
+      const markups = (markup) => productWorkbook(
+        [
+          [guid(1), 'c==', 46055.2767361111, 'ELLA STRIPE', markup, 'ELLA STRIPE', range],
+          [guid(999), 'c==', 46055.2767361111, 'GHOST', '', 'GHOST', range],
+        ],
+        MARKUP_COLUMNS
+      )
+      const product = async () => (await pool.query(
+        `SELECT p.trade_price_cents, p.retail_price_cents, pp.trade_markup_percent::float AS markup
+           FROM products p JOIN product_prices pp ON pp.id = p.product_price_id WHERE pp.guid = $1`,
+        [guid(1)]
+      )).rows[0]
+      // The house's retail markup: retail is the trade sell × 1.30.
+      await upsertBrandParameters(pool, madeauxId, {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, retail_markup_percent: 30, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      })
+      const before = await product()
+
+      const dry = await upload('validate', markups('70'))
+      expect(dry.statusCode).toBe(200)
+      expect(dry.json()).toMatchObject({ kind: 'markups', rows_read: 2, rows_changed: 1, markups: { matched: 1, unknown: 1, markups_stated: 1 } })
+      expect(await product()).toEqual(before)
+
+      const applied = await upload('apply', markups('70'))
+      expect(applied.json()).toMatchObject({ applied: true, catalogue: { trade_replaced: 1 } })
+      // Landed 192.79 × 1.70 (its own markup) where the range's is × 1.87; retail × 1.30 on that.
+      expect(await product()).toEqual({ trade_price_cents: 32774, retail_price_cents: 42606, markup: 70 })
+      const moves = (await pool.query(
+        `SELECT source, source_file FROM product_price_history h JOIN products p ON p.id = h.product_id
+           JOIN product_prices pp ON pp.id = p.product_price_id WHERE pp.guid = $1 ORDER BY h.id DESC LIMIT 1`,
+        [guid(1)]
+      )).rows
+      expect(moves).toEqual([{ source: 'import', source_file: FILENAME }])
+
+      // The prices export carries no markup column, so it never clears one.
+      await upload('apply', productWorkbook([ellaRow]))
+      expect((await product()).markup).toBe(70)
+      // A blank in the markup export is the range's markup again.
+      await upload('apply', markups(''))
+      expect(await product()).toMatchObject({ markup: null, trade_price_cents: 36052 })
+
+      await upsertBrandParameters(pool, madeauxId, {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      })
+    })
+
     it('refuses a bad file with the per-row reasons and writes nothing', async () => {
       const response = await upload('apply', productWorkbook([priceRow(1), priceRow(2, { currency: 'Swiss Franc' })]))
       expect(response.statusCode).toBe(422)

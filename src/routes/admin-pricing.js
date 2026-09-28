@@ -29,6 +29,7 @@ import { getHousePricing, saveHousePricing } from '../pricing/house-pricing.js'
 import { backfillPricingParameters } from '../pricing/parameters-backfill.js'
 import { readTrackingOptionsWorkbook } from '../pricing/house-pricing-import.js'
 import {
+  CLEARANCE_BASES,
   NUMERIC_PARAMETERS,
   OVERRIDABLE_INPUTS,
   deleteBrandParameters,
@@ -58,6 +59,7 @@ const PARAMETERS_BODY = {
       NUMERIC_PARAMETERS.map((column) => [column, { type: ['number', 'null'], minimum: 0 }])
     ),
     note: { type: ['string', 'null'], maxLength: 1000 },
+    clearance_basis: { type: ['string', 'null'], enum: [...CLEARANCE_BASES, null] },
   },
 }
 

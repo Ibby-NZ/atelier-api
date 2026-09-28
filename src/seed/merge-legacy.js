@@ -31,7 +31,8 @@ const main = async () => {
     console.log(`Reserves   — ${s.reserves.lines} line(s) in ${s.reserves.dockets} docket(s)`)
     list('  declined', s.reserves.declined, (d) => `${d.guid}: ${d.reason}`)
     if (s.housesRaised.length) console.log(`Houses     — raised ${s.housesRaised.length}: ${s.housesRaised.join(', ')}`)
-    console.log(
+    if (s.catalogue.skipped) console.log(`Catalogue  — no products made: ${s.catalogue.skipped}`)
+    else console.log(
       `Catalogue  — ${s.catalogue.items} stock item(s) → ${s.catalogue.colourways} colourway(s) across `
       + `${s.catalogue.products} product(s); ${s.catalogue.inventoryCreated} stock row(s) created, ${s.catalogue.conflicts} conflict(s), ${s.catalogue.noHouse} item(s) name no range`
     )

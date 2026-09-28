@@ -6,6 +6,7 @@ import { withChangeContext } from '../src/pricing/price-history.js'
 import { CATEGORIES, categoryForItemType } from '../scripts/lib/price-template.js'
 import { REVIEWED_STOCK_ITEM_TYPES } from '../src/seed/data/reviewed-stock-item-types.js'
 import {
+  CATALOGUE_FROM_PRICES,
   cfaFor,
   mergeLegacy,
   planReserveDockets,
@@ -95,6 +96,8 @@ describe('mergeLegacy against the database', () => {
     await pool.query('DELETE FROM legacy_cuttings WHERE customer LIKE $1', [`${PREFIX}%`])
     await pool.query('DELETE FROM legacy_stock_items WHERE range_name = $1', [HOUSE])
     await dropHouse()
+    await pool.query('DELETE FROM product_prices WHERE guid = $1', [G(61)])
+    await pool.query('DELETE FROM product_price_imports WHERE filename = $1', [`${PREFIX}.xlsx`])
   }
 
   // The price fill is captured in product_price_history (RESTRICT), so the
@@ -280,8 +283,41 @@ describe('mergeLegacy against the database', () => {
     expect(await category()).toEqual([null])
   })
 
+  it('makes no product once the catalogue is the product prices, and still lands the stock', async () => {
+    // The house and one product built from a price row, holding a SKU a D365
+    // stock item names — what live looks like after the product prices import.
+    await dropHouse()
+    const house = (await ours(
+      `INSERT INTO brands (name, slug, currency, trade_only) VALUES ($1, 'zz-merge-house', 'NZD', true) RETURNING id`, [HOUSE]
+    ))[0].id
+    const imported = (await ours(
+      `INSERT INTO product_price_imports (filename, rows_read, rows_new, rows_changed, rows_unchanged)
+       VALUES ($1, 1, 1, 0, 0) RETURNING id`, [`${PREFIX}.xlsx`]
+    ))[0].id
+    const price = (await ours(
+      `INSERT INTO product_prices (guid, code, description, range_name, currency, wholesale_rate, first_import_id, last_import_id)
+       VALUES ($1, 'F3518', 'Charlotte', $2, 'NZD', 210, $3, $3) RETURNING id`, [G(61), HOUSE, imported]
+    ))[0].id
+    const product = (await ours(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, product_price_id)
+       VALUES ($1, 'Charlotte', 'zz-merge-house-charlotte-priced', 'fabric', 'NZD', $2) RETURNING id`, [house, price]
+    ))[0].id
+    const colourway = (await ours(
+      `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Blue', 'ZZ-MERGE-HOUSE-CHARLOTTE-F3518-003') RETURNING id`, [product]
+    ))[0].id
+    await pool.query(`INSERT INTO inventory (colourway_id, qty_available, qty_reserved, unit) VALUES ($1, 0, 0, 'metres')`, [colourway])
+    await pool.query('UPDATE legacy_stock_items SET stock_on_hand = 4 WHERE guid = $1', [G(51)])
+
+    const summary = await mergeLegacy(pool, { createHouses: true })
+    expect(summary.catalogue).toMatchObject({ skipped: CATALOGUE_FROM_PRICES, products: 0, colourways: 0 })
+    expect(await ours('SELECT id FROM products WHERE brand_id = $1', [house])).toEqual([{ id: product }])
+    expect(await ours('SELECT qty_available::float AS qty FROM inventory WHERE colourway_id = $1', [colourway]))
+      .toEqual([{ qty: 4 }])
+  })
+
   it('leaves a house it does not know alone unless told to raise it', async () => {
     await dropHouse()
+    await pool.query('DELETE FROM product_prices WHERE guid = $1', [G(61)])
     const summary = await mergeLegacy(pool, { reviewedItemTypes: [[G(51), 'F3518-003 23PF', 'Towels']] })
     expect(summary.housesRaised).toEqual([])
     expect(summary.catalogue.unknownBrands.map((b) => b.brand)).toContain(HOUSE)

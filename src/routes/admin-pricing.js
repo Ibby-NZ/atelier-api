@@ -10,7 +10,7 @@
 //   PUT    /admin/pricing/fx-rates/:currency            { rate, set_on?, note? }
 //   GET    /admin/pricing/houses/:id                    one house's pricing, as the house page shows it
 //   PUT    /admin/pricing/houses/:id                    { parameters, discount_percent?, discount_classes?,
-//                                                          freight?, freight_classes? }
+//                                                          freight?, freight_classes?, remove_freight_classes? }
 //   POST   /admin/pricing/houses/import/validate        the Dynamics tracking-options .xlsx — dry run
 //   POST   /admin/pricing/houses/import/apply           the same file — one transaction
 //
@@ -104,6 +104,13 @@ const HOUSE_PRICING_BODY = {
           freight_class: { type: 'string', pattern: '^[A-Za-z]$' },
         },
       },
+    },
+    // Letters whose own rate is removed (the house's rate applies to them again).
+    remove_freight_classes: {
+      type: 'array',
+      maxItems: 26,
+      uniqueItems: true,
+      items: { type: 'string', pattern: '^[A-Za-z]$' },
     },
     // The house's discount classes as a whole set (PUT): an entry with an `id`
     // is that class kept or edited, one without is new, and a class left out

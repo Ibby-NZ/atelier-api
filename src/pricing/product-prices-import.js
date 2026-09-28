@@ -83,7 +83,14 @@ export const PRODUCT_PRICE_COLUMNS = Object.freeze({
   atelier_freightrate: ['freight_letter', TEXT],
   // Read for the exchange rates only; not a stored column (see the header).
   exchangerate: ['exchange_rate', NUM],
+  // The product's own markup to trade, where it is not its range's. Optional,
+  // and written apart from the upsert (applyProductMarkups) so an export
+  // without the column never clears one.
+  atelier_manualmarkuptotrade: ['trade_markup_percent', NUM],
 })
+
+/** The column a markup export carries (the "Markup to Trade %" view, 28 Sep 2026). */
+export const MARKUP_COLUMN = 'atelier_manualmarkuptotrade'
 
 /** Without these a row cannot be stored or priced. The rest are optional. */
 export const REQUIRED_COLUMNS = Object.freeze([
@@ -177,16 +184,9 @@ const coerce = (value, kind) => {
   return oneLine(value)
 }
 
-/**
- * The rows of one uploaded product-prices export, ready to store. Throws a 422
- * carrying `errors` for a file that is not that export or has a row that
- * cannot be read.
- *
- * @param {Buffer} buffer the .xlsx bytes
- * @param {string} [filename] the file's name — the export stamp is read from it
- * @returns {{ rows: object[], rows_read: number, exported_at: string|null }}
- */
-export const readProductPricesWorkbook = (buffer, filename = 'product-prices.xlsx') => {
+// The zip, its strings and the D365 schema map, after the checks every reader of
+// this export makes: a workbook, the product-prices entity.
+const openProductPricesExport = (buffer) => {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw refuse('That file is empty.')
   if (!buffer.subarray(0, 4).equals(ZIP_MAGIC)) {
     throw refuse(
@@ -220,6 +220,94 @@ export const readProductPricesWorkbook = (buffer, filename = 'product-prices.xls
         'Export the product prices (the Code, Range, Wholesale Rate and Currency list).'
     )
   }
+  return { zip, strings, schema, unreadable }
+}
+
+/**
+ * A markup export — the product prices view carrying "Markup to Trade %" and
+ * no prices — rather than the prices themselves. The upload routes send it to
+ * `readProductMarkupsWorkbook`.
+ */
+export const isMarkupExport = (buffer) => {
+  try {
+    const { schema } = openProductPricesExport(buffer)
+    return schema.logicalNames.includes(MARKUP_COLUMN) && !schema.logicalNames.includes('atelier_wholesalerate')
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The product-price rows of a markup export: the record id and its own markup
+ * to trade, or null where it takes its range's. 422 carrying `errors` for a
+ * file that is not one.
+ */
+export const readProductMarkupsWorkbook = (buffer) => {
+  const { zip, strings, schema, unreadable } = openProductPricesExport(buffer)
+  const missing = ['atelier_productpricesid', MARKUP_COLUMN].filter((column) => !schema.logicalNames.includes(column))
+  if (missing.length > 0) {
+    throw refuse(`That export is missing ${missing.join(', ')}. Export the product prices with the "Markup to Trade %" column.`)
+  }
+  const at = (logical) => schema.logicalNames.indexOf(logical)
+  const guidAt = at('atelier_productpricesid')
+  const markupAt = at(MARKUP_COLUMN)
+  const codeAt = at('atelier_code')
+  const errors = []
+  const rows = []
+  const seen = new Set()
+  try {
+    for (const [line, cells] of sheetRows(zip, DATA_SHEET, strings)) {
+      if (line === 1) continue
+      const guid = String(cells.get(guidAt) ?? '').trim().toLowerCase()
+      const text = String(cells.get(markupAt) ?? '').trim()
+      if (guid === '' && text === '') continue
+      const code = codeAt >= 0 ? String(cells.get(codeAt) ?? '').trim() : ''
+      const where = `row ${line}${code ? ` (${code})` : ''}`
+      if (!UUID.test(guid)) {
+        errors.push(`${where}: no Dynamics record id`)
+        continue
+      }
+      if (seen.has(guid)) {
+        errors.push(`${where}: the same Dynamics record twice`)
+        continue
+      }
+      seen.add(guid)
+      let markup = null
+      if (text !== '') {
+        try {
+          markup = coerce(text, NUM)
+        } catch (error) {
+          errors.push(`${where}: markup to trade: ${error.message}`)
+          continue
+        }
+        if (markup < 0) {
+          errors.push(`${where}: a negative markup to trade`)
+          continue
+        }
+      }
+      rows.push(Object.freeze({ guid, trade_markup_percent: markup }))
+    }
+  } catch (error) {
+    throw unreadable(error)
+  }
+  if (errors.length > 0) {
+    throw refuse(`${errors.length} row${errors.length === 1 ? '' : 's'} could not be read. Nothing has been written.`, errors)
+  }
+  if (rows.length === 0) throw refuse('That export has no rows.')
+  return Object.freeze({ rows: Object.freeze(rows), rows_read: rows.length })
+}
+
+/**
+ * The rows of one uploaded product-prices export, ready to store. Throws a 422
+ * carrying `errors` for a file that is not that export or has a row that
+ * cannot be read.
+ *
+ * @param {Buffer} buffer the .xlsx bytes
+ * @param {string} [filename] the file's name — the export stamp is read from it
+ * @returns {{ rows: object[], rows_read: number, exported_at: string|null }}
+ */
+export const readProductPricesWorkbook = (buffer, filename = 'product-prices.xlsx') => {
+  const { zip, strings, schema, unreadable } = openProductPricesExport(buffer)
   const missing = REQUIRED_COLUMNS.filter((column) => !schema.logicalNames.includes(column))
   if (missing.length > 0) {
     throw refuse(
@@ -293,6 +381,7 @@ export const readProductPricesWorkbook = (buffer, filename = 'product-prices.xls
           dynamics_modified_on: record.dynamics_modified_on ?? null,
           row_checksum: record.row_checksum ?? null,
           exchange_rate: record.exchange_rate > 0 ? record.exchange_rate : null,
+          trade_markup_percent: record.trade_markup_percent ?? null,
         })
       )
     }
@@ -311,6 +400,8 @@ export const readProductPricesWorkbook = (buffer, filename = 'product-prices.xls
     rows: Object.freeze(rows),
     rows_read: rowsRead,
     exported_at: exportedAt(filename.replace(/\.xlsx$/i, '')),
+    // Whether the view carried "Markup to Trade %": only then are markups written.
+    markups_stated: schema.logicalNames.includes(MARKUP_COLUMN),
   })
 }
 
@@ -619,3 +710,63 @@ export const applyProductPricesImport = async (pool, read, { filename, userId = 
     client.release()
   }
 }
+
+// --- a product's own markup to trade ---------------------------------------------
+
+/**
+ * What a file's markups would change. Reads only. A row the platform has not
+ * imported is counted (`unknown`), never created: a markup is a figure ON a
+ * product price.
+ *
+ * @param {{ query: Function }} db
+ * @param {{ guid: string, trade_markup_percent: number|null }[]} rows
+ */
+export const planProductMarkups = async (db, rows) => {
+  const { rows: stored } = await db.query(
+    `SELECT id, guid::text AS guid, code, range_name, trade_markup_percent
+       FROM product_prices WHERE guid = ANY($1::uuid[])`,
+    [rows.map((row) => row.guid)]
+  )
+  const byGuid = new Map(stored.map((row) => [row.guid, row]))
+  const changes = []
+  let unknown = 0
+  for (const row of rows) {
+    const current = byGuid.get(row.guid)
+    if (!current) {
+      unknown += 1
+      continue
+    }
+    const from = current.trade_markup_percent == null ? null : Number(current.trade_markup_percent)
+    if (from === row.trade_markup_percent) continue
+    changes.push(Object.freeze({ id: current.id, code: current.code, range_name: current.range_name, from, to: row.trade_markup_percent }))
+  }
+  return Object.freeze({
+    rows_read: rows.length,
+    markups_stated: rows.filter((row) => row.trade_markup_percent != null).length,
+    matched: rows.length - unknown,
+    unknown,
+    changed: changes.length,
+    changes: Object.freeze(changes.slice(0, MAX_REPORTED_CHANGES)),
+    // For apply; not serialised by a route.
+    writes: Object.freeze(changes),
+  })
+}
+
+/**
+ * Write the markups the file states — its blank is "the range's", so it clears
+ * one — in one statement. Returns the plan and the product-price ids that moved,
+ * for the caller to re-price their products.
+ */
+export const applyProductMarkups = async (pool, rows) => {
+  const plan = await planProductMarkups(pool, rows)
+  if (plan.writes.length > 0) {
+    await pool.query(
+      `UPDATE product_prices pp SET trade_markup_percent = s.markup, updated_at = now()
+         FROM unnest($1::int[], $2::numeric[]) AS s(id, markup)
+        WHERE pp.id = s.id`,
+      [plan.writes.map((change) => change.id), plan.writes.map((change) => change.to)]
+    )
+  }
+  return Object.freeze({ plan, changedIds: plan.writes.map((change) => change.id) })
+}
+

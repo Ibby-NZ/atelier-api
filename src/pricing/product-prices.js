@@ -235,7 +235,15 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
       freight: resolved.inputs.freight,
       clearance_percent: resolved.inputs.clearance_percent,
       handling: notInFormula(resolved.inputs.handling, 'handling charge'),
-      trade_markup_percent: resolved.inputs.trade_markup_percent,
+      // A product price that carries its own markup to trade (Dynamics' "Markup
+      // to Trade %", 39 of 21,054 on 28 Sep 2026) takes it over its range's.
+      trade_markup_percent:
+        row.trade_markup_percent != null
+          ? input(numeric(row.trade_markup_percent), 'product', {
+              replaced: { value: resolved.inputs.trade_markup_percent.value, source: resolved.inputs.trade_markup_percent.source },
+            })
+          : resolved.inputs.trade_markup_percent,
+      retail_markup_percent: resolved.inputs.retail_markup_percent,
       retail_markup: resolved.inputs.retail_markup,
     })
 
@@ -250,8 +258,10 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
       freight_basis: inputs.freight.detail?.basis ?? 'dollar',
       freight_unit: inputs.freight.detail?.unit ?? null,
       clearance_percent: inputs.clearance_percent.value,
+      clearance_basis: inputs.clearance_percent.detail?.basis ?? 'percent',
       handling: inputs.handling.value,
       trade_markup_percent: inputs.trade_markup_percent.value,
+      retail_markup_percent: inputs.retail_markup_percent.value,
       retail_markup: inputs.retail_markup.value,
     })
 
@@ -294,7 +304,7 @@ const COLUMNS = `pp.id, pp.guid::text AS guid, pp.code, pp.description, pp.range
   pp.item_type, pp.currency, pp.wholesale_rate,
   to_char(pp.date_effective, 'YYYY-MM-DD') AS date_effective,
   pp.horizontal_repeat, pp.vertical_repeat, pp.freight_letter, pp.duty_class,
-  pp.dynamics_price_ex_duty, pp.dynamics_price_incl_duty, pp.dynamics_trade_sell,
+  pp.dynamics_price_ex_duty, pp.dynamics_price_incl_duty, pp.dynamics_trade_sell, pp.trade_markup_percent,
   to_char(pp.dynamics_modified_on, 'YYYY-MM-DD HH24:MI:SS') AS dynamics_modified_on,
   pp.first_import_id, pp.last_import_id, pp.created_at, pp.updated_at`
 
@@ -316,6 +326,7 @@ const toRow = (row, latestImportId) =>
     dynamics_price_ex_duty: numeric(row.dynamics_price_ex_duty),
     dynamics_price_incl_duty: numeric(row.dynamics_price_incl_duty),
     dynamics_trade_sell: numeric(row.dynamics_trade_sell),
+    trade_markup_percent: numeric(row.trade_markup_percent),
     dynamics_modified_on: row.dynamics_modified_on,
     // A row a later export no longer carried is no longer Active in Dynamics.
     in_latest_export: latestImportId != null && row.last_import_id === latestImportId,

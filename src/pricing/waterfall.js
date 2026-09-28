@@ -90,9 +90,9 @@ export const WATERFALL_STEPS = Object.freeze(Object.keys(STEP_LABELS))
  * Compute what can be computed and name what is missing.
  *
  * Inputs are in the parameter table's own units: percentages as 5 (not 0.05),
- * `freight` in dollars per unit under the default `dollar` basis, and
- * `retail_markup` as a MULTIPLIER (1.30), because that is the only one of them
- * the corpus states as a ratio.
+ * `freight` in dollars per unit under the default `dollar` basis.
+ * `retail_markup_percent` is on the TRADE sell (30 = trade × 1.30);
+ * `retail_markup` is the older MULTIPLIER on landed, read only without it.
  *
  * @param {{
  *   wholesale_rate?: number|string|null, currency?: string|null,
@@ -101,9 +101,10 @@ export const WATERFALL_STEPS = Object.freeze(Object.keys(STEP_LABELS))
  *   duty_percent?: number|string|null,
  *   freight?: number|string|null, freight_basis?: 'dollar'|'percent',
  *   freight_unit?: string|null,
- *   clearance_percent?: number|string|null,
+ *   clearance_percent?: number|string|null, clearance_basis?: 'percent'|'dollar'|null,
  *   handling?: number|string|null,
  *   trade_markup_percent?: number|string|null,
+ *   retail_markup_percent?: number|string|null,
  *   retail_markup?: number|string|null,
  * }} input
  * @returns {Readonly<{ steps: object[], landed: number|null, trade_sell: number|null,
@@ -127,8 +128,11 @@ export const computeWaterfall = (input = {}) => {
   const tradeMarkup = need('trade_markup', stated(input.trade_markup_percent))
   // The retail markup is the one input the corpus proves is NOT a constant:
   // Retail / Trade is 1.30 on 92% of rows but 1.35, 1.40, 1.50 or 1.80 on
-  // thirteen ranges. It cannot be inferred and has to be asked for.
-  const retailMarkup = need('retail_markup', stated(input.retail_markup))
+  // thirteen ranges. It cannot be inferred and has to be asked for. The house's
+  // PERCENTAGE on the trade sell is Dynamics' own rule; the older multiplier on
+  // landed (supplier terms) stands in only where no percentage is set.
+  const retailPercent = stated(input.retail_markup_percent)
+  const retailMarkup = retailPercent === null ? need('retail_markup', stated(input.retail_markup)) : null
 
   // P2 — one resolved rate off list. The multiplicative CHAIN a supplier may
   // quote instead ("40% then 40%" is x0.36) is resolved upstream by
@@ -160,10 +164,14 @@ export const computeWaterfall = (input = {}) => {
         : freightRate
 
   // The verified incumbent figure: duty before freight, clearance over both.
+  // Clearance is a percentage of that by default; a house may state it in
+  // dollars per unit instead (`clearance_basis: 'dollar'`, 28 Sep 2026).
   const landedExHandling =
     priceInclDuty === null || freightAmount === null || clearance === null
       ? null
-      : (priceInclDuty + freightAmount) * (1 + clearance / 100)
+      : input.clearance_basis === 'dollar'
+        ? priceInclDuty + freightAmount + clearance
+        : (priceInclDuty + freightAmount) * (1 + clearance / 100)
 
   // Warehouse handling has no source anywhere in this schema, so the platform's
   // OWN landed cost stays null while the incumbent's reconstruction above is
@@ -172,7 +180,10 @@ export const computeWaterfall = (input = {}) => {
   const landed = landedExHandling === null || handling === null ? null : landedExHandling + handling
 
   const tradeSell = landed === null || tradeMarkup === null ? null : landed * (1 + tradeMarkup / 100)
-  const retailSell = landed === null || retailMarkup === null ? null : landed * retailMarkup
+  const retailSell =
+    retailPercent !== null
+      ? tradeSell === null ? null : tradeSell * (1 + retailPercent / 100)
+      : landed === null || retailMarkup === null ? null : landed * retailMarkup
 
   const amounts = {
     wholesale,

@@ -41,7 +41,13 @@ export const PARAMETER_COLUMNS = Object.freeze([
   'duty_percent_b',
   'duty_percent_c',
   'clearance_percent',
+  // How to read clearance_percent: 'percent' (NULL reads the same) or 'dollar'
+  // per unit — migration 1792358400000.
+  'clearance_basis',
   'trade_markup_percent',
+  // On the TRADE sell (30 = retail is trade × 1.30), Dynamics' own rule —
+  // migration 1792358400000.
+  'retail_markup_percent',
   'fx_margin_percent',
   'handling',
   // The small-order surcharge (migration 1791811200000). Not waterfall inputs
@@ -52,8 +58,11 @@ export const PARAMETER_COLUMNS = Object.freeze([
   'note',
 ])
 
-/** The numeric ones, for coercion; `note` is text. */
-export const NUMERIC_PARAMETERS = Object.freeze(PARAMETER_COLUMNS.filter((c) => c !== 'note'))
+/** The text ones; the rest are numeric. */
+export const TEXT_PARAMETERS = Object.freeze(['note', 'clearance_basis'])
+export const CLEARANCE_BASES = Object.freeze(['percent', 'dollar'])
+/** The numeric ones, for coercion. */
+export const NUMERIC_PARAMETERS = Object.freeze(PARAMETER_COLUMNS.filter((c) => !TEXT_PARAMETERS.includes(c)))
 
 /** Where a resolved input came from. */
 export const INPUT_SOURCES = Object.freeze([
@@ -65,6 +74,7 @@ export const INPUT_SOURCES = Object.freeze([
   'none', // a fact about the line, not a parameter (no duty class => no duty)
   'missing', // nobody has set it
   'manual', // a what-if value the caller supplied for this preview only
+  'product', // the product price's own figure (its markup to trade)
 ])
 
 /** The inputs a preview may override for itself. Nothing here persists. */
@@ -77,6 +87,7 @@ export const OVERRIDABLE_INPUTS = Object.freeze([
   'clearance_percent',
   'handling',
   'trade_markup_percent',
+  'retail_markup_percent',
   'retail_markup',
 ])
 
@@ -102,6 +113,7 @@ const toParameters = (row) => {
     supplier_id: row.supplier_id,
     brand_id: row.brand_id,
     ...values,
+    clearance_basis: row.clearance_basis ?? null,
     note: row.note,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -237,6 +249,14 @@ const pickParameter = (column, house, supplierDefaults) => {
   return input(null, 'missing')
 }
 
+// The clearance and how to read it come from the SAME row: a house's dollar
+// figure must not be read as a percentage because its supplier's basis is.
+const clearanceInput = (house, supplierDefaults) => {
+  const picked = pickParameter('clearance_percent', house, supplierDefaults)
+  const row = picked.source === 'house' ? house : picked.source === 'supplier' ? supplierDefaults : null
+  return input(picked.value, picked.source, { basis: row?.clearance_basis ?? 'percent' })
+}
+
 const loadBrand = async (db, brandId) => {
   const { rows } = await db.query(
     `SELECT b.id, b.name, b.slug, b.currency AS brand_currency
@@ -363,9 +383,10 @@ export const resolveWaterfallInputs = async (
     fx_margin_percent: pickParameter('fx_margin_percent', house, supplierDefaults),
     duty_percent: dutyInput(dutyClass, house, supplierDefaults),
     freight,
-    clearance_percent: pickParameter('clearance_percent', house, supplierDefaults),
+    clearance_percent: clearanceInput(house, supplierDefaults),
     handling: pickParameter('handling', house, supplierDefaults),
     trade_markup_percent: pickParameter('trade_markup_percent', house, supplierDefaults),
+    retail_markup_percent: pickParameter('retail_markup_percent', house, supplierDefaults),
     retail_markup: terms?.markup != null ? input(terms.markup, 'terms') : input(null, 'missing'),
   })
 
@@ -394,6 +415,8 @@ const applyOverrides = (inputs, overrides = {}) => {
     const was = inputs[key]
     next[key] = input(number, 'manual', {
       ...(key === 'freight' ? { basis: 'dollar', unit: was?.detail?.unit ?? null } : {}),
+      // A what-if clearance is read the way the house states its own.
+      ...(key === 'clearance_percent' ? { basis: was?.detail?.basis ?? 'percent' } : {}),
       replaced: { value: was?.value ?? null, source: was?.source ?? 'missing' },
     })
   }
@@ -446,8 +469,10 @@ export const previewWaterfall = async (
     freight_basis: inputs.freight.detail?.basis ?? 'dollar',
     freight_unit: inputs.freight.detail?.unit ?? null,
     clearance_percent: inputs.clearance_percent.value,
+    clearance_basis: inputs.clearance_percent.detail?.basis ?? 'percent',
     handling: inputs.handling.value,
     trade_markup_percent: inputs.trade_markup_percent.value,
+    retail_markup_percent: inputs.retail_markup_percent.value,
     retail_markup: inputs.retail_markup.value,
   })
   return Object.freeze({ ...resolved, inputs, wholesale_rate: wholesaleRate, waterfall })

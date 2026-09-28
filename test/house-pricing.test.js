@@ -14,7 +14,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
-import { getBrandParameters, upsertBrandParameters } from '../src/pricing/pricing-parameters.js'
+import { getBrandParameters, previewWaterfall, upsertBrandParameters } from '../src/pricing/pricing-parameters.js'
 import {
   CHANGE_KINDS,
   DISCOUNT_FIELD,
@@ -423,6 +423,32 @@ describe('/admin/pricing/houses', () => {
     expect(cleared.json().pricing.parameters).toMatchObject({ duty_percent_a: 5, clearance_percent: null, surcharge_min_qty: null })
     // Absent discount and freight are left alone.
     expect(cleared.json().pricing.discount.percent).toBe(20)
+  })
+
+  it('keeps the retail markup and a dollar clearance on the house, and prices by them', async () => {
+    const res = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
+      payload: { parameters: { ...fullSet(), clearance_percent: 4, clearance_basis: 'dollar', retail_markup_percent: 30 } },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().pricing.parameters).toMatchObject({ clearance_percent: 4, clearance_basis: 'dollar', retail_markup_percent: 30 })
+    // The house's own figures as the page shows them, then a what-if run of the
+    // rest (no rate or freight on the fixture house) to see how they combine.
+    const preview = await previewWaterfall(pool, {
+      brandId: houseId,
+      wholesaleRate: 100,
+      dutyClass: 'A',
+      overrides: { discount_percent: 0, fx_rate: 0.5, fx_margin_percent: 0, freight: 30, handling: 0 },
+    })
+    expect(preview.inputs.clearance_percent).toMatchObject({ value: 4, source: 'house', detail: { basis: 'dollar' } })
+    expect(preview.inputs.retail_markup_percent).toMatchObject({ value: 30, source: 'house' })
+    const { steps, trade_sell: trade, retail_sell: retail } = preview.waterfall
+    const at = (name) => steps.find((step) => step.step === name).amount
+    // $4 on top of duty-paid plus freight, not 4% of it; retail is trade × 1.30.
+    expect(at('landed_ex_handling')).toBeCloseTo(at('price_incl_duty') + at('freight_amount') + 4, 2)
+    expect(trade).not.toBeNull()
+    expect(retail).toBeCloseTo(trade * 1.3, 1)
+    expect((await inject('PUT', `/admin/pricing/houses/${houseId}`, { payload: { parameters: { clearance_basis: 'pounds' } } })).statusCode).toBe(400)
+    await inject('PUT', `/admin/pricing/houses/${houseId}`, { payload: { parameters: fullSet() } })
   })
 
   it('refuses a discount it cannot write as one transaction — nothing else is saved either', async () => {

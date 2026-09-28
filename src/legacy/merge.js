@@ -493,6 +493,11 @@ const landCategories = async (pool, items, reviewedItemTypes) => {
 
 // ---------------------------------------------------------------------------
 
+export const CATALOGUE_FROM_PRICES = 'the catalogue comes from the product prices export'
+const NO_CATALOGUE = Object.freeze({
+  products: 0, colourways: 0, inventoryCreated: 0, unknownBrands: [], skips: [], conflicts: [],
+})
+
 /**
  * @param {import('pg').Pool} pool
  * @param {{ createHouses?: boolean, reviewedItemTypes?: ReadonlyArray<[string, string, string]> }} [opts]
@@ -527,7 +532,17 @@ export const mergeLegacy = async (
   // house and is counted rather than handed to the importer, which would
   // refuse the whole batch as malformed.
   const filed = summary.items.filter((item) => blankToNull(item.range_name) !== null)
-  const catalogue = await importColourways(pool, filed.map(stockItemAsColourwayRow))
+  // Once the catalogue is the product prices export (28 Sep 2026: one product
+  // per row, src/catalogue/product-price-catalogue.js), a D365 stock item makes
+  // no product or colourway: the deploy runs this merge, and it re-raised the
+  // whole archived Dynamics catalogue under freed slugs. Stock and categories
+  // still land on the SKUs that exist.
+  const { rows: linked } = await pool.query(
+    'SELECT EXISTS (SELECT 1 FROM products WHERE product_price_id IS NOT NULL) AS yes'
+  )
+  const catalogue = linked[0].yes
+    ? { ...NO_CATALOGUE, skipped: CATALOGUE_FROM_PRICES }
+    : await importColourways(pool, filed.map(stockItemAsColourwayRow))
   const stock = await landStock(pool, filed)
   const categories = await landCategories(pool, filed, reviewedItemTypes)
 
@@ -545,6 +560,7 @@ export const mergeLegacy = async (
       unknownBrands: catalogue.unknownBrands,
       skips: catalogue.skips,
       conflicts: catalogue.conflicts.length,
+      skipped: catalogue.skipped ?? null,
     },
     stock,
     categories,

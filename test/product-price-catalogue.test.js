@@ -12,6 +12,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { applyProductSync } from '../src/pricing/product-price-sync.js'
+import { ARCHIVE_OUTSIDE_PRICE_CATALOGUE } from '../migrations/1792272000000_archive-products-outside-price-catalogue.js'
 import {
   applyColourAttach,
   createProductsFromPrices,
@@ -137,6 +138,31 @@ describe('the catalogue from product prices', () => {
       [houseId]
     )
     expect(rows[0].n).toBe(4)
+  })
+
+  it('archives what stands outside the price catalogue, frees its slug, and leaves the catalogue alone', async () => {
+    // What the deploy's merge raised again: an unlinked product under a plain slug.
+    const { rows: stray } = await pool.query(
+      `INSERT INTO products (brand_id, name, slug, product_type, currency) VALUES ($1, 'MADEIRA', $2, 'fabric', 'EUR') RETURNING id`,
+      [houseId, `${HOUSE_SLUG}-madeira`]
+    )
+    const client = await pool.connect()
+    try {
+      // In a transaction rolled back after: the statement runs over the whole table.
+      await client.query('BEGIN')
+      await client.query(ARCHIVE_OUTSIDE_PRICE_CATALOGUE)
+      const { rows } = await client.query(
+        `SELECT slug, archived_at IS NOT NULL AS archived, product_price_id IS NOT NULL AS linked
+           FROM products WHERE brand_id = $1 ORDER BY id`,
+        [houseId]
+      )
+      expect(rows.filter((row) => row.linked).every((row) => !row.archived)).toBe(true)
+      expect(rows.find((row) => !row.linked)).toEqual({ slug: `${HOUSE_SLUG}-madeira-archived-${stray[0].id}`, archived: true, linked: false })
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
+    await pool.query('DELETE FROM products WHERE id = $1', [stray[0].id])
   })
 
   it('hangs each colour under the product it names, and never makes a product for one it does not', async () => {

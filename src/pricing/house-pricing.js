@@ -43,6 +43,7 @@ import {
 import {
   createFreightRate,
   currentClassRates,
+  deleteHouseClassRates,
   freightClassOf,
   resolveFreightRate,
   today,
@@ -419,6 +420,8 @@ const writeFreightClasses = async (db, house, rates) => {
  *                     or null leaves the ledger alone (it cannot be cleared)
  *   freight_classes   optional [{ freight_class, rate, unit, effective_from? }];
  *                     a letter left out keeps its rate
+ *   remove_freight_classes optional ['B', …]; each letter's own rate is
+ *                     removed, so its lines pay the house's rate
  *
  * @param {{ query: Function }} db an open client inside BEGIN
  * @param {number} brandId
@@ -438,6 +441,12 @@ export const saveHousePricing = async (db, brandId, input = {}) => {
   }
   if (input.freight != null) {
     await writeFreight(db, house, input.freight)
+  }
+  if (Array.isArray(input.remove_freight_classes)) {
+    const removing = new Set(input.remove_freight_classes.map(freightClassOf))
+    const both = (input.freight_classes ?? []).map((rate) => freightClassOf(rate.freight_class)).filter((l) => removing.has(l))
+    if (both.length > 0) throw httpError(422, `Freight class ${both[0]} cannot be both set and removed in one save.`)
+    for (const letter of removing) await deleteHouseClassRates(db, { range_name: house.name, freight_class: letter })
   }
   if (Array.isArray(input.freight_classes)) {
     await writeFreightClasses(db, house, input.freight_classes)

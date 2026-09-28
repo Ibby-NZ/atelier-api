@@ -517,6 +517,22 @@ describe('/admin/pricing/houses', () => {
     ])
     expect(twice.statusCode).toBe(422)
     expect(twice.json().message).toMatch(/listed twice/)
+
+    // A class can be removed: every row of B goes, its lines pay the house's
+    // rate again, and A and the every-class rate are untouched.
+    const removed = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
+      payload: { parameters: fullSet(), remove_freight_classes: ['b'] },
+    })
+    expect(removed.statusCode).toBe(200)
+    expect(removed.json().pricing.freight_classes.map((rate) => rate.freight_class)).toEqual(['A'])
+    expect((await houseFreight(pool, houseName('house'))).length).toBe(2)
+    expect(await freightFor('B')).toMatchObject({ value: 23, detail: { freight_class: null } })
+    expect(await freightFor('A')).toMatchObject({ value: 30 })
+    const clash = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
+      payload: { parameters: fullSet(), remove_freight_classes: ['A'], freight_classes: [{ freight_class: 'A', rate: 9, unit: 'metre' }] },
+    })
+    expect(clash.statusCode).toBe(422)
+    expect(clash.json().message).toMatch(/both set and removed/)
   })
 
   it('keeps discount classes on the house: created with its terms, edited as a set, one default, products counted before a removal', async () => {

@@ -241,6 +241,26 @@ export const currentClassRates = async (db, query = {}) => {
 }
 
 /**
+ * Remove a house's rate for one freight class — every dated row of it, dated
+ * ahead included — so the letter pays the house's every-class rate again
+ * (28 Sep 2026, the office: a class must be removable, not only added).
+ * The one exception to "append-only": a class is an override the office
+ * decided should not exist, and an end-dated row would be a rate of nothing.
+ * The house's every-class rates and every other letter are untouched.
+ *
+ * @returns {Promise<number>} rows removed
+ */
+export const deleteHouseClassRates = async (db, { range_name: rangeName, freight_class: freightClass }) => {
+  const { rowCount } = await db.query(
+    `DELETE FROM supplier_freight_rates
+      WHERE supplier_id IS NULL AND lower(range_name) = lower($1)
+        AND category IS NULL AND freight_class = $2`,
+    [rangeName, freightClassOf(freightClass)]
+  )
+  return rowCount
+}
+
+/**
  * Every rate on the ledger, newest first — the history, not a current view,
  * because the history is the point of an append-only table.
  *

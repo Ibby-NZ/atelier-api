@@ -40,6 +40,9 @@ export const repriceFromWholesale = async (db, product, wholesaleRate) => {
     wholesale_rate: wholesaleRate,
     currency: product.currency,
   })
+  if (pricing.hand_priced) {
+    return { repriced: false, reason: 'Dynamics priced it by hand, so its price does not follow the wholesale rate' }
+  }
   if (pricing.trade_sell == null) {
     const why = pricing.reason ?? `${pricing.missing.join(', ')} not set on ${pricing.house?.name ?? 'the house'}`
     return { repriced: false, reason: why }

@@ -17,7 +17,10 @@
 //   trade_price_cents  the range calculation's trade sell (NZ$ — the store's
 //                      selling currency, which every product price is in)
 //   retail_price_cents the retail sell: the trade sell × (1 + the house's
-//                      retail markup), where the house has one (28 Sep 2026)
+//                      retail markup), where the house has one (28 Sep 2026);
+//                      where the range cannot reach a trade sell, the trade
+//                      price the product already carries × (1 + that markup)
+//                      (1 Oct 2026 — a markup was set and retail stayed blank)
 //   wholesale_rate     the export's wholesale rate, in the SUPPLIER's currency
 //                      — only where the product's own `currency` is that one;
 //                      a product in another currency is reported, never
@@ -165,7 +168,12 @@ export const planProductSync = async (
     const merged = setByMerge.get(product.id)
     const trade = { from: product.trade_price_cents, to: cents(pricing.trade_sell) }
     trade.action = decide(merged?.trade ? null : trade.from, trade.to, overwrite)
-    const retail = { from: product.retail_price_cents, to: cents(pricing.retail_sell) }
+    const markup = pricing.inputs?.retail_markup_percent?.value
+    const carried = product.trade_price_cents > 0 ? product.trade_price_cents : null
+    const retailCents = pricing.retail_sell != null
+      ? cents(pricing.retail_sell)
+      : markup != null && carried != null ? Math.round(carried * (1 + Number(markup) / 100)) : null
+    const retail = { from: product.retail_price_cents, to: retailCents }
     retail.action = decide(merged?.retail ? null : retail.from, retail.to, overwrite)
 
     let wholesale = null

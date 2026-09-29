@@ -46,12 +46,19 @@
 // a difference.
 //
 // DUTY. A row whose two Dynamics prices differ was charged duty (the class A
-// band); one whose two prices agree was not, as in the ELLA STRIPE example. A
-// row Dynamics priced BY HAND ("Set prices manually": Alpaka, Garrett Leather,
-// Loro Piana, Atelier Stock … 54 rows in the 28 Sep 2026 export) carries
-// neither price, so it says nothing either way; it is charged
-// ASSUMED_DUTY_PERCENT, the office's ruling of 30 Sep 2026 (the export's own
-// Duty % says 5 on every such row that states one).
+// band); one whose two prices agree was not, as in the ELLA STRIPE example.
+//
+// A ROW DYNAMICS PRICED BY HAND IS ITS OWN PRICE. "Set prices manually"
+// (Alpaka, Garrett Leather, Loro Piana, Brochier, C & C Milano, Atelier Stock —
+// 54 rows in the 28 Sep 2026 export, both duty prices blank) is priced in
+// Dynamics from a duty %, a markup and a freight typed on the product, with
+// freight after the markup and no clearance, and the result is often rounded
+// by hand (725 against 724.17) — inputs no export carries. The range formula
+// cannot reach it (Alpaka's house has no freight or discount of its own), so
+// until 1 Oct 2026 such a row had no trade price and therefore no retail price
+// however the house's retail markup was set. Its trade price is now Dynamics'
+// own (which carries Dynamics' 5% duty), and the house's retail markup goes on
+// it like on any other trade price.
 
 import { computeWaterfall } from './waterfall.js'
 import { listFxRates, resolveWaterfallInputs } from './pricing-parameters.js'
@@ -71,8 +78,7 @@ export const HOME_CURRENCY = 'NZD'
 
 const round2 = (value) => Math.round((value + Number.EPSILON) * 100) / 100
 
-/** Duty on a row Dynamics priced by hand, which states neither of its duty prices. */
-export const ASSUMED_DUTY_PERCENT = 5
+const HAND_PRICED = 'Dynamics priced this product by hand ("Set prices manually")'
 
 // pg returns numeric as a string, and Number(null) is 0 — see waterfall.js.
 const numeric = (value) => (value == null ? null : Number(value))
@@ -241,18 +247,13 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
     }
 
     const hasDuty = typeof row.duty_class === 'string' && row.duty_class.trim() !== ''
-    const pricedByHand = row.dynamics_price_ex_duty == null && row.dynamics_price_incl_duty == null
     const inputs = Object.freeze({
       discount_percent: resolved.inputs.discount_percent,
       fx_rate: await fxInput(row.currency),
       fx_margin_percent: notInFormula(resolved.inputs.fx_margin_percent, 'FX margin'),
       duty_percent: hasDuty
         ? resolved.inputs.duty_percent
-        : pricedByHand
-          ? input(ASSUMED_DUTY_PERCENT, 'none', {
-              reason: `Dynamics priced this product by hand and states no duty; ${ASSUMED_DUTY_PERCENT}% assumed.`,
-            })
-          : input(0, 'none', { reason: 'Dynamics charged no duty on this product.' }),
+        : input(0, 'none', { reason: 'Dynamics charged no duty on this product.' }),
       freight: resolved.inputs.freight,
       clearance_percent: resolved.inputs.clearance_percent,
       handling: notInFormula(resolved.inputs.handling, 'handling charge'),
@@ -267,6 +268,28 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
       retail_markup_percent: resolved.inputs.retail_markup_percent,
       retail_markup: resolved.inputs.retail_markup,
     })
+
+    if (row.dynamics_price_ex_duty == null && row.dynamics_price_incl_duty == null) {
+      const trade = dynamics.trade_sell
+      const percent = inputs.retail_markup_percent.value
+      return Object.freeze({
+        status: trade == null ? 'incomplete' : 'priced',
+        reason: trade == null ? `${HAND_PRICED} and carries no trade price for it.` : `${HAND_PRICED}; its price is Dynamics' own.`,
+        hand_priced: true,
+        house,
+        category,
+        inputs,
+        steps: null,
+        landed: null,
+        trade_sell: trade,
+        retail_sell: trade == null || percent == null ? null : round2(trade * (1 + Number(percent) / 100)),
+        missing: Object.freeze([]),
+        surcharge: surchargeOf(resolved.parameters),
+        dynamics,
+        difference: trade == null ? null : 0,
+        agrees: trade == null ? null : true,
+      })
+    }
 
     const waterfall = computeWaterfall({
       wholesale_rate: numeric(row.wholesale_rate),

@@ -416,15 +416,29 @@ describe('/admin/product-prices', () => {
       }
     })
 
-    // 30 Sep 2026: Alpaka and the other rows Dynamics priced by hand showed no
-    // duty; the office ruled 5% where Dynamics states none.
-    it('assumes 5% duty on a row Dynamics priced by hand, and keeps none where its two prices agree', async () => {
-      const pricer = createProductPricer(pool)
-      const byHand = await pricer.price(ella({ dynamics_price_ex_duty: null, dynamics_price_incl_duty: null }))
-      expect(byHand.inputs.duty_percent).toMatchObject({ value: 5, source: 'none' })
-      expect(byHand.inputs.duty_percent.detail.reason).toMatch(/by hand/)
-      expect(byHand.trade_sell).toBe(373.4)
-      expect((await pricer.price(ella())).inputs.duty_percent).toMatchObject({ value: 0, source: 'none' })
+    // 1 Oct 2026: Alpaka is priced by hand in Dynamics; the range formula
+    // cannot reach it, so it had no trade and no retail despite a markup.
+    it('takes a hand-priced row’s trade from Dynamics and puts the house’s retail markup on it', async () => {
+      const baseline = {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      }
+      const byHand = (over = {}) =>
+        ella({ wholesale_rate: 130, currency: 'EUR', dynamics_price_ex_duty: null, dynamics_price_incl_duty: null, dynamics_trade_sell: 561, ...over })
+      await upsertBrandParameters(pool, madeauxId, { ...baseline, retail_markup_percent: 30 })
+      try {
+        const priced = await createProductPricer(pool).price(byHand())
+        expect(priced).toMatchObject({ status: 'priced', hand_priced: true, trade_sell: 561, retail_sell: 729.3, difference: 0, agrees: true, steps: null })
+        expect(priced.reason).toMatch(/by hand/)
+        const blank = await createProductPricer(pool).price(byHand({ dynamics_trade_sell: null }))
+        expect(blank).toMatchObject({ status: 'incomplete', trade_sell: null, retail_sell: null })
+        expect(blank.reason).toMatch(/carries no trade price/)
+      } finally {
+        await upsertBrandParameters(pool, madeauxId, baseline)
+      }
+      expect((await createProductPricer(pool).price(byHand())).retail_sell).toBeNull()
+      // A row whose two prices agree is still the range formula, with no duty.
+      expect((await createProductPricer(pool).price(ella())).inputs.duty_percent).toMatchObject({ value: 0, source: 'none' })
     })
   })
 
@@ -713,6 +727,37 @@ describe('/admin/product-prices', () => {
         duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
         trade_markup_percent: 87, surcharge_min_qty: 5, surcharge_per_unit: 20,
       })
+    })
+
+    // 1 Oct 2026: a trade price the range cannot reach (a house missing
+    // freight) still takes the house's retail markup.
+    it('makes a retail price from the trade price a product carries when the range cannot price it', async () => {
+      const range = houseName('madeaux')
+      await upload('apply', productWorkbook([priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })]))
+      const { rows } = await pool.query(
+        `SELECT p.id FROM products p JOIN product_prices pp ON pp.id = p.product_price_id WHERE pp.guid = $1`, [guid(1)]
+      )
+      const id = rows[0].id
+      await withChangeContext(pool, { source: 'manual', reason: 'agreed', userId: null }, (client) =>
+        client.query('UPDATE products SET trade_price_cents = 50000, retail_price_cents = NULL WHERE id = $1', [id])
+      )
+      const baseline = {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      }
+      await pool.query(`UPDATE supplier_freight_rates SET range_name = range_name || ' (parked)' WHERE range_name = $1`, [range])
+      try {
+        const saved = await inject('PUT', `/admin/pricing/houses/${madeauxId}`, {
+          payload: { parameters: { ...baseline, retail_markup_percent: 30 } },
+        })
+        expect(saved.statusCode).toBe(200)
+        expect(saved.json().catalogue).toMatchObject({ retail_filled: 1, unpriced_count: 1 })
+        const product = (await pool.query('SELECT trade_price_cents, retail_price_cents FROM products WHERE id = $1', [id])).rows[0]
+        expect(product).toEqual({ trade_price_cents: 50000, retail_price_cents: 65000 })
+      } finally {
+        await pool.query(`UPDATE supplier_freight_rates SET range_name = $1 WHERE range_name = $2`, [range, `${range} (parked)`])
+        await upsertBrandParameters(pool, madeauxId, baseline)
+      }
     })
 
     // Live, 30 Sep 2026: the upload ran before the house had a retail markup,

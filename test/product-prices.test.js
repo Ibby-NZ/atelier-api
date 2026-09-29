@@ -682,6 +682,36 @@ describe('/admin/product-prices', () => {
       })
     })
 
+    // Live, 30 Sep 2026: the upload ran before the house had a retail markup,
+    // and the markup set afterwards never reached the products.
+    it('prices the products when their house is given a retail markup after the upload', async () => {
+      const range = houseName('madeaux')
+      await upload('apply', productWorkbook([priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })]))
+      const { rows } = await pool.query(
+        `SELECT p.id FROM products p JOIN product_prices pp ON pp.id = p.product_price_id WHERE pp.guid = $1`, [guid(1)]
+      )
+      const product = async () =>
+        (await pool.query('SELECT trade_price_cents, retail_price_cents FROM products WHERE id = $1', [rows[0].id])).rows[0]
+      expect(await product()).toEqual({ trade_price_cents: 36052, retail_price_cents: null })
+
+      const baseline = {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      }
+      const saved = await inject('PUT', `/admin/pricing/houses/${madeauxId}`, {
+        payload: { parameters: { ...baseline, retail_markup_percent: 30 } },
+      })
+      expect(saved.statusCode).toBe(200)
+      expect(saved.json().catalogue).toMatchObject({ retail_filled: 1, trade_filled: 0 })
+      expect(await product()).toEqual({ trade_price_cents: 36052, retail_price_cents: Math.round(360.5163 * 1.3 * 100) })
+      const history = (await pool.query(
+        `SELECT source, source_file FROM product_price_history WHERE product_id = $1 ORDER BY id DESC LIMIT 1`, [rows[0].id]
+      )).rows
+      expect(history).toEqual([{ source: 'import', source_file: "the house's range figures" }])
+
+      await upsertBrandParameters(pool, madeauxId, baseline)
+    })
+
     it('re-prices a product when its wholesale rate is edited, keeps a price typed in the same save, and says why when it cannot', async () => {
       const range = houseName('madeaux')
       await upload('apply', productWorkbook([priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })]))

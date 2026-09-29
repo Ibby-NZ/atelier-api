@@ -1284,7 +1284,9 @@ describe('W13 purchase orders', () => {
       expect(purchaseOrder.lines[0]).not.toHaveProperty('unit_price')
       expect(purchaseOrder.lines[0]).not.toHaveProperty('line_cost')
       expect(purchaseOrder).not.toHaveProperty('total_cost')
-      expect(response.body).not.toContain('48.5')
+      // Timestamps out first: a created_at of "…T20:07:48.575Z" carries the
+      // figure by chance and failed this once a few hundred runs.
+      expect(response.body.replace(/"\d{4}-\d{2}-\d{2}T[^"]*"/g, '""')).not.toContain('48.5')
       // The quantities are NOT costs and stay visible: the showroom needs to
       // know what is outstanding without seeing what it cost.
       expect(purchaseOrder.lines[0].qty_ordered).toBe(40)

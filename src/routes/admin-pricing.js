@@ -14,6 +14,11 @@
 //   POST   /admin/pricing/houses/import/validate        the Dynamics tracking-options .xlsx — dry run
 //   POST   /admin/pricing/houses/import/apply           the same file — one transaction
 //
+// EVERY SAVE RE-PRICES THE CATALOGUE after it lands (`catalogue` in the
+// answer): the product-price sync, fill-only, over the house's products —
+// every product for a supplier default, an exchange rate or the import. See
+// src/pricing/product-price-sync.js.
+//
 // EVERY ROUTE IS FINANCE-GATED, reads included, through `requireFinance` — the
 // one gate, recomputed per request. Every figure here is a cost input (what
 // Atelier pays, what it adds), and there is no useful masked view of a
@@ -28,6 +33,7 @@ import { requireFinance } from '../reports/access.js'
 import { getHousePricing, saveHousePricing } from '../pricing/house-pricing.js'
 import { backfillPricingParameters } from '../pricing/parameters-backfill.js'
 import { readTrackingOptionsWorkbook } from '../pricing/house-pricing-import.js'
+import { applyProductSync } from '../pricing/product-price-sync.js'
 import {
   CLEARANCE_BASES,
   NUMERIC_PARAMETERS,
@@ -165,6 +171,11 @@ export const adminPricingRoutes = async (app, { pool }) => {
   // Role first (sets request.user), then the finance grant on top of it.
   const guarded = [backoffice, finance]
 
+  // `brandIds` null is every product. `label` is the price history's source
+  // ("<label> said so").
+  const syncCatalogue = (request, label, brandIds = null) =>
+    applyProductSync(pool, { brandIds, sourceFile: label, userId: request.user?.id ?? null })
+
   // --- the waterfall ------------------------------------------------------------
   app.get(
     '/admin/pricing/waterfall',
@@ -221,14 +232,17 @@ export const adminPricingRoutes = async (app, { pool }) => {
   )
 
   // --- parameter rows, per scope --------------------------------------------------
-  const scopeRoutes = (path, { get, put, remove }) => {
+  const scopeRoutes = (path, { get, put, remove, label, brandIds }) => {
     app.get(`/admin/pricing/parameters/${path}/:id`, { preHandler: guarded, schema: { params: ID_PARAMS } },
       async (request) => ({ parameters: await get(pool, request.params.id) })
     )
     app.put(
       `/admin/pricing/parameters/${path}/:id`,
       { preHandler: guarded, schema: { params: ID_PARAMS, body: PARAMETERS_BODY } },
-      async (request) => ({ parameters: await put(pool, request.params.id, request.body ?? {}) })
+      async (request) => {
+        const parameters = await put(pool, request.params.id, request.body ?? {})
+        return { parameters, catalogue: await syncCatalogue(request, label, brandIds(request.params.id)) }
+      }
     )
     app.delete(`/admin/pricing/parameters/${path}/:id`, { preHandler: guarded, schema: { params: ID_PARAMS } },
       async (request) => ({ deleted: await remove(pool, request.params.id) })
@@ -238,11 +252,15 @@ export const adminPricingRoutes = async (app, { pool }) => {
     get: getSupplierParameters,
     put: upsertSupplierParameters,
     remove: deleteSupplierParameters,
+    label: "the supplier's range figures",
+    brandIds: () => null,
   })
   scopeRoutes('brands', {
     get: getBrandParameters,
     put: upsertBrandParameters,
     remove: deleteBrandParameters,
+    label: "the house's range figures",
+    brandIds: (id) => [id],
   })
 
   // --- exchange rates ------------------------------------------------------------
@@ -272,9 +290,10 @@ export const adminPricingRoutes = async (app, { pool }) => {
         },
       },
     },
-    async (request) => ({
-      rate: await upsertFxRate(pool, request.params.currency, request.body),
-    })
+    async (request) => {
+      const rate = await upsertFxRate(pool, request.params.currency, request.body)
+      return { rate, catalogue: await syncCatalogue(request, `the ${request.params.currency} exchange rate`) }
+    }
   )
 
   // --- one house, as its own page shows it ---------------------------------------
@@ -289,11 +308,11 @@ export const adminPricingRoutes = async (app, { pool }) => {
     { preHandler: guarded, schema: { params: ID_PARAMS, body: HOUSE_PRICING_BODY } },
     async (request) => {
       const client = await pool.connect()
+      let pricing
       try {
         await client.query('BEGIN')
-        const pricing = await saveHousePricing(client, request.params.id, request.body ?? {})
+        pricing = await saveHousePricing(client, request.params.id, request.body ?? {})
         await client.query('COMMIT')
-        return { pricing }
       } catch (error) {
         try {
           await client.query('ROLLBACK')
@@ -304,6 +323,7 @@ export const adminPricingRoutes = async (app, { pool }) => {
       } finally {
         client.release()
       }
+      return { pricing, catalogue: await syncCatalogue(request, "the house's range figures", [request.params.id]) }
     }
   )
 
@@ -334,7 +354,8 @@ export const adminPricingRoutes = async (app, { pool }) => {
       overwrite: request.query.overwrite === true,
       dryRun,
     })
-    return { exported_at: read.exported_at, ...result }
+    const catalogue = dryRun ? undefined : await syncCatalogue(request, request.query.filename ?? 'the ranges export')
+    return { exported_at: read.exported_at, ...result, catalogue }
   }
 
   for (const [step, dryRun] of [['validate', true], ['apply', false]]) {

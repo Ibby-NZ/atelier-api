@@ -25,6 +25,13 @@
 //   category           from the export's Type (Fabrics → fabric), where the
 //                      product has none and the word is in the vocabulary
 //
+// WHEN. Every product-prices upload, and every pricing save that moves a range
+// figure (src/routes/admin-pricing.js — the house page, /pricing, an exchange
+// rate, the ranges import) over the products it prices. A house given a retail
+// markup or freight after the upload gets its products' prices at once, not at
+// the next upload (30 Sep 2026: products sat without a retail price under a
+// house that had a markup).
+//
 // FILL-ONLY UNLESS ASKED — the cutover merge's rule for prices. An import
 // fills what is BLANK and reports every price the product already carries
 // that disagrees (`kept`); a person replaces one deliberately, from the
@@ -68,12 +75,16 @@ const decide = (current, next, overwrite) => {
  *
  * @param {{ query: Function }} db
  * @param {{ overwrite?: boolean, productPriceId?: number|null, productPriceIds?: number[]|null,
- *           productId?: number|null }} [scope]
+ *           productId?: number|null, brandIds?: number[]|null }} [scope]
  *   `productPriceId` and/or `productId` narrow it to one price row and/or one
  *   product; `productPriceIds` to a set of rows (the markups an upload moved);
+ *   `brandIds` to the products of those houses (a house's pricing was saved);
  *   absent, every row of the latest export against every product.
  */
-export const planProductSync = async (db, { overwrite = false, productPriceId = null, productPriceIds = null, productId = null } = {}) => {
+export const planProductSync = async (
+  db,
+  { overwrite = false, productPriceId = null, productPriceIds = null, productId = null, brandIds = null } = {}
+) => {
   const { rows: priceRows } = await db.query(
     `SELECT id, guid::text AS guid, code, description, range_name, item_type, currency,
             wholesale_rate, duty_class, freight_letter, trade_markup_percent,
@@ -104,8 +115,9 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
             p.trade_price_cents, p.retail_price_cents, p.wholesale_rate, p.product_price_id
        FROM products p JOIN brands b ON b.id = p.brand_id
       WHERE p.archived_at IS NULL AND ($1::int IS NULL OR p.id = $1::int)
+        AND ($2::int[] IS NULL OR p.brand_id = ANY($2::int[]))
       ORDER BY p.id`,
-    [productId]
+    [productId, brandIds]
   )
   const vocabulary = new Set(await categorySlugs(db))
   // A price the cutover merge last set (Dynamics' stored figure, copied onto a
@@ -229,11 +241,13 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
  *
  * @param {import('pg').Pool} pool
  * @param {{ overwrite?: boolean, productPriceId?: number|null, productId?: number|null,
- *           userId?: number|null, sourceFile?: string|null, reason?: string|null }} options
+ *           brandIds?: number[]|null, userId?: number|null, sourceFile?: string|null,
+ *           reason?: string|null }} options
  */
 export const applyProductSync = async (
   pool,
-  { overwrite = false, productPriceId = null, productPriceIds = null, productId = null, userId = null, sourceFile = null, reason = null } = {}
+  { overwrite = false, productPriceId = null, productPriceIds = null, productId = null, brandIds = null,
+    userId = null, sourceFile = null, reason = null } = {}
 ) => {
   // A person's replace is `manual`; an upload's — even one that replaces, as a
   // markup file does for the rows it moved — is an `import` of that file.
@@ -241,7 +255,7 @@ export const applyProductSync = async (
     ? { source: 'manual', reason: reason ?? 'Set to the price from its range', userId }
     : { source: 'import', sourceFile: sourceFile ?? 'product prices', userId }
   return withChangeContext(pool, context, async (client) => {
-    const plan = await planProductSync(client, { overwrite, productPriceId, productPriceIds, productId })
+    const plan = await planProductSync(client, { overwrite, productPriceId, productPriceIds, productId, brandIds })
     const writes = plan.writes
     if (writes.length > 0) {
       const set = (change, field) => (['fill', 'replace'].includes(change[field]?.action) ? change[field].to : null)

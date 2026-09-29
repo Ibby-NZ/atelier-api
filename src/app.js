@@ -19,6 +19,7 @@ import { adminPriceListImportRoutes } from './routes/admin-price-list-import.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
 import { adminSupplierColourRoutes } from './routes/admin-supplier-colours.js'
+import { adminStockLevelRoutes } from './routes/admin-stock-levels.js'
 import { adminFreightRoutes } from './routes/admin-freight.js'
 import { adminPricingRoutes } from './routes/admin-pricing.js'
 import { adminProductPriceRoutes } from './routes/admin-product-prices.js'
@@ -213,6 +214,9 @@ export const buildApp = ({
     // as designs + colourways through the existing colourway import. Director
     // only (a bulk catalogue write); its own plugin for the workbook parser.
     api.register(adminSupplierColourRoutes, { pool })
+    // /admin/inventory/stock-levels/* — Dynamics' Stock View onto the matched
+    // variations. Director only; its own plugin for the workbook parser.
+    api.register(adminStockLevelRoutes, { pool })
     // /admin/freight/* — the incumbent's pricing parameters, the freight-letter
     // recovery report, the append-only rate ledger and the landed-cost preview.
     // Backoffice throughout; the parameter, recovery and preview routes are

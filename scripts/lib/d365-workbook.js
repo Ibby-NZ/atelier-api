@@ -87,9 +87,18 @@ const readSchemaMap = (zip, strings) => {
  * @param {Buffer} buffer the .xlsx bytes
  * @returns {string} the entity's logical name
  */
-export const d365WorkbookEntity = (buffer) => {
+export const d365WorkbookEntity = (buffer) => d365WorkbookSchema(buffer).entity
+
+/**
+ * The export's entity and its columns' logical names, in file order — for a
+ * reader of a narrow view that ENTITIES does not describe (the Stock View).
+ *
+ * @param {Buffer} buffer the .xlsx bytes
+ * @returns {{ entity: string, logicalNames: string[] }}
+ */
+export const d365WorkbookSchema = (buffer) => {
   const zip = openWorkbook(buffer)
-  return readSchemaMap(zip, sharedStrings(zip)).entity
+  return readSchemaMap(zip, sharedStrings(zip))
 }
 
 const coerce = (value, kind) => {

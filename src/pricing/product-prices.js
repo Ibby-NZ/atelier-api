@@ -35,11 +35,23 @@
 // supplier's invoicing currency the house resolver uses, because the product
 // row says what it is quoted in (MADEAUX is Pound Sterling). NZ$ rows are 1.
 //
-// FREIGHT IS THE HOUSE'S. Dynamics priced freight by the row's letter (A/B/C/D
-// per range — Fabricut's A is $30, its B $3); the client answered F1 in
-// September 2026 that freight is per house, and the office's example uses the
-// range's figure. The letter is shown beside the price as the reason Dynamics'
-// own number may differ.
+// FREIGHT IS THE HOUSE'S, AT THE ROW'S LETTER. Dynamics priced freight by the
+// row's letter (A/B/C/D per range — Fabricut's A is $30, its B $3, its C $5).
+// The client answered F1 in September 2026 that freight is per house, and the
+// house page has since gained a rate per freight letter (freight classes), so a
+// row takes its house's rate for its letter where the house has one and the
+// house's every-class rate otherwise. Until 30 Sep 2026 the letter was never
+// passed, so a class rate set on the house page never reached this page, and
+// every B/C/D row of a range whose letters cost differently in Dynamics showed
+// a difference.
+//
+// DUTY. A row whose two Dynamics prices differ was charged duty (the class A
+// band); one whose two prices agree was not, as in the ELLA STRIPE example. A
+// row Dynamics priced BY HAND ("Set prices manually": Alpaka, Garrett Leather,
+// Loro Piana, Atelier Stock … 54 rows in the 28 Sep 2026 export) carries
+// neither price, so it says nothing either way; it is charged
+// ASSUMED_DUTY_PERCENT, the office's ruling of 30 Sep 2026 (the export's own
+// Duty % says 5 on every such row that states one).
 
 import { computeWaterfall } from './waterfall.js'
 import { listFxRates, resolveWaterfallInputs } from './pricing-parameters.js'
@@ -58,6 +70,9 @@ export const AGREEMENT_TOLERANCE = 0.02
 export const HOME_CURRENCY = 'NZD'
 
 const round2 = (value) => Math.round((value + Number.EPSILON) * 100) / 100
+
+/** Duty on a row Dynamics priced by hand, which states neither of its duty prices. */
+export const ASSUMED_DUTY_PERCENT = 5
 
 // pg returns numeric as a string, and Number(null) is 0 — see waterfall.js.
 const numeric = (value) => (value == null ? null : Number(value))
@@ -146,14 +161,14 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
   }
 
   // Duty is resolved at class A (the only letter the corpus has ever used) and
-  // replaced by the formula's own "no duty" for a row without one, so a house
-  // is resolved once per category rather than once per category per class.
-  const resolve = async (house, category) => {
-    const key = `${house.id}\u0000${category ?? ''}`
+  // replaced for a row without one, so a house is resolved once per category
+  // and freight letter rather than once per duty class as well.
+  const resolve = async (house, category, freightClass) => {
+    const key = `${house.id}\u0000${category ?? ''}\u0000${freightClass ?? ''}`
     if (!resolutions.has(key)) {
       resolutions.set(
         key,
-        resolveWaterfallInputs(db, { brandId: house.id, category, dutyClass: 'A' }).catch((error) => {
+        resolveWaterfallInputs(db, { brandId: house.id, category, dutyClass: 'A', freightClass }).catch((error) => {
           if (!error.statusCode || error.statusCode >= 500) throw error
           return { error: error.message }
         })
@@ -204,7 +219,8 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
     }
 
     const category = categoryForItemType(row.item_type)
-    const resolved = await resolve(house, category)
+    const letter = typeof row.freight_letter === 'string' ? row.freight_letter.trim().toUpperCase() : ''
+    const resolved = await resolve(house, category, /^[A-Z]$/.test(letter) ? letter : null)
     if (resolved.error) {
       return Object.freeze({
         status: 'incomplete',
@@ -225,13 +241,18 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
     }
 
     const hasDuty = typeof row.duty_class === 'string' && row.duty_class.trim() !== ''
+    const pricedByHand = row.dynamics_price_ex_duty == null && row.dynamics_price_incl_duty == null
     const inputs = Object.freeze({
       discount_percent: resolved.inputs.discount_percent,
       fx_rate: await fxInput(row.currency),
       fx_margin_percent: notInFormula(resolved.inputs.fx_margin_percent, 'FX margin'),
       duty_percent: hasDuty
         ? resolved.inputs.duty_percent
-        : input(0, 'none', { reason: 'Dynamics charged no duty on this product.' }),
+        : pricedByHand
+          ? input(ASSUMED_DUTY_PERCENT, 'none', {
+              reason: `Dynamics priced this product by hand and states no duty; ${ASSUMED_DUTY_PERCENT}% assumed.`,
+            })
+          : input(0, 'none', { reason: 'Dynamics charged no duty on this product.' }),
       freight: resolved.inputs.freight,
       clearance_percent: resolved.inputs.clearance_percent,
       handling: notInFormula(resolved.inputs.handling, 'handling charge'),

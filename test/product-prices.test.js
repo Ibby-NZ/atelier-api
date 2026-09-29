@@ -393,6 +393,39 @@ describe('/admin/product-prices', () => {
       // (100 + 50) × 1.10 × 1.87
       expect(home.trade_sell).toBe(308.55)
     })
+
+    // 30 Sep 2026: Dynamics prices freight per letter (Fabricut A $30, B $3),
+    // and a rate the office sets per letter on the house page must reach here.
+    it('takes the house’s rate for the row’s freight letter, and its every-class rate for a letter it has none for', async () => {
+      await pool.query(
+        `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, unit, effective_from, freight_class)
+         VALUES ($1, NULL, 'dollar', 3, 'metre', '2020-01-01', 'B')`,
+        [houseName('madeaux')]
+      )
+      try {
+        const pricer = createProductPricer(pool)
+        const b = await pricer.price(ella({ freight_letter: 'B' }))
+        expect(b.inputs.freight).toMatchObject({ value: 3, source: 'freight-ledger', detail: { freight_class: 'B' } })
+        // (125.26 + 3) × 1.10 × 1.87
+        expect(b.trade_sell).toBe(263.84)
+        const a = await pricer.price(ella({ freight_letter: 'A' }))
+        expect(a.inputs.freight).toMatchObject({ value: 50, detail: { freight_class: null } })
+        expect(a.trade_sell).toBe(360.52)
+      } finally {
+        await pool.query(`DELETE FROM supplier_freight_rates WHERE range_name = $1 AND freight_class = 'B'`, [houseName('madeaux')])
+      }
+    })
+
+    // 30 Sep 2026: Alpaka and the other rows Dynamics priced by hand showed no
+    // duty; the office ruled 5% where Dynamics states none.
+    it('assumes 5% duty on a row Dynamics priced by hand, and keeps none where its two prices agree', async () => {
+      const pricer = createProductPricer(pool)
+      const byHand = await pricer.price(ella({ dynamics_price_ex_duty: null, dynamics_price_incl_duty: null }))
+      expect(byHand.inputs.duty_percent).toMatchObject({ value: 5, source: 'none' })
+      expect(byHand.inputs.duty_percent.detail.reason).toMatch(/by hand/)
+      expect(byHand.trade_sell).toBe(373.4)
+      expect((await pricer.price(ella())).inputs.duty_percent).toMatchObject({ value: 0, source: 'none' })
+    })
   })
 
   describe('the routes', () => {

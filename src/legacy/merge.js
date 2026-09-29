@@ -415,6 +415,10 @@ const landStock = async (pool, items) => {
        FROM unnest($1::text[], $2::int[], $3::int[]) AS s(sku, trade, retail)
        JOIN colourways c ON c.sku = s.sku
       WHERE p.id = c.product_id
+        -- A product built from a product-price row is priced by its range
+        -- (product-price-sync.js), never by Dynamics' stored figure: filling it
+        -- here is how D365 retail landed on price-catalogue products (28 Sep 2026).
+        AND p.product_price_id IS NULL
         AND ((p.trade_price_cents IS NULL AND s.trade IS NOT NULL)
           OR (p.retail_price_cents IS NULL AND s.retail IS NOT NULL))`,
     [skus, trade, retail]

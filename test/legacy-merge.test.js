@@ -310,6 +310,9 @@ describe('mergeLegacy against the database', () => {
 
     const summary = await mergeLegacy(pool, { createHouses: true })
     expect(summary.catalogue).toMatchObject({ skipped: CATALOGUE_FROM_PRICES, products: 0, colourways: 0 })
+    // Nor does it copy Dynamics' stored prices onto a product the ranges price.
+    expect(await ours('SELECT trade_price_cents, retail_price_cents FROM products WHERE id = $1', [product]))
+      .toEqual([{ trade_price_cents: null, retail_price_cents: null }])
     expect(await ours('SELECT id FROM products WHERE brand_id = $1', [house])).toEqual([{ id: product }])
     expect(await ours('SELECT qty_available::float AS qty FROM inventory WHERE colourway_id = $1', [colourway]))
       .toEqual([{ qty: 4 }])

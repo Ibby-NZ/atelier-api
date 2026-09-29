@@ -648,6 +648,40 @@ describe('/admin/product-prices', () => {
         .toMatchObject({ products_changing: 0 })
     })
 
+    it('replaces a price the cutover merge copied from Dynamics, and keeps one a person set', async () => {
+      const range = houseName('madeaux')
+      await upload('apply', productWorkbook([priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })]))
+      const { rows } = await pool.query(
+        `SELECT p.id FROM products p JOIN product_prices pp ON pp.id = p.product_price_id WHERE pp.guid = $1`, [guid(1)]
+      )
+      const id = rows[0].id
+      const setRetail = (cents, context) => withChangeContext(pool, context, (client) =>
+        client.query('UPDATE products SET retail_price_cents = $1 WHERE id = $2', [cents, id])
+      )
+      const retail = async () => (await pool.query('SELECT retail_price_cents FROM products WHERE id = $1', [id])).rows[0].retail_price_cents
+      await upsertBrandParameters(pool, madeauxId, {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, retail_markup_percent: 30, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      })
+
+      // What the deploy's merge did on live: Dynamics' stored retail onto a blank.
+      await setRetail(23851, { source: 'import', sourceFile: 'merge:legacy' })
+      const reupload = await upload('apply', productWorkbook([priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })]))
+      expect(reupload.json().catalogue.retail_filled).toBeGreaterThanOrEqual(1)
+      expect(await retail()).toBe(Math.round(360.5163 * 1.3 * 100))
+
+      // A price a person typed is theirs: kept, and reported.
+      await setRetail(50000, { source: 'manual', reason: 'agreed', userId: null })
+      const again = await upload('apply', productWorkbook([priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })]))
+      expect(await retail()).toBe(50000)
+      expect(again.json().catalogue.kept_count).toBeGreaterThanOrEqual(1)
+
+      await upsertBrandParameters(pool, madeauxId, {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      })
+    })
+
     it('re-prices a product when its wholesale rate is edited, keeps a price typed in the same save, and says why when it cannot', async () => {
       const range = houseName('madeaux')
       await upload('apply', productWorkbook([priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })]))

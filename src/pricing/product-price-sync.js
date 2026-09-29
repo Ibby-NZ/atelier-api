@@ -48,6 +48,8 @@ import { categoryForItemType } from '../../scripts/lib/price-template.js'
 const httpError = (statusCode, message) => Object.assign(new Error(message), { statusCode })
 
 export const MAX_REPORTED = 50
+/** The cutover merge's own change-source file (src/legacy/merge.js). */
+const MERGE_SOURCE = 'merge:legacy'
 
 const cents = (dollars) => (dollars == null ? null : Math.round(dollars * 100))
 const round4 = (value) => Math.round((Number(value) + Number.EPSILON) * 10000) / 10000
@@ -106,6 +108,24 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
     [productId]
   )
   const vocabulary = new Set(await categorySlugs(db))
+  // A price the cutover merge last set (Dynamics' stored figure, copied onto a
+  // blank) is nobody's decision, so it counts as blank here and the range's
+  // price replaces it; a price a person or an upload set is kept as before.
+  const { rows: mergeSet } = await db.query(
+    `SELECT h.product_id,
+            (h.retail_moved AND h.source = 'import' AND h.source_file = $1) AS retail,
+            (h.trade_moved AND h.source = 'import' AND h.source_file = $1) AS trade
+       FROM (
+         SELECT DISTINCT ON (product_id) product_id, source, source_file,
+                new_retail_price_cents IS DISTINCT FROM old_retail_price_cents AS retail_moved,
+                new_trade_price_cents IS DISTINCT FROM old_trade_price_cents AS trade_moved
+           FROM product_price_history
+          WHERE product_id = ANY($2::int[])
+          ORDER BY product_id, changed_at DESC, id DESC
+       ) h`,
+    [MERGE_SOURCE, products.map((product) => product.id)]
+  )
+  const setByMerge = new Map(mergeSet.map((row) => [row.product_id, row]))
 
   const changes = []
   const report = { matched: 0, ambiguous: [], unpriced: [], currency_mismatch: [], kept: [] }
@@ -130,10 +150,11 @@ export const planProductSync = async (db, { overwrite = false, productPriceId = 
       report.unpriced.push({ product_id: product.id, product: product.name, why: pricing.reason ?? `${pricing.missing.join(', ')} not set` })
     }
 
+    const merged = setByMerge.get(product.id)
     const trade = { from: product.trade_price_cents, to: cents(pricing.trade_sell) }
-    trade.action = decide(trade.from, trade.to, overwrite)
+    trade.action = decide(merged?.trade ? null : trade.from, trade.to, overwrite)
     const retail = { from: product.retail_price_cents, to: cents(pricing.retail_sell) }
-    retail.action = decide(retail.from, retail.to, overwrite)
+    retail.action = decide(merged?.retail ? null : retail.from, retail.to, overwrite)
 
     let wholesale = null
     if (product.currency === row.currency) {

@@ -627,6 +627,41 @@ describe('/admin/product-prices', () => {
       expect((await inject('GET', '/admin/product-prices/999999999')).statusCode).toBe(404)
     })
 
+    // 1 Oct 2026, Armani Casa 4741: two rows share the code, the upload built
+    // "SETA FIAMMATA 4741 (1)" and "(2)", and an archived "SETA FIAMMATA" sat
+    // under the house. Both pages matched by name and showed the wrong record.
+    it('links a row and its product both ways by the link the upload made, not by name', async () => {
+      const range = houseName('madeaux')
+      await upload('apply', productWorkbook([
+        priceRow(1, { code: '4741', description: 'SETA FIAMMATA', range, wholesale: 80.11, exDuty: 210.82, trade: 433.5 }),
+        priceRow(2, { code: '4741', description: 'SETA FIAMMATA', range, wholesale: 72.83, exDuty: 191.66, trade: 400.58 }),
+      ]))
+      const archived = await withChangeContext(pool, { source: 'import', sourceFile: 'fixture' }, (client) =>
+        client
+          .query(
+            `INSERT INTO products (brand_id, name, slug, product_type, currency, archived_at)
+             VALUES ($1, 'SETA FIAMMATA', $2, 'fabric', 'GBP', now()) RETURNING id`,
+            [madeauxId, `${PREFIX}-seta-archived`]
+          )
+          .then(({ rows }) => rows[0].id)
+      )
+      const { rows: linked } = await pool.query(
+        `SELECT p.id, p.name, pp.id AS price_id FROM products p JOIN product_prices pp ON pp.id = p.product_price_id
+          WHERE pp.guid = ANY($1::uuid[]) ORDER BY pp.guid`,
+        [[guid(1), guid(2)]]
+      )
+      expect(linked).toHaveLength(2)
+
+      for (const { id, name, price_id: priceId } of linked) {
+        const detail = (await inject('GET', `/admin/product-prices/${priceId}`)).json().product_price
+        expect(detail.catalogue_products).toEqual([expect.objectContaining({ id, name })])
+        const panel = (await inject('GET', `/admin/product-prices?product_id=${id}`)).json()
+        expect(panel.product_prices.map((row) => row.id)).toEqual([priceId])
+      }
+      expect(linked.map(({ id }) => id)).not.toContain(archived)
+      expect((await inject('GET', '/admin/product-prices?product_id=999999999')).statusCode).toBe(404)
+    })
+
     it('writes the range price onto the catalogue product — fill-only on import, replaced only when asked, every move in the price history', async () => {
       const range = houseName('madeaux')
       // A priced insert is a price move, so it is declared like any other.

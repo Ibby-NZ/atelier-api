@@ -578,6 +578,46 @@ describe('pricing-parameter backfill from the Dynamics export', () => {
     expect(plan.reports.rangesWithoutBrand.map((r) => r.range)).toContain(`${PREFIX} NOBODY`)
   })
 
+  // 30 Sep 2026: Dynamics charged freight per range × letter from a table no
+  // export carries; its archived prices say what each letter paid.
+  it('fills a freight class per letter from what Dynamics’ prices paid, where most of them agree', () => {
+    const sources = {
+      parameters: [range('FABRICUT', { freight_per_unit: 23 })],
+      brands: [{ id: 1, name: 'Fabricut', slug: 'fabricut', supplier_id: 7 }],
+      freight: [{ range_name: 'Fabricut', basis: 'dollar', rate: 23, unit: 'yard', effective_from: '2026-01-01', freight_class: null }],
+      classRates: [{ range_name: 'Fabricut', freight_class: 'C', basis: 'dollar', rate: 4, unit: 'yard', effective_from: '2026-01-01' }],
+      letterFreights: [
+        { range_name: 'FABRICUT', letter: 'A', rate: 30, rows: 1500 },
+        { range_name: 'FABRICUT', letter: 'A', rate: 26, rows: 10 },
+        { range_name: 'FABRICUT', letter: 'B', rate: 3, rows: 204 },
+        { range_name: 'FABRICUT', letter: 'C', rate: 5, rows: 262 },
+        // The every-class rate already charges it: no class needed.
+        { range_name: 'FABRICUT', letter: 'D', rate: 23, rows: 40 },
+        // Typed prices: no majority.
+        { range_name: 'FABRICUT', letter: 'E', rate: 13, rows: 3 },
+        { range_name: 'FABRICUT', letter: 'E', rate: 40, rows: 3 },
+      ],
+    }
+    const classesOf = (plan) =>
+      plan.freightInserts.filter((row) => row.freight_class).map(({ freight_class: letter, rate, unit }) => ({ letter, rate, unit }))
+
+    const plan = planParametersBackfill(sources, { on: '2026-09-30' })
+    expect(classesOf(plan)).toEqual([
+      { letter: 'A', rate: 30, unit: 'yard' },
+      { letter: 'B', rate: 3, unit: 'yard' },
+    ])
+    expect(plan.changes.filter((line) => line.field.startsWith('freight_class_'))).toEqual([
+      expect.objectContaining({ field: 'freight_class_A', from: null, to: 30, kind: 'fill', unit: 'yard' }),
+      expect.objectContaining({ field: 'freight_class_B', from: null, to: 3, kind: 'fill' }),
+      expect.objectContaining({ field: 'freight_class_C', from: 4, to: 5, kind: 'kept' }),
+    ])
+    expect(plan.reports.freightClassUnclear).toEqual([expect.objectContaining({ brand: 'Fabricut', letter: 'E', rows: 6 })])
+
+    // A class the house already has is re-dated only when asked.
+    const replaced = planParametersBackfill(sources, { on: '2026-09-30', overwrite: true })
+    expect(classesOf(replaced)).toContainEqual({ letter: 'C', rate: 5, unit: 'yard' })
+  })
+
   it('applies: creates the sets, fills only what was blank, writes the discount, leaves existing terms alone', async () => {
     const summary = await backfillPricingParameters(pool, { rangeParameters: rangeParameters() })
     expect(summary).toMatchObject({ parameters_inserted: 3, parameters_filled: 1, terms_inserted: 2 })

@@ -50,6 +50,7 @@ const loadLinesByOrderId = async (pool, orderIds) => {
             p.name AS product_name,
             p.slug,
             p.product_type,
+            p.sell_retail,
             p.lead_time,
             b.name AS brand_name
        FROM order_lines ol
@@ -67,6 +68,9 @@ const loadLinesByOrderId = async (pool, orderIds) => {
       product_name: row.product_name,
       slug: row.slug,
       product_type: row.product_type,
+      // Whether the cart sells it today (1 Oct 2026): the store's Reorder
+      // refills the cart with it, else the quote request.
+      sell_retail: row.sell_retail === true,
       brand_name: row.brand_name,
       colourway_name: row.colourway_name,
       lead_time: row.lead_time,

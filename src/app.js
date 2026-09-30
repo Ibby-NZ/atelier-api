@@ -18,6 +18,7 @@ import { adminPriceListRoutes } from './routes/admin-price-lists.js'
 import { adminPriceListImportRoutes } from './routes/admin-price-list-import.js'
 import { adminSupplierRoutes } from './routes/admin-suppliers.js'
 import { adminProductSheetRoutes } from './routes/admin-product-sheet.js'
+import { adminMediaRoutes } from './routes/admin-media.js'
 import { adminSupplierColourRoutes } from './routes/admin-supplier-colours.js'
 import { adminStockLevelRoutes } from './routes/admin-stock-levels.js'
 import { adminFreightRoutes } from './routes/admin-freight.js'
@@ -63,6 +64,10 @@ export const buildApp = ({
   newsletter = null,
   // The fetch Mailchimp is called through; tests inject a fake.
   newsletterFetch = fetch,
+  // EmDash config for image upload (src/config.js `media`). null = POST
+  // /admin/media answers 503 and the CRM's image fields fall back to a link.
+  media = null,
+  mediaFetch = fetch,
   // The Xero service (src/xero/service.js). null = not configured; the
   // /admin/xero routes answer 503, same posture as checkout without Stripe.
   xero = null,
@@ -210,6 +215,9 @@ export const buildApp = ({
     // /admin/product-sheet/* — the spreadsheet round trip that fills in
     // products.category. Backoffice-only; the export is a CSV download.
     api.register(adminProductSheetRoutes, { pool })
+    // POST /admin/media — the CRM's image fields, handed on to EmDash. Its own
+    // plugin scope for the raw image parser.
+    api.register(adminMediaRoutes, { media, storeBaseUrl, fetchImpl: mediaFetch })
     // /admin/catalogue/colours/import/* — the Supplier Colours workbook landed
     // as designs + colourways through the existing colourway import. Director
     // only (a bulk catalogue write); its own plugin for the workbook parser.

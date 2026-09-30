@@ -37,3 +37,18 @@ describe('loadConfig: mail', () => {
     expect(loadConfig({ ...BASE, EMAIL_REDIRECT_TO: '' }).emailRedirectTo).toBeNull()
   })
 })
+
+describe('loadConfig: media', () => {
+  it('is null until both EMDASH_URL and EMDASH_TOKEN are set', () => {
+    expect(loadConfig({ ...BASE }).media).toBeNull()
+    expect(loadConfig({ ...BASE, EMDASH_URL: 'http://127.0.0.1:4321' }).media).toBeNull()
+    expect(loadConfig({ ...BASE, EMDASH_TOKEN: 'ec_x' }).media).toBeNull()
+  })
+
+  it('drops a trailing slash from EMDASH_URL', () => {
+    expect(loadConfig({ ...BASE, EMDASH_URL: 'http://127.0.0.1:4321/', EMDASH_TOKEN: 'ec_x' }).media).toEqual({
+      emdashUrl: 'http://127.0.0.1:4321',
+      token: 'ec_x',
+    })
+  })
+})

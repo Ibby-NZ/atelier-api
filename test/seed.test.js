@@ -352,6 +352,31 @@ describe('catalogue seed import', () => {
     expect(rows[0].website_url).toBe('https://staff-entered.example.com')
   })
 
+  it('keeps an image the office uploaded in the CRM across a reseed', async () => {
+    const UPLOADED = 'https://store.example.com/_emdash/api/media/file/01UPLOAD.jpg'
+    const targets = [
+      ['collections', 'image_url', `slug = 'pierre-frey-cappuccino'`],
+      ['colourways', 'image_url', `sku = 'LAR-WRT-03'`],
+      ['products', 'hi_res_asset_url', `id = (SELECT product_id FROM colourways WHERE sku = 'LAR-WRT-03')`],
+    ]
+    const read = async ([table, column, where]) =>
+      (await pool.query(`SELECT ${column} AS url FROM ${table} WHERE ${where}`)).rows.map((r) => r.url)
+    const before = await Promise.all(targets.map(read))
+    try {
+      for (const [table, column, where] of targets) {
+        await pool.query(`UPDATE ${table} SET ${column} = $1 WHERE ${where}`, [UPLOADED])
+      }
+      await runSeed(pool)
+      for (const target of targets) {
+        expect(await read(target)).toEqual([UPLOADED])
+      }
+    } finally {
+      for (const [index, [table, column, where]] of targets.entries()) {
+        await pool.query(`UPDATE ${table} SET ${column} = $1 WHERE ${where}`, [before[index][0]])
+      }
+    }
+  })
+
   it('opens the house workroom to the public and closes every represented maison', async () => {
     const { rows } = await pool.query(
       `SELECT slug FROM brands WHERE trade_only = false ORDER BY slug`

@@ -221,6 +221,15 @@ export const loadConfig = (env = process.env) => {
             audienceId: env.MAILCHIMP_AUDIENCE_ID,
           }
         : null,
+    // Image upload (POST /admin/media) hands the file to EmDash, the
+    // storefront's media library. EMDASH_URL is its INTERNAL address (same host:
+    // http://127.0.0.1:4321, which also skips the staging Basic Auth);
+    // EMDASH_TOKEN is an EmDash API token with media read + upload. null until
+    // both are set; the route answers 503 and the CRM offers "paste a link".
+    media:
+      env.EMDASH_URL && env.EMDASH_TOKEN
+        ? { emdashUrl: env.EMDASH_URL.replace(/\/+$/, ''), token: env.EMDASH_TOKEN }
+        : null,
     port: Number(env.PORT ?? DEFAULT_PORT),
     host: env.HOST ?? DEFAULT_HOST,
     logLevel: env.LOG_LEVEL ?? DEFAULT_LOG_LEVEL,

@@ -67,14 +67,16 @@ const upsertCollections = async (client, rows, brandIds) => {
     const brandId = requireBrandId(brandIds, row.brand_name, `collection "${row.name}"`)
     // Editorial refreshes on reseed like the rest of the catalogue (DO UPDATE);
     // staff edits made in the CRM between reseeds are snapshot corrections, not
-    // operational data like inventory, so freshest-vendored wins.
+    // operational data like inventory, so freshest-vendored wins — except the
+    // image, which the CRM now uploads (POST /admin/media) and a reseed keeps.
     await client.query(
       `INSERT INTO collections (brand_id, name, slug, description, image_url)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (brand_id, slug) DO UPDATE SET
          name = EXCLUDED.name,
          description = EXCLUDED.description,
-         image_url = EXCLUDED.image_url`,
+         -- Fills a blank only: an image the office set in the CRM is kept.
+         image_url = COALESCE(collections.image_url, EXCLUDED.image_url)`,
       [brandId, row.name, row.slug, row.description, row.image_url]
     )
   }
@@ -89,7 +91,7 @@ const upsertColourway = async (client, productId, colourway) => {
        product_id = EXCLUDED.product_id,
        name = EXCLUDED.name,
        hex_tones = EXCLUDED.hex_tones,
-       image_url = EXCLUDED.image_url
+       image_url = COALESCE(colourways.image_url, EXCLUDED.image_url)
      RETURNING id`,
     [
       productId,
@@ -135,7 +137,7 @@ const upsertProducts = async (client, rows, brandIds) => {
          trade_price_cents = EXCLUDED.trade_price_cents,
          currency = EXCLUDED.currency,
          show_on_website = EXCLUDED.show_on_website,
-         hi_res_asset_url = EXCLUDED.hi_res_asset_url
+         hi_res_asset_url = COALESCE(products.hi_res_asset_url, EXCLUDED.hi_res_asset_url)
        RETURNING id`,
       [
         brandId,

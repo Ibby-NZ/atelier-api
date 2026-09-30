@@ -77,6 +77,7 @@ const start = async () => {
     tradeAccountsEmail: config.tradeAccountsEmail,
     mailer,
     newsletter: config.newsletter,
+    media: config.media,
     tradePriceListsEnabled: config.tradePriceListsEnabled,
     logLevel: config.logLevel,
     trustProxy: config.trustProxy,

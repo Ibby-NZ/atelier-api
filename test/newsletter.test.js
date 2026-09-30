@@ -78,12 +78,21 @@ describe('POST /newsletter', () => {
     expect(fetched.calls[0].url).toBe(memberRequest(CONFIG, 'ada@example.com').url)
   })
 
-  it('502 with a printable sentence when Mailchimp refuses', async () => {
+  // 503, not 502: the Cloudflare/RunCloud proxy in front of production swaps
+  // an origin 502 for its own plain-text page without CORS headers, and the
+  // footer then says "could not reach the store service" instead of this.
+  it('503 with a printable sentence when Mailchimp refuses', async () => {
     const refused = fakeFetch(400, { title: 'Invalid Resource', detail: 'looks fake' })
     const app = await build({ newsletter: CONFIG, fetchImpl: refused.impl })
     const res = await post(app, { email: 'ada@example.com' })
-    expect(res.statusCode).toBe(502)
+    expect(res.statusCode).toBe(503)
     expect(res.json().message).toMatch(/try again/)
+  })
+
+  it('gives Mailchimp a timeout so a hung call cannot hang the footer', async () => {
+    const app = await build({ newsletter: CONFIG, fetchImpl: fetched.impl })
+    await post(app, { email: 'ada@example.com' })
+    expect(fetched.calls[0].init.signal).toBeInstanceOf(AbortSignal)
   })
 
   it('400 on an unknown key or a missing email (schema)', async () => {

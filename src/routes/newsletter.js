@@ -9,7 +9,7 @@
 // never sees the field, a form-filling bot fills it. A non-empty value answers
 // 202 and calls nobody — the bot is told "ok" and learns nothing.
 
-import { subscribe, NEWSLETTER_MESSAGES } from '../newsletter/mailchimp.js'
+import { subscribe, NEWSLETTER_MESSAGES, SIGN_UP_TIMEOUT_MS } from '../newsletter/mailchimp.js'
 
 const NEWSLETTER_RATE_LIMIT = Object.freeze({ max: 10, timeWindow: 15 * 60 * 1000 })
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
@@ -50,13 +50,17 @@ export const newsletterRoutes = async (app, { newsletter = null, fetchImpl = fet
       }
 
       try {
-        const { status } = await subscribe(newsletter, email, { fetchImpl })
+        const signal = AbortSignal.timeout(SIGN_UP_TIMEOUT_MS)
+        const { status } = await subscribe(newsletter, email, { fetchImpl, signal })
         reply.code(202)
         return { ok: true, status }
       } catch (error) {
         request.log.error({ err: error }, 'newsletter: Mailchimp refused the sign-up')
-        reply.code(502)
-        return { error: 'Bad Gateway', message: NEWSLETTER_MESSAGES.FAILED }
+        // 503, not 502: the proxy in front of production replaces an origin
+        // 502 with its own page (no CORS headers), so the footer would print
+        // "could not reach the store service" instead of this sentence.
+        reply.code(503)
+        return { error: 'Service Unavailable', message: NEWSLETTER_MESSAGES.FAILED }
       }
     }
   )

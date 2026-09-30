@@ -64,14 +64,14 @@ export const subscribe = async (config, email, { fetchImpl = fetch, signal } = {
   return { status: body.status }
 }
 
-// Long enough for a slow Mailchimp, short enough that an applicant is never
-// left watching a spinner for it.
-const SIDE_SIGN_UP_TIMEOUT_MS = 5000
+// Long enough for a slow Mailchimp, short enough that an applicant (or the
+// footer form) is never left watching a spinner for it.
+export const SIGN_UP_TIMEOUT_MS = 5000
 
 /**
  * subscribe() as a side effect of something else that has already succeeded —
  * the trade form's opt-in, after the account and form are committed. Never
- * throws and never waits past SIDE_SIGN_UP_TIMEOUT_MS: unconfigured is a no-op,
+ * throws and never waits past SIGN_UP_TIMEOUT_MS: unconfigured is a no-op,
  * a refusal or timeout is logged and swallowed, because the application must
  * not fail over its newsletter box.
  *
@@ -83,7 +83,7 @@ const SIDE_SIGN_UP_TIMEOUT_MS = 5000
 export const subscribeQuietly = async (config, email, { fetchImpl = fetch, log } = {}) => {
   if (!config) return null
   try {
-    const signal = AbortSignal.timeout(SIDE_SIGN_UP_TIMEOUT_MS)
+    const signal = AbortSignal.timeout(SIGN_UP_TIMEOUT_MS)
     const { status } = await subscribe(config, email, { fetchImpl, signal })
     return status
   } catch (error) {

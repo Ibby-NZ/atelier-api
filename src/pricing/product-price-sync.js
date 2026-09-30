@@ -27,6 +27,12 @@
 //                      converted
 //   category           from the export's Type (Fabrics → fabric), where the
 //                      product has none and the word is in the vocabulary
+//   freight_class      the row's Dynamics freight letter (A–E), where the
+//                      product has none (1 Oct 2026)
+//
+// Each product is priced at ITS OWN class letters — its freight class (else
+// the row's letter) and its discount class — so a letter the office chose on
+// the product is the one its price is made at.
 //
 // WHEN. Every product-prices upload, and every pricing save that moves a range
 // figure (src/routes/admin-pricing.js — the house page, /pricing, an exchange
@@ -115,7 +121,8 @@ export const planProductSync = async (
   const rowById = new Map(priceRows.map((row) => [row.id, row]))
   const { rows: products } = await db.query(
     `SELECT p.id, p.name, p.slug, p.brand_id, b.name AS house, p.currency, p.category,
-            p.trade_price_cents, p.retail_price_cents, p.wholesale_rate, p.product_price_id
+            p.trade_price_cents, p.retail_price_cents, p.wholesale_rate, p.product_price_id,
+            p.discount_class, p.freight_class
        FROM products p JOIN brands b ON b.id = p.brand_id
       WHERE p.archived_at IS NULL AND ($1::int IS NULL OR p.id = $1::int)
         AND ($2::int[] IS NULL OR p.brand_id = ANY($2::int[]))
@@ -152,7 +159,8 @@ export const planProductSync = async (
     if (!matches) continue
     report.matched += 1
     const priced = []
-    for (const row of matches) priced.push({ row, pricing: await pricer.price(row) })
+    const classes = { freightClass: product.freight_class ?? null, discountClass: product.discount_class ?? null }
+    for (const row of matches) priced.push({ row, pricing: await pricer.price(row, classes) })
     const sells = new Set(priced.map(({ pricing }) => pricing.trade_sell))
     if (sells.size > 1) {
       report.ambiguous.push({ product_id: product.id, product: product.name, rows: priced.map(({ row }) => row.code) })
@@ -190,9 +198,11 @@ export const planProductSync = async (
 
     const category = categoryForItemType(row.item_type)
     const categoryFill = product.category == null && category && vocabulary.has(category) ? category : null
+    const letter = typeof row.freight_letter === 'string' ? row.freight_letter.trim().toUpperCase() : ''
+    const freightClassFill = product.freight_class == null && /^[A-E]$/.test(letter) ? letter : null
 
     const moves = (field) => ['fill', 'replace'].includes(field?.action)
-    const writes = moves(trade) || moves(retail) || moves(wholesale) || categoryFill
+    const writes = moves(trade) || moves(retail) || moves(wholesale) || categoryFill || freightClassFill
     if (trade.action === 'kept' || retail.action === 'kept' || wholesale?.action === 'kept') {
       report.kept.push({
         product_id: product.id,
@@ -213,6 +223,7 @@ export const planProductSync = async (
         retail,
         wholesale,
         category: categoryFill,
+        freight_class: freightClassFill,
       })
     )
   }
@@ -229,6 +240,7 @@ export const planProductSync = async (
     wholesale_filled: count('wholesale', 'fill'),
     wholesale_replaced: count('wholesale', 'replace'),
     category_filled: changes.filter((change) => change.category).length,
+    freight_class_filled: changes.filter((change) => change.freight_class).length,
     kept_count: report.kept.length,
     kept: Object.freeze(report.kept.slice(0, MAX_REPORTED)),
     ambiguous_count: report.ambiguous.length,
@@ -272,9 +284,10 @@ export const applyProductSync = async (
             SET trade_price_cents = COALESCE(s.trade, p.trade_price_cents),
                 retail_price_cents = COALESCE(s.retail, p.retail_price_cents),
                 wholesale_rate = COALESCE(s.wholesale, p.wholesale_rate),
-                category = COALESCE(p.category, s.category)
-           FROM unnest($1::int[], $2::int[], $3::numeric[], $4::text[], $5::int[])
-             AS s(id, trade, wholesale, category, retail)
+                category = COALESCE(p.category, s.category),
+                freight_class = COALESCE(p.freight_class, s.freight_class)
+           FROM unnest($1::int[], $2::int[], $3::numeric[], $4::text[], $5::int[], $6::text[])
+             AS s(id, trade, wholesale, category, retail, freight_class)
           WHERE p.id = s.id`,
         [
           writes.map((change) => change.product_id),
@@ -282,6 +295,7 @@ export const applyProductSync = async (
           writes.map((change) => set(change, 'wholesale')),
           writes.map((change) => change.category),
           writes.map((change) => set(change, 'retail')),
+          writes.map((change) => change.freight_class ?? null),
         ]
       )
     }

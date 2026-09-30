@@ -168,13 +168,13 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
 
   // Duty is resolved at class A (the only letter the corpus has ever used) and
   // replaced for a row without one, so a house is resolved once per category
-  // and freight letter rather than once per duty class as well.
-  const resolve = async (house, category, freightClass) => {
-    const key = `${house.id}\u0000${category ?? ''}\u0000${freightClass ?? ''}`
+  // and class letters rather than once per duty class as well.
+  const resolve = async (house, category, freightClass, discountClass) => {
+    const key = `${house.id}\u0000${category ?? ''}\u0000${freightClass ?? ''}\u0000${discountClass ?? ''}`
     if (!resolutions.has(key)) {
       resolutions.set(
         key,
-        resolveWaterfallInputs(db, { brandId: house.id, category, dutyClass: 'A', freightClass }).catch((error) => {
+        resolveWaterfallInputs(db, { brandId: house.id, category, dutyClass: 'A', freightClass, discountClass }).catch((error) => {
           if (!error.statusCode || error.statusCode >= 500) throw error
           return { error: error.message }
         })
@@ -196,8 +196,11 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
    * step it could not reach as null.
    *
    * @param {object} row a product_prices row (or an import row of the same shape)
+   * @param {{ freightClass?: string|null, discountClass?: string|null }} [classes]
+   *   the letters a catalogue product (or variation) chose, over the row's own
+   *   Dynamics freight letter and the house's default discount class
    */
-  const price = async (row) => {
+  const price = async (row, classes = {}) => {
     const dynamics = Object.freeze({
       price_ex_duty: numeric(row.dynamics_price_ex_duty),
       price_incl_duty: numeric(row.dynamics_price_incl_duty),
@@ -225,8 +228,9 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
     }
 
     const category = categoryForItemType(row.item_type)
-    const letter = typeof row.freight_letter === 'string' ? row.freight_letter.trim().toUpperCase() : ''
-    const resolved = await resolve(house, category, /^[A-Z]$/.test(letter) ? letter : null)
+    const rowLetter = typeof row.freight_letter === 'string' ? row.freight_letter.trim().toUpperCase() : ''
+    const letter = classes.freightClass ?? (/^[A-Z]$/.test(rowLetter) ? rowLetter : null)
+    const resolved = await resolve(house, category, letter, classes.discountClass ?? null)
     if (resolved.error) {
       return Object.freeze({
         status: 'incomplete',
@@ -454,10 +458,17 @@ const escapeLike = (value) => value.replace(/[\\%_]/g, (match) => `\\${match}`)
 export const listProductPrices = async (db, rawFilters = {}) => {
   const latest = await latestProductPriceImport(db)
   let filters = rawFilters
+  // A product's rows are priced at the product's own class letters, so the
+  // panel on its page shows the price the product is made at.
+  let classes = {}
   if (rawFilters.product_id) {
-    const { rows } = await db.query(`SELECT brand_id, name, product_price_id FROM products WHERE id = $1`, [rawFilters.product_id])
+    const { rows } = await db.query(
+      `SELECT brand_id, name, product_price_id, discount_class, freight_class FROM products WHERE id = $1`,
+      [rawFilters.product_id]
+    )
     if (rows.length === 0) throw httpError(404, 'That product does not exist.')
     const [product] = rows
+    classes = { discountClass: product.discount_class, freightClass: product.freight_class }
     filters = product.product_price_id != null
       ? { ...rawFilters, id: product.product_price_id, include_previous: true }
       : { ...rawFilters, brand_id: product.brand_id, design: product.name }
@@ -516,7 +527,7 @@ export const listProductPrices = async (db, rawFilters = {}) => {
   const items = []
   for (const row of rows) {
     const product = toRow(row, latest?.id ?? null)
-    items.push(Object.freeze({ ...product, pricing: summarise(await pricer.price(product)) }))
+    items.push(Object.freeze({ ...product, pricing: summarise(await pricer.price(product, classes)) }))
   }
   return Object.freeze({
     product_prices: Object.freeze(items),

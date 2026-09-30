@@ -1,7 +1,7 @@
 // /admin/pricing/* — the platform's own pricing waterfall and the parameters
 // behind it (src/pricing/pricing-parameters.js).
 //
-//   GET    /admin/pricing/waterfall?brand_id&wholesale_rate[&category&duty_class&freight_class&on]
+//   GET    /admin/pricing/waterfall?brand_id&wholesale_rate[&category&duty_class&freight_class&discount_class&on]
 //   GET    /admin/pricing/parameters/suppliers/:id      the supplier's default set
 //   PUT    /admin/pricing/parameters/suppliers/:id      replace it (PUT, not PATCH — see module)
 //   DELETE /admin/pricing/parameters/suppliers/:id
@@ -118,17 +118,20 @@ const HOUSE_PRICING_BODY = {
     },
     // The house's discount classes as a whole set (PUT): an entry with an `id`
     // is that class kept or edited, one without is new, and a class left out
-    // is removed. Absent leaves the classes alone.
+    // is removed. Absent leaves the classes alone. Each carries its letter
+    // (A–E, what a product or variation chooses) and/or a name; a class with
+    // only a letter is named after it.
     discount_classes: {
       type: 'array',
       maxItems: 50,
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['label', 'percent'],
+        required: ['percent'],
         properties: {
           id: { type: 'integer', minimum: 1 },
-          label: { type: 'string', minLength: 1, maxLength: 120 },
+          label: { type: ['string', 'null'], maxLength: 120 },
+          discount_class: { type: ['string', 'null'], pattern: '^[A-Ea-e]$' },
           percent: { type: 'number', minimum: 0, exclusiveMaximum: 100 },
           is_default: { type: 'boolean' },
         },
@@ -191,6 +194,9 @@ export const adminPricingRoutes = async (app, { pool }) => {
             // absent), and the product whose chosen discount tier applies.
             supplier_id: { type: 'integer', minimum: 1 },
             product_id: { type: 'integer', minimum: 1 },
+            // One of the product's variations: its own class letters, else the
+            // product's (1 Oct 2026).
+            colourway_id: { type: 'integer', minimum: 1 },
             // Free text: a terms tier is matched against it case-insensitively,
             // and the freight ledger's category enum is checked by the resolver.
             category: { type: 'string', maxLength: 40 },
@@ -198,6 +204,8 @@ export const adminPricingRoutes = async (app, { pool }) => {
             // The line's freight letter: the house's rate for it wins over the
             // house's every-class rate.
             freight_class: { type: 'string', pattern: '^[A-Za-z]$' },
+            // The house's discount class to price at, by letter (A–E).
+            discount_class: { type: 'string', pattern: '^[A-Ea-e]$' },
             on: { type: 'string', pattern: ISO_DAY },
             // What-if values for this preview only (the screen's Manual mode).
             // They stand in for the resolved input, source `manual`, and
@@ -210,7 +218,7 @@ export const adminPricingRoutes = async (app, { pool }) => {
       },
     },
     async (request) => {
-      const { brand_id, wholesale_rate, supplier_id, product_id, category, duty_class, freight_class, on, ...rest } =
+      const { brand_id, wholesale_rate, supplier_id, product_id, colourway_id, category, duty_class, freight_class, discount_class, on, ...rest } =
         request.query
       const overrides = Object.fromEntries(
         OVERRIDABLE_INPUTS.filter((key) => rest[key] !== undefined).map((key) => [key, rest[key]])
@@ -220,9 +228,11 @@ export const adminPricingRoutes = async (app, { pool }) => {
         wholesaleRate: wholesale_rate,
         supplierId: supplier_id ?? null,
         productId: product_id ?? null,
+        colourwayId: colourway_id ?? null,
         category: category ?? null,
         dutyClass: duty_class ?? null,
         freightClass: freight_class ? freight_class.toUpperCase() : null,
+        discountClass: discount_class ? discount_class.toUpperCase() : null,
         on: on ?? null,
         overrides,
       })

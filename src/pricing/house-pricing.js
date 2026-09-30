@@ -57,7 +57,6 @@ import {
   updateSupplierBrandTerms,
   updateSupplierDiscountTier,
 } from '../suppliers/supplier-terms.js'
-import { countProductsByTier } from '../suppliers/product-tiers.js'
 import { supplierForBrand } from '../suppliers/brand-suppliers.js'
 
 const httpError = (statusCode, message) =>
@@ -128,6 +127,28 @@ export const houseFreightClassLines = async (db, brandId) => {
   return rows.map((row) => Object.freeze({ freight_class: row.freight_class, lines: row.lines }))
 }
 
+/**
+ * How many of a house's products and variations chose each discount-class
+ * letter — a variation counts only where it states its own. The house page
+ * says so before a class is removed or loses its letter.
+ *
+ * @param {{ query: Function }} db
+ * @param {number} brandId
+ * @returns {Promise<Map<string, number>>} letter -> products + variations
+ */
+export const countByDiscountClass = async (db, brandId) => {
+  const { rows } = await db.query(
+    `SELECT letter, count(*)::int AS n FROM (
+       SELECT discount_class AS letter FROM products WHERE brand_id = $1 AND discount_class IS NOT NULL
+       UNION ALL
+       SELECT c.discount_class FROM colourways c JOIN products p ON p.id = c.product_id
+        WHERE p.brand_id = $1 AND c.discount_class IS NOT NULL
+     ) chosen GROUP BY letter`,
+    [brandId]
+  )
+  return new Map(rows.map((row) => [row.letter, row.n]))
+}
+
 const describeClasses = (terms, productCounts) =>
   Object.freeze(
     (terms?.tiers ?? []).map((tier) =>
@@ -136,12 +157,14 @@ const describeClasses = (terms, productCounts) =>
         label: tier.label,
         percent: fractionToPercent(tier.pct),
         is_default: tier.is_fallback,
-        // A class whose label is no category is chosen only by a product
-        // picking it; the page says so.
+        // The letter products and variations choose it by (A–E).
+        discount_class: tier.discount_class ?? null,
+        // A class whose label is no category is chosen only by its letter; the
+        // page says so.
         matches_category: tier.matches_category,
-        // How many products chose this class — they fall back to category
-        // matching if it is removed.
-        products: productCounts.get(tier.id) ?? 0,
+        // How many products and variations chose its letter — they fall back
+        // to category matching and the default if it is removed.
+        products: tier.discount_class ? (productCounts.get(tier.discount_class) ?? 0) : 0,
       })
     )
   )
@@ -210,7 +233,7 @@ export const getHousePricing = async (db, brandId) => {
   const [classRates, classLines, productCounts] = [
     await currentClassRates(db, { range_name: house.name }),
     await houseFreightClassLines(db, house.id),
-    await countProductsByTier(db, (terms?.tiers ?? []).map((tier) => tier.id)),
+    await countByDiscountClass(db, house.id),
   ]
 
   return Object.freeze({
@@ -264,13 +287,26 @@ const writeDiscount = async (db, house, percent) => {
  * (one label per terms row, one default): removals first, then the default
  * cleared where it moves, then edits, then new classes.
  */
-const writeDiscountClasses = async (db, house, classes) => {
+const writeDiscountClasses = async (db, house, rawClasses) => {
+  // A class with only a letter is named after it ("B").
+  const classes = rawClasses.map((entry) => {
+    const letter = typeof entry.discount_class === 'string' && entry.discount_class.trim() !== ''
+      ? entry.discount_class.trim().toUpperCase()
+      : null
+    const label = typeof entry.label === 'string' && entry.label.trim() !== '' ? entry.label.trim() : letter ?? ''
+    return { ...entry, label, discount_class: letter }
+  })
   const labels = new Set()
+  const letters = new Set()
   for (const entry of classes) {
-    const key = entry.label.trim().toLowerCase()
-    if (key === '') throw httpError(422, 'A discount class needs a name.')
-    if (labels.has(key)) throw httpError(422, `Two discount classes are called "${entry.label.trim()}".`)
+    const key = entry.label.toLowerCase()
+    if (key === '') throw httpError(422, 'A discount class needs a letter or a name.')
+    if (labels.has(key)) throw httpError(422, `Two discount classes are called "${entry.label}".`)
     labels.add(key)
+    if (entry.discount_class && letters.has(entry.discount_class)) {
+      throw httpError(422, `Two discount classes are class ${entry.discount_class}.`)
+    }
+    if (entry.discount_class) letters.add(entry.discount_class)
   }
   if (classes.filter((entry) => entry.is_default).length > 1) {
     throw httpError(422, 'Only one discount class can be the default.')
@@ -303,16 +339,21 @@ const writeDiscountClasses = async (db, house, classes) => {
     if (tier?.is_fallback && !entry.is_default) {
       await updateSupplierDiscountTier(db, supplierId, terms.id, tier.id, { is_fallback: false })
     }
+    // A letter moving between classes is cleared first: one letter per house.
+    if (tier?.discount_class && tier.discount_class !== entry.discount_class) {
+      await updateSupplierDiscountTier(db, supplierId, terms.id, tier.id, { discount_class: null })
+    }
   }
   for (const entry of classes) {
     const tier = entry.id == null ? null : current.get(entry.id)
     if (!tier) continue
-    const label = entry.label.trim()
+    const label = entry.label
     const pct = percentToFraction(entry.percent)
     const patch = {
       ...(tier.label !== label ? { label } : {}),
       ...(sameRate(tier.pct, pct) ? {} : { pct }),
       ...(entry.is_default && !tier.is_fallback ? { is_fallback: true } : {}),
+      ...(entry.discount_class && tier.discount_class !== entry.discount_class ? { discount_class: entry.discount_class } : {}),
     }
     if (Object.keys(patch).length > 0) {
       await updateSupplierDiscountTier(db, supplierId, terms.id, tier.id, patch)
@@ -321,9 +362,10 @@ const writeDiscountClasses = async (db, house, classes) => {
   for (const entry of classes) {
     if (entry.id != null) continue
     await createSupplierDiscountTier(db, supplierId, terms.id, {
-      label: entry.label.trim(),
+      label: entry.label,
       pct: percentToFraction(entry.percent),
       is_fallback: entry.is_default === true,
+      discount_class: entry.discount_class,
     })
   }
 }

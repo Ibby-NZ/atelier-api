@@ -99,8 +99,8 @@ describe('brand additional suppliers and product discount tiers', () => {
       [mainId, houseId]
     )
     const { rows } = await pool.query(
-      `INSERT INTO supplier_discount_tiers (supplier_brand_term_id, label, pct, is_fallback)
-       VALUES ($1, 'Standard', 0.40, true), ($1, 'Design', 0.45, false), ($1, 'Contract', 0.50, false)
+      `INSERT INTO supplier_discount_tiers (supplier_brand_term_id, label, pct, is_fallback, discount_class)
+       VALUES ($1, 'Standard', 0.40, true, 'A'), ($1, 'Design', 0.45, false, 'B'), ($1, 'Contract', 0.50, false, 'C')
        RETURNING id, label`,
       [termsId]
     )
@@ -198,75 +198,61 @@ describe('brand additional suppliers and product discount tiers', () => {
     })
   })
 
-  describe('product discount tiers', () => {
-    it('refuses a login without finance visibility', async () => {
-      const read = await inject('GET', `/admin/products/${productId}/discount-tier`, { cookie: plainCookie })
-      expect(read.statusCode).toBe(403)
-      const write = await inject('PUT', `/admin/products/${productId}/discount-tier`, {
-        cookie: plainCookie,
-        payload: { tier_id: tierIds.Design },
+  // 1 Oct 2026: a product and a variation choose the house's discount class by
+  // letter; a variation with none takes its product's.
+  describe('discount classes chosen by letter on the product and the variation', () => {
+    const base = () => `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100`
+    const discountAt = async (query) => (await inject('GET', `${base()}${query}`)).json().inputs.discount_percent
+
+    it('lets any back-office login choose a letter — it is no rate', async () => {
+      const set = await inject('PATCH', `/admin/products/${productId}`, { cookie: plainCookie, payload: { discount_class: 'C' } })
+      expect(set.statusCode).toBe(200)
+      expect(set.json().product.discount_class).toBe('C')
+      const bad = await inject('PATCH', `/admin/products/${productId}`, { payload: { discount_class: 'F' } })
+      expect(bad.statusCode).toBe(400)
+    })
+
+    it("prices the product at its letter's class, and the house at its default without one", async () => {
+      expect(await discountAt(`&product_id=${productId}`)).toMatchObject({
+        value: 50,
+        source: 'terms',
+        detail: { shape: 'tier', label: 'Contract', discount_class: 'C' },
       })
-      expect(write.statusCode).toBe(403)
+      expect(await discountAt('')).toMatchObject({ value: 40, detail: { discount_class: 'A' } })
+      expect(await discountAt('&discount_class=b')).toMatchObject({ value: 45 })
     })
 
-    it('offers every tier of the product’s house, lowest rate first, with no choice yet', async () => {
-      const res = await inject('GET', `/admin/products/${productId}/discount-tier`)
-      expect(res.statusCode).toBe(200)
-      const tier = res.json().discount_tier
-      expect(tier.tier_id).toBeNull()
-      expect(tier.tiers.map((t) => [t.label, t.pct])).toEqual([
-        ['Standard', 0.4],
-        ['Design', 0.45],
-        ['Contract', 0.5],
-      ])
-    })
-
-    it('stores a choice, and the waterfall prices the product with it', async () => {
-      const put = await inject('PUT', `/admin/products/${productId}/discount-tier`, { payload: { tier_id: tierIds.Contract } })
-      expect(put.statusCode).toBe(200)
-      expect(put.json().discount_tier.tier_id).toBe(tierIds.Contract)
-
-      const base = `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100`
-      const withProduct = (await inject('GET', `${base}&product_id=${productId}`)).json()
-      expect(withProduct.inputs.discount_percent).toMatchObject({ value: 50, source: 'terms' })
-      expect(withProduct.inputs.discount_percent.detail).toMatchObject({ shape: 'tier', label: 'Contract' })
-
-      // Without a product the fallback tier still applies.
-      const houseOnly = (await inject('GET', base)).json()
-      expect(houseOnly.inputs.discount_percent).toMatchObject({ value: 40 })
-    })
-
-    it('refuses another house’s tier and another house’s product', async () => {
-      const otherTermsId = await one(
+    it("prices a variation at its own letter, else its product's", async () => {
+      const variation = await one(
         pool,
-        `INSERT INTO supplier_brand_terms (supplier_id, brand_id) VALUES ($1, $2) RETURNING id`,
-        [mainId, otherHouseId]
+        `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Ink', $2) RETURNING id`,
+        [productId, `${PREFIX}-ink`]
       )
-      const foreign = await one(
-        pool,
-        `INSERT INTO supplier_discount_tiers (supplier_brand_term_id, label, pct) VALUES ($1, 'Other', 0.1) RETURNING id`,
-        [otherTermsId]
-      )
-      const put = await inject('PUT', `/admin/products/${productId}/discount-tier`, { payload: { tier_id: foreign } })
-      expect(put.statusCode).toBe(422)
+      expect(await discountAt(`&product_id=${productId}&colourway_id=${variation}`)).toMatchObject({ value: 50 })
+      const own = await inject('PATCH', `/admin/colourways/${variation}`, { payload: { discount_class: 'B' } })
+      expect(own.statusCode).toBe(200)
+      expect(own.json().colourway.discount_class).toBe('B')
+      expect(await discountAt(`&product_id=${productId}&colourway_id=${variation}`)).toMatchObject({ value: 45 })
+      await inject('PATCH', `/admin/colourways/${variation}`, { payload: { discount_class: null } })
+      expect(await discountAt(`&product_id=${productId}&colourway_id=${variation}`)).toMatchObject({ value: 50 })
+    })
 
-      const wrongProduct = await inject(
-        'GET',
-        `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100&product_id=${otherProductId}`
-      )
+    it("refuses another house's product and another product's variation", async () => {
+      const wrongProduct = await inject('GET', `${base()}&product_id=${otherProductId}`)
       expect(wrongProduct.statusCode).toBe(422)
-      const missing = await inject('GET', '/admin/products/999999999/discount-tier')
-      expect(missing.statusCode).toBe(404)
+      const stranger = await one(
+        pool,
+        `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Stone', $2) RETURNING id`,
+        [otherProductId, `${PREFIX}-stone`]
+      )
+      const wrongVariation = await inject('GET', `${base()}&product_id=${productId}&colourway_id=${stranger}`)
+      expect(wrongVariation.statusCode).toBe(422)
     })
 
-    it('clears the choice with null, and loses it when the tier is deleted', async () => {
-      const cleared = await inject('PUT', `/admin/products/${productId}/discount-tier`, { payload: { tier_id: null } })
-      expect(cleared.json().discount_tier.tier_id).toBeNull()
-
-      await inject('PUT', `/admin/products/${productId}/discount-tier`, { payload: { tier_id: tierIds.Design } })
-      await pool.query('DELETE FROM supplier_discount_tiers WHERE id = $1', [tierIds.Design])
-      const after = (await inject('GET', `/admin/products/${productId}/discount-tier`)).json().discount_tier
-      expect(after.tier_id).toBeNull()
+    it('falls back to the default class when no class answers to the letter', async () => {
+      await pool.query('UPDATE supplier_discount_tiers SET discount_class = NULL WHERE id = $1', [tierIds.Contract])
+      expect(await discountAt(`&product_id=${productId}`)).toMatchObject({ value: 40 })
+      await pool.query(`UPDATE supplier_discount_tiers SET discount_class = 'C' WHERE id = $1`, [tierIds.Contract])
     })
   })
 })

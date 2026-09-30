@@ -47,8 +47,18 @@ export const MEDIA_MESSAGES = Object.freeze({
   NOT_CONFIGURED: 'Image upload is not switched on in the API yet. Paste a link to the image for now.',
   NOT_AN_IMAGE: 'That file is not a JPEG, PNG or WebP image.',
   LOGO_NEEDS_TRANSPARENCY: 'A logo must be a PNG or WebP with a transparent background.',
-  LIBRARY_REFUSED: 'The image library did not take the file. Try again, or paste a link to the image for now.',
 })
+
+// The refusal names its cause, so a misconfigured EMDASH_URL or token is read
+// off the CRM rather than out of the server log. Back office only, and the
+// reason is a status or error code — never the address or the token.
+export const libraryRefused = (reason) =>
+  `The image library did not take the file (${reason}). Try again, or paste a link to the image for now.`
+
+// A code staff can pass on: EmDash's own (INSUFFICIENT_SCOPE), the socket's
+// (ECONNREFUSED — nothing listening at EMDASH_URL), or the timeout's.
+export const refusalReason = (error) =>
+  error?.emdash ?? error?.cause?.code ?? (error?.name === 'TimeoutError' ? 'timed out' : 'no answer')
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
@@ -105,11 +115,14 @@ const sendToEmdash = async ({ media, fetchImpl }, bytes, type, name) => {
   })
   const json = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(`EmDash answered ${response.status}: ${json?.error?.message ?? 'no message'}`)
+    const code = typeof json?.error?.code === 'string' ? json.error.code.slice(0, 60) : 'no code'
+    throw Object.assign(new Error(`EmDash answered ${response.status}: ${json?.error?.message ?? 'no message'}`), {
+      emdash: `EmDash ${response.status} ${code}`,
+    })
   }
   const item = json?.data?.item
   if (typeof item?.storageKey !== 'string' || item.storageKey === '') {
-    throw new Error('EmDash answered without a storage key')
+    throw Object.assign(new Error('EmDash answered without a storage key'), { emdash: 'EmDash sent no file key' })
   }
   return item
 }
@@ -157,7 +170,7 @@ export const adminMediaRoutes = async (app, { media = null, storeBaseUrl, fetchI
         // 503, not 502: the proxy in front of production swaps an origin 502
         // for its own page without CORS headers, and the CRM could not read it.
         reply.code(503)
-        return { error: 'Service Unavailable', message: MEDIA_MESSAGES.LIBRARY_REFUSED }
+        return { error: 'Service Unavailable', message: libraryRefused(refusalReason(error)) }
       }
 
       reply.code(201)

@@ -443,13 +443,26 @@ const escapeLike = (value) => value.replace(/[\\%_]/g, (match) => `\\${match}`)
  *
  * @param {{ query: Function }} db
  * @param {{ q?: string, range?: string, brand_id?: number, design?: string,
- *           currency?: string, include_previous?: boolean,
+ *           product_id?: number, currency?: string, include_previous?: boolean,
  *           limit?: number, page?: number }} [filters]
- *   `brand_id` + `design` find the rows behind one catalogue product: its
- *   house, and its name as the Dynamics description or code.
+ *   `product_id` finds the rows behind one catalogue product by the sync's
+ *   rule (product-price-sync.js): the row it was built from
+ *   (`products.product_price_id`), else its house + its name as the Dynamics
+ *   description or code (`brand_id` + `design`). Until 1 Oct 2026 the product
+ *   page asked by name alone, and a product built from a row is named
+ *   "SETA FIAMMATA 4741 (1)" — which names no row.
  */
-export const listProductPrices = async (db, filters = {}) => {
+export const listProductPrices = async (db, rawFilters = {}) => {
   const latest = await latestProductPriceImport(db)
+  let filters = rawFilters
+  if (rawFilters.product_id) {
+    const { rows } = await db.query(`SELECT brand_id, name, product_price_id FROM products WHERE id = $1`, [rawFilters.product_id])
+    if (rows.length === 0) throw httpError(404, 'That product does not exist.')
+    const [product] = rows
+    filters = product.product_price_id != null
+      ? { ...rawFilters, id: product.product_price_id, include_previous: true }
+      : { ...rawFilters, brand_id: product.brand_id, design: product.name }
+  }
   const limit = Math.min(Math.max(Number(filters.limit) || DEFAULT_LIMIT, 1), MAX_LIMIT)
   // 1-based, as every paged admin list here is (the CRM's list kit sends `page`).
   const page = Math.max(Math.floor(Number(filters.page)) || 1, 1)
@@ -467,6 +480,7 @@ export const listProductPrices = async (db, filters = {}) => {
     const like = bind(`%${escapeLike(String(filters.q).trim())}%`)
     where.push(`(pp.code ILIKE ${like} OR pp.description ILIKE ${like} OR pp.range_name ILIKE ${like})`)
   }
+  if (filters.id) where.push(`pp.id = ${bind(filters.id)}`)
   if (filters.range) where.push(`lower(btrim(pp.range_name)) = ${bind(nameKey(filters.range))}`)
   const pricer = createProductPricer(db)
   if (filters.brand_id) {
@@ -545,19 +559,22 @@ export const getProductPrice = async (db, id) => {
   const product = toRow(rows[0], latest?.id ?? null)
   const pricing = await createProductPricer(db).price(product)
 
-  // The catalogue's products are named by the Dynamics description (the
-  // cutover merge names them so), under the house the range is.
-  let catalogueProducts = []
-  if (pricing.house) {
-    const { rows: products } = await db.query(
-      `SELECT id, name, slug FROM products
-        WHERE brand_id = $1
-          AND lower(btrim(name)) IN (lower(btrim($2)), lower(btrim($3)))
-        ORDER BY id`,
-      [pricing.house.id, product.description ?? '', product.code]
-    )
-    catalogueProducts = products.map((row) => Object.freeze({ ...row }))
-  }
+  // The catalogue products this row prices, by the sync's rule: those built
+  // from it (`product_price_id`), and a product built from no row that carries
+  // its Dynamics description or code under the house. Archived ones are not
+  // priced and are left out. Until 1 Oct 2026 this was the name match alone,
+  // which missed the row's own product ("SETA FIAMMATA 4741 (1)") and listed an
+  // archived "SETA FIAMMATA" instead.
+  const { rows: products } = await db.query(
+    `SELECT id, name, slug FROM products
+      WHERE archived_at IS NULL
+        AND (product_price_id = $1
+             OR (product_price_id IS NULL AND brand_id = $2
+                 AND lower(btrim(name)) IN (lower(btrim($3)), lower(btrim($4)))))
+      ORDER BY id`,
+    [product.id, pricing.house?.id ?? null, product.description ?? '', product.code]
+  )
+  const catalogueProducts = products.map((row) => Object.freeze({ ...row }))
 
   return Object.freeze({
     ...product,

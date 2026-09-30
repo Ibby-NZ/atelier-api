@@ -2,7 +2,7 @@
 // priced through its house's range parameters (src/pricing/product-prices.js).
 //
 //   GET  /admin/product-prices                 a page, each row with its price
-//        ?q&range&brand_id&design&currency&include_previous&page&limit
+//        ?q&range&brand_id&design&product_id&currency&include_previous&page&limit
 //   GET  /admin/product-prices/ranges          the ranges named, and each one's house
 //   GET  /admin/product-prices/imports         who imported which export, when
 //   GET  /admin/product-prices/:id             one row with its full waterfall
@@ -65,6 +65,7 @@ const LIST_QUERY = {
     range: { type: 'string', maxLength: 200 },
     brand_id: { type: 'integer', minimum: 1 },
     design: { type: 'string', maxLength: 300 },
+    product_id: { type: 'integer', minimum: 1 },
     currency: { type: 'string', pattern: '^[A-Za-z]{3}$' },
     include_previous: { type: 'boolean' },
     limit: { type: 'integer', minimum: 1, maximum: MAX_LIMIT },

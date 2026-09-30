@@ -19,6 +19,7 @@
 
 import { deleteOrExplain, replyDelete } from '../lifecycle/delete.js'
 import { listCategories, createCategory } from '../catalogue/categories.js'
+import { UNITS } from '../../scripts/lib/price-template.js'
 import {
   listAdminBrands,
   getAdminBrand,
@@ -103,6 +104,9 @@ const productDetailProps = {
   // towels), so an enum would need a migration every time the office stocked a
   // new one. Same posture as product_range above.
   size: nullableShort,
+  // What the product is priced and freighted per (the column's CHECK, restated
+  // so a typo is a 400 naming the choices rather than a 500).
+  unit: { type: ['string', 'null'], enum: [...UNITS, null] },
   // Sales prose — `nullableText` like collections.description, not one of the
   // short spec fields beside it.
   description: nullableText,

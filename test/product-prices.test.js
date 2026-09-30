@@ -231,8 +231,8 @@ describe('/admin/product-prices', () => {
       [supplier[0].id, brand[0].id]
     )
     await pool.query(
-      `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, unit, effective_from)
-       VALUES ($1, NULL, 'dollar', 50, 'metre', '2020-01-01')`,
+      `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, effective_from)
+       VALUES ($1, NULL, 'dollar', 50, '2020-01-01')`,
       [houseName('madeaux')]
     )
     return brand[0].id
@@ -398,8 +398,8 @@ describe('/admin/product-prices', () => {
     // and a rate the office sets per letter on the house page must reach here.
     it('takes the house’s rate for the row’s freight letter, and its every-class rate for a letter it has none for', async () => {
       await pool.query(
-        `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, unit, effective_from, freight_class)
-         VALUES ($1, NULL, 'dollar', 3, 'metre', '2020-01-01', 'B')`,
+        `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, effective_from, freight_class)
+         VALUES ($1, NULL, 'dollar', 3, '2020-01-01', 'B')`,
         [houseName('madeaux')]
       )
       try {

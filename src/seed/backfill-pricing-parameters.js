@@ -21,7 +21,6 @@ const REPORT_LINES = [
   ['brandsWithSeveralRanges', 'houses named by more than one range (first kept)', (r) => `${r.brand}: kept ${r.kept}, skipped ${r.skipped}`],
   ['brandsWithoutSupplier', 'houses with no supplier link — discount not written (run backfill:suppliers, or link in the CRM)', (r) => `${r.brand} (range ${r.range})`],
   ['termsAlreadyOnFile', 'houses on a discount chain or tiers (left alone)', (r) => `${r.brand} (range ${r.range})`],
-  ['freightWithoutUnit', 'freight not written — no unit known for the house (set it on the house page)', (r) => `${r.brand}: $${r.rate}`],
   ['freightDatedToday', 'freight not replaced — the house already has a rate dated today', (r) => `${r.brand}: $${r.current} kept, export says $${r.rate}`],
   ['inactiveRanges', 'inactive ranges (skipped)', (r) => `${r.range} (${r.status})`],
 ]

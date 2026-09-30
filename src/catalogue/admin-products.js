@@ -86,6 +86,7 @@ const PRODUCT_COLUMNS = `p.id,
         p.product_range,
         p.category,
         p.size,
+        p.unit,
         p.description,
         p.composition,
         p.width,
@@ -132,6 +133,12 @@ const PRODUCT_UPDATE_COLUMNS = Object.freeze([
   // vocabulary is per category and open-ended (queen/king, hand/bath) — with
   // the CRM offering the sizes already in use as suggestions.
   'size',
+  // What the product is priced and freighted PER — metre, yard, roll, piece,
+  // hide, panel (migration 1792444800000, 1 Oct 2026: "units should be on the
+  // product level, not the house/range level"). A freight rate is a figure; this
+  // says what it is a figure per. Not the colourway's stock unit, which
+  // product_type fixes (metres / units, above).
+  'unit',
   // Sales prose for the storefront's product page. `nullableText` in the route
   // schema, matching collections.description rather than the short spec fields.
   'description',
@@ -176,6 +183,7 @@ const toProduct = (row, extra) =>
     product_range: row.product_range ?? null,
     category: row.category ?? null,
     size: row.size ?? null,
+    unit: row.unit ?? null,
     description: row.description ?? null,
     composition: row.composition,
     width: row.width,
@@ -588,10 +596,10 @@ export const createProduct = async (pool, input) => {
          brand_id, collection_id, name, slug, product_type, product_range,
          category, composition, width, application, rubs, price_band, lead_time,
          retail_price_cents, trade_price_cents, currency, show_on_website,
-         hi_res_asset_url, size, description
+         hi_res_asset_url, size, description, unit
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-               $19, $20)
+               $19, $20, $21)
        RETURNING id`,
       [
         brand.id,
@@ -615,6 +623,7 @@ export const createProduct = async (pool, input) => {
         input.hi_res_asset_url ?? null,
         input.size ?? null,
         input.description ?? null,
+        input.unit ?? null,
       ]
     )
     return getAdminProduct(pool, rows[0].id)

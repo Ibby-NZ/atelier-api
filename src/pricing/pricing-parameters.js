@@ -318,7 +318,6 @@ const freightInput = async (db, { supplierId, brandName, category, freightClass,
     if (found.rate) {
       return input(found.rate.rate, 'freight-ledger', {
         basis: found.rate.basis,
-        unit: found.rate.unit,
         effective_from: found.rate.effective_from,
         scope: scope.supplier_id ? 'supplier' : 'range',
         // Which rate answered: the letter's own, or every class (null).
@@ -414,7 +413,7 @@ const applyOverrides = (inputs, overrides = {}) => {
     if (!Number.isFinite(number) || number < 0) continue
     const was = inputs[key]
     next[key] = input(number, 'manual', {
-      ...(key === 'freight' ? { basis: 'dollar', unit: was?.detail?.unit ?? null } : {}),
+      ...(key === 'freight' ? { basis: 'dollar' } : {}),
       // A what-if clearance is read the way the house states its own.
       ...(key === 'clearance_percent' ? { basis: was?.detail?.basis ?? 'percent' } : {}),
       replaced: { value: was?.value ?? null, source: was?.source ?? 'missing' },
@@ -467,7 +466,6 @@ export const previewWaterfall = async (
     duty_percent: inputs.duty_percent.value,
     freight: inputs.freight.value,
     freight_basis: inputs.freight.detail?.basis ?? 'dollar',
-    freight_unit: inputs.freight.detail?.unit ?? null,
     clearance_percent: inputs.clearance_percent.value,
     clearance_basis: inputs.clearance_percent.detail?.basis ?? 'percent',
     handling: inputs.handling.value,

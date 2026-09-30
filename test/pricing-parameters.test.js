@@ -82,11 +82,11 @@ const insertTerms = (pool, { supplierId, brandId, discount = null, chain = null,
     [supplierId, brandId, discount, chain, markup]
   )
 
-const insertFreight = (pool, { supplierId, rate, basis = 'dollar', unit = 'metre', on = '2020-01-01' }) =>
+const insertFreight = (pool, { supplierId, rate, basis = 'dollar', on = '2020-01-01' }) =>
   pool.query(
-    `INSERT INTO supplier_freight_rates (supplier_id, category, basis, rate, unit, effective_from)
-     VALUES ($1, NULL, $2, $3, $4, $5)`,
-    [supplierId, basis, rate, basis === 'dollar' ? unit : null, on]
+    `INSERT INTO supplier_freight_rates (supplier_id, category, basis, rate, effective_from)
+     VALUES ($1, NULL, $2, $3, $4)`,
+    [supplierId, basis, rate, on]
   )
 
 // --------------------------------------------------------------------------
@@ -303,19 +303,19 @@ describe('pricing parameters — the module and the resolver', () => {
     await upsertFxRate(pool, CURRENCY, { rate: 0.5, set_on: '2026-01-01' })
     const { inputs, currency } = await resolveWaterfallInputs(pool, { brandId: houseId })
     expect(currency).toBe(CURRENCY)
-    expect(inputs.freight).toMatchObject({ value: 30, source: 'freight-ledger', detail: { basis: 'dollar', unit: 'metre', scope: 'supplier' } })
+    expect(inputs.freight).toMatchObject({ value: 30, source: 'freight-ledger', detail: { basis: 'dollar', scope: 'supplier' } })
     expect(inputs.fx_rate).toMatchObject({ value: 0.5, source: 'fx', detail: { currency: CURRENCY } })
   })
 
   it("takes the house's own freight rate ahead of the supplier-wide one", async () => {
     await pool.query(
-      `INSERT INTO supplier_freight_rates (range_name, basis, rate, unit, effective_from)
-       VALUES ($1, 'dollar', 45, 'roll', '2020-01-01')`,
+      `INSERT INTO supplier_freight_rates (range_name, basis, rate, effective_from)
+       VALUES ($1, 'dollar', 45, '2020-01-01')`,
       [`${PREFIX} module-house`.toUpperCase()]
     )
     try {
       const { inputs } = await resolveWaterfallInputs(pool, { brandId: houseId })
-      expect(inputs.freight).toMatchObject({ value: 45, detail: { unit: 'roll', scope: 'range' } })
+      expect(inputs.freight).toMatchObject({ value: 45, detail: { scope: 'range' } })
     } finally {
       await pool.query(`DELETE FROM supplier_freight_rates WHERE lower(range_name) = lower($1)`, [
         `${PREFIX} module-house`,
@@ -584,8 +584,8 @@ describe('pricing-parameter backfill from the Dynamics export', () => {
     const sources = {
       parameters: [range('FABRICUT', { freight_per_unit: 23 })],
       brands: [{ id: 1, name: 'Fabricut', slug: 'fabricut', supplier_id: 7 }],
-      freight: [{ range_name: 'Fabricut', basis: 'dollar', rate: 23, unit: 'yard', effective_from: '2026-01-01', freight_class: null }],
-      classRates: [{ range_name: 'Fabricut', freight_class: 'C', basis: 'dollar', rate: 4, unit: 'yard', effective_from: '2026-01-01' }],
+      freight: [{ range_name: 'Fabricut', basis: 'dollar', rate: 23, effective_from: '2026-01-01', freight_class: null }],
+      classRates: [{ range_name: 'Fabricut', freight_class: 'C', basis: 'dollar', rate: 4, effective_from: '2026-01-01' }],
       letterFreights: [
         { range_name: 'FABRICUT', letter: 'A', rate: 30, rows: 1500 },
         { range_name: 'FABRICUT', letter: 'A', rate: 26, rows: 10 },
@@ -599,15 +599,15 @@ describe('pricing-parameter backfill from the Dynamics export', () => {
       ],
     }
     const classesOf = (plan) =>
-      plan.freightInserts.filter((row) => row.freight_class).map(({ freight_class: letter, rate, unit }) => ({ letter, rate, unit }))
+      plan.freightInserts.filter((row) => row.freight_class).map(({ freight_class: letter, rate }) => ({ letter, rate }))
 
     const plan = planParametersBackfill(sources, { on: '2026-09-30' })
     expect(classesOf(plan)).toEqual([
-      { letter: 'A', rate: 30, unit: 'yard' },
-      { letter: 'B', rate: 3, unit: 'yard' },
+      { letter: 'A', rate: 30 },
+      { letter: 'B', rate: 3 },
     ])
     expect(plan.changes.filter((line) => line.field.startsWith('freight_class_'))).toEqual([
-      expect.objectContaining({ field: 'freight_class_A', from: null, to: 30, kind: 'fill', unit: 'yard' }),
+      expect.objectContaining({ field: 'freight_class_A', from: null, to: 30, kind: 'fill' }),
       expect.objectContaining({ field: 'freight_class_B', from: null, to: 3, kind: 'fill' }),
       expect.objectContaining({ field: 'freight_class_C', from: 4, to: 5, kind: 'kept' }),
     ])
@@ -615,7 +615,7 @@ describe('pricing-parameter backfill from the Dynamics export', () => {
 
     // A class the house already has is re-dated only when asked.
     const replaced = planParametersBackfill(sources, { on: '2026-09-30', overwrite: true })
-    expect(classesOf(replaced)).toContainEqual({ letter: 'C', rate: 5, unit: 'yard' })
+    expect(classesOf(replaced)).toContainEqual({ letter: 'C', rate: 5 })
   })
 
   it('applies: creates the sets, fills only what was blank, writes the discount, leaves existing terms alone', async () => {

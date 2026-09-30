@@ -33,12 +33,12 @@
 // discount range (export/wholesale ratio exactly 1.000). It is written as a
 // stated 0% flat discount, with the note saying where it came from.
 //
-// FREIGHT NEEDS A UNIT. A dollar rate on the ledger must say what it is per
-// (FR-187) and the export does not. A house's FIRST rate takes the unit its
-// price lines are mostly quoted in (`houseUnits`) — the "range's own pack
-// type" the Dynamics figure is per; a replacement keeps the unit the house's
-// current rate states. A house with neither is reported, not guessed. FX and
-// handling are not in the export at all and stay as finance sets them.
+// FREIGHT IS A FIGURE, NOT A FIGURE PER A UNIT (1 Oct 2026). It is per unit of
+// whatever the product is sold in, and the unit is the product's. Until then a
+// dollar rate had to name a unit and a house with no price lines to take one
+// from was reported and got no freight at all (Alpaka, Armani Casa, Missoni
+// Home, S. Harris …). FX and handling are not in the export at all and stay as
+// finance sets them.
 //
 // FREIGHT PER LETTER COMES FROM DYNAMICS' OWN PRICES (30 Sep 2026). Dynamics
 // charged freight per range AND letter (Fabricut A $30, B $3, C $5; Pierre
@@ -64,7 +64,7 @@ import {
   updateSupplierBrandTerms,
 } from '../suppliers/supplier-terms.js'
 import { createFreightRate, currentRangeRates, today } from './freight-rates.js'
-import { fractionToPercent, houseUnits, percentToFraction, sameRate } from './house-pricing.js'
+import { fractionToPercent, percentToFraction, sameRate } from './house-pricing.js'
 import { listRangeParameters, MAX_LIMIT } from './tracking-parameters.js'
 
 /** Parameter column <- the range row's field (src/pricing/tracking-parameters.js shape). */
@@ -129,8 +129,6 @@ const numeric = (value) => (value == null ? null : Number(value))
  * @param {object[]} input.terms       every house's terms shape (listBrandTermsShapes);
  *                                     a row without shape fields is treated as not flat
  * @param {object[]} [input.freight]   each house's current catch-all rate (currentRangeRates)
- * @param {Map<number,string|null>|[number,string|null][]} [input.units]
- *                                     the unit each house's price lines are quoted in
  * @param {{range_name:string, ratio:number, rows:number}[]} [input.retailRatios]
  *                                     Dynamics' retail ÷ trade, counted per range
  * @param {{range_name:string, letter:string, rate:number, rows:number}[]} [input.letterFreights]
@@ -140,7 +138,7 @@ const numeric = (value) => (value == null ? null : Number(value))
  */
 export const planParametersBackfill = (
   {
-    parameters = [], brands = [], existing = [], terms = [], freight = [], units = [], retailRatios = [],
+    parameters = [], brands = [], existing = [], terms = [], freight = [], retailRatios = [],
     letterFreights = [], classRates = [],
   },
   { overwrite = false, on = today() } = {}
@@ -151,7 +149,6 @@ export const planParametersBackfill = (
     brandsWithoutSupplier: [],
     termsAlreadyOnFile: [],
     inactiveRanges: [],
-    freightWithoutUnit: [],
     freightDatedToday: [],
     retailMarkupUnclear: [],
     freightClassUnclear: [],
@@ -161,7 +158,6 @@ export const planParametersBackfill = (
   const existingByBrand = new Map(existing.map((row) => [row.brand_id, row]))
   const termsByBrand = new Map(terms.map((row) => [row.brand_id, row]))
   const freightByHouse = new Map(freight.map((rate) => [nameKey(rate.range_name), rate]))
-  const unitByBrand = new Map(units)
   const classRatesByHouse = new Map()
   for (const rate of classRates) {
     const key = nameKey(rate.range_name)
@@ -342,34 +338,28 @@ export const planParametersBackfill = (
     const stated = numeric(parameter.freight_per_unit)
     if (stated != null) {
       const rate = freightByHouse.get(nameKey(brand.name)) ?? null
-      const append = (unit, kind, from) => {
+      const append = (kind, from) => {
         freightInserts.push(
           Object.freeze({
             ...where,
             range_name: brand.name,
             rate: stated,
-            unit,
             effective_from: on,
             note: `${BACKFILL_NOTE} (range ${range})`,
           })
         )
-        change(FREIGHT_FIELD, from, stated, kind, { unit, from_unit: rate?.unit ?? null })
+        change(FREIGHT_FIELD, from, stated, kind)
       }
       if (!rate) {
-        const unit = unitByBrand.get(brand.id) ?? null
-        if (unit) append(unit, CHANGE_KINDS.FILL, null)
-        else reports.freightWithoutUnit.push(Object.freeze({ brand: brand.name, range, rate: stated }))
+        append(CHANGE_KINDS.FILL, null)
       } else if (!(rate.basis === 'dollar' && sameRate(rate.rate, stated))) {
-        const unit = rate.unit ?? unitByBrand.get(brand.id) ?? null
         if (!overwrite) {
-          change(FREIGHT_FIELD, rate.rate, stated, CHANGE_KINDS.KEPT, { unit: rate.unit, from_unit: rate.unit })
+          change(FREIGHT_FIELD, rate.rate, stated, CHANGE_KINDS.KEPT)
         } else if (rate.effective_from === on) {
           // The ledger holds one rate per house per day; today's is already set.
           reports.freightDatedToday.push(Object.freeze({ brand: brand.name, range, rate: stated, current: rate.rate }))
-        } else if (!unit) {
-          reports.freightWithoutUnit.push(Object.freeze({ brand: brand.name, range, rate: stated }))
         } else {
-          append(unit, CHANGE_KINDS.REPLACE, rate.rate)
+          append(CHANGE_KINDS.REPLACE, rate.rate)
         }
       }
     }
@@ -378,38 +368,35 @@ export const planParametersBackfill = (
     const houseRate = freightByHouse.get(nameKey(brand.name)) ?? null
     const writtenRate = freightInserts.find((row) => row.brand_id === brand.id && row.freight_class == null)
     // The every-class rate once this import lands: what it writes, else what the
-    // house has, else what the export states (a house with no unit to write it).
-    const everyClass = writtenRate ? writtenRate.rate : houseRate ? (houseRate.basis === 'dollar' ? numeric(houseRate.rate) : null) : stated
-    const unit = houseRate?.unit ?? writtenRate?.unit ?? unitByBrand.get(brand.id) ?? null
+    // house has.
+    const everyClass = writtenRate ? writtenRate.rate : houseRate?.basis === 'dollar' ? numeric(houseRate.rate) : null
     const houseClasses = classRatesByHouse.get(nameKey(brand.name)) ?? new Map()
     for (const { letter, rate, rows } of letterRatesFor(brand)) {
       const field = freightClassField(letter)
       const current = houseClasses.get(letter) ?? null
-      const append = (kind, from, classUnit) => {
+      const append = (kind, from) => {
         freightInserts.push(
           Object.freeze({
             ...where,
             range_name: brand.name,
             freight_class: letter,
             rate,
-            unit: classUnit,
             effective_from: on,
             note: `${FREIGHT_CLASS_NOTE} (letter ${letter}, ${rows} prices)`,
           })
         )
-        change(field, from, rate, kind, { unit: classUnit, from_unit: current?.unit ?? null })
+        change(field, from, rate, kind)
       }
       if (!current) {
         if (sameRate(everyClass, rate)) continue // the every-class rate already charges it
-        if (unit) append(CHANGE_KINDS.FILL, null, unit)
-        else reports.freightWithoutUnit.push(Object.freeze({ brand: brand.name, range, rate, letter }))
+        append(CHANGE_KINDS.FILL, null)
       } else if (!(current.basis === 'dollar' && sameRate(current.rate, rate))) {
         if (!overwrite) {
-          change(field, current.rate, rate, CHANGE_KINDS.KEPT, { unit: current.unit, from_unit: current.unit })
+          change(field, current.rate, rate, CHANGE_KINDS.KEPT)
         } else if (current.effective_from === on) {
           reports.freightDatedToday.push(Object.freeze({ brand: brand.name, range, rate, current: current.rate, letter }))
         } else {
-          append(CHANGE_KINDS.REPLACE, current.rate, current.unit ?? unit)
+          append(CHANGE_KINDS.REPLACE, current.rate)
         }
       }
     }
@@ -460,14 +447,13 @@ const readSources = async (client, rangeParameters, on) => {
   const terms = await listBrandTermsShapes(client)
   const freight = await currentRangeRates(client, on)
   const { rows: classRates } = await client.query(
-    `SELECT DISTINCT ON (lower(range_name), freight_class) range_name, freight_class, basis, rate::float8 AS rate, unit,
+    `SELECT DISTINCT ON (lower(range_name), freight_class) range_name, freight_class, basis, rate::float8 AS rate,
             to_char(effective_from, 'YYYY-MM-DD') AS effective_from
        FROM supplier_freight_rates
       WHERE range_name IS NOT NULL AND category IS NULL AND freight_class IS NOT NULL AND effective_from <= $1::date
       ORDER BY lower(range_name), freight_class, effective_from DESC, id DESC`,
     [on]
   )
-  const units = await houseUnits(client)
   // Dynamics' retail ÷ trade, read off its product-price archive: for each row of
   // the latest product-prices import by its guid (so a range the office renamed
   // on the way in counts under its new name), and — for a range none of whose
@@ -509,7 +495,7 @@ const readSources = async (client, rangeParameters, on) => {
         AND upper(btrim(lp.freight_rate)) ~ '^[A-E]$'
       GROUP BY 1, 2, 3`
   )
-  return { parameters, brands, existing, terms, freight, units, retailRatios, letterFreights, classRates }
+  return { parameters, brands, existing, terms, freight, retailRatios, letterFreights, classRates }
 }
 
 const applyInserts = async (client, inserts) => {
@@ -585,8 +571,8 @@ const applyTermsUpdates = async (client, termsUpdates) => {
   return termsUpdates.length
 }
 
-// Through createFreightRate, so the ledger's own rules (unit per basis, the
-// house must exist, one rate per scope per day) hold for an import as they do
+// Through createFreightRate, so the ledger's own rules (the house must exist,
+// one rate per scope per day) hold for an import as they do
 // for the form and the yearly sheet.
 const applyFreight = async (client, freightInserts) => {
   for (const row of freightInserts) {
@@ -595,7 +581,6 @@ const applyFreight = async (client, freightInserts) => {
       freight_class: row.freight_class ?? null,
       basis: 'dollar',
       rate: row.rate,
-      unit: row.unit,
       effective_from: row.effective_from,
       note: row.note,
     })

@@ -309,6 +309,8 @@ const productCreateSchema = {
     brand_id: { type: 'integer', minimum: 1 },
     product_type: { type: 'string', enum: ['fabric', 'finished_good'] },
     show_on_website: { type: 'boolean', default: false },
+    // Card checkout sells it; off, it can only be quoted (1 Oct 2026).
+    sell_retail: { type: 'boolean', default: false },
   },
 }
 
@@ -326,6 +328,7 @@ const productPatchSchema = {
   properties: {
     ...productDetailProps,
     show_on_website: { type: 'boolean' },
+    sell_retail: { type: 'boolean' },
     reason: { type: 'string', maxLength: MAX_REASON_LENGTH },
   },
 }

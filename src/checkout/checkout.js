@@ -2,8 +2,10 @@
 //
 // Everything that touches money is resolved server-side from the database:
 // the request carries only { sku, qty } per line plus a shipping zone. Client
-// prices are never trusted. Fabric-type products are rejected — they go through
-// the order-request flow (US-012), not card checkout. The cart + zone are
+// prices are never trusted. A product not sold retail is rejected — it goes
+// through the order-request flow (US-012), a quote, not card checkout. Until
+// 1 Oct 2026 the rule was the type (fabric refused); it is the product's own
+// Retail tick now (`products.sell_retail`). The cart + zone are
 // stashed in the Stripe session metadata so the webhook (US-011) can rebuild the
 // order without a pending row here.
 
@@ -72,7 +74,7 @@ export const validateCheckoutLines = async (
       `SELECT c.id AS colourway_id,
               p.name,
               p.slug AS product_slug,
-              p.product_type,
+              p.sell_retail,
               COALESCE(c.retail_price_cents, p.retail_price_cents) AS retail_price_cents,
               COALESCE(c.trade_price_cents, p.trade_price_cents) AS trade_price_cents,
               b.trade_only,
@@ -89,10 +91,10 @@ export const validateCheckoutLines = async (
     if (!row || (row.trade_only && !includeTradeOnly)) {
       throw httpError(422, `No purchasable product for SKU "${sku}".`)
     }
-    if (row.product_type === 'fabric') {
+    if (!row.sell_retail) {
       throw httpError(
         422,
-        `"${row.name}" is a fabric — use an order request, not card checkout.`
+        `"${row.name}" is sold by quote only — use an order request, not card checkout.`
       )
     }
     const tradePriceCents = includeTrade ? row.trade_price_cents : null

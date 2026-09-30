@@ -102,6 +102,7 @@ const PRODUCT_COLUMNS = `p.id,
         p.wholesale_rate,
         p.currency,
         p.show_on_website,
+        p.sell_retail,
         p.hi_res_asset_url,
         p.archived_at,
         p.created_at,
@@ -170,6 +171,9 @@ const PRODUCT_UPDATE_COLUMNS = Object.freeze([
   'wholesale_rate',
   'currency',
   'show_on_website',
+  // Retail, beside it (1 Oct 2026): card checkout sells the product. Off, a
+  // listed product can only be quoted (migration 1792704000000).
+  'sell_retail',
   'hi_res_asset_url',
 ])
 
@@ -218,6 +222,7 @@ const toProduct = (row, extra) =>
     wholesale_rate: row.wholesale_rate == null ? null : Number(row.wholesale_rate),
     currency: row.currency,
     show_on_website: row.show_on_website,
+    sell_retail: row.sell_retail,
     hi_res_asset_url: row.hi_res_asset_url,
     archived_at: row.archived_at ?? null,
     created_at: row.created_at,
@@ -623,10 +628,10 @@ export const createProduct = async (pool, input) => {
          brand_id, collection_id, name, slug, product_type, product_range,
          category, composition, width, application, rubs, price_band, lead_time,
          retail_price_cents, trade_price_cents, currency, show_on_website,
-         hi_res_asset_url, size, description, unit, discount_class, freight_class, duty_class
+         hi_res_asset_url, size, description, unit, discount_class, freight_class, duty_class, sell_retail
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-               $19, $20, $21, $22, $23, $24)
+               $19, $20, $21, $22, $23, $24, $25)
        RETURNING id`,
       [
         brand.id,
@@ -654,6 +659,7 @@ export const createProduct = async (pool, input) => {
         input.discount_class ?? null,
         input.freight_class ?? null,
         input.duty_class ?? null,
+        input.sell_retail ?? false,
       ]
     )
     return getAdminProduct(pool, rows[0].id)

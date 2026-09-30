@@ -20,6 +20,7 @@ const PRODUCT_COLUMNS = `
   p.slug,
   p.name,
   p.product_type,
+  p.sell_retail,
   p.category,
   p.size,
   p.description,
@@ -91,6 +92,8 @@ const toProductDetail = (row, colourways, includeTrade) => {
     slug: row.slug,
     name: row.name,
     product_type: row.product_type,
+    // Add to cart is offered only when true; a quote request always is.
+    sell_retail: row.sell_retail === true,
     // Same shape as the list endpoint's card: present, null when uncategorised.
     category: row.category ?? null,
     size: row.size ?? null,

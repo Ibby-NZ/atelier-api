@@ -71,6 +71,7 @@ const PRODUCT_COLUMNS = `
   p.slug,
   p.name,
   p.product_type,
+  p.sell_retail,
   p.category,
   p.size,
   p.composition,
@@ -146,6 +147,9 @@ const toPublicProduct = (row, includeTrade) => {
     slug: row.slug,
     name: row.name,
     product_type: row.product_type,
+    // Whether the cart sells it (1 Oct 2026); every listed product can be
+    // quoted. Not a price, so it rides on every card.
+    sell_retail: row.sell_retail === true,
     // Always present, null included: a card can branch on the value instead of
     // on whether the key came back, and "not categorised yet" is a real state
     // across most of the catalogue.

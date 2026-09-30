@@ -28,7 +28,6 @@ import {
 import { runFreightRecovery } from '../pricing/freight-recovery.js'
 import {
   FREIGHT_BASES,
-  FREIGHT_UNITS,
   createFreightRate,
   listFreightRates,
   resolveFreightRate,
@@ -217,7 +216,6 @@ export const adminFreightRoutes = async (app, { pool }) => {
         // A missing rate is null, never zero — see src/pricing/freight-rates.js.
         freight: freight.rate?.rate ?? null,
         freight_basis: freight.rate?.basis ?? 'dollar',
-        freight_unit: freight.rate?.unit ?? null,
         clearance_percent: parameters.clearance_percent,
         handling: query.handling ?? null,
         trade_markup_percent: parameters.trade_markup_percent,
@@ -244,7 +242,6 @@ export const adminFreightRoutes = async (app, { pool }) => {
             // mask and be the one leak this route exists to prevent.
             duty_reason: duty.reason,
             freight_reason: freight.reason,
-            freight_unit: waterfall.freight_unit,
             freight_scope: query.supplier_id == null ? 'range' : 'supplier',
             missing: waterfall.missing,
             as_at: on,
@@ -311,7 +308,6 @@ export const adminFreightRoutes = async (app, { pool }) => {
             freight_class: { type: ['string', 'null'], maxLength: 1 },
             basis: { type: 'string', enum: [...FREIGHT_BASES] },
             rate: { type: 'number', minimum: 0 },
-            unit: { type: 'string', enum: [...FREIGHT_UNITS] },
             effective_from: { type: 'string', pattern: ISO_DAY },
             note: { type: 'string', maxLength: 500 },
           },

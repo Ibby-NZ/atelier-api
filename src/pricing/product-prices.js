@@ -4,7 +4,7 @@
 // the PRODUCT knows — wholesale rate, currency, range, type, whether duty
 // applies — and nothing it does not. Every other figure is its RANGE's, and a
 // range is a house: `range_name` is matched to `brands.name` case-insensitively
-// and trimmed, the rule the freight ledger and `houseUnits` already use. So the
+// and trimmed, the rule the freight ledger already uses. So the
 // price is derived on every read, never stored, and a change to a house's
 // clearance or markup reprices every product in the range at once.
 //
@@ -300,7 +300,6 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
       duty_percent: inputs.duty_percent.value,
       freight: inputs.freight.value,
       freight_basis: inputs.freight.detail?.basis ?? 'dollar',
-      freight_unit: inputs.freight.detail?.unit ?? null,
       clearance_percent: inputs.clearance_percent.value,
       clearance_basis: inputs.clearance_percent.detail?.basis ?? 'percent',
       handling: inputs.handling.value,

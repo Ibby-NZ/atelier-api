@@ -25,8 +25,13 @@
 // Dynamics export's own per-house figure, applied by the pricing import
 // (src/pricing/parameters-backfill.js) as a dated range rate. A house nobody
 // has set is still a miss, never a zero.
+//
+// A RATE CARRIES NO UNIT (1 Oct 2026, the office: "those values will be
+// separate from any kind of unit"). A dollar rate is per unit of whatever the
+// product is sold in, and that unit is the PRODUCT's (`products.unit`,
+// migration 1792444800000), not the house's.
 
-import { CATEGORIES, UNITS } from '../../scripts/lib/price-template.js'
+import { CATEGORIES } from '../../scripts/lib/price-template.js'
 import { categorySlugs } from '../catalogue/categories.js'
 
 const httpError = (statusCode, message) =>
@@ -39,7 +44,6 @@ export const FREIGHT_BASES = Object.freeze(['dollar', 'percent'])
 // that table and `createFreightRate` reads it; this is the fallback for a
 // validation call made without one.
 export const FREIGHT_CATEGORIES = Object.freeze([...CATEGORIES])
-export const FREIGHT_UNITS = Object.freeze([...UNITS])
 
 export const DEFAULT_LIMIT = 100
 export const MAX_LIMIT = 500
@@ -52,7 +56,7 @@ export const NO_RATE_REASONS = Object.freeze({
 })
 
 const RATE_COLUMNS = `id, supplier_id, range_name, category, freight_class, basis,
-  rate, unit, to_char(effective_from, 'YYYY-MM-DD') AS effective_from, note, created_at`
+  rate, to_char(effective_from, 'YYYY-MM-DD') AS effective_from, note, created_at`
 
 // `effective_from` is selected as text on purpose: pg turns a `date` into a JS
 // Date at LOCAL midnight, so a naive comparison against an ISO day string is
@@ -69,7 +73,6 @@ const toRate = (row) =>
     freight_class: row.freight_class ?? null,
     basis: row.basis,
     rate: Number(row.rate),
-    unit: row.unit,
     effective_from: row.effective_from,
     note: row.note,
     created_at: row.created_at,
@@ -333,18 +336,6 @@ export const validateFreightRate = (input = {}, vocabulary = FREIGHT_CATEGORIES)
     return 'Rate must be a number of zero or more.'
   }
 
-  const unit = input.unit ?? null
-  if (basis === 'dollar' && !FREIGHT_UNITS.includes(unit)) {
-    // FR-187: the unit is the range's own pack type, and a rate that does not
-    // state it is unusable — the priced corpus is P/M 8,574, P/Y 5,753,
-    // P/Roll 2,816, P/P 2,011, so a per-roll figure applied to a metre
-    // overcharges by roughly the roll length.
-    return `A dollar rate must state its unit. Use one of: ${FREIGHT_UNITS.join(', ')}.`
-  }
-  if (basis === 'percent' && unit != null) {
-    return 'A percent rate is per nothing — leave the unit blank.'
-  }
-
   if (input.category != null && !categories.includes(input.category)) {
     return `"${input.category}" is not a category. Use one of: ${categories.join(', ')}, or leave it blank for every category.`
   }
@@ -408,8 +399,8 @@ export const createFreightRate = async (db, rawInput) => {
   try {
     const { rows } = await db.query(
       `INSERT INTO supplier_freight_rates
-         (supplier_id, range_name, category, freight_class, basis, rate, unit, effective_from, note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (supplier_id, range_name, category, freight_class, basis, rate, effective_from, note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING ${RATE_COLUMNS}`,
       [
         scope.supplierId,
@@ -418,7 +409,6 @@ export const createFreightRate = async (db, rawInput) => {
         input.freight_class,
         input.basis ?? 'dollar',
         Number(input.rate),
-        input.unit ?? null,
         input.effective_from,
         input.note ?? null,
       ]

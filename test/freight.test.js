@@ -26,6 +26,7 @@ import { computeWaterfall } from '../src/pricing/waterfall.js'
 import {
   FREIGHT_RATE_SHEET_HEADER,
   FREIGHT_RATE_SHEET_HEADER_V1,
+  FREIGHT_RATE_SHEET_HEADER_V2,
   applyFreightRateSheet,
   getFreightRateSheet,
   parseFreightRateSheet,
@@ -131,15 +132,14 @@ describe('W16-US-004 — supplier_freight_rates (schema only, no rate)', () => {
   const insert = (values) =>
     pool.query(
       `INSERT INTO supplier_freight_rates
-         (supplier_id, range_name, category, basis, rate, unit, effective_from)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+         (supplier_id, range_name, category, basis, rate, effective_from)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
       [
         values.supplier_id ?? null,
         values.range_name ?? null,
         values.category ?? null,
         values.basis ?? 'dollar',
         values.rate,
-        values.unit ?? null,
         values.effective_from ?? '2026-01-01',
       ]
     )
@@ -194,16 +194,16 @@ describe('W16-US-004 — supplier_freight_rates (schema only, no rate)', () => {
     expect(freightColumns).toEqual([{ column_name: 'freight_class', data_type: 'text', is_nullable: 'YES' }])
     await expect(
       pool.query(
-        `INSERT INTO supplier_freight_rates (range_name, freight_class, basis, rate, unit, effective_from)
-         VALUES ($1, 'ab', 'dollar', 1, 'metre', '2026-01-01')`,
+        `INSERT INTO supplier_freight_rates (range_name, freight_class, basis, rate, effective_from)
+         VALUES ($1, 'ab', 'dollar', 1, '2026-01-01')`,
         [`${PREFIX} RANGE`]
       )
     ).rejects.toThrow(/freight_class_check/)
   })
 
   it('accepts a supplier-scoped rate and a range-scoped rate', async () => {
-    await insert({ supplier_id: supplierId, rate: 30, unit: 'metre' })
-    await insert({ range_name: `${PREFIX} RANGE`, rate: 50, unit: 'roll' })
+    await insert({ supplier_id: supplierId, rate: 30 })
+    await insert({ range_name: `${PREFIX} RANGE`, rate: 50 })
     const { rows } = await pool.query(
       `SELECT count(*)::int AS total FROM supplier_freight_rates
         WHERE supplier_id = $1 OR range_name LIKE $2`,
@@ -214,58 +214,60 @@ describe('W16-US-004 — supplier_freight_rates (schema only, no rate)', () => {
 
   it('refuses a rate with both scopes, and one with neither', async () => {
     await expect(
-      insert({ supplier_id: supplierId, range_name: `${PREFIX} X`, rate: 30, unit: 'metre' })
+      insert({ supplier_id: supplierId, range_name: `${PREFIX} X`, rate: 30 })
     ).rejects.toThrow(/supplier_freight_rates_scope_check/)
-    await expect(insert({ rate: 30, unit: 'metre' })).rejects.toThrow(
+    await expect(insert({ rate: 30 })).rejects.toThrow(
       /supplier_freight_rates_scope_check/
     )
   })
 
-  it('defaults the basis to dollar and requires a dollar rate to state its unit', async () => {
-    await insert({ supplier_id: supplierId, rate: 30, unit: 'metre' })
+  // 1 Oct 2026: a rate is a figure; what it is per is the product's unit.
+  it('defaults the basis to dollar, and a rate carries no unit — the product does', async () => {
+    await insert({ supplier_id: supplierId, rate: 30 })
     const { rows } = await pool.query(
       `SELECT basis FROM supplier_freight_rates WHERE supplier_id = $1`,
       [supplierId]
     )
     expect(rows[0].basis).toBe('dollar')
-
-    await expect(insert({ range_name: `${PREFIX} A`, rate: 30 })).rejects.toThrow(
-      /supplier_freight_rates_unit_basis_check/
-    )
-    // ...and a percentage is per nothing.
-    await expect(
-      insert({ range_name: `${PREFIX} B`, basis: 'percent', rate: 8, unit: 'metre' })
-    ).rejects.toThrow(/supplier_freight_rates_unit_basis_check/)
     await insert({ range_name: `${PREFIX} C`, basis: 'percent', rate: 8 })
+
+    const { rows: columns } = await pool.query(
+      `SELECT table_name FROM information_schema.columns
+        WHERE column_name = 'unit' AND table_name IN ('supplier_freight_rates', 'products')`
+    )
+    expect(columns).toEqual([{ table_name: 'products' }])
+    const { rows: checks } = await pool.query(
+      `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'products_unit_check'`
+    )
+    expect(checks[0].def).toMatch(/metre.*yard.*roll.*piece.*hide.*panel/)
   })
 
   it('refuses a basis outside the vocabulary and a negative rate', async () => {
     await expect(
-      insert({ range_name: `${PREFIX} D`, basis: 'per-roll', rate: 1, unit: 'roll' })
+      insert({ range_name: `${PREFIX} D`, basis: 'per-roll', rate: 1 })
     ).rejects.toThrow(/supplier_freight_rates_basis_check/)
     await expect(
-      insert({ range_name: `${PREFIX} E`, rate: -1, unit: 'roll' })
+      insert({ range_name: `${PREFIX} E`, rate: -1 })
     ).rejects.toThrow(/supplier_freight_rates_rate_check/)
   })
 
   // FR-192. Two rates claiming one day would make the resolver pick at random —
   // the same argument the fallback-tier partial unique index already makes.
   it('refuses two rates for one scope, category and day — including on NULLs', async () => {
-    await insert({ range_name: `${PREFIX} RANGE`, rate: 30, unit: 'metre' })
+    await insert({ range_name: `${PREFIX} RANGE`, rate: 30 })
     await expect(
-      insert({ range_name: `${PREFIX.toLowerCase()} range`, rate: 40, unit: 'metre' })
+      insert({ range_name: `${PREFIX.toLowerCase()} range`, rate: 40 })
     ).rejects.toThrow(/supplier_freight_rates_scope_effective_unique/)
     // A different day is the append, and it is allowed.
     await insert({
       range_name: `${PREFIX} RANGE`,
       rate: 40,
-      unit: 'metre',
       effective_from: '2027-01-01',
     })
   })
 
   it('refuses deleting a supplier that a rate points at', async () => {
-    await insert({ supplier_id: supplierId, rate: 30, unit: 'metre' })
+    await insert({ supplier_id: supplierId, rate: 30 })
     await expect(pool.query('DELETE FROM suppliers WHERE id = $1', [supplierId])).rejects.toThrow(
       /supplier_freight_rates/
     )
@@ -630,7 +632,6 @@ describe('W16-US-005 — the freight rate resolver', () => {
     await createFreightRate(pool, {
       supplier_id: supplierId,
       rate: 30,
-      unit: 'metre',
       effective_from: '2027-01-01',
     })
     const early = await resolveFreightRate(pool, { supplier_id: supplierId, on: '2026-08-13' })
@@ -642,13 +643,11 @@ describe('W16-US-005 — the freight rate resolver', () => {
     await createFreightRate(pool, {
       supplier_id: supplierId,
       rate: 30,
-      unit: 'metre',
       effective_from: '2025-01-01',
     })
     await createFreightRate(pool, {
       supplier_id: supplierId,
       rate: 33,
-      unit: 'metre',
       effective_from: '2026-01-01',
     })
     expect((await resolveFreightRate(pool, { supplier_id: supplierId, on: '2025-06-01' })).rate.rate).toBe(30)
@@ -659,14 +658,12 @@ describe('W16-US-005 — the freight rate resolver', () => {
     await createFreightRate(pool, {
       supplier_id: supplierId,
       rate: 30,
-      unit: 'metre',
       effective_from: '2025-01-01',
     })
     await createFreightRate(pool, {
       supplier_id: supplierId,
       category: 'wallpaper',
       rate: 50,
-      unit: 'roll',
       effective_from: '2025-01-01',
     })
     const wallpaper = await resolveFreightRate(pool, {
@@ -675,7 +672,6 @@ describe('W16-US-005 — the freight rate resolver', () => {
       on: '2026-06-01',
     })
     expect(wallpaper.rate.rate).toBe(50)
-    expect(wallpaper.rate.unit).toBe('roll')
 
     // A caller naming no category is asking for the catch-all and gets only it.
     expect((await resolveFreightRate(pool, { supplier_id: supplierId, on: '2026-06-01' })).rate.rate).toBe(30)
@@ -688,7 +684,7 @@ describe('W16-US-005 — the freight rate resolver', () => {
 
   it("prefers the line's freight class over the every-class rate, and the class over the category", async () => {
     const rate = (over) =>
-      createFreightRate(pool, { supplier_id: supplierId, unit: 'metre', effective_from: '2025-01-01', ...over })
+      createFreightRate(pool, { supplier_id: supplierId, effective_from: '2025-01-01', ...over })
     await rate({ rate: 23 })
     await rate({ freight_class: 'b', rate: 3 })
     await rate({ category: 'wallpaper', rate: 40 })
@@ -706,15 +702,15 @@ describe('W16-US-005 — the freight rate resolver', () => {
   })
 
   it('refuses a freight class that is not one letter from A to E', async () => {
-    expect(validateFreightRate({ range_name: 'X', freight_class: 'AB', rate: 1, unit: 'metre', effective_from: '2026-01-01' })).toMatch(
+    expect(validateFreightRate({ range_name: 'X', freight_class: 'AB', rate: 1, effective_from: '2026-01-01' })).toMatch(
       /not a freight class/
     )
-    expect(validateFreightRate({ range_name: 'X', freight_class: 'F', rate: 1, unit: 'metre', effective_from: '2026-01-01' })).toMatch(
+    expect(validateFreightRate({ range_name: 'X', freight_class: 'F', rate: 1, effective_from: '2026-01-01' })).toMatch(
       /A to E/
     )
-    expect(validateFreightRate({ range_name: 'X', freight_class: 'E', rate: 1, unit: 'metre', effective_from: '2026-01-01' })).toBeNull()
+    expect(validateFreightRate({ range_name: 'X', freight_class: 'E', rate: 1, effective_from: '2026-01-01' })).toBeNull()
     await expect(
-      createFreightRate(pool, { supplier_id: supplierId, freight_class: '7', rate: 1, unit: 'metre', effective_from: '2026-01-01' })
+      createFreightRate(pool, { supplier_id: supplierId, freight_class: '7', rate: 1, effective_from: '2026-01-01' })
     ).rejects.toMatchObject({ statusCode: 422 })
   })
 
@@ -723,7 +719,6 @@ describe('W16-US-005 — the freight rate resolver', () => {
       createFreightRate(pool, {
         range_name: `${PREFIX} NOBODY`,
         rate: 28,
-        unit: 'metre',
         effective_from: '2025-01-01',
       })
     ).rejects.toMatchObject({ statusCode: 422, message: expect.stringMatching(/is not a house/) })
@@ -733,7 +728,6 @@ describe('W16-US-005 — the freight rate resolver', () => {
     await createFreightRate(pool, {
       range_name: `${PREFIX} PIERRE FREY`,
       rate: 28,
-      unit: 'metre',
       effective_from: '2025-01-01',
     })
     const hit = await resolveFreightRate(pool, {
@@ -774,14 +768,12 @@ describe('W16-US-008 — the rate ledger is append-only', () => {
     await createFreightRate(pool, {
       supplier_id: supplierId,
       rate: 30,
-      unit: 'metre',
       effective_from: '2026-01-01',
     })
     await expect(
       createFreightRate(pool, {
         supplier_id: supplierId,
         rate: 33,
-        unit: 'metre',
         effective_from: '2026-01-01',
       })
     ).rejects.toMatchObject({ statusCode: 409 })
@@ -794,20 +786,15 @@ describe('W16-US-008 — the rate ledger is append-only', () => {
   })
 
   it('validates a rate the same way for the form and the file', () => {
-    expect(validateFreightRate({ range_name: 'X', rate: 1, unit: 'metre', effective_from: '2026-01-01' })).toBeNull()
-    expect(validateFreightRate({ rate: 1, unit: 'metre', effective_from: '2026-01-01' })).toMatch(
+    expect(validateFreightRate({ range_name: 'X', rate: 1, effective_from: '2026-01-01' })).toBeNull()
+    expect(validateFreightRate({ rate: 1, effective_from: '2026-01-01' })).toMatch(
       /either a supplier or a range/
     )
-    expect(validateFreightRate({ range_name: 'X', rate: 1, effective_from: '2026-01-01' })).toMatch(
-      /must state its unit/
-    )
-    expect(
-      validateFreightRate({ range_name: 'X', basis: 'percent', rate: 8, unit: 'metre', effective_from: '2026-01-01' })
-    ).toMatch(/per nothing/)
-    expect(validateFreightRate({ range_name: 'X', rate: -1, unit: 'metre', effective_from: '2026-01-01' })).toMatch(
+    expect(validateFreightRate({ range_name: 'X', basis: 'percent', rate: 8, effective_from: '2026-01-01' })).toBeNull()
+    expect(validateFreightRate({ range_name: 'X', rate: -1, effective_from: '2026-01-01' })).toMatch(
       /zero or more/
     )
-    expect(validateFreightRate({ range_name: 'X', rate: 1, unit: 'metre', effective_from: '01/01/2026' })).toMatch(
+    expect(validateFreightRate({ range_name: 'X', rate: 1, effective_from: '01/01/2026' })).toMatch(
       /YYYY-MM-DD/
     )
   })
@@ -817,7 +804,6 @@ describe('W16-US-008 — the rate ledger is append-only', () => {
       createFreightRate(pool, {
         supplier_id: 2147483646,
         rate: 30,
-        unit: 'metre',
         effective_from: '2026-01-01',
       })
     ).rejects.toMatchObject({ statusCode: 422 })
@@ -835,8 +821,8 @@ describe('W16-US-009 — the rate CSV round trip', () => {
       'utf8'
     )
 
-  const line = ({ id = '', name = '', range = '', category = '', freightClass = '', basis = 'dollar', rate = '', unit = '', from = '', note = '' }) =>
-    [id, name, range, category, freightClass, basis, rate, unit, from, note]
+  const line = ({ id = '', name = '', range = '', category = '', freightClass = '', basis = 'dollar', rate = '', from = '', note = '' }) =>
+    [id, name, range, category, freightClass, basis, rate, from, note]
 
   beforeAll(async () => {
     const config = loadConfig()
@@ -873,11 +859,23 @@ describe('W16-US-009 — the rate CSV round trip', () => {
       'Freight Class',
       'Basis',
       'Rate',
+      'Effective From',
+      'Note',
+    ])
+    // Older headers are still read — a sheet on somebody's desk keeps importing:
+    // with a Unit column (ignored since 1 Oct 2026), and before freight classes.
+    expect(FREIGHT_RATE_SHEET_HEADER_V2).toEqual([
+      'Supplier ID',
+      'Supplier',
+      'Range',
+      'Category',
+      'Freight Class',
+      'Basis',
+      'Rate',
       'Unit',
       'Effective From',
       'Note',
     ])
-    // The pre-class header is still read — a sheet on somebody's desk keeps importing.
     expect(FREIGHT_RATE_SHEET_HEADER_V1).toEqual([
       'Supplier ID',
       'Supplier',
@@ -910,21 +908,21 @@ describe('W16-US-009 — the rate CSV round trip', () => {
 
   it('carries a freight class: a default and a letter from the same day are two rates, and round-trip', async () => {
     const file = sheet([
-      line({ range: `${PREFIX} A`, rate: '23', unit: 'metre', from: '2026-01-01' }),
-      line({ range: `${PREFIX} A`, freightClass: 'b', rate: '3', unit: 'metre', from: '2026-01-01' }),
-      line({ range: `${PREFIX} B`, freightClass: 'AB', rate: '3', unit: 'metre', from: '2026-01-01' }),
+      line({ range: `${PREFIX} A`, rate: '23', from: '2026-01-01' }),
+      line({ range: `${PREFIX} A`, freightClass: 'b', rate: '3', from: '2026-01-01' }),
+      line({ range: `${PREFIX} B`, freightClass: 'AB', rate: '3', from: '2026-01-01' }),
     ])
     const refused = await validateFreightRateSheet(pool, file)
     expect(refused.errors).toEqual([{ row: 4, message: expect.stringMatching(/"AB" is not a freight class/) }])
 
     const good = sheet([
-      line({ range: `${PREFIX} A`, rate: '23', unit: 'metre', from: '2026-01-01' }),
-      line({ range: `${PREFIX} A`, freightClass: 'b', rate: '3', unit: 'metre', from: '2026-01-01' }),
+      line({ range: `${PREFIX} A`, rate: '23', from: '2026-01-01' }),
+      line({ range: `${PREFIX} A`, freightClass: 'b', rate: '3', from: '2026-01-01' }),
     ])
     expect((await applyFreightRateSheet(pool, good)).applied).toBe(2)
     // Exported and read back, the letter survives and nothing is new.
     const csv = toFreightRateCsv(await getFreightRateSheet(pool))
-    expect(csv).toMatch(new RegExp(`${PREFIX} A,,B,dollar,3,metre,2026-01-01`))
+    expect(csv).toMatch(new RegExp(`${PREFIX} A,,B,dollar,3,2026-01-01`))
     expect((await applyFreightRateSheet(pool, Buffer.from(csv, 'utf8'))).summary.created).toBe(0)
   })
 
@@ -943,7 +941,6 @@ describe('W16-US-009 — the rate CSV round trip', () => {
           category: null,
           basis: 'dollar',
           rate: 30,
-          unit: 'metre',
           effective_from: '2026-01-01',
           note: '=HYPERLINK("http://evil.test")',
         },
@@ -963,22 +960,22 @@ describe('W16-US-009 — the rate CSV round trip', () => {
     const report = await validateFreightRateSheet(
       pool,
       sheet([
-        line({ range: `${PREFIX} A`, rate: '30', unit: 'metre', from: '2026-01-01' }),
-        line({ range: `${PREFIX} B`, rate: '30', from: '2026-01-01' }),
-        line({ id: 'abc', rate: '30', unit: 'metre', from: '2026-01-01' }),
-        line({ range: `${PREFIX} C`, rate: '30', unit: 'metre', from: 'yesterday' }),
+        line({ range: `${PREFIX} A`, rate: '30', from: '2026-01-01' }),
+        line({ range: `${PREFIX} B`, rate: '-1', from: '2026-01-01' }),
+        line({ id: 'abc', rate: '30', from: '2026-01-01' }),
+        line({ range: `${PREFIX} C`, rate: '30', from: 'yesterday' }),
       ])
     )
     expect(report.errors.map((error) => error.row)).toEqual([3, 4, 5])
-    expect(report.errors[0].message).toMatch(/must state its unit/)
+    expect(report.errors[0].message).toMatch(/zero or more/)
     expect(report.errors[1].message).toMatch(/not a Supplier ID/)
     expect(report.errors[2].message).toMatch(/not a date/)
   })
 
   it('refuses a row whose range names no house, by line, and applies nothing', async () => {
     const file = sheet([
-      line({ range: `${PREFIX} a`, rate: '30', unit: 'metre', from: '2026-01-01' }),
-      line({ range: `${PREFIX} Nowhere`, rate: '30', unit: 'metre', from: '2026-01-01' }),
+      line({ range: `${PREFIX} a`, rate: '30', from: '2026-01-01' }),
+      line({ range: `${PREFIX} Nowhere`, rate: '30', from: '2026-01-01' }),
     ])
     const report = await validateFreightRateSheet(pool, file)
     expect(report.errors).toEqual([{ row: 3, message: expect.stringMatching(/Nowhere" is not a house/) }])
@@ -993,7 +990,7 @@ describe('W16-US-009 — the rate CSV round trip', () => {
   it('accepts the d/m/Y an Excel on a New Zealand desk writes back', async () => {
     const report = await validateFreightRateSheet(
       pool,
-      sheet([line({ range: `${PREFIX} A`, rate: '30', unit: 'metre', from: '5/03/2026' })])
+      sheet([line({ range: `${PREFIX} A`, rate: '30', from: '5/03/2026' })])
     )
     expect(report.errors).toEqual([])
     expect(report.changes[0].effective_from).toBe('2026-03-05')
@@ -1001,8 +998,8 @@ describe('W16-US-009 — the rate CSV round trip', () => {
 
   it('balances: rows = skipped + repeats + unchanged + created', async () => {
     const file = sheet([
-      line({ range: `${PREFIX} A`, rate: '30', unit: 'metre', from: '2026-01-01' }),
-      line({ range: `${PREFIX} A`, rate: '30', unit: 'metre', from: '2026-01-01' }),
+      line({ range: `${PREFIX} A`, rate: '30', from: '2026-01-01' }),
+      line({ range: `${PREFIX} A`, rate: '30', from: '2026-01-01' }),
       line({ id: String(supplierId), name: 'ignored', rate: '8', basis: 'percent', from: '2026-01-01' }),
       line({}),
     ])
@@ -1015,7 +1012,7 @@ describe('W16-US-009 — the rate CSV round trip', () => {
 
   it('is a dry run: validate writes nothing, apply writes once, re-apply writes nothing', async () => {
     const file = sheet([
-      line({ range: `${PREFIX} A`, rate: '30', unit: 'metre', from: '2026-01-01' }),
+      line({ range: `${PREFIX} A`, rate: '30', from: '2026-01-01' }),
     ])
     await validateFreightRateSheet(pool, file)
     const before = await pool.query(
@@ -1036,11 +1033,11 @@ describe('W16-US-009 — the rate CSV round trip', () => {
   it('refuses a row that would change a rate already on the ledger', async () => {
     await applyFreightRateSheet(
       pool,
-      sheet([line({ range: `${PREFIX} A`, rate: '30', unit: 'metre', from: '2026-01-01' })])
+      sheet([line({ range: `${PREFIX} A`, rate: '30', from: '2026-01-01' })])
     )
     const report = await applyFreightRateSheet(
       pool,
-      sheet([line({ range: `${PREFIX} A`, rate: '35', unit: 'metre', from: '2026-01-01' })])
+      sheet([line({ range: `${PREFIX} A`, rate: '35', from: '2026-01-01' })])
     )
     expect(report.applied).toBe(0)
     expect(report.errors[0].message).toMatch(/append-only/)
@@ -1055,8 +1052,8 @@ describe('W16-US-009 — the rate CSV round trip', () => {
     const report = await applyFreightRateSheet(
       pool,
       sheet([
-        line({ range: `${PREFIX} A`, rate: '30', unit: 'metre', from: '2026-01-01' }),
-        line({ range: `${PREFIX} B`, rate: 'lots', unit: 'metre', from: '2026-01-01' }),
+        line({ range: `${PREFIX} A`, rate: '30', from: '2026-01-01' }),
+        line({ range: `${PREFIX} B`, rate: 'lots', from: '2026-01-01' }),
       ])
     )
     expect(report.applied).toBe(0)

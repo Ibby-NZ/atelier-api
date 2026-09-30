@@ -2,7 +2,7 @@
 // every house (Sept 2026 — "this information should be added to their
 // respective houses with editable fields"):
 //   1. reading the uploaded workbook — the D365 envelope, Range rows only
-//   2. the planner — fill vs replace vs kept, freight units, what is never touched
+//   2. the planner — fill vs replace vs kept, what is never touched
 //   3. /admin/pricing/houses/:id — read and write each figure into its one home
 //   4. /admin/pricing/houses/import/* — the upload, dry run then apply
 //
@@ -70,8 +70,8 @@ const insertTerms = (pool, { supplierId, brandId, discount = null, chain = null 
     [supplierId, brandId, discount, chain]
   )
 
-// Price lines give a house its unit: `count` lines in `unit`, carrying a
-// freight letter when one is given.
+// Price lines under a house: `count` lines in `unit`, carrying a freight
+// letter when one is given (the classes worth setting).
 const insertPriceLines = async (pool, suffix, unit, count = 1, freightClass = null) => {
   for (let at = 0; at < count; at += 1) {
     await pool.query(
@@ -83,17 +83,17 @@ const insertPriceLines = async (pool, suffix, unit, count = 1, freightClass = nu
   }
 }
 
-const insertFreight = (pool, { rangeName, rate, unit = 'metre', on = '2020-01-01' }) =>
+const insertFreight = (pool, { rangeName, rate, on = '2020-01-01' }) =>
   pool.query(
-    `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, unit, effective_from)
-     VALUES ($1, NULL, 'dollar', $2, $3, $4)`,
-    [rangeName, rate, unit, on]
+    `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, effective_from)
+     VALUES ($1, NULL, 'dollar', $2, $3)`,
+    [rangeName, rate, on]
   )
 
 const houseFreight = (pool, rangeName) =>
   pool
     .query(
-      `SELECT rate::float AS rate, unit, to_char(effective_from, 'YYYY-MM-DD') AS effective_from
+      `SELECT rate::float AS rate, to_char(effective_from, 'YYYY-MM-DD') AS effective_from
          FROM supplier_freight_rates WHERE lower(range_name) = lower($1)
         ORDER BY effective_from DESC, id DESC`,
       [rangeName]
@@ -183,14 +183,14 @@ describe('planning the export onto the houses', () => {
     { id: 1, name: 'NEW HOUSE', slug: 'new-house', supplier_id: 7 },
     { id: 2, name: 'SAVED HOUSE', slug: 'saved-house', supplier_id: 7 },
     { id: 3, name: 'CHAIN HOUSE', slug: 'chain-house', supplier_id: 7 },
-    { id: 4, name: 'NO UNIT', slug: 'no-unit', supplier_id: null },
+    { id: 4, name: 'NO SUPPLIER', slug: 'no-supplier', supplier_id: null },
   ]
   const sources = {
     parameters: [
       range('NEW HOUSE'),
       range('SAVED HOUSE', { clearance_percent: 12, duty_rate_b: null, trade_markup_percent: 90, freight_per_unit: 35 }),
       range('CHAIN HOUSE'),
-      range('NO UNIT'),
+      range('NO SUPPLIER'),
       range('RETIRED', { status: 'Inactive' }),
     ],
     brands,
@@ -199,8 +199,7 @@ describe('planning the export onto the houses', () => {
       { id: 20, brand_id: 2, supplier_id: 7, discount: 0.1, chain_length: 0, tier_count: 0 },
       { id: 30, brand_id: 3, supplier_id: 7, discount: null, chain_length: 2, tier_count: 0 },
     ],
-    freight: [{ range_name: 'Saved House', rate: 30, basis: 'dollar', unit: 'roll', effective_from: '2026-01-01' }],
-    units: [[1, 'metre'], [3, 'metre']],
+    freight: [{ range_name: 'Saved House', rate: 30, basis: 'dollar', effective_from: '2026-01-01' }],
   }
   const lines = (plan, brand) => plan.changes.filter((line) => line.brand === brand)
   const line = (plan, brand, field) => lines(plan, brand).find((l) => l.field === field)
@@ -212,11 +211,13 @@ describe('planning the export onto the houses', () => {
     expect(plan.inserts.map((row) => row.brand_id)).toEqual([1, 3, 4])
     expect(plan.inserts[0]).toMatchObject({ surcharge_min_qty: 5, surcharge_per_unit: 20, trade_markup_percent: 85 })
     expect(plan.termsInserts).toEqual([expect.objectContaining({ brand_id: 1, supplier_id: 7, discount: 0.25 })])
-    // Freight lands on every house with a unit — the chain house too, since
-    // only its DISCOUNT is off limits — and not on the saved house, whose rate
+    // Freight lands on every house — the chain house too, since only its
+    // DISCOUNT is off limits, and one with no supplier or price lines, since a
+    // rate needs no unit (1 Oct 2026) — and not on the saved house, whose rate
     // the export disagrees with.
-    expect(plan.freightInserts.map((row) => row.brand_id)).toEqual([1, 3])
-    expect(plan.freightInserts[0]).toMatchObject({ range_name: 'NEW HOUSE', rate: 30, unit: 'metre', effective_from: '2026-09-25' })
+    expect(plan.freightInserts.map((row) => row.brand_id)).toEqual([1, 3, 4])
+    expect(plan.freightInserts[0]).toEqual(expect.objectContaining({ range_name: 'NEW HOUSE', rate: 30, effective_from: '2026-09-25' }))
+    expect(plan.freightInserts[0]).not.toHaveProperty('unit')
     expect(lines(plan, 'NEW HOUSE').every((l) => l.kind === CHANGE_KINDS.FILL)).toBe(true)
 
     // The saved house: its blank markup and surcharge fill; the rest is kept.
@@ -233,21 +234,21 @@ describe('planning the export onto the houses', () => {
     expect(line(plan, 'SAVED HOUSE', 'duty_percent_a')).toBeUndefined()
 
     expect(plan.reports.termsAlreadyOnFile).toEqual([expect.objectContaining({ brand: 'CHAIN HOUSE' })])
-    expect(plan.reports.brandsWithoutSupplier).toEqual([expect.objectContaining({ brand: 'NO UNIT' })])
-    expect(plan.reports.freightWithoutUnit).toEqual([expect.objectContaining({ brand: 'NO UNIT', rate: 30 })])
+    expect(plan.reports.brandsWithoutSupplier).toEqual([expect.objectContaining({ brand: 'NO SUPPLIER' })])
+    expect(plan.reports).not.toHaveProperty('freightWithoutUnit')
     expect(plan.reports.inactiveRanges).toEqual([{ range: 'RETIRED', status: 'Inactive' }])
     expect(plan.summary).toMatchObject({ houses_matched: 4, values_replaced: 0, values_kept: 3 })
   })
 
-  it('with overwrite, replaces what disagrees — freight as a new dated row in the unit it already had — and still never touches a chain', () => {
+  it('with overwrite, replaces what disagrees — freight as a new dated row — and still never touches a chain', () => {
     const plan = planParametersBackfill(sources, { overwrite: true, on: '2026-09-25' })
     expect(plan.overwrites).toEqual([expect.objectContaining({ brand_id: 2, clearance_percent: 12 })])
     expect(plan.overwrites[0]).not.toHaveProperty('duty_percent_b')
     expect(plan.termsUpdates).toEqual([expect.objectContaining({ terms_id: 20, supplier_id: 7, discount: 0.25, was: 0.1 })])
     expect(plan.freightInserts).toEqual(
-      expect.arrayContaining([expect.objectContaining({ brand_id: 2, rate: 35, unit: 'roll', effective_from: '2026-09-25' })])
+      expect.arrayContaining([expect.objectContaining({ brand_id: 2, rate: 35, effective_from: '2026-09-25' })])
     )
-    expect(line(plan, 'SAVED HOUSE', FREIGHT_FIELD)).toMatchObject({ from: 30, to: 35, kind: CHANGE_KINDS.REPLACE, unit: 'roll' })
+    expect(line(plan, 'SAVED HOUSE', FREIGHT_FIELD)).toMatchObject({ from: 30, to: 35, kind: CHANGE_KINDS.REPLACE })
     expect(plan.changes.some((l) => l.kind === CHANGE_KINDS.KEPT)).toBe(false)
     expect(plan.termsUpdates.some((row) => row.brand_id === 3)).toBe(false)
   })
@@ -377,7 +378,7 @@ describe('/admin/pricing/houses', () => {
     }
   })
 
-  it('reads a house with nothing set: every figure blank, the discount writable, the freight unit taken from its price lines', async () => {
+  it('reads a house with nothing set: every figure blank, the discount writable', async () => {
     const res = await inject('GET', `/admin/pricing/houses/${houseId}`)
     expect(res.statusCode).toBe(200)
     const { pricing } = res.json()
@@ -385,7 +386,7 @@ describe('/admin/pricing/houses', () => {
     expect(pricing.parameters).toBe(null)
     expect(pricing.discount).toMatchObject({ percent: null, source: 'missing', editable: true })
     expect(pricing.freight).toBe(null)
-    expect(pricing.freight_unit_hint).toBe('metre')
+    expect(pricing).not.toHaveProperty('freight_unit_hint')
     expect((await inject('GET', '/admin/pricing/houses/999999999')).statusCode).toBe(404)
   })
 
@@ -394,26 +395,27 @@ describe('/admin/pricing/houses', () => {
       payload: {
         parameters: fullSet(),
         discount_percent: 25,
-        freight: { rate: 30, unit: 'metre', effective_from: '2026-01-01' },
+        freight: { rate: 30, effective_from: '2026-01-01' },
       },
     })
     expect(res.statusCode).toBe(200)
     const { pricing } = res.json()
     expect(pricing.parameters).toMatchObject({ duty_percent_a: 5, clearance_percent: 10, surcharge_min_qty: 5, surcharge_per_unit: 20 })
     expect(pricing.discount).toMatchObject({ percent: 25, source: 'house', shape: 'flat', editable: true })
-    expect(pricing.freight).toMatchObject({ rate: 30, unit: 'metre', basis: 'dollar', effective_from: '2026-01-01' })
+    expect(pricing.freight).toMatchObject({ rate: 30, basis: 'dollar', effective_from: '2026-01-01' })
+    expect(pricing.freight).not.toHaveProperty('unit')
     expect(await houseTerms(pool, houseId)).toMatchObject({ discount: 0.25, chain: 0 })
 
     // The same figures again change nothing: no second ledger row, no 409.
     const again = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
-      payload: { parameters: fullSet(), discount_percent: 25, freight: { rate: 30, unit: 'metre', effective_from: '2026-02-01' } },
+      payload: { parameters: fullSet(), discount_percent: 25, freight: { rate: 30, effective_from: '2026-02-01' } },
     })
     expect(again.statusCode).toBe(200)
     expect(await houseFreight(pool, houseName('house'))).toHaveLength(1)
 
     // A new rate is a new dated row; the old one stays as history.
     const moved = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
-      payload: { parameters: fullSet(), discount_percent: 20, freight: { rate: 32, unit: 'metre', effective_from: '2026-03-01' } },
+      payload: { parameters: fullSet(), discount_percent: 20, freight: { rate: 32, effective_from: '2026-03-01' } },
     })
     expect(moved.json().pricing).toMatchObject({ discount: { percent: 20 }, freight: { rate: 32 } })
     expect((await houseFreight(pool, houseName('house'))).map((row) => row.rate)).toEqual([32, 30])
@@ -474,21 +476,21 @@ describe('/admin/pricing/houses', () => {
   it('sets a freight rate per class — the letters the price lines carry — and the waterfall prices a line by its letter', async () => {
     await insertPriceLines(pool, 'house', 'metre', 2, 'A')
     await insertPriceLines(pool, 'house', 'metre', 1, 'B')
-    const put = (freightClasses, freight = { rate: 23, unit: 'metre', effective_from: '2026-01-01' }) =>
+    const put = (freightClasses, freight = { rate: 23, effective_from: '2026-01-01' }) =>
       inject('PUT', `/admin/pricing/houses/${houseId}`, {
         payload: { parameters: fullSet(), freight, freight_classes: freightClasses },
       })
 
     const res = await put([
-      { freight_class: 'a', rate: 30, unit: 'metre', effective_from: '2026-01-01' },
-      { freight_class: 'B', rate: 3, unit: 'metre', effective_from: '2026-01-01' },
+      { freight_class: 'a', rate: 30, effective_from: '2026-01-01' },
+      { freight_class: 'B', rate: 3, effective_from: '2026-01-01' },
     ])
     expect(res.statusCode).toBe(200)
     const { pricing } = res.json()
     expect(pricing.freight).toMatchObject({ rate: 23, freight_class: null })
     expect(pricing.freight_classes).toEqual([
-      expect.objectContaining({ freight_class: 'A', rate: 30, unit: 'metre' }),
-      expect.objectContaining({ freight_class: 'B', rate: 3, unit: 'metre' }),
+      expect.objectContaining({ freight_class: 'A', rate: 30 }),
+      expect.objectContaining({ freight_class: 'B', rate: 3 }),
     ])
     expect(pricing.freight_class_lines).toEqual([
       { freight_class: 'A', lines: 2 },
@@ -496,9 +498,9 @@ describe('/admin/pricing/houses', () => {
     ])
 
     // The same rates again append nothing; a changed letter is one new dated row.
-    await put([{ freight_class: 'A', rate: 30, unit: 'metre', effective_from: '2026-02-01' }])
+    await put([{ freight_class: 'A', rate: 30, effective_from: '2026-02-01' }])
     expect(await houseFreight(pool, houseName('house'))).toHaveLength(3)
-    await put([{ freight_class: 'B', rate: 4, unit: 'metre', effective_from: '2026-03-01' }])
+    await put([{ freight_class: 'B', rate: 4, effective_from: '2026-03-01' }])
     expect(await houseFreight(pool, houseName('house'))).toHaveLength(4)
 
     // A line is priced by its letter; a letter with no rate takes the house's default.
@@ -512,8 +514,8 @@ describe('/admin/pricing/houses', () => {
     expect(await freightFor(null)).toMatchObject({ value: 23 })
 
     const twice = await put([
-      { freight_class: 'A', rate: 30, unit: 'metre' },
-      { freight_class: 'a', rate: 31, unit: 'metre' },
+      { freight_class: 'A', rate: 30 },
+      { freight_class: 'a', rate: 31 },
     ])
     expect(twice.statusCode).toBe(422)
     expect(twice.json().message).toMatch(/listed twice/)
@@ -529,7 +531,7 @@ describe('/admin/pricing/houses', () => {
     expect(await freightFor('B')).toMatchObject({ value: 23, detail: { freight_class: null } })
     expect(await freightFor('A')).toMatchObject({ value: 30 })
     const clash = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
-      payload: { parameters: fullSet(), remove_freight_classes: ['A'], freight_classes: [{ freight_class: 'A', rate: 9, unit: 'metre' }] },
+      payload: { parameters: fullSet(), remove_freight_classes: ['A'], freight_classes: [{ freight_class: 'A', rate: 9 }] },
     })
     expect(clash.statusCode).toBe(422)
     expect(clash.json().message).toMatch(/both set and removed/)
@@ -618,12 +620,14 @@ describe('/admin/pricing/houses', () => {
     expect(await refusal(bareId, [{ label: 'A', percent: 10 }])).toMatch(/Link this house to the supplier/)
   })
 
-  it('refuses a freight rate with no unit the ledger knows, and a discount of 100%', async () => {
-    const unit = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
-      payload: { parameters: fullSet(), freight: { rate: 30, unit: 'bolt' } },
+  // 1 Oct 2026: the unit is the product's. An older page still sending one
+  // is not refused for it; the rate lands as the figure it is.
+  it('takes a freight rate as a figure, with no unit, and refuses a discount of 100%', async () => {
+    const figure = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
+      payload: { parameters: fullSet(), freight: { rate: 30, unit: 'bolt', effective_from: '2026-01-01' } },
     })
-    expect(unit.statusCode).toBe(422)
-    expect(await getBrandParameters(pool, houseId)).toBe(null)
+    expect(figure.statusCode).toBe(200)
+    expect(await houseFreight(pool, houseName('house'))).toEqual([{ rate: 30, effective_from: '2026-01-01' }])
     const whole = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
       payload: { parameters: fullSet(), discount_percent: 100 },
     })
@@ -647,7 +651,7 @@ describe('/admin/pricing/houses', () => {
     expect(plan.changes).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ brand_id: houseId, field: 'clearance_percent', from: 12, to: 10, kind: 'kept' }),
-        expect.objectContaining({ brand_id: houseId, field: 'freight', to: 30, unit: 'metre', kind: 'fill' }),
+        expect.objectContaining({ brand_id: houseId, field: 'freight', to: 30, kind: 'fill' }),
         expect.objectContaining({ brand_id: houseId, field: 'discount_percent', to: 25, kind: 'fill' }),
       ])
     )
@@ -659,7 +663,7 @@ describe('/admin/pricing/houses', () => {
 
     const applied = await upload('apply', book)
     expect(applied.statusCode).toBe(200)
-    expect(applied.json()).toMatchObject({ dry_run: false, terms_inserted: 1, freight_inserted: 1 })
+    expect(applied.json()).toMatchObject({ dry_run: false, terms_inserted: 1, freight_inserted: 3 })
     expect(await getBrandParameters(pool, houseId)).toMatchObject({
       clearance_percent: 12,
       trade_markup_percent: 85,
@@ -667,12 +671,12 @@ describe('/admin/pricing/houses', () => {
       surcharge_per_unit: 20,
     })
     expect(await houseTerms(pool, houseId)).toMatchObject({ discount: 0.25 })
-    expect(await houseFreight(pool, houseName('house'))).toEqual([expect.objectContaining({ rate: 30, unit: 'metre' })])
-    // The chain house kept its chain; the house with no unit has no freight.
+    expect(await houseFreight(pool, houseName('house'))).toEqual([expect.objectContaining({ rate: 30 })])
+    // The chain house kept its chain; every house got its freight — a house
+    // with no price lines to take a unit from included (1 Oct 2026).
     expect(await houseTerms(pool, chainId)).toMatchObject({ discount: null, chain: 2 })
-    expect(applied.json().reports.freightWithoutUnit.map((r) => r.brand)).toEqual(
-      expect.arrayContaining([houseName('chain'), houseName('bare')])
-    )
+    expect((await houseFreight(pool, houseName('chain'))).map((row) => row.rate)).toEqual([40])
+    expect((await houseFreight(pool, houseName('bare'))).map((row) => row.rate)).toEqual([50])
 
     // Re-running changes nothing but the one kept line.
     const rerun = (await upload('validate', book)).json()
@@ -684,19 +688,19 @@ describe('/admin/pricing/houses', () => {
     expect(await getBrandParameters(pool, houseId)).toMatchObject({ clearance_percent: 10 })
   })
 
-  it('replaces a house’s freight only when asked, as a new dated row in the unit the house already had', async () => {
-    await insertFreight(pool, { rangeName: houseName('house'), rate: 20, unit: 'roll', on: '2020-01-01' })
+  it('replaces a house’s freight only when asked, as a new dated row', async () => {
+    await insertFreight(pool, { rangeName: houseName('house'), rate: 20, on: '2020-01-01' })
     const book = d365Workbook([trackingRow('g1', houseName('house'), { freight: 30 })])
 
     const kept = (await upload('validate', book)).json()
     expect(kept.changes).toEqual(
-      expect.arrayContaining([expect.objectContaining({ field: 'freight', from: 20, to: 30, kind: 'kept', unit: 'roll' })])
+      expect.arrayContaining([expect.objectContaining({ field: 'freight', from: 20, to: 30, kind: 'kept' })])
     )
 
     const applied = await upload('apply', book, '&overwrite=true')
     expect(applied.json()).toMatchObject({ freight_inserted: 1 })
     const rates = await houseFreight(pool, houseName('house'))
-    expect(rates.map((row) => [row.rate, row.unit])).toEqual([[30, 'roll'], [20, 'roll']])
+    expect(rates.map((row) => row.rate)).toEqual([30, 20])
   })
 
   it('refuses a file that is not the export with the per-cell reasons, and writes nothing', async () => {

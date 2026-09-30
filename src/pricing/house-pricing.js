@@ -107,40 +107,6 @@ const HOUSE_LINES = `FROM price_list_items pli
    AND pli.discontinued_at IS NULL`
 
 /**
- * The unit each house's price lines are mostly quoted in — the "range's own
- * pack type" that a Dynamics freight figure is per. A dollar rate on the ledger
- * must state its unit, and the export does not, so this is where the import
- * takes it from. A tie is no answer (null), and so is a house with no price
- * lines; both are reported by the caller rather than guessed.
- *
- * @param {{ query: Function }} db
- * @param {number|null} [brandId] one house, or every house when absent
- * @returns {Promise<Map<number, string|null>>} brand id -> unit
- */
-export const houseUnits = async (db, brandId = null) => {
-  const { rows } = await db.query(
-    `SELECT b.id AS brand_id, pli.unit, count(*)::int AS lines
-       ${HOUSE_LINES}
-        AND pli.unit IS NOT NULL
-        AND ($1::int IS NULL OR b.id = $1::int)
-      GROUP BY b.id, pli.unit`,
-    [brandId]
-  )
-  const byHouse = new Map()
-  for (const row of rows) {
-    const list = byHouse.get(row.brand_id) ?? []
-    byHouse.set(row.brand_id, [...list, row])
-  }
-  const units = new Map()
-  for (const [id, list] of byHouse) {
-    const top = Math.max(...list.map((row) => row.lines))
-    const leaders = list.filter((row) => row.lines === top)
-    units.set(id, leaders.length === 1 ? leaders[0].unit : null)
-  }
-  return units
-}
-
-/**
  * The freight letters one house's price lines carry, with how many lines each —
  * the classes the house page offers a rate for, so the office sets the letters
  * that are actually priced (Fabricut: A on most lines, B on trimmings).
@@ -219,7 +185,6 @@ const freightView = (rate) =>
     ? Object.freeze({
         rate: rate.rate,
         basis: rate.basis,
-        unit: rate.unit,
         effective_from: rate.effective_from,
         note: rate.note,
         freight_class: rate.freight_class ?? null,
@@ -235,13 +200,12 @@ const freightView = (rate) =>
 export const getHousePricing = async (db, brandId) => {
   const house = await loadHouse(db, brandId)
   const supplier = await supplierForBrand(db, house.id)
-  const [parameters, supplierParameters, terms, houseFreight, supplierFreight, units] = [
+  const [parameters, supplierParameters, terms, houseFreight, supplierFreight] = [
     await getBrandParameters(db, house.id),
     supplier ? await getSupplierParameters(db, supplier.id) : null,
     await getBrandTerms(db, house.id),
     await resolveFreightRate(db, { range_name: house.name }),
     supplier ? await resolveFreightRate(db, { supplier_id: supplier.id }) : null,
-    await houseUnits(db, house.id),
   ]
   const [classRates, classLines, productCounts] = [
     await currentClassRates(db, { range_name: house.name }),
@@ -271,8 +235,6 @@ export const getHousePricing = async (db, brandId) => {
     // carry (with how many lines) — the classes worth setting.
     freight_classes: Object.freeze(classRates.map(freightView)),
     freight_class_lines: Object.freeze(classLines),
-    // What a new freight rate's unit defaults to on the form.
-    freight_unit_hint: houseFreight.rate?.unit ?? units.get(house.id) ?? null,
   })
 }
 
@@ -369,8 +331,7 @@ const writeDiscountClasses = async (db, house, classes) => {
 const sameFreight = (current, freight) =>
   current != null &&
   current.basis === 'dollar' &&
-  sameRate(current.rate, freight.rate) &&
-  current.unit === (freight.unit ?? null)
+  sameRate(current.rate, freight.rate)
 
 const appendFreight = (db, house, freight, freightClass = null) =>
   createFreightRate(db, {
@@ -378,7 +339,6 @@ const appendFreight = (db, house, freight, freightClass = null) =>
     freight_class: freightClass,
     basis: 'dollar',
     rate: freight.rate,
-    unit: freight.unit ?? null,
     effective_from: freight.effective_from ?? today(),
     note: freight.note ?? 'Set on the house page',
   })
@@ -416,9 +376,9 @@ const writeFreightClasses = async (db, house, rates) => {
  *   discount_classes  optional; the whole set of the house's classes
  *                     ([{ id?, label, percent, is_default? }]) — absent leaves
  *                     them alone
- *   freight           optional { rate, unit, effective_from?, note? }; absent
+ *   freight           optional { rate, effective_from?, note? }; absent
  *                     or null leaves the ledger alone (it cannot be cleared)
- *   freight_classes   optional [{ freight_class, rate, unit, effective_from? }];
+ *   freight_classes   optional [{ freight_class, rate, effective_from? }];
  *                     a letter left out keeps its rate
  *   remove_freight_classes optional ['B', …]; each letter's own rate is
  *                     removed, so its lines pay the house's rate

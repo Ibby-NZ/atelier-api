@@ -717,6 +717,22 @@ describe('back-office catalogue admin', () => {
       expect(response.statusCode).toBe(409)
     })
 
+    // 1 Oct 2026: the unit a product is priced and freighted per is the
+    // product's, no longer its house's freight rate's.
+    it('carries the unit it is sold per, set on create, changed and cleared by a patch', async () => {
+      const brand = await createBrandFixture('House')
+      const product = await createProductFixture(brand.id, { name: brandName('Miette'), unit: 'yard' })
+      expect(product.unit).toBe('yard')
+
+      const patched = await inject('PATCH', `/admin/products/${product.id}`, backofficeCookie, { unit: 'roll' })
+      expect(patched.statusCode).toBe(200)
+      expect(patched.json().product.unit).toBe('roll')
+      const cleared = await inject('PATCH', `/admin/products/${product.id}`, backofficeCookie, { unit: null })
+      expect(cleared.json().product.unit).toBe(null)
+      const furlong = await inject('PATCH', `/admin/products/${product.id}`, backofficeCookie, { unit: 'furlong' })
+      expect(furlong.statusCode).toBe(400)
+    })
+
     it('rejects an unknown brand_id with 422', async () => {
       const response = await inject('POST', '/admin/collections', backofficeCookie, {
         brand_id: 99999999,

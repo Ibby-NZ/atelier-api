@@ -69,14 +69,14 @@ const PARAMETERS_BODY = {
   },
 }
 
-// One freight rate as the house page sends it: dollars per unit, dated.
+// One freight rate as the house page sends it: dollars, dated. It carries no
+// unit — the unit is the product's (1 Oct 2026).
 const FREIGHT_RATE_BODY = {
   type: ['object', 'null'],
   additionalProperties: false,
-  required: ['rate', 'unit'],
+  required: ['rate'],
   properties: {
     rate: { type: 'number', minimum: 0 },
-    unit: { type: 'string', minLength: 1, maxLength: 20 },
     effective_from: { type: ['string', 'null'], pattern: ISO_DAY },
     note: { type: ['string', 'null'], maxLength: 1000 },
   },
@@ -85,8 +85,6 @@ const FREIGHT_RATE_BODY = {
 // One house's pricing in one body. `parameters` is the whole override set (PUT
 // semantics); the discount and the freight are optional because each lives
 // somewhere else and absent means "leave it" — see src/pricing/house-pricing.js.
-// The unit is checked against the ledger's vocabulary by createFreightRate, so
-// a typo is its 422 rather than a second list here.
 const HOUSE_PRICING_BODY = {
   type: 'object',
   additionalProperties: false,
@@ -104,7 +102,7 @@ const HOUSE_PRICING_BODY = {
       items: {
         ...FREIGHT_RATE_BODY,
         type: 'object',
-        required: ['freight_class', 'rate', 'unit'],
+        required: ['freight_class', 'rate'],
         properties: {
           ...FREIGHT_RATE_BODY.properties,
           freight_class: { type: 'string', pattern: '^[A-Za-z]$' },

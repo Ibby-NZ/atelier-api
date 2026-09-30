@@ -100,7 +100,6 @@ export const WATERFALL_STEPS = Object.freeze(Object.keys(STEP_LABELS))
  *   fx_rate?: number|string|null, fx_margin_percent?: number|string|null,
  *   duty_percent?: number|string|null,
  *   freight?: number|string|null, freight_basis?: 'dollar'|'percent',
- *   freight_unit?: string|null,
  *   clearance_percent?: number|string|null, clearance_basis?: 'percent'|'dollar'|null,
  *   handling?: number|string|null,
  *   trade_markup_percent?: number|string|null,
@@ -199,7 +198,6 @@ export const computeWaterfall = (input = {}) => {
 
   return Object.freeze({
     currency: input.currency ?? null,
-    freight_unit: input.freight_unit ?? null,
     // Every step is present whether or not it resolved, so a reader can see
     // WHERE the chain stopped rather than inferring it from a short list.
     // Rounding happens here and nowhere earlier: rounding each intermediate

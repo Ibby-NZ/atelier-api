@@ -316,8 +316,8 @@ describe('product categories', () => {
       ])
       await pool.query(
         `INSERT INTO supplier_freight_rates
-           (range_name, category, basis, rate, unit, effective_from)
-         VALUES ($1, $2, 'dollar', 5, 'metre', '2026-01-01')`,
+           (range_name, category, basis, rate, effective_from)
+         VALUES ($1, $2, 'dollar', 5, '2026-01-01')`,
         [`${PREFIX}-range`, slug]
       )
 

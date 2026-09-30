@@ -695,8 +695,8 @@ describe('W13 purchase orders', () => {
       // A fraction off list on the supplier row: 40%.
       await pool.query(`UPDATE suppliers SET default_discount = 0.4 WHERE id = $1`, [fixtures.supplierId])
       await pool.query(
-        `INSERT INTO supplier_freight_rates (supplier_id, basis, rate, unit, effective_from)
-         VALUES ($1, 'dollar', 3.25, 'metre', '2026-01-01')`,
+        `INSERT INTO supplier_freight_rates (supplier_id, basis, rate, effective_from)
+         VALUES ($1, 'dollar', 3.25, '2026-01-01')`,
         [fixtures.supplierId]
       )
       await placeOrder(SKU.alpha, 10)

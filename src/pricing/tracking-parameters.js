@@ -13,8 +13,8 @@
 //     direction as the real fee, so it looks plausible everywhere. It comes out
 //     of here as `clearance_percent`.
 //   - `freight` is DOLLARS PER UNIT and never was a percentage. It comes out as
-//     `freight_per_unit`, and the unit is the range's own pack type, which this
-//     table does not state — see FR-187 and `supplier_freight_rates.unit`.
+//     `freight_per_unit`: per unit of whatever the PRODUCT is sold in
+//     (`products.unit`, since 1 Oct 2026 — a rate itself carries no unit).
 //
 // BLANK MEANS THREE DIFFERENT THINGS AND ONE COALESCE FOR ALL OF THEM IS WRONG.
 //

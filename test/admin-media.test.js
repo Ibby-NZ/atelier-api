@@ -9,6 +9,7 @@ import {
   storedFilename,
   MAX_IMAGE_BYTES,
   MEDIA_MESSAGES,
+  libraryRefused,
 } from '../src/routes/admin-media.js'
 
 const MEDIA = Object.freeze({ emdashUrl: 'http://127.0.0.1:4321', token: 'ec_test' })
@@ -162,12 +163,26 @@ describe('POST /admin/media', () => {
     expect(emdash.calls).toHaveLength(0)
   })
 
-  it('answers 503 when EmDash refuses or answers without a storage key', async () => {
-    for (const refusal of [fakeEmdash(403, { error: { message: 'INSUFFICIENT_SCOPE' } }), fakeEmdash(201, { data: {} })]) {
-      const app = await build({ fetchImpl: refusal.impl })
+  it('answers 503 naming why EmDash refused, never the address or the token', async () => {
+    const unreachable = async () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
+    }
+    const slow = async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    }
+    const cases = [
+      [fakeEmdash(403, { error: { code: 'INSUFFICIENT_SCOPE', message: 'Token lacks media:write' } }).impl, 'EmDash 403 INSUFFICIENT_SCOPE'],
+      [fakeEmdash(502, null).impl, 'EmDash 502 no code'],
+      [fakeEmdash(201, { data: {} }).impl, 'EmDash sent no file key'],
+      [unreachable, 'ECONNREFUSED'],
+      [slow, 'timed out'],
+    ]
+    for (const [fetchImpl, reason] of cases) {
+      const app = await build({ fetchImpl })
       const response = await upload(app)
       expect(response.statusCode).toBe(503)
-      expect(response.json().message).toBe(MEDIA_MESSAGES.LIBRARY_REFUSED)
+      expect(response.json().message).toBe(libraryRefused(reason))
+      expect(response.json().message).not.toMatch(/127\.0\.0\.1|ec_test/)
     }
   })
 })

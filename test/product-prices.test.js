@@ -873,6 +873,97 @@ describe('/admin/product-prices', () => {
       })
     })
 
+    // 1 Oct 2026: a product and a variation choose the house's discount and
+    // freight class by letter; the product's freight letter comes from Dynamics,
+    // and a variation with no letter of its own sells at its product's price.
+    it('prices a product at its class letters, fills its freight letter from Dynamics, and a variation at its own or its product’s', async () => {
+      const range = houseName('madeaux')
+      const params = {
+        duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
+        trade_markup_percent: 87, surcharge_min_qty: 5, surcharge_per_unit: 20,
+      }
+      await upsertBrandParameters(pool, madeauxId, { ...params, duty_percent_b: 12, retail_markup_percent: 30 })
+      await pool.query(
+        `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, effective_from, freight_class)
+         VALUES ($1, NULL, 'dollar', 3, '2020-01-01', 'B')`,
+        [range]
+      )
+      const { rows: terms } = await pool.query(`SELECT id FROM supplier_brand_terms WHERE brand_id = $1`, [madeauxId])
+      await pool.query(
+        `INSERT INTO supplier_discount_tiers (supplier_brand_term_id, label, pct, discount_class) VALUES ($1, 'Trade C', 0.10, 'C')`,
+        [terms[0].id]
+      )
+      // GBP 0.38; clearance 10%; markup 87%; retail 30% on trade.
+      const trade = (wholesale, discount, freight, duty = 0) =>
+        Math.round((((wholesale * (1 - discount)) / 0.38) * (1 + duty) + freight) * 1.1 * 1.87 * 100) / 100
+      const cents = (dollars) => Math.round(dollars * 100)
+      const near = (actual, dollars) => expect(Math.abs(actual - cents(dollars))).toBeLessThanOrEqual(1)
+      try {
+        const synced = await upload('apply', productWorkbook([
+          priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 263.84, letter: 'B' }),
+        ]))
+        expect(synced.json().catalogue).toMatchObject({ freight_class_filled: 1 })
+        const { rows } = await pool.query(
+          `SELECT p.id FROM products p JOIN product_prices pp ON pp.id = p.product_price_id WHERE pp.guid = $1`, [guid(1)]
+        )
+        const id = rows[0].id
+        const product = async () => (await pool.query(
+          `SELECT freight_class, discount_class, duty_class, trade_price_cents, retail_price_cents FROM products WHERE id = $1`, [id]
+        )).rows[0]
+        // The Dynamics letter B, priced at the house's class-B freight ($3).
+        const filled = await product()
+        // Its two Dynamics prices agree, so it carries no duty class.
+        expect(filled).toMatchObject({ freight_class: 'B', discount_class: null, duty_class: null })
+        near(filled.trade_price_cents, trade(47.6, 0, 3))
+
+        // A discount class re-prices the product, with the reason in its history.
+        const discounted = await inject('PATCH', `/admin/products/${id}`, { payload: { discount_class: 'C' } })
+        expect(discounted.statusCode).toBe(200)
+        expect(discounted.json().product.repricing).toMatchObject({ repriced: true })
+        near((await product()).trade_price_cents, trade(47.6, 0.1, 3))
+        const history = (await pool.query(
+          `SELECT reason FROM product_price_history WHERE product_id = $1 ORDER BY id DESC LIMIT 1`, [id]
+        )).rows[0]
+        expect(history.reason).toMatch(/Recalculated from discount class C/)
+
+        // A variation with no letter of its own sells at the product's price.
+        const { rows: made } = await pool.query(
+          `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Ink', $2) RETURNING id`, [id, `${PREFIX}-ink`]
+        )
+        const variationId = made[0].id
+        const variation = async () => (await pool.query(
+          `SELECT trade_price_cents, retail_price_cents FROM colourways WHERE id = $1`, [variationId]
+        )).rows[0]
+        expect(await variation()).toEqual({ trade_price_cents: null, retail_price_cents: null })
+
+        // Its own freight letter prices it there, keeping the product's discount class.
+        const own = await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { freight_class: 'A' } })
+        expect(own.statusCode).toBe(200)
+        expect(own.json().colourway).toMatchObject({ freight_class: 'A', discount_class: null })
+        const at = await variation()
+        near(at.trade_price_cents, trade(47.6, 0.1, 50))
+        near(at.retail_price_cents, trade(47.6, 0.1, 50) * 1.3)
+
+        // Its own duty class (the house's band B, 12%) prices it at that band.
+        await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { duty_class: 'B' } })
+        near((await variation()).trade_price_cents, trade(47.6, 0.1, 50, 0.12))
+        await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { duty_class: null } })
+
+        // The product's wholesale rate moving re-prices it too.
+        await inject('PATCH', `/admin/products/${id}`, { payload: { wholesale_rate: 50 } })
+        near((await variation()).trade_price_cents, trade(50, 0.1, 50))
+
+        // Clearing its letter sends it back to the product's price.
+        await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { freight_class: null } })
+        expect(await variation()).toEqual({ trade_price_cents: null, retail_price_cents: null })
+        await pool.query(`DELETE FROM colourways WHERE id = $1`, [variationId])
+      } finally {
+        await pool.query(`DELETE FROM supplier_discount_tiers WHERE supplier_brand_term_id = $1`, [terms[0].id])
+        await pool.query(`DELETE FROM supplier_freight_rates WHERE range_name = $1 AND freight_class = 'B'`, [range])
+        await upsertBrandParameters(pool, madeauxId, params)
+      }
+    })
+
     it('reads a "Markup to Trade %" export for the markups alone, re-prices what it moves, and keeps them through a prices re-upload', async () => {
       const range = houseName('madeaux')
       const ellaRow = priceRow(1, { code: 'ELLA STRIPE', range, wholesale: 47.6, exDuty: 125.26, trade: 360.52 })

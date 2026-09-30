@@ -59,6 +59,8 @@ import { listProductPriceHistory, MAX_REASON_LENGTH } from '../pricing/price-his
 const nameProp = { type: 'string', minLength: 1, maxLength: 200 }
 const nullableText = { type: ['string', 'null'], maxLength: 2000 }
 const nullableShort = { type: ['string', 'null'], maxLength: 200 }
+const classLetterProp = { type: ['string', 'null'], enum: ['A', 'B', 'C', 'D', 'E', null] }
+const dutyLetterProp = { type: ['string', 'null'], enum: ['A', 'B', 'C', null] }
 const nullableUrl = { type: ['string', 'null'], maxLength: 1000 }
 const currencyProp = { type: 'string', pattern: '^[A-Z]{3}$' }
 const nullableCents = { type: ['integer', 'null'], minimum: 0 }
@@ -107,6 +109,13 @@ const productDetailProps = {
   // What the product is priced and freighted per (the column's CHECK, restated
   // so a typo is a 400 naming the choices rather than a 500).
   unit: { type: ['string', 'null'], enum: [...UNITS, null] },
+  // The house's discount and freight class the product is priced at (A–E;
+  // null is the default class / every-class freight). The column CHECKs are
+  // the real gate.
+  discount_class: classLetterProp,
+  freight_class: classLetterProp,
+  // The house's duty band (A–C); null is no duty.
+  duty_class: dutyLetterProp,
   // Sales prose — `nullableText` like collections.description, not one of the
   // short spec fields beside it.
   description: nullableText,
@@ -358,7 +367,15 @@ const colourwayPatchSchema = {
   type: 'object',
   additionalProperties: false,
   minProperties: 1,
-  properties: colourwayProps,
+  properties: {
+    ...colourwayProps,
+    // The variation's own class letters; null is its product's. Setting one
+    // prices the variation at it; clearing both sends it back to the product's
+    // price (src/pricing/product-reprice.js).
+    discount_class: classLetterProp,
+    freight_class: classLetterProp,
+    duty_class: dutyLetterProp,
+  },
 }
 
 // A category is created from its label alone. The slug is derived and immutable,

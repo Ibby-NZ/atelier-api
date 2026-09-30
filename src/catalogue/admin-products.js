@@ -16,7 +16,7 @@ import {
   reportingLabelFrom,
 } from './admin-brands.js'
 import { setArchived } from '../lifecycle/archive.js'
-import { repriceFromWholesale } from '../pricing/product-reprice.js'
+import { repriceOwnClassVariations, repriceProduct, variationPrices } from '../pricing/product-reprice.js'
 import {
   withChangeContext,
   requireChangeReason,
@@ -87,6 +87,9 @@ const PRODUCT_COLUMNS = `p.id,
         p.category,
         p.size,
         p.unit,
+        p.discount_class,
+        p.freight_class,
+        p.duty_class,
         p.description,
         p.composition,
         p.width,
@@ -139,6 +142,16 @@ const PRODUCT_UPDATE_COLUMNS = Object.freeze([
   // says what it is a figure per. Not the colourway's stock unit, which
   // product_type fixes (metres / units, above).
   'unit',
+  // The house's discount and freight class the product is priced at, by letter
+  // (A–E; migration 1792531200000). Blank is the house's default class and its
+  // every-class freight. The freight letter is filled from the Dynamics price
+  // the product was built from; a change re-prices the product (below). A
+  // letter is no rate — the rate per letter is finance's, on the house page.
+  'discount_class',
+  'freight_class',
+  // The house's duty band (A–C) the product is dutied at; blank is no duty.
+  // Filled from its Dynamics price; a change re-prices it (1 Oct 2026).
+  'duty_class',
   // Sales prose for the storefront's product page. `nullableText` in the route
   // schema, matching collections.description rather than the short spec fields.
   'description',
@@ -167,6 +180,11 @@ const COLOURWAY_UPDATE_COLUMNS = Object.freeze([
   'image_url',
   'retail_price_cents',
   'trade_price_cents',
+  // The variation's own class letters; blank is its product's (1 Oct 2026). A
+  // change re-prices the variation (src/pricing/product-reprice.js).
+  'discount_class',
+  'freight_class',
+  'duty_class',
 ])
 
 const toProduct = (row, extra) =>
@@ -184,6 +202,9 @@ const toProduct = (row, extra) =>
     category: row.category ?? null,
     size: row.size ?? null,
     unit: row.unit ?? null,
+    discount_class: row.discount_class ?? null,
+    freight_class: row.freight_class ?? null,
+    duty_class: row.duty_class ?? null,
     description: row.description ?? null,
     composition: row.composition,
     width: row.width,
@@ -219,6 +240,10 @@ const toColourway = (row, extra) =>
     // (colourwayContext) replaces both with the price the variation sells at.
     retail_price_cents: row.own_retail_price_cents ?? null,
     trade_price_cents: row.own_trade_price_cents ?? null,
+    // The variation's OWN class letters; null is its product's.
+    discount_class: row.own_discount_class ?? null,
+    freight_class: row.own_freight_class ?? null,
+    duty_class: row.own_duty_class ?? null,
     archived_at: row.archived_at ?? null,
     inventory:
       row.unit === null || row.unit === undefined
@@ -234,6 +259,8 @@ const toColourway = (row, extra) =>
 const COLOURWAY_COLUMNS = `c.id, c.product_id, c.name, c.sku, c.hex_tones, c.image_url,
               c.retail_price_cents AS own_retail_price_cents,
               c.trade_price_cents AS own_trade_price_cents,
+              c.discount_class AS own_discount_class, c.freight_class AS own_freight_class,
+              c.duty_class AS own_duty_class,
               c.archived_at, i.qty_available, i.qty_reserved, i.unit`
 
 const COLOURWAY_SELECT = `SELECT ${COLOURWAY_COLUMNS}
@@ -596,10 +623,10 @@ export const createProduct = async (pool, input) => {
          brand_id, collection_id, name, slug, product_type, product_range,
          category, composition, width, application, rubs, price_band, lead_time,
          retail_price_cents, trade_price_cents, currency, show_on_website,
-         hi_res_asset_url, size, description, unit
+         hi_res_asset_url, size, description, unit, discount_class, freight_class, duty_class
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-               $19, $20, $21)
+               $19, $20, $21, $22, $23, $24)
        RETURNING id`,
       [
         brand.id,
@@ -624,6 +651,9 @@ export const createProduct = async (pool, input) => {
         input.size ?? null,
         input.description ?? null,
         input.unit ?? null,
+        input.discount_class ?? null,
+        input.freight_class ?? null,
+        input.duty_class ?? null,
       ]
     )
     return getAdminProduct(pool, rows[0].id)
@@ -651,7 +681,8 @@ export const createProduct = async (pool, input) => {
  */
 export const updateProduct = async (pool, id, input, ctx = {}) => {
   const { rows } = await pool.query(
-    `SELECT id, brand_id, retail_price_cents, trade_price_cents, wholesale_rate, currency, product_price_id
+    `SELECT id, brand_id, retail_price_cents, trade_price_cents, wholesale_rate, currency, product_price_id,
+            discount_class, freight_class, duty_class
        FROM products WHERE id = $1`,
     [id]
   )
@@ -675,14 +706,29 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
   const moving = PRICE_COLUMNS.some(typed)
   const reason = moving ? requireChangeReason(input.reason) : null
 
-  // A new wholesale rate re-prices the product through its range (28 Sep
-  // 2026); a price typed in the same save is the person's and is kept.
+  // A new wholesale rate (28 Sep 2026) or class letter (1 Oct 2026) re-prices
+  // the product through its range; a price typed in the same save is the
+  // person's and is kept.
   const wholesaleFrom = existing.wholesale_rate == null ? null : Number(existing.wholesale_rate)
   const wholesaleTo = Object.hasOwn(patch, 'wholesale_rate') ? patch.wholesale_rate : wholesaleFrom
+  const letterMoved = (column) => Object.hasOwn(patch, column) && (patch[column] ?? null) !== (existing[column] ?? null)
+  const moved = [
+    ...(wholesaleTo != null && wholesaleTo !== wholesaleFrom
+      ? [`the wholesale rate (${wholesaleFrom ?? '—'} → ${wholesaleTo} ${patch.currency ?? existing.currency})`]
+      : []),
+    ...(letterMoved('discount_class') ? [`discount class ${patch.discount_class ?? 'default'}`] : []),
+    ...(letterMoved('freight_class') ? [`freight class ${patch.freight_class ?? 'every class'}`] : []),
+    ...(letterMoved('duty_class') ? [`duty class ${patch.duty_class ?? 'none'}`] : []),
+  ]
   let repricing = null
-  if (wholesaleTo != null && wholesaleTo !== wholesaleFrom) {
+  if (moved.length > 0) {
     const currency = patch.currency ?? existing.currency
-    repricing = await repriceFromWholesale(pool, { ...existing, currency }, wholesaleTo)
+    repricing = await repriceProduct(pool, { ...existing, currency }, {
+      wholesaleRate: wholesaleTo,
+      discountClass: Object.hasOwn(patch, 'discount_class') ? patch.discount_class : existing.discount_class,
+      freightClass: Object.hasOwn(patch, 'freight_class') ? patch.freight_class : existing.freight_class,
+      dutyClass: Object.hasOwn(patch, 'duty_class') ? patch.duty_class : existing.duty_class,
+    })
     if (repricing.repriced) {
       const filled = Object.fromEntries(
         PRICE_COLUMNS.filter((column) => !typed(column) && repricing[column] != null).map((column) => [column, repricing[column]])
@@ -696,7 +742,7 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
   const recalculated = PRICE_COLUMNS.some(
     (column) => !Object.hasOwn(input, column) && Object.hasOwn(patch, column) && patch[column] !== (existing[column] ?? null)
   )
-  const autoReason = `Recalculated from the wholesale rate (${wholesaleFrom ?? '—'} → ${wholesaleTo} ${patch.currency ?? existing.currency})`
+  const autoReason = `Recalculated from ${moved.join(' and ')}`
 
   try {
     await withChangeContext(
@@ -712,6 +758,9 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
     raisePriceHistoryError(error)
     return rethrowConflict(error)
   }
+  // Variations with a class letter of their own are priced from the product's
+  // wholesale rate and its other letter, so they follow.
+  if (moved.length > 0) await repriceOwnClassVariations(pool, id)
   const product = await getAdminProduct(pool, id)
   // What the new wholesale rate did to the prices, when there was one — the CRM
   // says so on save, including why a price did NOT move.
@@ -792,7 +841,34 @@ export const updateColourway = async (pool, id, input) => {
       ? { hex_tones: serialiseTones(input.hex_tones) }
       : {}),
   }
-  const { sets, params } = buildUpdate(patch, COLOURWAY_UPDATE_COLUMNS)
+  // A class letter of its own prices the variation at it; clearing both
+  // letters sends it back to its product's price (1 Oct 2026). A price typed in
+  // the same save is the person's and is kept.
+  let classed = patch
+  if (['discount_class', 'freight_class', 'duty_class'].some((column) => Object.hasOwn(patch, column))) {
+    const { rows: found } = await pool.query(
+      `SELECT c.discount_class AS own_discount, c.freight_class AS own_freight, c.duty_class AS own_duty,
+              p.product_price_id, p.currency, p.wholesale_rate, p.discount_class, p.freight_class, p.duty_class
+         FROM colourways c JOIN products p ON p.id = c.product_id WHERE c.id = $1`,
+      [id]
+    )
+    if (found.length === 0) throw httpError(404, `Colourway ${id} not found.`)
+    const [row] = found
+    const own = {
+      discount_class: Object.hasOwn(patch, 'discount_class') ? patch.discount_class : row.own_discount,
+      freight_class: Object.hasOwn(patch, 'freight_class') ? patch.freight_class : row.own_freight,
+      duty_class: Object.hasOwn(patch, 'duty_class') ? patch.duty_class : row.own_duty,
+    }
+    const prices = await variationPrices(pool, row, own)
+    if (prices) {
+      classed = {
+        ...patch,
+        ...(Object.hasOwn(patch, 'trade_price_cents') ? {} : { trade_price_cents: prices.trade_price_cents }),
+        ...(Object.hasOwn(patch, 'retail_price_cents') ? {} : { retail_price_cents: prices.retail_price_cents }),
+      }
+    }
+  }
+  const { sets, params } = buildUpdate(classed, COLOURWAY_UPDATE_COLUMNS)
   try {
     const { rows } = await pool.query(
       `UPDATE colourways SET ${sets.join(', ')}

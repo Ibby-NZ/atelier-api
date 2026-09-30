@@ -60,6 +60,7 @@ const nameProp = { type: 'string', minLength: 1, maxLength: 200 }
 const nullableText = { type: ['string', 'null'], maxLength: 2000 }
 const nullableShort = { type: ['string', 'null'], maxLength: 200 }
 const classLetterProp = { type: ['string', 'null'], enum: ['A', 'B', 'C', 'D', 'E', null] }
+const dutyLetterProp = { type: ['string', 'null'], enum: ['A', 'B', 'C', null] }
 const nullableUrl = { type: ['string', 'null'], maxLength: 1000 }
 const currencyProp = { type: 'string', pattern: '^[A-Z]{3}$' }
 const nullableCents = { type: ['integer', 'null'], minimum: 0 }
@@ -113,6 +114,8 @@ const productDetailProps = {
   // the real gate.
   discount_class: classLetterProp,
   freight_class: classLetterProp,
+  // The house's duty band (A–C); null is no duty.
+  duty_class: dutyLetterProp,
   // Sales prose — `nullableText` like collections.description, not one of the
   // short spec fields beside it.
   description: nullableText,
@@ -371,6 +374,7 @@ const colourwayPatchSchema = {
     // price (src/pricing/product-reprice.js).
     discount_class: classLetterProp,
     freight_class: classLetterProp,
+    duty_class: dutyLetterProp,
   },
 }
 

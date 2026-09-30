@@ -89,6 +89,7 @@ const PRODUCT_COLUMNS = `p.id,
         p.unit,
         p.discount_class,
         p.freight_class,
+        p.duty_class,
         p.description,
         p.composition,
         p.width,
@@ -148,6 +149,9 @@ const PRODUCT_UPDATE_COLUMNS = Object.freeze([
   // letter is no rate — the rate per letter is finance's, on the house page.
   'discount_class',
   'freight_class',
+  // The house's duty band (A–C) the product is dutied at; blank is no duty.
+  // Filled from its Dynamics price; a change re-prices it (1 Oct 2026).
+  'duty_class',
   // Sales prose for the storefront's product page. `nullableText` in the route
   // schema, matching collections.description rather than the short spec fields.
   'description',
@@ -180,6 +184,7 @@ const COLOURWAY_UPDATE_COLUMNS = Object.freeze([
   // change re-prices the variation (src/pricing/product-reprice.js).
   'discount_class',
   'freight_class',
+  'duty_class',
 ])
 
 const toProduct = (row, extra) =>
@@ -199,6 +204,7 @@ const toProduct = (row, extra) =>
     unit: row.unit ?? null,
     discount_class: row.discount_class ?? null,
     freight_class: row.freight_class ?? null,
+    duty_class: row.duty_class ?? null,
     description: row.description ?? null,
     composition: row.composition,
     width: row.width,
@@ -237,6 +243,7 @@ const toColourway = (row, extra) =>
     // The variation's OWN class letters; null is its product's.
     discount_class: row.own_discount_class ?? null,
     freight_class: row.own_freight_class ?? null,
+    duty_class: row.own_duty_class ?? null,
     archived_at: row.archived_at ?? null,
     inventory:
       row.unit === null || row.unit === undefined
@@ -253,6 +260,7 @@ const COLOURWAY_COLUMNS = `c.id, c.product_id, c.name, c.sku, c.hex_tones, c.ima
               c.retail_price_cents AS own_retail_price_cents,
               c.trade_price_cents AS own_trade_price_cents,
               c.discount_class AS own_discount_class, c.freight_class AS own_freight_class,
+              c.duty_class AS own_duty_class,
               c.archived_at, i.qty_available, i.qty_reserved, i.unit`
 
 const COLOURWAY_SELECT = `SELECT ${COLOURWAY_COLUMNS}
@@ -615,10 +623,10 @@ export const createProduct = async (pool, input) => {
          brand_id, collection_id, name, slug, product_type, product_range,
          category, composition, width, application, rubs, price_band, lead_time,
          retail_price_cents, trade_price_cents, currency, show_on_website,
-         hi_res_asset_url, size, description, unit, discount_class, freight_class
+         hi_res_asset_url, size, description, unit, discount_class, freight_class, duty_class
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-               $19, $20, $21, $22, $23)
+               $19, $20, $21, $22, $23, $24)
        RETURNING id`,
       [
         brand.id,
@@ -645,6 +653,7 @@ export const createProduct = async (pool, input) => {
         input.unit ?? null,
         input.discount_class ?? null,
         input.freight_class ?? null,
+        input.duty_class ?? null,
       ]
     )
     return getAdminProduct(pool, rows[0].id)
@@ -673,7 +682,7 @@ export const createProduct = async (pool, input) => {
 export const updateProduct = async (pool, id, input, ctx = {}) => {
   const { rows } = await pool.query(
     `SELECT id, brand_id, retail_price_cents, trade_price_cents, wholesale_rate, currency, product_price_id,
-            discount_class, freight_class
+            discount_class, freight_class, duty_class
        FROM products WHERE id = $1`,
     [id]
   )
@@ -709,6 +718,7 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
       : []),
     ...(letterMoved('discount_class') ? [`discount class ${patch.discount_class ?? 'default'}`] : []),
     ...(letterMoved('freight_class') ? [`freight class ${patch.freight_class ?? 'every class'}`] : []),
+    ...(letterMoved('duty_class') ? [`duty class ${patch.duty_class ?? 'none'}`] : []),
   ]
   let repricing = null
   if (moved.length > 0) {
@@ -717,6 +727,7 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
       wholesaleRate: wholesaleTo,
       discountClass: Object.hasOwn(patch, 'discount_class') ? patch.discount_class : existing.discount_class,
       freightClass: Object.hasOwn(patch, 'freight_class') ? patch.freight_class : existing.freight_class,
+      dutyClass: Object.hasOwn(patch, 'duty_class') ? patch.duty_class : existing.duty_class,
     })
     if (repricing.repriced) {
       const filled = Object.fromEntries(
@@ -834,10 +845,10 @@ export const updateColourway = async (pool, id, input) => {
   // letters sends it back to its product's price (1 Oct 2026). A price typed in
   // the same save is the person's and is kept.
   let classed = patch
-  if (Object.hasOwn(patch, 'discount_class') || Object.hasOwn(patch, 'freight_class')) {
+  if (['discount_class', 'freight_class', 'duty_class'].some((column) => Object.hasOwn(patch, column))) {
     const { rows: found } = await pool.query(
-      `SELECT c.discount_class AS own_discount, c.freight_class AS own_freight,
-              p.product_price_id, p.currency, p.wholesale_rate, p.discount_class, p.freight_class
+      `SELECT c.discount_class AS own_discount, c.freight_class AS own_freight, c.duty_class AS own_duty,
+              p.product_price_id, p.currency, p.wholesale_rate, p.discount_class, p.freight_class, p.duty_class
          FROM colourways c JOIN products p ON p.id = c.product_id WHERE c.id = $1`,
       [id]
     )
@@ -846,6 +857,7 @@ export const updateColourway = async (pool, id, input) => {
     const own = {
       discount_class: Object.hasOwn(patch, 'discount_class') ? patch.discount_class : row.own_discount,
       freight_class: Object.hasOwn(patch, 'freight_class') ? patch.freight_class : row.own_freight,
+      duty_class: Object.hasOwn(patch, 'duty_class') ? patch.duty_class : row.own_duty,
     }
     const prices = await variationPrices(pool, row, own)
     if (prices) {

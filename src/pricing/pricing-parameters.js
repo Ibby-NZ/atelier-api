@@ -307,25 +307,26 @@ const dutyInput = (dutyClass, house, supplierDefaults) => {
   return input(picked.value, picked.source, { duty_class: letter })
 }
 
-const classOf = (value) => {
+const classOf = (value, pattern = /^[A-E]$/) => {
   const letter = typeof value === 'string' ? value.trim().toUpperCase() : ''
-  return /^[A-E]$/.test(letter) ? letter : null
+  return pattern.test(letter) ? letter : null
 }
 
 /**
- * The discount and freight class a product — or one of its variations — is
- * priced at: the variation's own letter, else its product's (1 Oct 2026). 422
+ * The discount, freight and duty class a product — or one of its variations —
+ * is priced at: the variation's own letter, else its product's (1 Oct 2026). 422
  * when the product is another house's or the variation another product's.
  *
  * @param {{ query: Function }} db
  * @param {{ brandId: number, productId?: number|null, colourwayId?: number|null }} scope
- * @returns {Promise<{ discount_class: string|null, freight_class: string|null }>}
+ * @returns {Promise<{ discount_class: string|null, freight_class: string|null, duty_class: string|null }>}
  */
 export const productClasses = async (db, { brandId, productId = null, colourwayId = null }) => {
-  if (productId == null) return { discount_class: null, freight_class: null }
+  if (productId == null) return { discount_class: null, freight_class: null, duty_class: null }
   const { rows } = await db.query(
-    `SELECT p.brand_id, p.discount_class, p.freight_class,
-            c.id AS colourway_id, c.discount_class AS own_discount_class, c.freight_class AS own_freight_class
+    `SELECT p.brand_id, p.discount_class, p.freight_class, p.duty_class,
+            c.id AS colourway_id, c.discount_class AS own_discount_class, c.freight_class AS own_freight_class,
+            c.duty_class AS own_duty_class
        FROM products p
        LEFT JOIN colourways c ON c.product_id = p.id AND c.id = $2
       WHERE p.id = $1`,
@@ -340,6 +341,7 @@ export const productClasses = async (db, { brandId, productId = null, colourwayI
   return {
     discount_class: row.own_discount_class ?? row.discount_class ?? null,
     freight_class: row.own_freight_class ?? row.freight_class ?? null,
+    duty_class: row.own_duty_class ?? row.duty_class ?? null,
   }
 }
 
@@ -409,6 +411,7 @@ export const resolveWaterfallInputs = async (
   const classes = Object.freeze({
     discount_class: classOf(discountClass) ?? chosen.discount_class,
     freight_class: classOf(freightClass) ?? chosen.freight_class,
+    duty_class: classOf(dutyClass, /^[A-Z]$/) ?? chosen.duty_class,
   })
   // The supplier's INVOICING currency is what the price list is quoted in; the
   // house's own currency is the seed's stand-in where no supplier is linked.
@@ -428,7 +431,7 @@ export const resolveWaterfallInputs = async (
       ? input(fx.rate, 'fx', { currency, set_on: fx.set_on })
       : input(null, 'missing', { reason: currency ? `no rate set for ${currency}` : 'no currency on the house or its supplier' }),
     fx_margin_percent: pickParameter('fx_margin_percent', house, supplierDefaults),
-    duty_percent: dutyInput(dutyClass, house, supplierDefaults),
+    duty_percent: dutyInput(classes.duty_class, house, supplierDefaults),
     freight,
     clearance_percent: clearanceInput(house, supplierDefaults),
     handling: pickParameter('handling', house, supplierDefaults),

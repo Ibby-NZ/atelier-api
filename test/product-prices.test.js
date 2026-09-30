@@ -882,7 +882,7 @@ describe('/admin/product-prices', () => {
         duty_percent_a: 5, duty_percent_b: 5, duty_percent_c: 5, clearance_percent: 10,
         trade_markup_percent: 87, surcharge_min_qty: 5, surcharge_per_unit: 20,
       }
-      await upsertBrandParameters(pool, madeauxId, { ...params, retail_markup_percent: 30 })
+      await upsertBrandParameters(pool, madeauxId, { ...params, duty_percent_b: 12, retail_markup_percent: 30 })
       await pool.query(
         `INSERT INTO supplier_freight_rates (range_name, category, basis, rate, effective_from, freight_class)
          VALUES ($1, NULL, 'dollar', 3, '2020-01-01', 'B')`,
@@ -894,7 +894,8 @@ describe('/admin/product-prices', () => {
         [terms[0].id]
       )
       // GBP 0.38; clearance 10%; markup 87%; retail 30% on trade.
-      const trade = (wholesale, discount, freight) => Math.round((((wholesale * (1 - discount)) / 0.38 + freight) * 1.1 * 1.87) * 100) / 100
+      const trade = (wholesale, discount, freight, duty = 0) =>
+        Math.round((((wholesale * (1 - discount)) / 0.38) * (1 + duty) + freight) * 1.1 * 1.87 * 100) / 100
       const cents = (dollars) => Math.round(dollars * 100)
       const near = (actual, dollars) => expect(Math.abs(actual - cents(dollars))).toBeLessThanOrEqual(1)
       try {
@@ -907,11 +908,12 @@ describe('/admin/product-prices', () => {
         )
         const id = rows[0].id
         const product = async () => (await pool.query(
-          `SELECT freight_class, discount_class, trade_price_cents, retail_price_cents FROM products WHERE id = $1`, [id]
+          `SELECT freight_class, discount_class, duty_class, trade_price_cents, retail_price_cents FROM products WHERE id = $1`, [id]
         )).rows[0]
         // The Dynamics letter B, priced at the house's class-B freight ($3).
         const filled = await product()
-        expect(filled).toMatchObject({ freight_class: 'B', discount_class: null })
+        // Its two Dynamics prices agree, so it carries no duty class.
+        expect(filled).toMatchObject({ freight_class: 'B', discount_class: null, duty_class: null })
         near(filled.trade_price_cents, trade(47.6, 0, 3))
 
         // A discount class re-prices the product, with the reason in its history.
@@ -941,6 +943,11 @@ describe('/admin/product-prices', () => {
         const at = await variation()
         near(at.trade_price_cents, trade(47.6, 0.1, 50))
         near(at.retail_price_cents, trade(47.6, 0.1, 50) * 1.3)
+
+        // Its own duty class (the house's band B, 12%) prices it at that band.
+        await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { duty_class: 'B' } })
+        near((await variation()).trade_price_cents, trade(47.6, 0.1, 50, 0.12))
+        await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { duty_class: null } })
 
         // The product's wholesale rate moving re-prices it too.
         await inject('PATCH', `/admin/products/${id}`, { payload: { wholesale_rate: 50 } })

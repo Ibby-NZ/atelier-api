@@ -733,6 +733,22 @@ describe('back-office catalogue admin', () => {
       expect(furlong.statusCode).toBe(400)
     })
 
+    // 1 Oct 2026: Retail beside "Show on the website". Off, a listed product is
+    // quote-only; on, the cart sells it. The storefront reads it off the card.
+    it('carries the Retail tick, off by default, and the public read says so', async () => {
+      const brand = await createBrandFixture('House')
+      const product = await createProductFixture(brand.id, { name: brandName('Retail One'), show_on_website: true })
+      expect(product.sell_retail).toBe(false)
+      const ticked = await inject('PATCH', `/admin/products/${product.id}`, backofficeCookie, { sell_retail: true })
+      expect(ticked.statusCode).toBe(200)
+      expect(ticked.json().product.sell_retail).toBe(true)
+      const created = await createProductFixture(brand.id, { name: brandName('Retail Two'), sell_retail: true })
+      expect(created.sell_retail).toBe(true)
+      const detail = await app.inject({ method: 'GET', url: `/catalogue/products/${product.slug}` })
+      expect(detail.statusCode).toBe(200)
+      expect(detail.json().product.sell_retail).toBe(true)
+    })
+
     it('rejects an unknown brand_id with 422', async () => {
       const response = await inject('POST', '/admin/collections', backofficeCookie, {
         brand_id: 99999999,

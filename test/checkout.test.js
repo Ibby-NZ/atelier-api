@@ -5,6 +5,8 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
+import { withChangeContext } from '../src/pricing/price-history.js'
+import { validateCheckoutLines } from '../src/checkout/checkout.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
 const PREFIX = 'chk-test'
@@ -79,14 +81,15 @@ const seedFixtures = async (pool) => {
     // The trade fixture is priced in EUR at retail and carries a trade figure:
     // trade money is NZD cents whatever `currency` says, so the two are only
     // told apart when they disagree.
+    // Every finished good is sold retail; the fabric is quote-only.
     `INSERT INTO products
-       (brand_id, name, slug, product_type, retail_price_cents, trade_price_cents, currency, show_on_website)
+       (brand_id, name, slug, product_type, retail_price_cents, trade_price_cents, currency, show_on_website, sell_retail)
      VALUES
-       ($1, 'Chk Good',   $2, 'finished_good', 4500, NULL, 'NZD', true),
-       ($1, 'Chk NoPrice',$3, 'finished_good', NULL, NULL, 'NZD', true),
-       ($1, 'Chk Low',    $4, 'finished_good', 2000, NULL, 'NZD', true),
-       ($1, 'Chk Fabric', $5, 'fabric',        NULL, NULL, 'NZD', true),
-       ($1, 'Chk Trade',  $6, 'finished_good', 4500, 9900, 'EUR', true)
+       ($1, 'Chk Good',   $2, 'finished_good', 4500, NULL, 'NZD', true, true),
+       ($1, 'Chk NoPrice',$3, 'finished_good', NULL, NULL, 'NZD', true, true),
+       ($1, 'Chk Low',    $4, 'finished_good', 2000, NULL, 'NZD', true, true),
+       ($1, 'Chk Fabric', $5, 'fabric',        NULL, NULL, 'NZD', true, false),
+       ($1, 'Chk Trade',  $6, 'finished_good', 4500, 9900, 'EUR', true, true)
      RETURNING id, slug`,
     [
       brandId,
@@ -131,6 +134,12 @@ const seedFixtures = async (pool) => {
 }
 
 const cleanup = async (pool) => {
+  // A declared price move leaves history, which RESTRICTs deleting its product.
+  await pool.query(
+    `DELETE FROM product_price_history WHERE product_id IN
+       (SELECT p.id FROM products p JOIN brands b ON b.id = p.brand_id WHERE b.slug LIKE $1)`,
+    [`${PREFIX}-%`]
+  )
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
   await pool.query('DELETE FROM users WHERE email LIKE $1', [`${PREFIX}-%`])
   await pool.query('DELETE FROM shipping_rates WHERE zone LIKE $1', [
@@ -242,13 +251,41 @@ describe('POST /checkout/session', () => {
     expect(shipping.quantity).toBe(1)
   })
 
-  it('rejects fabric products with 422', async () => {
-    const response = await post({
-      lines: [{ sku: SKU.fabric, qty: 1 }],
-      zone: ZONE,
-    })
-    expect(response.statusCode).toBe(422)
-    expect(response.json().message).toMatch(/fabric/i)
+  // 1 Oct 2026: the product's own Retail tick decides, not its type. Off, a
+  // listed product is quote-only; on, the cart sells it, a fabric included.
+  it('rejects a product not sold retail with 422, and sells one ticked Retail whatever its type', async () => {
+    const fabric = await post({ lines: [{ sku: SKU.fabric, qty: 1 }], zone: ZONE })
+    expect(fabric.statusCode).toBe(422)
+    expect(fabric.json().message).toMatch(/quote only/i)
+
+    // The rest through the validator itself: the route is rate-limited per IP.
+    await pool.query(`UPDATE products SET sell_retail = false WHERE slug = $1`, [`${PREFIX}-good`])
+    try {
+      await expect(validateCheckoutLines(pool, [{ sku: SKU.good, qty: 1 }])).rejects.toMatchObject({
+        statusCode: 422,
+        message: expect.stringMatching(/"Chk Good" is sold by quote only/),
+      })
+    } finally {
+      await pool.query(`UPDATE products SET sell_retail = true WHERE slug = $1`, [`${PREFIX}-good`])
+    }
+
+    // A price move is declared, as the capture trigger requires.
+    const setPrice = (sellRetail, cents) =>
+      withChangeContext(pool, { source: 'manual', reason: 'fixture' }, (client) =>
+        client.query(`UPDATE products SET sell_retail = $2, retail_price_cents = $3 WHERE slug = $1`, [
+          `${PREFIX}-fabric`, sellRetail, cents,
+        ])
+      )
+    await setPrice(true, 6000)
+    await pool.query(
+      `UPDATE inventory SET qty_available = 10 WHERE colourway_id = (SELECT id FROM colourways WHERE sku = $1)`, [SKU.fabric]
+    )
+    try {
+      const [sold] = await validateCheckoutLines(pool, [{ sku: SKU.fabric, qty: 2 }])
+      expect(sold).toMatchObject({ sku: SKU.fabric, qty: 2, unit_price_cents: 6000 })
+    } finally {
+      await setPrice(false, null)
+    }
   })
 
   it('rejects finished goods with no price at all (422)', async () => {
@@ -497,8 +534,8 @@ describe('GET /checkout/session/:id', () => {
     )
     const { rows: products } = await pool.query(
       `INSERT INTO products
-         (brand_id, name, slug, product_type, retail_price_cents, currency, show_on_website)
-       VALUES ($1, 'Chk Session Good', $2, 'finished_good', 4500, 'NZD', true)
+         (brand_id, name, slug, product_type, retail_price_cents, currency, show_on_website, sell_retail)
+       VALUES ($1, 'Chk Session Good', $2, 'finished_good', 4500, 'NZD', true, true)
        RETURNING id`,
       [brands[0].id, `${SESSION_PREFIX}-good`]
     )

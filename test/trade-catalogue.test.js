@@ -83,18 +83,18 @@ const seedFixtures = async (pool) => {
     `INSERT INTO products
        (brand_id, name, slug, product_type, application, width, composition,
         retail_price_cents, trade_price_cents, currency, show_on_website,
-        collection_id)
+        collection_id, sell_retail)
      VALUES
        ($1, 'Gate Open Fabric', $2, 'fabric', 'Drapery', '140cm', '100% Linen',
         NULL, 18776, 'NZD', true,
-        (SELECT id FROM collections WHERE slug = $6)),
+        (SELECT id FROM collections WHERE slug = $6), false),
        ($3, 'Gate Closed Fabric', $4, 'fabric', 'Drapery', '140cm', '100% Linen',
         NULL, 22000, 'NZD', true,
-        (SELECT id FROM collections WHERE slug = $7)),
+        (SELECT id FROM collections WHERE slug = $7), false),
        ($1, 'Gate Open Good', $5, 'finished_good', 'Cushion', NULL, 'Wool',
-        12000, NULL, 'NZD', true, NULL),
+        12000, NULL, 'NZD', true, NULL, true),
        ($3, 'Gate Closed Good', $8, 'finished_good', 'Cushion', NULL, 'Wool',
-        15000, NULL, 'NZD', true, NULL)
+        15000, NULL, 'NZD', true, NULL, true)
      RETURNING id, slug`,
     [
       idBySlug.get(OPEN_SLUG),

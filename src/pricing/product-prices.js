@@ -166,15 +166,15 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
     return byName.get(key) ?? bySlug.get(sluggable(rangeName)) ?? null
   }
 
-  // Duty is resolved at class A (the only letter the corpus has ever used) and
-  // replaced for a row without one, so a house is resolved once per category
-  // and freight letter rather than once per duty class as well.
-  const resolve = async (house, category, freightClass) => {
-    const key = `${house.id}\u0000${category ?? ''}\u0000${freightClass ?? ''}`
+  // A house is resolved once per category and class letters. Duty resolves at
+  // the row's (or product's) duty class; with none, the row is replaced below
+  // by the formula's own "no duty".
+  const resolve = async (house, category, freightClass, discountClass, dutyClass) => {
+    const key = [house.id, category ?? '', freightClass ?? '', discountClass ?? '', dutyClass ?? ''].join('\u0000')
     if (!resolutions.has(key)) {
       resolutions.set(
         key,
-        resolveWaterfallInputs(db, { brandId: house.id, category, dutyClass: 'A', freightClass }).catch((error) => {
+        resolveWaterfallInputs(db, { brandId: house.id, category, dutyClass: dutyClass ?? 'A', freightClass, discountClass }).catch((error) => {
           if (!error.statusCode || error.statusCode >= 500) throw error
           return { error: error.message }
         })
@@ -196,8 +196,11 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
    * step it could not reach as null.
    *
    * @param {object} row a product_prices row (or an import row of the same shape)
+   * @param {{ freightClass?: string|null, discountClass?: string|null, dutyClass?: string|null }} [classes]
+   *   the letters a catalogue product (or variation) chose, over the row's own
+   *   Dynamics freight letter and duty class and the house's default discount class
    */
-  const price = async (row) => {
+  const price = async (row, classes = {}) => {
     const dynamics = Object.freeze({
       price_ex_duty: numeric(row.dynamics_price_ex_duty),
       price_incl_duty: numeric(row.dynamics_price_incl_duty),
@@ -225,8 +228,11 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
     }
 
     const category = categoryForItemType(row.item_type)
-    const letter = typeof row.freight_letter === 'string' ? row.freight_letter.trim().toUpperCase() : ''
-    const resolved = await resolve(house, category, /^[A-Z]$/.test(letter) ? letter : null)
+    const rowLetter = typeof row.freight_letter === 'string' ? row.freight_letter.trim().toUpperCase() : ''
+    const letter = classes.freightClass ?? (/^[A-Z]$/.test(rowLetter) ? rowLetter : null)
+    const rowDuty = typeof row.duty_class === 'string' ? row.duty_class.trim().toUpperCase() : ''
+    const dutyLetter = classes.dutyClass ?? (/^[A-C]$/.test(rowDuty) ? rowDuty : null)
+    const resolved = await resolve(house, category, letter, classes.discountClass ?? null, dutyLetter)
     if (resolved.error) {
       return Object.freeze({
         status: 'incomplete',
@@ -246,7 +252,7 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
       })
     }
 
-    const hasDuty = typeof row.duty_class === 'string' && row.duty_class.trim() !== ''
+    const hasDuty = dutyLetter != null
     const inputs = Object.freeze({
       discount_percent: resolved.inputs.discount_percent,
       fx_rate: await fxInput(row.currency),
@@ -454,10 +460,17 @@ const escapeLike = (value) => value.replace(/[\\%_]/g, (match) => `\\${match}`)
 export const listProductPrices = async (db, rawFilters = {}) => {
   const latest = await latestProductPriceImport(db)
   let filters = rawFilters
+  // A product's rows are priced at the product's own class letters, so the
+  // panel on its page shows the price the product is made at.
+  let classes = {}
   if (rawFilters.product_id) {
-    const { rows } = await db.query(`SELECT brand_id, name, product_price_id FROM products WHERE id = $1`, [rawFilters.product_id])
+    const { rows } = await db.query(
+      `SELECT brand_id, name, product_price_id, discount_class, freight_class, duty_class FROM products WHERE id = $1`,
+      [rawFilters.product_id]
+    )
     if (rows.length === 0) throw httpError(404, 'That product does not exist.')
     const [product] = rows
+    classes = { discountClass: product.discount_class, freightClass: product.freight_class, dutyClass: product.duty_class }
     filters = product.product_price_id != null
       ? { ...rawFilters, id: product.product_price_id, include_previous: true }
       : { ...rawFilters, brand_id: product.brand_id, design: product.name }
@@ -516,7 +529,7 @@ export const listProductPrices = async (db, rawFilters = {}) => {
   const items = []
   for (const row of rows) {
     const product = toRow(row, latest?.id ?? null)
-    items.push(Object.freeze({ ...product, pricing: summarise(await pricer.price(product)) }))
+    items.push(Object.freeze({ ...product, pricing: summarise(await pricer.price(product, classes)) }))
   }
   return Object.freeze({
     product_prices: Object.freeze(items),

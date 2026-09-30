@@ -22,9 +22,9 @@ Extracted from the root CLAUDE.md (root conventions still apply). Loaded automat
 - Routes: `POST /admin/brands/:id/suppliers {supplier_id}` / `DELETE /admin/brands/:id/suppliers/:supplierId` (backoffice, like the main-supplier PATCH). Brand reads carry `additional_suppliers: [{id, name}]`; supplier detail lists both kinds of house with `is_main`, and `brand_count` counts both. Both FKs CASCADE.
 - **Terms stay one set per house** (UNIQUE `brand_id`): a house invoiced by two suppliers is discounted on the one terms row, whichever supplier owns it.
 
-### Product discount tier (`product_discount_tiers`, `product-tiers.js`)
+### Discount classes by letter (migration 1792531200000, 1 Oct 2026)
 
-- **A product may pick one tier from its own house's terms** (`GET`/`PUT /admin/products/:id/discount-tier`, finance-gated; `{tier_id: null}` clears). Another house's tier is a 422 — the FK alone would accept it. `resolveTermsChain(terms, tiers, category, tierId)` precedence: chain > chosen tier > category label > fallback tier > flat. The waterfall applies it when given `product_id` (a product of another house is a 422). Cost data: no storefront read model may join the table; deleting the tier CASCADEs the choice.
+- **A tier carries a letter, A–E (`supplier_discount_tiers.discount_class`, unique per terms row), and a product or variation chooses a class by that letter** (`products.discount_class`, `colourways.discount_class`; a variation's null is its product's). The office asked for "A B C D E discount level tags" chosen on the product and the variation. `product_discount_tiers` and `GET|PUT /admin/products/:id/discount-tier` (a finance-gated choice by tier id, `product-tiers.js`) were folded into the product's letter and removed. The letter is written through the ordinary product/variation PATCH: it is no rate, and the rate per letter stays behind finance on the house page. `resolveTermsChain(terms, tiers, category, tierId)` is unchanged; the resolver maps the letter to the tier (`discountInput`), so the precedence is chain > the letter's class > category label > default tier > flat, and a letter no class answers to falls through. The migration lettered existing tiers (a label that was already A–E keeps it, the rest take free letters in rate order).
 
 ### Commercial terms (`supplier_brand_terms`, `supplier_discount_tiers`)
 

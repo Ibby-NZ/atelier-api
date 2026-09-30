@@ -545,14 +545,14 @@ describe('/admin/pricing/houses', () => {
 
     const first = await put([
       { label: 'wallpaper', percent: 40 },
-      { label: 'All other collections', percent: 50, is_default: true },
+      { label: 'All other collections', discount_class: 'b', percent: 50, is_default: true },
     ])
     expect(first.statusCode).toBe(200)
     let discount = first.json().pricing.discount
     expect(discount).toMatchObject({ shape: 'tiers', editable: true, percent: null })
     expect(discount.classes).toEqual([
-      expect.objectContaining({ label: 'wallpaper', percent: 40, is_default: false, matches_category: true, products: 0 }),
-      expect.objectContaining({ label: 'All other collections', percent: 50, is_default: true, matches_category: false }),
+      expect.objectContaining({ label: 'wallpaper', discount_class: null, percent: 40, is_default: false, matches_category: true, products: 0 }),
+      expect.objectContaining({ label: 'All other collections', discount_class: 'B', percent: 50, is_default: true, matches_category: false }),
     ])
     const [wallpaper, others] = discount.classes
 
@@ -563,15 +563,25 @@ describe('/admin/pricing/houses', () => {
     expect(await discountFor('wallpaper')).toMatchObject({ value: 40, detail: { shape: 'tier', label: 'wallpaper' } })
     expect(await discountFor('fabric')).toMatchObject({ value: 50, detail: { label: 'All other collections' } })
 
-    // A product chose the default class; the read counts it.
+    // A product and one variation of another chose class B by letter; the read
+    // counts both. A variation with no letter of its own is not counted.
     const { rows } = await pool.query(
-      `INSERT INTO products (brand_id, name, slug, product_type, currency)
-       VALUES ($1, $2, $3, 'fabric', 'NZD') RETURNING id`,
-      [houseId, `${PREFIX} product`, `${PREFIX}-product`]
+      `INSERT INTO products (brand_id, name, slug, product_type, currency, discount_class)
+       VALUES ($1, $2, $3, 'fabric', 'NZD', 'B'), ($1, $4, $5, 'fabric', 'NZD', NULL) RETURNING id`,
+      [houseId, `${PREFIX} product`, `${PREFIX}-product`, `${PREFIX} second`, `${PREFIX}-second`]
     )
-    await pool.query(`INSERT INTO product_discount_tiers (product_id, tier_id) VALUES ($1, $2)`, [rows[0].id, others.id])
+    await pool.query(
+      `INSERT INTO colourways (product_id, name, sku, discount_class) VALUES ($1, 'Own', $2, 'B'), ($1, 'Inherits', $3, NULL)`,
+      [rows[1].id, `${PREFIX}-own`, `${PREFIX}-inherits`]
+    )
     discount = (await inject('GET', `/admin/pricing/houses/${houseId}`)).json().pricing.discount
-    expect(discount.classes.find((entry) => entry.id === others.id).products).toBe(1)
+    expect(discount.classes.find((entry) => entry.id === others.id).products).toBe(2)
+    const twoB = await put([
+      { id: wallpaper.id, label: 'wallpaper', discount_class: 'B', percent: 40 },
+      { id: others.id, label: 'All other collections', discount_class: 'B', percent: 50, is_default: true },
+    ])
+    expect(twoB.statusCode).toBe(422)
+    expect(twoB.json().message).toMatch(/class B/)
 
     // Edit as a set: rename and re-rate one, move the default onto it, drop the
     // other, add a new one — with a flat rate beside them for everything else.
@@ -589,10 +599,18 @@ describe('/admin/pricing/houses', () => {
       ['New collections', 45, false],
       ['Wallpaper', 42, true],
     ])
-    // The removed class's product fell back — its choice went with the class.
-    const { rows: choices } = await pool.query(`SELECT 1 FROM product_discount_tiers WHERE product_id = $1`, [rows[0].id])
-    expect(choices).toEqual([])
-    await pool.query(`DELETE FROM products WHERE id = $1`, [rows[0].id])
+    // The removed class's product keeps its letter; no class answers to it, so
+    // the waterfall falls back to the default class.
+    const { rows: kept } = await pool.query(`SELECT discount_class FROM products WHERE id = $1`, [rows[0].id])
+    expect(kept).toEqual([{ discount_class: 'B' }])
+    const fellBack = (await inject('GET', `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100&product_id=${rows[0].id}`)).json()
+    expect(fellBack.inputs.discount_percent).toMatchObject({ value: 42, detail: { label: 'Wallpaper' } })
+    await pool.query(`DELETE FROM colourways WHERE product_id = ANY($1::int[])`, [rows.map((row) => row.id)])
+    await pool.query(`DELETE FROM products WHERE id = ANY($1::int[])`, [rows.map((row) => row.id)])
+
+    // A class with only a letter is named after it.
+    const lettered = await put([{ discount_class: 'D', percent: 33 }])
+    expect(lettered.json().pricing.discount.classes).toEqual([expect.objectContaining({ label: 'D', discount_class: 'D', percent: 33 })])
 
     // An empty set removes them all; the flat rate stays.
     const none = await put([])

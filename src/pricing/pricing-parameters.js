@@ -28,7 +28,6 @@
 import { chainMultiplier, resolveTermsChain } from '../suppliers/discount-chain.js'
 import { getBrandTerms } from '../suppliers/supplier-terms.js'
 import { supplierForBrand } from '../suppliers/brand-suppliers.js'
-import { getProductTierId } from '../suppliers/product-tiers.js'
 import { resolveFreightRate } from './freight-rates.js'
 import { computeWaterfall } from './waterfall.js'
 
@@ -272,14 +271,19 @@ const loadBrand = async (db, brandId) => {
 // the precedence every other parameter here follows, and the one the 9 Jul rule
 // describes: a supplier is rated by one averaged discount UNLESS it was
 // excluded and handled brand by brand. The two are never added together.
-const discountInput = (terms, category, supplierDefault, tierId) => {
+const discountInput = (terms, category, supplierDefault, discountClass) => {
+  // The class a product or variation chose by letter; a letter no class of the
+  // house answers to falls through to category matching and the default.
+  const tierId = discountClass ? (terms?.tiers?.find((tier) => tier.discount_class === discountClass)?.id ?? null) : null
   const resolved = terms ? resolveTermsChain(terms, terms.tiers, category, tierId) : null
   if (resolved && resolved.source !== 'none') {
     // A chain is multiplicative; the waterfall takes the one net percentage.
     const percent = round3((1 - chainMultiplier(resolved.chain)) * 100)
+    const tier = resolved.source === 'tier' ? terms.tiers.find((entry) => entry.label === resolved.label) : null
     return input(percent, 'terms', {
       shape: resolved.source, // 'chain' | 'tier' | 'flat'
       label: resolved.label,
+      discount_class: tier?.discount_class ?? null,
       chain: resolved.chain,
     })
   }
@@ -301,6 +305,44 @@ const dutyInput = (dutyClass, house, supplierDefaults) => {
   if (!column) return input(null, 'missing', { reason: `unknown duty class ${letter}` })
   const picked = pickParameter(column, house, supplierDefaults)
   return input(picked.value, picked.source, { duty_class: letter })
+}
+
+const classOf = (value, pattern = /^[A-E]$/) => {
+  const letter = typeof value === 'string' ? value.trim().toUpperCase() : ''
+  return pattern.test(letter) ? letter : null
+}
+
+/**
+ * The discount, freight and duty class a product — or one of its variations —
+ * is priced at: the variation's own letter, else its product's (1 Oct 2026). 422
+ * when the product is another house's or the variation another product's.
+ *
+ * @param {{ query: Function }} db
+ * @param {{ brandId: number, productId?: number|null, colourwayId?: number|null }} scope
+ * @returns {Promise<{ discount_class: string|null, freight_class: string|null, duty_class: string|null }>}
+ */
+export const productClasses = async (db, { brandId, productId = null, colourwayId = null }) => {
+  if (productId == null) return { discount_class: null, freight_class: null, duty_class: null }
+  const { rows } = await db.query(
+    `SELECT p.brand_id, p.discount_class, p.freight_class, p.duty_class,
+            c.id AS colourway_id, c.discount_class AS own_discount_class, c.freight_class AS own_freight_class,
+            c.duty_class AS own_duty_class
+       FROM products p
+       LEFT JOIN colourways c ON c.product_id = p.id AND c.id = $2
+      WHERE p.id = $1`,
+    [productId, colourwayId]
+  )
+  if (rows.length === 0) throw httpError(404, `Product ${productId} not found.`)
+  const [row] = rows
+  if (row.brand_id !== brandId) throw httpError(422, `Product ${productId} is not one of this house's products.`)
+  if (colourwayId != null && row.colourway_id == null) {
+    throw httpError(422, `Variation ${colourwayId} is not one of product ${productId}'s variations.`)
+  }
+  return {
+    discount_class: row.own_discount_class ?? row.discount_class ?? null,
+    freight_class: row.own_freight_class ?? row.freight_class ?? null,
+    duty_class: row.own_duty_class ?? row.duty_class ?? null,
+  }
 }
 
 const freightInput = async (db, { supplierId, brandName, category, freightClass, on }) => {
@@ -333,14 +375,16 @@ const freightInput = async (db, { supplierId, brandName, category, freightClass,
  *
  * @param {{ query: Function }} db
  * `supplierId` picks which of the house's suppliers to price through (main when
- * absent, 422 when it does not invoice the house); `productId` brings in the
- * discount tier staff chose for that product (422 when it is another house's).
- * `freightClass` is the line's freight letter (`price_list_items.freight_class`):
- * the house's rate for that letter wins over its every-class rate.
+ * absent, 422 when it does not invoice the house). `discountClass` is the letter
+ * of the house's discount class to price at; `freightClass` the freight letter,
+ * whose rate wins over the house's every-class one. `productId` (and
+ * `colourwayId`) bring in the letters chosen on the product and the variation
+ * (`productClasses`) where the caller states none (422 when the product is
+ * another house's).
  *
  * @param {{ brandId: number, supplierId?: number|null, productId?: number|null,
- *           category?: string|null, dutyClass?: string|null,
- *           freightClass?: string|null, on?: string|null }} query
+ *           colourwayId?: number|null, category?: string|null, dutyClass?: string|null,
+ *           discountClass?: string|null, freightClass?: string|null, on?: string|null }} query
  */
 export const resolveWaterfallInputs = async (
   db,
@@ -348,20 +392,27 @@ export const resolveWaterfallInputs = async (
     brandId,
     supplierId = null,
     productId = null,
+    colourwayId = null,
     category = null,
     dutyClass = null,
+    discountClass = null,
     freightClass = null,
     on = null,
   }
 ) => {
   const brand = await loadBrand(db, brandId)
   const supplier = await supplierForBrand(db, brand.id, supplierId)
-  const [house, supplierDefaults, terms, tierId] = [
+  const [house, supplierDefaults, terms, chosen] = [
     await getBrandParameters(db, brand.id),
     supplier ? await getSupplierParameters(db, supplier.id) : null,
     await getBrandTerms(db, brand.id),
-    productId ? await getProductTierId(db, productId, brand.id) : null,
+    await productClasses(db, { brandId: brand.id, productId, colourwayId }),
   ]
+  const classes = Object.freeze({
+    discount_class: classOf(discountClass) ?? chosen.discount_class,
+    freight_class: classOf(freightClass) ?? chosen.freight_class,
+    duty_class: classOf(dutyClass, /^[A-Z]$/) ?? chosen.duty_class,
+  })
   // The supplier's INVOICING currency is what the price list is quoted in; the
   // house's own currency is the seed's stand-in where no supplier is linked.
   const currency = supplier?.currency ?? brand.brand_currency ?? null
@@ -370,17 +421,17 @@ export const resolveWaterfallInputs = async (
     supplierId: supplier?.id ?? null,
     brandName: brand.name,
     category,
-    freightClass,
+    freightClass: classes.freight_class,
     on,
   })
 
   const inputs = Object.freeze({
-    discount_percent: discountInput(terms, category, supplier?.default_discount ?? null, tierId),
+    discount_percent: discountInput(terms, category, supplier?.default_discount ?? null, classes.discount_class),
     fx_rate: fx
       ? input(fx.rate, 'fx', { currency, set_on: fx.set_on })
       : input(null, 'missing', { reason: currency ? `no rate set for ${currency}` : 'no currency on the house or its supplier' }),
     fx_margin_percent: pickParameter('fx_margin_percent', house, supplierDefaults),
-    duty_percent: dutyInput(dutyClass, house, supplierDefaults),
+    duty_percent: dutyInput(classes.duty_class, house, supplierDefaults),
     freight,
     clearance_percent: clearanceInput(house, supplierDefaults),
     handling: pickParameter('handling', house, supplierDefaults),
@@ -394,7 +445,7 @@ export const resolveWaterfallInputs = async (
     supplier: supplier
       ? Object.freeze({ id: supplier.id, name: supplier.name, currency: supplier.currency })
       : null,
-    product_tier_id: tierId,
+    classes,
     currency,
     parameters: Object.freeze({ house, supplier: supplierDefaults }),
     inputs,
@@ -440,8 +491,10 @@ export const previewWaterfall = async (
     wholesaleRate,
     supplierId = null,
     productId = null,
+    colourwayId = null,
     category = null,
     dutyClass = null,
+    discountClass = null,
     freightClass = null,
     on = null,
     overrides = {},
@@ -451,8 +504,10 @@ export const previewWaterfall = async (
     brandId,
     supplierId,
     productId,
+    colourwayId,
     category,
     dutyClass,
+    discountClass,
     freightClass,
     on,
   })

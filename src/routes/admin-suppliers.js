@@ -16,7 +16,6 @@
 //     entire point of the 409.
 
 import { backfillSuppliers } from '../suppliers/backfill.js'
-import { getProductTier, setProductTier } from '../suppliers/product-tiers.js'
 import {
   listSuppliers,
   getSupplier,
@@ -256,13 +255,6 @@ const defaultDiscountSchema = {
   additionalProperties: false,
   required: ['default_discount'],
   properties: { default_discount: nullableRateProp },
-}
-
-const productTierBodySchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['tier_id'],
-  properties: { tier_id: { type: ['integer', 'null'], minimum: 1 } },
 }
 
 const createTermsSchema = {
@@ -559,23 +551,10 @@ export const adminSupplierRoutes = async (app, { pool }) => {
     }
   )
 
-  // The discount tier chosen for one product (migration 1791638400000): the
-  // product's choice plus every tier its house offers, so the CRM can render
-  // the picker from one read. Finance-gated — a tier is a discount.
-  app.get(
-    '/admin/products/:id/discount-tier',
-    { preHandler: financeStaff, schema: { params: idParamsSchema } },
-    async (request) => ({ discount_tier: await getProductTier(pool, request.params.id) })
-  )
-
-  // PUT: the body IS the choice; null clears it back to category matching.
-  app.put(
-    '/admin/products/:id/discount-tier',
-    { preHandler: financeStaff, schema: { params: idParamsSchema, body: productTierBodySchema } },
-    async (request) => ({
-      discount_tier: await setProductTier(pool, request.params.id, request.body.tier_id),
-    })
-  )
+  // A product's discount class was chosen here by tier id until 1 Oct 2026
+  // (GET|PUT /admin/products/:id/discount-tier); it is a letter on the product
+  // and the variation now, written through their own PATCH — see
+  // src/catalogue/admin-products.js.
 
   // The supplier-level rate. A PATCH of its own rather than a field on
   // PATCH /admin/suppliers/:id, because that route is backoffice-wide and a

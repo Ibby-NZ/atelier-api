@@ -47,7 +47,7 @@ const TERMS_COLUMNS = `supplier_brand_terms.id, supplier_brand_terms.supplier_id
   supplier_brand_terms.updated_at,
   brands.name AS brand_name, brands.slug AS brand_slug`
 
-const TIER_COLUMNS = `id, supplier_brand_term_id, label, pct, is_fallback`
+const TIER_COLUMNS = `id, supplier_brand_term_id, label, pct, is_fallback, discount_class`
 
 // Columns a PATCH may ever write, frozen and in-code as buildUpdate requires.
 // `brand_id` is absent: it is the row's identity (UNIQUE, one set of terms per
@@ -62,7 +62,7 @@ export const TERMS_UPDATE_COLUMNS = Object.freeze([
   'note',
 ])
 
-export const TIER_UPDATE_COLUMNS = Object.freeze(['label', 'pct', 'is_fallback'])
+export const TIER_UPDATE_COLUMNS = Object.freeze(['label', 'pct', 'is_fallback', 'discount_class'])
 
 const httpError = (statusCode, message) =>
   Object.assign(new Error(message), { statusCode })
@@ -76,6 +76,9 @@ const CONFLICT_MESSAGES = Object.freeze({
   supplier_discount_tiers_label_unique:
     'These terms already have a tier with that label. Labels are matched ' +
     'ignoring case and padding, so two that differ only there would resolve at random.',
+  supplier_discount_tiers_class_unique:
+    'These terms already have a class with that letter. A product or variation chooses its class by ' +
+    'letter, so two classes answering to one letter would price it at random.',
   supplier_discount_tiers_fallback_unique:
     'These terms already have a fallback tier. Clear that one first — two ' +
     'fallbacks make the unmatched case, which is the common case, non-deterministic.',
@@ -94,6 +97,8 @@ const CHECK_MESSAGES = Object.freeze({
     'A chain cannot contain a blank rate — one null nulls the whole net rate.',
   supplier_discount_tiers_pct_check:
     'A tier rate is a fraction off list: 0 or more and below 1.',
+  supplier_discount_tiers_discount_class_check:
+    'A discount class letter is one of A, B, C, D or E.',
 })
 
 // Both foreign keys are NOT NULL, so a bad id is the caller's mistake either
@@ -165,9 +170,12 @@ const toTier = (row) =>
     label: row.label,
     pct: Number(row.pct),
     is_fallback: row.is_fallback,
+    // The letter (A–E) a product or variation chooses the class by (migration
+    // 1792531200000); null on a class nothing can choose by letter.
+    discount_class: row.discount_class ?? null,
     // Advisory, not a rule: a label that is neither a category nor the fallback
-    // is never selected by category matching — only by a product choosing it
-    // (product-tiers.js). Compared the way the resolver compares.
+    // is never selected by category matching — only by a product or variation
+    // choosing its letter. Compared the way the resolver compares.
     matches_category: CATEGORIES.has(String(row.label).trim().toLowerCase()),
   })
 
@@ -472,11 +480,11 @@ export const createSupplierDiscountTier = async (pool, supplierId, termsId, inpu
   try {
     const { rows } = await pool.query(
       `INSERT INTO supplier_discount_tiers
-         (supplier_brand_term_id, label, pct, is_fallback)
-       SELECT id, $2, $3, $4 FROM supplier_brand_terms
+         (supplier_brand_term_id, label, pct, is_fallback, discount_class)
+       SELECT id, $2, $3, $4, $6 FROM supplier_brand_terms
         WHERE id = $1 AND supplier_id = $5
        RETURNING id`,
-      [termsId, assertLabel(input.label), input.pct, input.is_fallback ?? false, supplierId]
+      [termsId, assertLabel(input.label), input.pct, input.is_fallback ?? false, supplierId, input.discount_class ?? null]
     )
     if (rows.length === 0) throw termsNotFound(supplierId, termsId)
     return await getSupplierBrandTerms(pool, supplierId, termsId)
@@ -556,9 +564,9 @@ export const findScopedTierId = async (pool, supplierId, termsId, tierId) => {
 /**
  * Remove a tier, scoped to its terms row and that row's supplier in the
  * deleting statement — the house page's discount classes, written as a whole
- * set. A product that had chosen the tier falls back to category matching
- * (`product_discount_tiers` CASCADEs), which is why the house page shows the
- * count first. Returns whether a row went.
+ * set. A product or variation that chose its letter keeps the letter and falls
+ * back to category matching and the default class until a class answers to it
+ * again, which is why the house page shows the count first. Returns whether a row went.
  *
  * @param {{ query: Function }} db
  * @param {number} supplierId

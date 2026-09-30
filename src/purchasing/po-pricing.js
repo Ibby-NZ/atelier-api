@@ -6,10 +6,11 @@
 // steps so a purchase order and the Pricing screen can never disagree:
 //   - `unit_price`, in the SUPPLIER's currency: the design's wholesale rate
 //     (`products.wholesale_rate`, filled by the wholesale import) less the
-//     supplier's discount for the house, product tier included — the
-//     waterfall's "export price" step;
+//     supplier's discount for the house at the variation's discount class
+//     (its own, else its product's) — the waterfall's "export price" step;
 //   - `freight_per_unit`, NZ$: the house's freight rate from the freight
-//     ledger — the waterfall's "freight" step. A percentage rate needs the
+//     ledger at the variation's freight class (its own, else its product's) —
+//     the waterfall's "freight" step. A percentage rate needs the
 //     duty-paid price, so it stays null wherever duty or FX is not set.
 //
 // Blank is not zero, the engine's rule: a design with no wholesale rate, or a
@@ -49,6 +50,7 @@ export const priceLineFromCatalogue = async (db, { purchaseOrderId, colourwayId 
       brandId: row.brand_id,
       supplierId: row.supplier_id,
       productId: row.product_id,
+      colourwayId,
       category: row.category,
       wholesaleRate: row.wholesale_rate == null ? null : Number(row.wholesale_rate),
     })

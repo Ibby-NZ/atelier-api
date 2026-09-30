@@ -344,6 +344,19 @@ describe('supplier contacts and contact log', () => {
     })
   })
 
+  describe('the first contact at a glance', () => {
+    it('rides every supplier list row as the first person added, null with none', async () => {
+      const none = await insertSupplier(pool, 'nobody')
+      const two = await insertSupplier(pool, 'two-people')
+      await inject('POST', `/admin/suppliers/${two}/contacts`, { name: 'Lucile Chaix', email: 'interiorswholesale@libertylondon.com' })
+      await inject('POST', `/admin/suppliers/${two}/contacts`, { name: 'Karin Fritz', email: 'KFritz@libertylondon.com' })
+
+      const rows = (await inject('GET', `/admin/suppliers?q=${PREFIX}`)).json().suppliers
+      expect(rows.find((s) => s.id === two).primary_contact).toEqual({ name: 'Lucile Chaix', email: 'interiorswholesale@libertylondon.com' })
+      expect(rows.find((s) => s.id === none).primary_contact).toBeNull()
+    })
+  })
+
   describe('archived suppliers', () => {
     it('still accept a contact and a log entry', async () => {
       const id = await insertSupplier(pool, 'archived', { archived_at: new Date() })

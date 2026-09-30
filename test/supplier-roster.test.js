@@ -135,6 +135,19 @@ describe('the supplier roster', () => {
     expect((await pool.query(`SELECT count(*)::int AS n FROM supplier_contacts`)).rows[0].n).toBe(before)
   })
 
+  it('the second ruling creates Inter-weave and merges Rubelli into Rubelli Venezia, only where the roster is', async () => {
+    const { SPEC, CREATE_INTERWEAVE } = await import('../migrations/1792876800000_supplier-roster-rubelli-interweave.js')
+    expect(SPEC.merges).toEqual([{ from: 'Rubelli', into: 'Rubelli Venezia' }])
+    expect(SPEC.contacts).toEqual([
+      { supplier: 'Inter-weave', country: 'New Zealand', name: 'Customer service', email: 'customerservice@inter-weave.co.nz', role: null },
+    ])
+    // Guarded like the roster: nothing is created where Fabricut and Pierre Frey are absent.
+    const { rows } = await pool.query(`SELECT count(*)::int AS n FROM suppliers WHERE lower(name) IN ('fabricut', 'pierre frey')`)
+    if (rows[0].n === 2) return
+    await pool.query(CREATE_INTERWEAVE)
+    expect((await pool.query(`SELECT 1 FROM suppliers WHERE lower(name) = 'inter-weave'`)).rows).toHaveLength(0)
+  })
+
   it('names every merge target and contact supplier the list keeps, and never merges a list supplier away', () => {
     const kept = new Set(Object.values(MERGES).map((name) => name.toLowerCase()))
     for (const from of Object.keys(MERGES)) expect(kept.has(from.toLowerCase())).toBe(false)

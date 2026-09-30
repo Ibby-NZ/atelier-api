@@ -186,7 +186,7 @@ export const listSuppliers = async (
   // one definition. `suppliers` stays unaliased — SUPPLIER_COLUMNS is
   // unqualified, and the lateral projects only disjoint last_* names.
   const { rows } = await pool.query(
-    `SELECT ${SUPPLIER_COLUMNS}, last_contact.*,
+    `SELECT ${SUPPLIER_COLUMNS}, last_contact.*, first_person.*,
             ((SELECT count(*)::int FROM brands WHERE brands.supplier_id = suppliers.id)
               + (SELECT count(*)::int FROM brand_additional_suppliers bas
                   WHERE bas.supplier_id = suppliers.id))
@@ -202,6 +202,15 @@ export const listSuppliers = async (
         ORDER BY contacted_on DESC, id DESC
         LIMIT 1
      ) last_contact ON true
+     -- The first person on file (the order they were added: the roster lists a
+     -- supplier's main contact first), for the list's Contact column.
+     LEFT JOIN LATERAL (
+       SELECT name AS first_contact_name, email AS first_contact_email
+         FROM supplier_contacts
+        WHERE supplier_contacts.supplier_id = suppliers.id
+        ORDER BY id ASC
+        LIMIT 1
+     ) first_person ON true
      ${where}
      ORDER BY name ASC, id ASC
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -226,6 +235,11 @@ export const listSuppliers = async (
               staff_name: row.last_contact_staff,
               follow_up_on: row.last_contact_follow_up_on,
             }),
+      // The first person on file, or null — the list's Contact column.
+      primary_contact:
+        row.first_contact_name == null
+          ? null
+          : Object.freeze({ name: row.first_contact_name, email: row.first_contact_email ?? null }),
     })
   )
 

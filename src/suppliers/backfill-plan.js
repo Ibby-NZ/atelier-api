@@ -79,19 +79,17 @@ export const SUPPLIER_FILL_COLUMNS = Object.freeze([
   'incoterm',
   'po_email',
   'discount_method',
-  // The averaged rate itself, not only the method — the snapshot has carried
-  // it as `terms.net` since 9 Jul and the column exists to hold it. Numeric
-  // rather than text, which is why the upsert types its params per column.
-  'default_discount',
+  // Not `default_discount`: the supplier's own discount prices its purchase
+  // orders and the office types every one by hand (1 Oct 2026). The snapshot's
+  // `terms.net` would fill the blanks they cleared.
 ])
 
 /**
  * The Postgres type of each fill column, for the unnest params the apply step
- * binds. Everything is text but the rate: an INSERT ... SELECT has no
- * assignment cast from text to numeric, so a text[] param for
- * `default_discount` fails outright rather than coercing.
+ * binds. Everything is text today; an INSERT ... SELECT has no assignment cast
+ * from text, so a numeric column added here must say so.
  */
-export const SUPPLIER_FILL_TYPES = Object.freeze({ default_discount: 'numeric' })
+export const SUPPLIER_FILL_TYPES = Object.freeze({})
 
 /** That type, or `text` — the default every other column takes. */
 export const fillColumnType = (column) => SUPPLIER_FILL_TYPES[column] ?? 'text'
@@ -246,9 +244,6 @@ export const planSupplierBackfill = ({
       incoterm: supplier.incoterm ?? null,
       po_email: supplier.poEmail ?? null,
       discount_method: supplier.terms?.method ?? null,
-      // `net` is the averaged supplier-level rate; null on the houses excluded
-      // from averaging (JV), whose terms are planned brand by brand below.
-      default_discount: supplier.terms?.net ?? null,
     })
   }
 

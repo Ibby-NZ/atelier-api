@@ -140,26 +140,17 @@ describe('supplier backfill plan (real sources)', () => {
       incoterm: 'FOB',
       po_email: 'orders@fabricut.com',
       discount_method: 'averaged',
-      // The averaged RATE, not only the method: the snapshot has carried it as
-      // `terms.net` since 9 Jul and it had no column to land in until now.
-      default_discount: 0.05,
     })
-    expect(byName.get('Janelli Volpi')).toMatchObject({
-      short_code: 'JV',
-      discount_method: 'per-brand',
-      // Excluded from averaging — the rate is per house, so there is no
-      // supplier-level one to plan.
-      default_discount: null,
-    })
-    // Already-net prices are a recorded 0, never a blank.
-    expect(byName.get('Loro Piana')).toMatchObject({ default_discount: 0 })
+    // The supplier's own discount is typed by hand (1 Oct 2026): the snapshot's
+    // averaged rate is never planned.
+    expect(byName.get('Fabricut')).not.toHaveProperty('default_discount')
+    expect(byName.get('Janelli Volpi')).toMatchObject({ short_code: 'JV', discount_method: 'per-brand' })
     // A price-list-only name gets a currency and nothing else — no country
     // guessed from the name, no discount method assumed.
     expect(byName.get('Hamam')).toMatchObject({
       currency: 'EUR',
       country: null,
       discount_method: null,
-      default_discount: null,
       agent: null,
     })
   })
@@ -544,14 +535,13 @@ describe('supplier backfill (database)', () => {
       incoterm: 'FCA',
       po_email: 'orders@w3-backfill.test',
       discount_method: 'per-brand',
-      // Excluded from averaging: its rates are per house, planned as terms rows.
       default_discount: null,
     })
 
-    // The averaged house's rate lands in the column rather than staying in the
-    // snapshot. numeric, not text — the upsert types its params per column.
+    // The averaged rate stays in the snapshot: the office types the supplier's
+    // own discount by hand (1 Oct 2026).
     const beta = await supplierRow(`${PREFIX} Beta`)
-    expect(Number(beta.default_discount)).toBe(0.05)
+    expect(beta.default_discount).toBeNull()
 
     // The price list is the currency authority; the snapshot said EUR.
     const gamma = await supplierRow(`${PREFIX} Gamma`)

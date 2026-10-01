@@ -19,8 +19,6 @@ import { backfillPricingParameters } from '../pricing/parameters-backfill.js'
 const REPORT_LINES = [
   ['rangesWithoutBrand', 'Dynamics ranges with no live house (nothing to hang the parameters on)', (r) => `${r.range}${r.supplier ? ` (${r.supplier})` : ''}`],
   ['brandsWithSeveralRanges', 'houses named by more than one range (first kept)', (r) => `${r.brand}: kept ${r.kept}, skipped ${r.skipped}`],
-  ['brandsWithoutSupplier', 'houses with no supplier link — discount not written (run backfill:suppliers, or link in the CRM)', (r) => `${r.brand} (range ${r.range})`],
-  ['termsAlreadyOnFile', 'houses on a discount chain or tiers (left alone)', (r) => `${r.brand} (range ${r.range})`],
   ['freightDatedToday', 'freight not replaced — the house already has a rate dated today', (r) => `${r.brand}: $${r.current} kept, export says $${r.rate}`],
   ['inactiveRanges', 'inactive ranges (skipped)', (r) => `${r.range} (${r.status})`],
 ]
@@ -65,8 +63,7 @@ const main = async () => {
     if (!dryRun) {
       console.log(
         `  parameter sets: ${summary.parameters_inserted} created, ${summary.parameters_filled} filled, ` +
-          `${summary.parameters_replaced} replaced; discounts: ${summary.terms_inserted} written, ` +
-          `${summary.terms_updated} replaced; freight rates appended: ${summary.freight_inserted}`
+          `${summary.parameters_replaced} replaced; freight rates appended: ${summary.freight_inserted}`
       )
     }
     printKept(summary.changes)

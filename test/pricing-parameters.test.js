@@ -20,6 +20,7 @@ import {
   getSupplierParameters,
   previewWaterfall,
   resolveWaterfallInputs,
+  setHouseDiscount,
   upsertBrandParameters,
   upsertFxRate,
   upsertSupplierParameters,
@@ -259,44 +260,70 @@ describe('pricing parameters — the module and the resolver', () => {
     expect(bandB.inputs.duty_percent).toMatchObject({ value: null, source: 'missing', detail: { duty_class: 'B' } })
   })
 
-  it('takes the discount and the retail markup from the terms, and nets a chain multiplicatively', async () => {
-    const flat = await resolveWaterfallInputs(pool, { brandId: houseId })
-    expect(flat.inputs.discount_percent).toMatchObject({ value: 25, source: 'terms', detail: { shape: 'flat' } })
-    expect(flat.inputs.retail_markup).toMatchObject({ value: 1.3, source: 'terms' })
+  it("prices a sale at the house's own discount, never the supplier's terms or averaged rate", async () => {
+    await pool.query(`UPDATE suppliers SET default_discount = 0.05 WHERE id = $1`, [supplierId])
+    // 1 Oct 2026: Armani Casa sold at its supplier's 50% when Dynamics prices
+    // the range at 0%. The supplier's discounts are for purchase orders only.
+    const unset = await resolveWaterfallInputs(pool, { brandId: houseId })
+    expect(unset.inputs.discount_percent).toMatchObject({ value: null, source: 'missing' })
+    expect(unset.inputs.retail_markup).toMatchObject({ value: 1.3, source: 'terms' })
+    expect((await resolveWaterfallInputs(pool, { brandId: averagedId })).inputs.discount_percent).toMatchObject({
+      value: null,
+      source: 'missing',
+    })
 
-    // {0.4, 0.4} is x0.36 — a 64% discount, not 80%.
-    const chained = await resolveWaterfallInputs(pool, { brandId: bareId })
-    expect(chained.inputs.discount_percent).toMatchObject({ value: 64, source: 'terms', detail: { shape: 'chain' } })
-    expect(chained.inputs.retail_markup).toMatchObject({ value: null, source: 'missing' })
+    await setHouseDiscount(pool, houseId, 0)
+    const own = await resolveWaterfallInputs(pool, { brandId: houseId })
+    expect(own.inputs.discount_percent).toMatchObject({ value: 0, source: 'house' })
+    // The purchase order still buys at the supplier's 25%.
+    const bought = await resolveWaterfallInputs(pool, { brandId: houseId, purchase: true })
+    expect(bought.inputs.discount_percent).toMatchObject({ value: 25, source: 'terms', detail: { shape: 'flat' } })
   })
 
-  it('falls back to the supplier’s averaged rate where a house has no terms of its own', async () => {
-    await pool.query(`UPDATE suppliers SET default_discount = 0.05 WHERE id = $1`, [supplierId])
+  it("buys at the supplier's terms, a chain netted multiplicatively, else its averaged rate", async () => {
+    await setHouseDiscount(pool, bareId, 10)
+    // {0.4, 0.4} is x0.36 — a 64% discount, not 80%.
+    const chained = await resolveWaterfallInputs(pool, { brandId: bareId, purchase: true })
+    expect(chained.inputs.discount_percent).toMatchObject({ value: 64, source: 'terms', detail: { shape: 'chain' } })
+    expect(chained.inputs.retail_markup).toMatchObject({ value: null, source: 'missing' })
 
-    // The 9 Jul rule: one averaged rate for every house this supplier invoices.
-    // Before the column existed this resolved MISSING and the landed cost could
-    // not be previewed at all.
-    const averaged = await resolveWaterfallInputs(pool, { brandId: averagedId })
+    // The 9 Jul rule: one averaged rate for every house this supplier invoices,
+    // and never added to a house's own terms (25%, not 30%).
+    await pool.query(`UPDATE suppliers SET default_discount = 0.05 WHERE id = $1`, [supplierId])
+    const averaged = await resolveWaterfallInputs(pool, { brandId: averagedId, purchase: true })
     expect(averaged.inputs.discount_percent).toMatchObject({
       value: 5,
       source: 'supplier',
       detail: { shape: 'supplier-default' },
     })
-
-    // A house negotiated brand by brand keeps its own rate — the two are never
-    // added together (25%, not 30%).
-    const exception = await resolveWaterfallInputs(pool, { brandId: houseId })
+    const exception = await resolveWaterfallInputs(pool, { brandId: houseId, purchase: true })
     expect(exception.inputs.discount_percent).toMatchObject({ value: 25, source: 'terms' })
   })
 
   it('keeps a supplier rate of 0 distinct from none — already-net prices are an answer', async () => {
     await pool.query(`UPDATE suppliers SET default_discount = 0 WHERE id = $1`, [supplierId])
-    const net = await resolveWaterfallInputs(pool, { brandId: averagedId })
+    const net = await resolveWaterfallInputs(pool, { brandId: averagedId, purchase: true })
     expect(net.inputs.discount_percent).toMatchObject({ value: 0, source: 'supplier' })
 
     await pool.query(`UPDATE suppliers SET default_discount = NULL WHERE id = $1`, [supplierId])
-    const unset = await resolveWaterfallInputs(pool, { brandId: averagedId })
+    const unset = await resolveWaterfallInputs(pool, { brandId: averagedId, purchase: true })
     expect(unset.inputs.discount_percent).toMatchObject({ value: null, source: 'missing' })
+  })
+
+  it("keeps the house's discount through a PUT of its set, and never on a supplier's row", async () => {
+    await setHouseDiscount(pool, houseId, 12.5)
+    await upsertBrandParameters(pool, houseId, { trade_markup_percent: 80 })
+    expect((await resolveWaterfallInputs(pool, { brandId: houseId })).inputs.discount_percent).toMatchObject({
+      value: 12.5,
+      source: 'house',
+    })
+    expect(await getBrandParameters(pool, houseId)).not.toHaveProperty('discount_percent')
+
+    await upsertSupplierParameters(pool, supplierId, { handling: 1 })
+    await expect(
+      pool.query(`UPDATE supplier_pricing_parameters SET discount_percent = 5 WHERE supplier_id = $1`, [supplierId])
+    ).rejects.toMatchObject({ code: '23514' })
+    await expect(setHouseDiscount(pool, houseId, 100)).rejects.toMatchObject({ statusCode: 422 })
   })
 
   it('takes freight from the ledger at supplier scope and the exchange rate from the supplier currency', async () => {
@@ -339,6 +366,7 @@ describe('pricing parameters — the module and the resolver', () => {
       handling: 3,
       trade_markup_percent: 80,
     })
+    await setHouseDiscount(pool, houseId, 25)
     const preview = await previewWaterfall(pool, { brandId: houseId, wholesaleRate: 100, dutyClass: 'A' })
     expect(preview.waterfall.missing).toEqual([])
     // 100 -25% = 75; / 0.5 = 150; +5% duty = 157.5; +30 freight, x1.10 clearance = 206.25;
@@ -376,6 +404,15 @@ describe('pricing parameters — the module and the resolver', () => {
     const { inputs } = await resolveWaterfallInputs(pool, { brandId: houseId })
     expect(inputs.handling).toMatchObject({ value: 2, source: 'supplier' })
     expect(await deleteBrandParameters(pool, houseId)).toBe(false)
+
+    // The house's own discount is not one of the override's figures: it stays.
+    await setHouseDiscount(pool, houseId, 15)
+    await upsertBrandParameters(pool, houseId, { handling: 9 })
+    expect(await deleteBrandParameters(pool, houseId)).toBe(true)
+    const kept = await resolveWaterfallInputs(pool, { brandId: houseId })
+    expect(kept.inputs.handling).toMatchObject({ value: 2, source: 'supplier' })
+    expect(kept.inputs.discount_percent).toMatchObject({ value: 15, source: 'house' })
+    expect(await deleteBrandParameters(pool, houseId)).toBe(false)
   })
 })
 
@@ -410,6 +447,7 @@ describe('/admin/pricing routes', () => {
     supplierId = await insertSupplier(pool, 'route-supplier')
     houseId = await insertBrand(pool, 'route-house', supplierId)
     await insertTerms(pool, { supplierId, brandId: houseId, discount: 0.25, markup: 1.3 })
+    await setHouseDiscount(pool, houseId, 20)
 
     for (const [key, finance] of [
       ['finance', true],
@@ -484,7 +522,7 @@ describe('/admin/pricing routes', () => {
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.brand).toMatchObject({ id: houseId })
-    expect(body.inputs.discount_percent).toMatchObject({ value: 25, source: 'terms' })
+    expect(body.inputs.discount_percent).toMatchObject({ value: 20, source: 'house' })
     expect(body.inputs.trade_markup_percent).toMatchObject({ value: 89, source: 'house' })
     expect(body.inputs.clearance_percent).toMatchObject({ value: 10, source: 'supplier' })
     expect(body.inputs.freight).toMatchObject({ source: 'missing' })
@@ -559,7 +597,7 @@ describe('pricing-parameter backfill from the Dynamics export', () => {
     range(`${PREFIX} NOBODY`),
   ]
 
-  it('plans purely: a set per matched house, a flat discount per linked house, and reports the rest', () => {
+  it("plans purely: a set per matched house, the discount on the house's own set, and reports the rest", () => {
     const plan = planParametersBackfill({
       parameters: rangeParameters(),
       brands: [
@@ -569,12 +607,14 @@ describe('pricing-parameter backfill from the Dynamics export', () => {
       existing: [],
       terms: [],
     })
-    expect(plan.summary).toMatchObject({ ranges: 5, parameter_inserts: 2, terms_inserts: 1, ranges_without_brand: 3 })
-    expect(plan.inserts[0]).toMatchObject({ brand_id: 1, duty_percent_a: 5, duty_percent_c: 10, clearance_percent: 10, trade_markup_percent: 85 })
-    expect(plan.termsInserts).toEqual([
-      expect.objectContaining({ brand_id: 1, supplier_id: 7, discount: 0.25, discount_stated: true }),
-    ])
-    expect(plan.reports.brandsWithoutSupplier).toEqual([expect.objectContaining({ brand: `${PREFIX} bf-orphan` })])
+    expect(plan.summary).toMatchObject({ ranges: 5, parameter_inserts: 2, ranges_without_brand: 3 })
+    expect(plan.inserts[0]).toMatchObject({
+      brand_id: 1, duty_percent_a: 5, duty_percent_c: 10, clearance_percent: 10, trade_markup_percent: 85, discount_percent: 25,
+    })
+    // A house with no supplier still takes its discount: it prices a sale, and
+    // a sale needs no supplier. A blank discount is 0%.
+    expect(plan.inserts[1]).toMatchObject({ brand_id: 2, discount_percent: 0 })
+    expect(plan).not.toHaveProperty('termsInserts')
     expect(plan.reports.rangesWithoutBrand.map((r) => r.range)).toContain(`${PREFIX} NOBODY`)
   })
 
@@ -618,9 +658,9 @@ describe('pricing-parameter backfill from the Dynamics export', () => {
     expect(classesOf(replaced)).toContainEqual({ letter: 'C', rate: 5 })
   })
 
-  it('applies: creates the sets, fills only what was blank, writes the discount, leaves existing terms alone', async () => {
+  it("applies: creates the sets, fills only what was blank, writes the house's discount, leaves the supplier's terms alone", async () => {
     const summary = await backfillPricingParameters(pool, { rangeParameters: rangeParameters() })
-    expect(summary).toMatchObject({ parameters_inserted: 3, parameters_filled: 1, terms_inserted: 2 })
+    expect(summary).toMatchObject({ parameters_inserted: 3, parameters_filled: 1 })
 
     const house = await getBrandParameters(pool, houseId)
     expect(house).toMatchObject({ duty_percent_a: 5, duty_percent_c: 10, clearance_percent: 10, trade_markup_percent: 85 })
@@ -635,22 +675,22 @@ describe('pricing-parameter backfill from the Dynamics export', () => {
         WHERE brand_id = ANY($1::int[]) ORDER BY brand_id`,
       [[houseId, keptId, termedId, orphanId]]
     )
-    const byBrand = Object.fromEntries(terms.map((row) => [row.brand_id, row]))
-    expect(Number(byBrand[houseId].discount)).toBe(0.25)
-    expect(Number(byBrand[keptId].discount)).toBe(0.25)
-    // The chain the office recorded is untouched.
-    expect(byBrand[termedId].discount).toBe(null)
-    expect(byBrand[termedId].discount_chain.map(Number)).toEqual([0.4, 0.4])
-    // No supplier to hang terms on.
-    expect(byBrand[orphanId]).toBeUndefined()
+    // The supplier's terms are what purchase orders buy at: never written here.
+    expect(terms).toHaveLength(1)
+    expect(terms[0]).toMatchObject({ brand_id: termedId, discount: null })
+    expect(terms[0].discount_chain.map(Number)).toEqual([0.4, 0.4])
     expect(await getBrandParameters(pool, orphanId)).toMatchObject({ clearance_percent: 10 })
 
-    expect(summary.reports.termsAlreadyOnFile).toEqual([expect.objectContaining({ brand: `${PREFIX} bf-termed` })])
-    expect(summary.reports.brandsWithoutSupplier).toEqual([expect.objectContaining({ brand: `${PREFIX} bf-orphan` })])
+    const discountOf = async (brandId) =>
+      (await resolveWaterfallInputs(pool, { brandId })).inputs.discount_percent
+    for (const brandId of [houseId, keptId, termedId]) {
+      expect(await discountOf(brandId)).toMatchObject({ value: 25, source: 'house' })
+    }
+    expect(await discountOf(orphanId)).toMatchObject({ value: 0, source: 'house' })
   })
 
   it('changes nothing on a second run', async () => {
     const summary = await backfillPricingParameters(pool, { rangeParameters: rangeParameters() })
-    expect(summary).toMatchObject({ parameters_inserted: 0, parameters_filled: 0, terms_inserted: 0 })
+    expect(summary).toMatchObject({ parameters_inserted: 0, parameters_filled: 0 })
   })
 })

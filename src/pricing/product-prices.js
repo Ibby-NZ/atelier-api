@@ -17,9 +17,10 @@
 //     × (1 + clearance 10%)                           = 192.79  landed
 //     × (1 + trade markup 87%)                        = 360.52  trade sell
 //
-// plus the range's supplier discount off the wholesale rate before the
-// exchange (0 on MADEAUX; 50% on ALTAGAMMA — the export's own prices prove it
-// on 20,651 of 20,977 rows). That is `computeWaterfall` step for step, so this
+// plus the house's own discount off the wholesale rate before the exchange (0
+// on MADEAUX; 50% on ALTAGAMMA — the export's own prices prove it on 20,651 of
+// 20,977 rows). Never the supplier's: that prices purchase orders only (1 Oct
+// 2026). That is `computeWaterfall` step for step, so this
 // module computes nothing itself: it assembles the inputs and hands them over.
 //
 // TWO INPUTS THE RANGE FORMULA DOES NOT HAVE. The engine also takes an FX
@@ -169,12 +170,12 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
   // A house is resolved once per category and class letters. Duty resolves at
   // the row's (or product's) duty class; with none, the row is replaced below
   // by the formula's own "no duty".
-  const resolve = async (house, category, freightClass, discountClass, dutyClass) => {
-    const key = [house.id, category ?? '', freightClass ?? '', discountClass ?? '', dutyClass ?? ''].join('\u0000')
+  const resolve = async (house, category, freightClass, dutyClass) => {
+    const key = [house.id, category ?? '', freightClass ?? '', dutyClass ?? ''].join('\u0000')
     if (!resolutions.has(key)) {
       resolutions.set(
         key,
-        resolveWaterfallInputs(db, { brandId: house.id, category, dutyClass: dutyClass ?? 'A', freightClass, discountClass }).catch((error) => {
+        resolveWaterfallInputs(db, { brandId: house.id, category, dutyClass: dutyClass ?? 'A', freightClass }).catch((error) => {
           if (!error.statusCode || error.statusCode >= 500) throw error
           return { error: error.message }
         })
@@ -196,9 +197,10 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
    * step it could not reach as null.
    *
    * @param {object} row a product_prices row (or an import row of the same shape)
-   * @param {{ freightClass?: string|null, discountClass?: string|null, dutyClass?: string|null }} [classes]
+   * @param {{ freightClass?: string|null, dutyClass?: string|null }} [classes]
    *   the letters a catalogue product (or variation) chose, over the row's own
-   *   Dynamics freight letter and duty class and the house's default discount class
+   *   Dynamics freight letter and duty class. Its discount class is the
+   *   supplier's, for purchase orders, and prices no sale.
    */
   const price = async (row, classes = {}) => {
     const dynamics = Object.freeze({
@@ -232,7 +234,7 @@ export const createProductPricer = (db, { fxRates = null, shared = null } = {}) 
     const letter = classes.freightClass ?? (/^[A-Z]$/.test(rowLetter) ? rowLetter : null)
     const rowDuty = typeof row.duty_class === 'string' ? row.duty_class.trim().toUpperCase() : ''
     const dutyLetter = classes.dutyClass ?? (/^[A-C]$/.test(rowDuty) ? rowDuty : null)
-    const resolved = await resolve(house, category, letter, classes.discountClass ?? null, dutyLetter)
+    const resolved = await resolve(house, category, letter, dutyLetter)
     if (resolved.error) {
       return Object.freeze({
         status: 'incomplete',
@@ -465,12 +467,12 @@ export const listProductPrices = async (db, rawFilters = {}) => {
   let classes = {}
   if (rawFilters.product_id) {
     const { rows } = await db.query(
-      `SELECT brand_id, name, product_price_id, discount_class, freight_class, duty_class FROM products WHERE id = $1`,
+      `SELECT brand_id, name, product_price_id, freight_class, duty_class FROM products WHERE id = $1`,
       [rawFilters.product_id]
     )
     if (rows.length === 0) throw httpError(404, 'That product does not exist.')
     const [product] = rows
-    classes = { discountClass: product.discount_class, freightClass: product.freight_class, dutyClass: product.duty_class }
+    classes = { freightClass: product.freight_class, dutyClass: product.duty_class }
     filters = product.product_price_id != null
       ? { ...rawFilters, id: product.product_price_id, include_previous: true }
       : { ...rawFilters, brand_id: product.brand_id, design: product.name }

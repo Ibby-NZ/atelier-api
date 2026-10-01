@@ -33,8 +33,9 @@
 //                      Dynamics prices), where the product has none
 //
 // Each product is priced at ITS OWN class letters — its freight class (else
-// the row's letter) and its discount class — so a letter the office chose on
-// the product is the one its price is made at.
+// the row's letter) and its duty class — so a letter the office chose on the
+// product is the one its price is made at. Its discount class is the
+// supplier's, for purchase orders, and prices no sale (1 Oct 2026).
 //
 // WHEN. Every product-prices upload, and every pricing save that moves a range
 // figure (src/routes/admin-pricing.js — the house page, /pricing, an exchange
@@ -124,7 +125,7 @@ export const planProductSync = async (
   const { rows: products } = await db.query(
     `SELECT p.id, p.name, p.slug, p.brand_id, b.name AS house, p.currency, p.category,
             p.trade_price_cents, p.retail_price_cents, p.wholesale_rate, p.product_price_id,
-            p.discount_class, p.freight_class, p.duty_class
+            p.freight_class, p.duty_class
        FROM products p JOIN brands b ON b.id = p.brand_id
       WHERE p.archived_at IS NULL AND ($1::int IS NULL OR p.id = $1::int)
         AND ($2::int[] IS NULL OR p.brand_id = ANY($2::int[]))
@@ -163,7 +164,6 @@ export const planProductSync = async (
     const priced = []
     const classes = {
       freightClass: product.freight_class ?? null,
-      discountClass: product.discount_class ?? null,
       dutyClass: product.duty_class ?? null,
     }
     for (const row of matches) priced.push({ row, pricing: await pricer.price(row, classes) })

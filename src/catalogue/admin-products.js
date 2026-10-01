@@ -712,9 +712,10 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
   const moving = PRICE_COLUMNS.some(typed)
   const reason = moving ? requireChangeReason(input.reason) : null
 
-  // A new wholesale rate (28 Sep 2026) or class letter (1 Oct 2026) re-prices
-  // the product through its range; a price typed in the same save is the
-  // person's and is kept.
+  // A new wholesale rate (28 Sep 2026) or freight or duty letter (1 Oct 2026)
+  // re-prices the product through its range; a price typed in the same save is
+  // the person's and is kept. The discount class is the supplier's, for
+  // purchase orders, and moves no sell price.
   const wholesaleFrom = existing.wholesale_rate == null ? null : Number(existing.wholesale_rate)
   const wholesaleTo = Object.hasOwn(patch, 'wholesale_rate') ? patch.wholesale_rate : wholesaleFrom
   const letterMoved = (column) => Object.hasOwn(patch, column) && (patch[column] ?? null) !== (existing[column] ?? null)
@@ -722,7 +723,6 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
     ...(wholesaleTo != null && wholesaleTo !== wholesaleFrom
       ? [`the wholesale rate (${wholesaleFrom ?? '—'} → ${wholesaleTo} ${patch.currency ?? existing.currency})`]
       : []),
-    ...(letterMoved('discount_class') ? [`discount class ${patch.discount_class ?? 'default'}`] : []),
     ...(letterMoved('freight_class') ? [`freight class ${patch.freight_class ?? 'every class'}`] : []),
     ...(letterMoved('duty_class') ? [`duty class ${patch.duty_class ?? 'none'}`] : []),
   ]
@@ -731,7 +731,6 @@ export const updateProduct = async (pool, id, input, ctx = {}) => {
     const currency = patch.currency ?? existing.currency
     repricing = await repriceProduct(pool, { ...existing, currency }, {
       wholesaleRate: wholesaleTo,
-      discountClass: Object.hasOwn(patch, 'discount_class') ? patch.discount_class : existing.discount_class,
       freightClass: Object.hasOwn(patch, 'freight_class') ? patch.freight_class : existing.freight_class,
       dutyClass: Object.hasOwn(patch, 'duty_class') ? patch.duty_class : existing.duty_class,
     })
@@ -847,21 +846,21 @@ export const updateColourway = async (pool, id, input) => {
       ? { hex_tones: serialiseTones(input.hex_tones) }
       : {}),
   }
-  // A class letter of its own prices the variation at it; clearing both
-  // letters sends it back to its product's price (1 Oct 2026). A price typed in
-  // the same save is the person's and is kept.
+  // A freight or duty letter of its own prices the variation at it; clearing
+  // both sends it back to its product's price (1 Oct 2026). A price typed in
+  // the same save is the person's and is kept. Its discount class prices
+  // purchase orders only.
   let classed = patch
-  if (['discount_class', 'freight_class', 'duty_class'].some((column) => Object.hasOwn(patch, column))) {
+  if (['freight_class', 'duty_class'].some((column) => Object.hasOwn(patch, column))) {
     const { rows: found } = await pool.query(
-      `SELECT c.discount_class AS own_discount, c.freight_class AS own_freight, c.duty_class AS own_duty,
-              p.product_price_id, p.currency, p.wholesale_rate, p.discount_class, p.freight_class, p.duty_class
+      `SELECT c.freight_class AS own_freight, c.duty_class AS own_duty,
+              p.product_price_id, p.currency, p.wholesale_rate, p.freight_class, p.duty_class
          FROM colourways c JOIN products p ON p.id = c.product_id WHERE c.id = $1`,
       [id]
     )
     if (found.length === 0) throw httpError(404, `Colourway ${id} not found.`)
     const [row] = found
     const own = {
-      discount_class: Object.hasOwn(patch, 'discount_class') ? patch.discount_class : row.own_discount,
       freight_class: Object.hasOwn(patch, 'freight_class') ? patch.freight_class : row.own_freight,
       duty_class: Object.hasOwn(patch, 'duty_class') ? patch.duty_class : row.own_duty,
     }

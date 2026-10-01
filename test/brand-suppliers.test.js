@@ -14,6 +14,7 @@ import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
 import { resolveTermsChain } from '../src/suppliers/discount-chain.js'
+import { resolveWaterfallInputs } from '../src/pricing/pricing-parameters.js'
 
 const PREFIX = 'brand-suppliers-test'
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
@@ -202,7 +203,10 @@ describe('brand additional suppliers and product discount tiers', () => {
   // letter; a variation with none takes its product's.
   describe('discount classes chosen by letter on the product and the variation', () => {
     const base = () => `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100`
-    const discountAt = async (query) => (await inject('GET', `${base()}${query}`)).json().inputs.discount_percent
+    // A class is the supplier's discount, so it prices what a purchase order
+    // buys at — never a sale (1 Oct 2026).
+    const discountAt = async (chosen = {}) =>
+      (await resolveWaterfallInputs(pool, { brandId: houseId, ...chosen, purchase: true })).inputs.discount_percent
 
     it('lets any back-office login choose a letter — it is no rate', async () => {
       const set = await inject('PATCH', `/admin/products/${productId}`, { cookie: plainCookie, payload: { discount_class: 'C' } })
@@ -213,13 +217,15 @@ describe('brand additional suppliers and product discount tiers', () => {
     })
 
     it("prices the product at its letter's class, and the house at its default without one", async () => {
-      expect(await discountAt(`&product_id=${productId}`)).toMatchObject({
+      expect(await discountAt({ productId })).toMatchObject({
         value: 50,
         source: 'terms',
         detail: { shape: 'tier', label: 'Contract', discount_class: 'C' },
       })
-      expect(await discountAt('')).toMatchObject({ value: 40, detail: { discount_class: 'A' } })
-      expect(await discountAt('&discount_class=b')).toMatchObject({ value: 45 })
+      expect(await discountAt()).toMatchObject({ value: 40, detail: { discount_class: 'A' } })
+      expect(await discountAt({ discountClass: 'B' })).toMatchObject({ value: 45 })
+      const sale = await inject('GET', `${base()}&product_id=${productId}`)
+      expect(sale.json().inputs.discount_percent).toMatchObject({ value: null, source: 'missing' })
     })
 
     it("prices a variation at its own letter, else its product's", async () => {
@@ -228,13 +234,13 @@ describe('brand additional suppliers and product discount tiers', () => {
         `INSERT INTO colourways (product_id, name, sku) VALUES ($1, 'Ink', $2) RETURNING id`,
         [productId, `${PREFIX}-ink`]
       )
-      expect(await discountAt(`&product_id=${productId}&colourway_id=${variation}`)).toMatchObject({ value: 50 })
+      expect(await discountAt({ productId, colourwayId: variation })).toMatchObject({ value: 50 })
       const own = await inject('PATCH', `/admin/colourways/${variation}`, { payload: { discount_class: 'B' } })
       expect(own.statusCode).toBe(200)
       expect(own.json().colourway.discount_class).toBe('B')
-      expect(await discountAt(`&product_id=${productId}&colourway_id=${variation}`)).toMatchObject({ value: 45 })
+      expect(await discountAt({ productId, colourwayId: variation })).toMatchObject({ value: 45 })
       await inject('PATCH', `/admin/colourways/${variation}`, { payload: { discount_class: null } })
-      expect(await discountAt(`&product_id=${productId}&colourway_id=${variation}`)).toMatchObject({ value: 50 })
+      expect(await discountAt({ productId, colourwayId: variation })).toMatchObject({ value: 50 })
     })
 
     it("refuses another house's product and another product's variation", async () => {
@@ -251,7 +257,7 @@ describe('brand additional suppliers and product discount tiers', () => {
 
     it('falls back to the default class when no class answers to the letter', async () => {
       await pool.query('UPDATE supplier_discount_tiers SET discount_class = NULL WHERE id = $1', [tierIds.Contract])
-      expect(await discountAt(`&product_id=${productId}`)).toMatchObject({ value: 40 })
+      expect(await discountAt({ productId })).toMatchObject({ value: 40 })
       await pool.query(`UPDATE supplier_discount_tiers SET discount_class = 'C' WHERE id = $1`, [tierIds.Contract])
     })
   })

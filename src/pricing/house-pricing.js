@@ -12,14 +12,17 @@
 //   duty bands, clearance, trade markup, FX margin, handling, surcharge
 //       -> the house's override row in `supplier_pricing_parameters`
 //          (PUT semantics: the whole set travels, an omitted field clears)
-//   discount, discount classes
-//       -> the house's supplier terms, through src/suppliers/supplier-terms.js
-//          (the terms tables are named only under src/suppliers/ —
-//          test/suppliers-terms.test.js scans for it): the flat rate, and the
-//          tiers as the house's discount classes. A house on a compounded chain
-//          is refused here with a 422 that sends the office to the supplier's
-//          terms panel — the chain wins over everything and is a different
-//          agreement, not an edit.
+//   discount
+//       -> the house's own `discount_percent` on that same row, outside the
+//          PUT set: what the house SELLS at (1 Oct 2026). It needs no supplier.
+//   discount classes
+//       -> the supplier's terms for the house, through
+//          src/suppliers/supplier-terms.js (the terms tables are named only
+//          under src/suppliers/ — test/suppliers-terms.test.js scans for it):
+//          the tiers. They are the SUPPLIER's discount, so they price purchase
+//          orders only. A house on a compounded chain is refused here with a
+//          422 that sends the office to the supplier's terms panel — the chain
+//          wins over everything and is a different agreement, not an edit.
 //   freight, freight classes
 //       -> NEW dated rows on the append-only freight ledger, scoped to the
 //          house's name (the client answered F1 in Sept 2026: freight is per
@@ -37,7 +40,9 @@
 import {
   PARAMETER_COLUMNS,
   getBrandParameters,
+  getHouseDiscount,
   getSupplierParameters,
+  setHouseDiscount,
   upsertBrandParameters,
 } from './pricing-parameters.js'
 import {
@@ -48,13 +53,11 @@ import {
   resolveFreightRate,
   today,
 } from './freight-rates.js'
-import { chainMultiplier, resolveTermsChain } from '../suppliers/discount-chain.js'
 import {
   createSupplierBrandTerms,
   createSupplierDiscountTier,
   deleteSupplierDiscountTier,
   getBrandTerms,
-  updateSupplierBrandTerms,
   updateSupplierDiscountTier,
 } from '../suppliers/supplier-terms.js'
 import { supplierForBrand } from '../suppliers/brand-suppliers.js'
@@ -79,9 +82,9 @@ export const fractionToPercent = (fraction) => (fraction == null ? null : round3
 export const percentToFraction = (percent) => (percent == null ? null : round4(Number(percent) / 100))
 
 const CHAIN_REFUSAL =
-  "This house's discount is a compounded chain. Edit it on the supplier's terms — a flat rate or classes would replace the agreement."
+  "This house's supplier discount is a compounded chain. Edit it on the supplier's terms — classes would replace the agreement."
 const NO_SUPPLIER_REFUSAL =
-  'Link this house to the supplier that invoices it before setting a discount — a discount is that supplier’s term.'
+  'Link this house to the supplier that invoices it before setting discount classes — they are that supplier’s terms.'
 
 // A house page shows an ARCHIVED house too, so its pricing reads for one as
 // well — unlike the waterfall's loader, which prices live houses only.
@@ -169,39 +172,16 @@ const describeClasses = (terms, productCounts) =>
     )
   )
 
-// What the panel says about the discount, and whether it may write one.
-const describeDiscount = (house, terms, supplierDefault, productCounts) => {
-  const classes = describeClasses(terms, productCounts)
-  if (terms && terms.discount_chain.length > 0) {
-    const resolved = resolveTermsChain(terms, terms.tiers)
-    return Object.freeze({
-      percent: round3((1 - chainMultiplier(resolved.chain)) * 100),
-      source: 'house',
-      shape: 'chain',
-      editable: false,
-      reason: "This house is on a compounded discount chain. Edit it on the supplier's terms.",
-      classes,
-    })
-  }
-  // The house's own flat rate, else the supplier's averaged one, else nothing.
-  // Classes sit beside it: a product's class (chosen, or matched by category,
-  // or the default class) wins, and the flat rate covers everything else.
-  const base =
-    terms?.discount != null
-      ? { percent: fractionToPercent(terms.discount), source: 'house' }
-      : supplierDefault != null
-        ? { percent: fractionToPercent(supplierDefault), source: 'supplier' }
-        : { percent: null, source: 'missing' }
-  // Writing needs a supplier to hang terms on — the terms' own, or the house's.
-  const editable = terms != null || house.supplier_id != null
-  return Object.freeze({
-    ...base,
-    shape: classes.length > 0 ? 'tiers' : terms ? 'flat' : 'none',
-    editable,
-    reason: editable ? null : NO_SUPPLIER_REFUSAL,
-    classes,
+// What the panel says about the discount: the house's own figure, and the
+// supplier's classes beside it.
+const describeDiscount = (percent, terms, productCounts) =>
+  Object.freeze({
+    percent,
+    source: percent != null ? 'house' : 'missing',
+    editable: true,
+    reason: null,
+    classes: describeClasses(terms, productCounts),
   })
-}
 
 const freightView = (rate) =>
   rate
@@ -249,7 +229,7 @@ export const getHousePricing = async (db, brandId) => {
     // default row it falls back to, column for column.
     parameters,
     supplier_parameters: supplierParameters,
-    discount: describeDiscount(house, terms, supplier?.default_discount ?? null, productCounts),
+    discount: describeDiscount(await getHouseDiscount(db, house.id), terms, productCounts),
     // The house's own every-class rate; the supplier-wide one covers a house
     // with none.
     freight: freightView(houseFreight.rate),
@@ -258,25 +238,6 @@ export const getHousePricing = async (db, brandId) => {
     // carry (with how many lines) — the classes worth setting.
     freight_classes: Object.freeze(classRates.map(freightView)),
     freight_class_lines: Object.freeze(classLines),
-  })
-}
-
-const writeDiscount = async (db, house, percent) => {
-  const terms = await getBrandTerms(db, house.id)
-  const fraction = percentToFraction(percent)
-  if (terms) {
-    if (terms.discount_chain.length > 0) throw httpError(422, CHAIN_REFUSAL)
-    if (terms.discount == null ? fraction == null : sameRate(terms.discount, fraction)) return
-    await updateSupplierBrandTerms(db, terms.supplier_id ?? house.supplier_id, terms.id, { discount: fraction })
-    return
-  }
-  // Nothing to clear on a house with no terms.
-  if (fraction == null) return
-  if (house.supplier_id == null) throw httpError(422, NO_SUPPLIER_REFUSAL)
-  await createSupplierBrandTerms(db, house.supplier_id, {
-    brand_id: house.id,
-    discount: fraction,
-    note: 'Set on the house page',
   })
 }
 
@@ -413,8 +374,8 @@ const writeFreightClasses = async (db, house, rates) => {
  * Save the house's pricing. Call inside a transaction.
  *
  *   parameters        the whole override set (PUT — an omitted column clears)
- *   discount_percent  optional; absent leaves the terms alone, null clears a
- *                     flat rate, a number sets one
+ *   discount_percent  optional; the house's own discount — absent leaves it,
+ *                     null clears it, a number sets it
  *   discount_classes  optional; the whole set of the house's classes
  *                     ([{ id?, label, percent, is_default? }]) — absent leaves
  *                     them alone
@@ -436,7 +397,7 @@ export const saveHousePricing = async (db, brandId, input = {}) => {
   )
   await upsertBrandParameters(db, house.id, parameters)
   if (Object.hasOwn(input, 'discount_percent')) {
-    await writeDiscount(db, house, input.discount_percent)
+    await setHouseDiscount(db, house.id, input.discount_percent)
   }
   if (Array.isArray(input.discount_classes)) {
     await writeDiscountClasses(db, house, input.discount_classes)

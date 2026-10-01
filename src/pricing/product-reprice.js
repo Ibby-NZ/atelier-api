@@ -1,18 +1,19 @@
 // A product's — and a variation's — sell prices, recalculated when what they
 // are priced from is edited: the wholesale rate (28 Sep 2026 — the office:
 // "when we change the wholesale rate, the trade price remains the same"), and
-// the discount, freight and duty class letters (1 Oct 2026).
+// the freight and duty class letters (1 Oct 2026). The discount class is the
+// supplier's, for purchase orders only, and moves no sell price.
 //
 // The product's own product-price row prices it (products.product_price_id):
 // its house, duty class and own markup to trade, exactly as the import priced
 // it — with the product's wholesale rate in the product's currency, its freight
-// class (else the row's Dynamics letter) and its discount class. Trade and
+// class (else the row's Dynamics letter) and its duty class. Trade and
 // retail are written where the formula yields them and the person did not type
 // that price in the same save; a typed price wins. A product not built from a
 // price row, one Dynamics priced by hand, or one whose house cannot price it
 // yet, keeps its prices, and the report says why.
 //
-// A VARIATION with a class letter of its own (discount, freight or duty) is
+// A VARIATION with a class letter of its own (freight or duty) is
 // priced the same way at its own letters (the others its product's); one with none sells at its product's
 // price (NULL), which is what clearing its letters puts back.
 
@@ -29,12 +30,11 @@ const ROW_COLUMNS = `id, code, description, range_name, item_type, currency, who
  *
  * @param {{ query: Function }} db
  * @param {{ product_price_id: number|null, currency: string }} product
- * @param {{ wholesaleRate: number|null, discountClass?: string|null, freightClass?: string|null,
- *           dutyClass?: string|null }} basis
+ * @param {{ wholesaleRate: number|null, freightClass?: string|null, dutyClass?: string|null }} basis
  * @returns {Promise<{ repriced: boolean, trade_price_cents?: number|null,
  *                     retail_price_cents?: number|null, reason?: string }>}
  */
-export const repriceProduct = async (db, product, { wholesaleRate, discountClass = null, freightClass = null, dutyClass = null }) => {
+export const repriceProduct = async (db, product, { wholesaleRate, freightClass = null, dutyClass = null }) => {
   if (product.product_price_id == null) {
     return { repriced: false, reason: 'not built from a product price, so there is no range to price it through' }
   }
@@ -43,7 +43,7 @@ export const repriceProduct = async (db, product, { wholesaleRate, discountClass
   if (!rows[0]) return { repriced: false, reason: 'its product price is gone' }
   const pricing = await createProductPricer(db).price(
     { ...rows[0], wholesale_rate: wholesaleRate, currency: product.currency },
-    { discountClass, freightClass, dutyClass }
+    { freightClass, dutyClass }
   )
   if (pricing.hand_priced) {
     return { repriced: false, reason: 'Dynamics priced it by hand, so its price does not follow the wholesale rate or its classes' }
@@ -66,17 +66,16 @@ export const repriceProduct = async (db, product, { wholesaleRate, discountClass
  *
  * @param {{ query: Function }} db
  * @param {{ product_price_id: number|null, currency: string, wholesale_rate: number|string|null,
- *           discount_class: string|null, freight_class: string|null, duty_class: string|null }} product
- * @param {{ discount_class: string|null, freight_class: string|null, duty_class: string|null }} variation its OWN letters
+ *           freight_class: string|null, duty_class: string|null }} product
+ * @param {{ freight_class: string|null, duty_class: string|null }} variation its OWN letters
  * @returns {Promise<{ trade_price_cents: number|null, retail_price_cents: number|null }|null>}
  */
 export const variationPrices = async (db, product, variation) => {
-  if (variation.discount_class == null && variation.freight_class == null && variation.duty_class == null) {
+  if (variation.freight_class == null && variation.duty_class == null) {
     return { trade_price_cents: null, retail_price_cents: null }
   }
   const priced = await repriceProduct(db, product, {
     wholesaleRate: product.wholesale_rate == null ? null : Number(product.wholesale_rate),
-    discountClass: variation.discount_class ?? product.discount_class,
     freightClass: variation.freight_class ?? product.freight_class,
     dutyClass: variation.duty_class ?? product.duty_class,
   })
@@ -95,13 +94,13 @@ export const variationPrices = async (db, product, variation) => {
  */
 export const repriceOwnClassVariations = async (db, productId) => {
   const { rows: products } = await db.query(
-    `SELECT product_price_id, currency, wholesale_rate, discount_class, freight_class, duty_class FROM products WHERE id = $1`,
+    `SELECT product_price_id, currency, wholesale_rate, freight_class, duty_class FROM products WHERE id = $1`,
     [productId]
   )
   if (!products[0]) return 0
   const { rows: variations } = await db.query(
-    `SELECT id, discount_class, freight_class, duty_class FROM colourways
-      WHERE product_id = $1 AND (discount_class IS NOT NULL OR freight_class IS NOT NULL OR duty_class IS NOT NULL)`,
+    `SELECT id, freight_class, duty_class FROM colourways
+      WHERE product_id = $1 AND (freight_class IS NOT NULL OR duty_class IS NOT NULL)`,
     [productId]
   )
   let moved = 0

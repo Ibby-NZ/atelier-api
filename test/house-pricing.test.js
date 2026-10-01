@@ -14,10 +14,14 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
-import { getBrandParameters, previewWaterfall, upsertBrandParameters } from '../src/pricing/pricing-parameters.js'
+import {
+  getBrandParameters,
+  previewWaterfall,
+  resolveWaterfallInputs,
+  upsertBrandParameters,
+} from '../src/pricing/pricing-parameters.js'
 import {
   CHANGE_KINDS,
-  DISCOUNT_FIELD,
   FREIGHT_FIELD,
   planParametersBackfill,
 } from '../src/pricing/parameters-backfill.js'
@@ -194,7 +198,10 @@ describe('planning the export onto the houses', () => {
       range('RETIRED', { status: 'Inactive' }),
     ],
     brands,
-    existing: [{ brand_id: 2, duty_percent_a: '5.000', duty_percent_b: '7.000', clearance_percent: '10.000', trade_markup_percent: null }],
+    existing: [{
+      brand_id: 2, duty_percent_a: '5.000', duty_percent_b: '7.000', clearance_percent: '10.000', trade_markup_percent: null,
+      discount_percent: '10.000',
+    }],
     terms: [
       { id: 20, brand_id: 2, supplier_id: 7, discount: 0.1, chain_length: 0, tier_count: 0 },
       { id: 30, brand_id: 3, supplier_id: 7, discount: null, chain_length: 2, tier_count: 0 },
@@ -209,12 +216,13 @@ describe('planning the export onto the houses', () => {
 
     // A house with nothing: every stated value is a fill, in all three homes.
     expect(plan.inserts.map((row) => row.brand_id)).toEqual([1, 3, 4])
-    expect(plan.inserts[0]).toMatchObject({ surcharge_min_qty: 5, surcharge_per_unit: 20, trade_markup_percent: 85 })
-    expect(plan.termsInserts).toEqual([expect.objectContaining({ brand_id: 1, supplier_id: 7, discount: 0.25 })])
-    // Freight lands on every house — the chain house too, since only its
-    // DISCOUNT is off limits, and one with no supplier or price lines, since a
-    // rate needs no unit (1 Oct 2026) — and not on the saved house, whose rate
-    // the export disagrees with.
+    expect(plan.inserts[0]).toMatchObject({ surcharge_min_qty: 5, surcharge_per_unit: 20, trade_markup_percent: 85, discount_percent: 25 })
+    // The discount is the house's own, so a chain on the supplier's terms or no
+    // supplier at all is no bar to it (1 Oct 2026).
+    expect(plan.inserts.map((row) => row.discount_percent)).toEqual([25, 25, 25])
+    // Freight lands on every house — one with no supplier or price lines too,
+    // since a rate needs no unit (1 Oct 2026) — and not on the saved house,
+    // whose rate the export disagrees with.
     expect(plan.freightInserts.map((row) => row.brand_id)).toEqual([1, 3, 4])
     expect(plan.freightInserts[0]).toEqual(expect.objectContaining({ range_name: 'NEW HOUSE', rate: 30, effective_from: '2026-09-25' }))
     expect(plan.freightInserts[0]).not.toHaveProperty('unit')
@@ -226,44 +234,29 @@ describe('planning the export onto the houses', () => {
     ])
     expect(plan.overwrites).toEqual([])
     expect(line(plan, 'SAVED HOUSE', 'clearance_percent')).toMatchObject({ from: 10, to: 12, kind: CHANGE_KINDS.KEPT })
-    expect(line(plan, 'SAVED HOUSE', DISCOUNT_FIELD)).toMatchObject({ from: 10, to: 25, kind: CHANGE_KINDS.KEPT })
+    expect(line(plan, 'SAVED HOUSE', 'discount_percent')).toMatchObject({ from: 10, to: 25, kind: CHANGE_KINDS.KEPT })
     expect(line(plan, 'SAVED HOUSE', FREIGHT_FIELD)).toMatchObject({ from: 30, to: 35, kind: CHANGE_KINDS.KEPT })
     // A BLANK in the export never clears the saved band.
     expect(line(plan, 'SAVED HOUSE', 'duty_percent_b')).toBeUndefined()
     // An unchanged value is no line at all.
     expect(line(plan, 'SAVED HOUSE', 'duty_percent_a')).toBeUndefined()
 
-    expect(plan.reports.termsAlreadyOnFile).toEqual([expect.objectContaining({ brand: 'CHAIN HOUSE' })])
-    expect(plan.reports.brandsWithoutSupplier).toEqual([expect.objectContaining({ brand: 'NO SUPPLIER' })])
+    expect(plan.reports).not.toHaveProperty('termsAlreadyOnFile')
+    expect(plan.reports).not.toHaveProperty('brandsWithoutSupplier')
     expect(plan.reports).not.toHaveProperty('freightWithoutUnit')
     expect(plan.reports.inactiveRanges).toEqual([{ range: 'RETIRED', status: 'Inactive' }])
     expect(plan.summary).toMatchObject({ houses_matched: 4, values_replaced: 0, values_kept: 3 })
   })
 
-  it('with overwrite, replaces what disagrees — freight as a new dated row — and still never touches a chain', () => {
+  it('with overwrite, replaces what disagrees — freight as a new dated row', () => {
     const plan = planParametersBackfill(sources, { overwrite: true, on: '2026-09-25' })
-    expect(plan.overwrites).toEqual([expect.objectContaining({ brand_id: 2, clearance_percent: 12 })])
+    expect(plan.overwrites).toEqual([expect.objectContaining({ brand_id: 2, clearance_percent: 12, discount_percent: 25 })])
     expect(plan.overwrites[0]).not.toHaveProperty('duty_percent_b')
-    expect(plan.termsUpdates).toEqual([expect.objectContaining({ terms_id: 20, supplier_id: 7, discount: 0.25, was: 0.1 })])
     expect(plan.freightInserts).toEqual(
       expect.arrayContaining([expect.objectContaining({ brand_id: 2, rate: 35, effective_from: '2026-09-25' })])
     )
     expect(line(plan, 'SAVED HOUSE', FREIGHT_FIELD)).toMatchObject({ from: 30, to: 35, kind: CHANGE_KINDS.REPLACE })
     expect(plan.changes.some((l) => l.kind === CHANGE_KINDS.KEPT)).toBe(false)
-    expect(plan.termsUpdates.some((row) => row.brand_id === 3)).toBe(false)
-  })
-
-  it('fills the discount on terms that carry none — a markup-only row is a blank, not a saved rate', () => {
-    const plan = planParametersBackfill(
-      {
-        ...sources,
-        terms: [...sources.terms, { id: 40, brand_id: 1, supplier_id: 7, discount: null, chain_length: 0, tier_count: 0 }],
-      },
-      { on: '2026-09-25' }
-    )
-    expect(plan.termsInserts.some((row) => row.brand_id === 1)).toBe(false)
-    expect(plan.termsUpdates).toEqual([expect.objectContaining({ terms_id: 40, discount: 0.25, was: null })])
-    expect(line(plan, 'NEW HOUSE', DISCOUNT_FIELD)).toMatchObject({ from: null, to: 25, kind: CHANGE_KINDS.FILL })
   })
 
   it('does not replace a freight rate already dated today — the ledger holds one per day', () => {
@@ -390,7 +383,7 @@ describe('/admin/pricing/houses', () => {
     expect((await inject('GET', '/admin/pricing/houses/999999999')).statusCode).toBe(404)
   })
 
-  it('saves each figure into its one home — parameters, a flat discount on the terms, a dated freight rate', async () => {
+  it("saves each figure into its one home — parameters, the house's discount, a dated freight rate", async () => {
     const res = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
       payload: {
         parameters: fullSet(),
@@ -401,10 +394,12 @@ describe('/admin/pricing/houses', () => {
     expect(res.statusCode).toBe(200)
     const { pricing } = res.json()
     expect(pricing.parameters).toMatchObject({ duty_percent_a: 5, clearance_percent: 10, surcharge_min_qty: 5, surcharge_per_unit: 20 })
-    expect(pricing.discount).toMatchObject({ percent: 25, source: 'house', shape: 'flat', editable: true })
+    expect(pricing.discount).toMatchObject({ percent: 25, source: 'house', editable: true })
     expect(pricing.freight).toMatchObject({ rate: 30, basis: 'dollar', effective_from: '2026-01-01' })
     expect(pricing.freight).not.toHaveProperty('unit')
-    expect(await houseTerms(pool, houseId)).toMatchObject({ discount: 0.25, chain: 0 })
+    // The supplier's terms are what purchase orders buy at; the house page
+    // never writes them a flat rate.
+    expect(await houseTerms(pool, houseId)).toBe(null)
 
     // The same figures again change nothing: no second ledger row, no 409.
     const again = await inject('PUT', `/admin/pricing/houses/${houseId}`, {
@@ -453,24 +448,33 @@ describe('/admin/pricing/houses', () => {
     await inject('PUT', `/admin/pricing/houses/${houseId}`, { payload: { parameters: fullSet() } })
   })
 
-  it('refuses a discount it cannot write as one transaction — nothing else is saved either', async () => {
+  it("sets a house's discount with no supplier and beside a chain, which stays the supplier's", async () => {
+    // Classes are the supplier's terms: a chain house refuses them, and the
+    // whole save with them.
     const chain = await inject('PUT', `/admin/pricing/houses/${chainId}`, {
-      payload: { parameters: fullSet(), discount_percent: 10 },
+      payload: { parameters: fullSet(), discount_percent: 10, discount_classes: [{ discount_class: 'A', percent: 5 }] },
     })
     expect(chain.statusCode).toBe(422)
     expect(chain.json().message).toMatch(/compounded chain/)
     expect(await getBrandParameters(pool, chainId)).toBe(null)
-    expect(await houseTerms(pool, chainId)).toMatchObject({ discount: null, chain: 2 })
 
-    const read = (await inject('GET', `/admin/pricing/houses/${chainId}`)).json().pricing
-    expect(read.discount).toMatchObject({ shape: 'chain', editable: false, percent: 64 })
+    const flat = await inject('PUT', `/admin/pricing/houses/${chainId}`, {
+      payload: { parameters: fullSet(), discount_percent: 10 },
+    })
+    expect(flat.statusCode).toBe(200)
+    expect(flat.json().pricing.discount).toMatchObject({ percent: 10, source: 'house', editable: true })
+    expect(await houseTerms(pool, chainId)).toMatchObject({ discount: null, chain: 2 })
 
     const orphan = await inject('PUT', `/admin/pricing/houses/${bareId}`, {
       payload: { parameters: fullSet(), discount_percent: 10 },
     })
-    expect(orphan.statusCode).toBe(422)
-    expect(orphan.json().message).toMatch(/Link this house to the supplier/)
-    expect(await getBrandParameters(pool, bareId)).toBe(null)
+    expect(orphan.statusCode).toBe(200)
+    expect(orphan.json().pricing.discount).toMatchObject({ percent: 10, source: 'house' })
+    const orphanClasses = await inject('PUT', `/admin/pricing/houses/${bareId}`, {
+      payload: { parameters: fullSet(), discount_classes: [{ discount_class: 'A', percent: 5 }] },
+    })
+    expect(orphanClasses.statusCode).toBe(422)
+    expect(orphanClasses.json().message).toMatch(/Link this house to the supplier/)
   })
 
   it('sets a freight rate per class — the letters the price lines carry — and the waterfall prices a line by its letter', async () => {
@@ -549,17 +553,19 @@ describe('/admin/pricing/houses', () => {
     ])
     expect(first.statusCode).toBe(200)
     let discount = first.json().pricing.discount
-    expect(discount).toMatchObject({ shape: 'tiers', editable: true, percent: null })
+    expect(discount).toMatchObject({ editable: true, percent: null })
     expect(discount.classes).toEqual([
       expect.objectContaining({ label: 'wallpaper', discount_class: null, percent: 40, is_default: false, matches_category: true, products: 0 }),
       expect.objectContaining({ label: 'All other collections', discount_class: 'B', percent: 50, is_default: true, matches_category: false }),
     ])
     const [wallpaper, others] = discount.classes
 
-    // The waterfall picks the class by the line's category, else the default class.
+    // A purchase order picks the class by the line's category, else the default
+    // class. A sale never does: it is priced at the house's own discount.
     const discountFor = async (category) =>
-      (await inject('GET', `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100&category=${category}`)).json()
-        .inputs.discount_percent
+      (await resolveWaterfallInputs(pool, { brandId: houseId, category, purchase: true })).inputs.discount_percent
+    expect((await resolveWaterfallInputs(pool, { brandId: houseId, category: 'wallpaper' })).inputs.discount_percent)
+      .toMatchObject({ value: null, source: 'missing' })
     expect(await discountFor('wallpaper')).toMatchObject({ value: 40, detail: { shape: 'tier', label: 'wallpaper' } })
     expect(await discountFor('fabric')).toMatchObject({ value: 50, detail: { label: 'All other collections' } })
 
@@ -594,16 +600,16 @@ describe('/admin/pricing/houses', () => {
     )
     expect(second.statusCode).toBe(200)
     discount = second.json().pricing.discount
-    expect(discount).toMatchObject({ percent: 30, source: 'house', shape: 'tiers' })
+    expect(discount).toMatchObject({ percent: 30, source: 'house' })
     expect(discount.classes.map((entry) => [entry.label, entry.percent, entry.is_default])).toEqual([
       ['New collections', 45, false],
       ['Wallpaper', 42, true],
     ])
     // The removed class's product keeps its letter; no class answers to it, so
-    // the waterfall falls back to the default class.
+    // the purchase order falls back to the default class.
     const { rows: kept } = await pool.query(`SELECT discount_class FROM products WHERE id = $1`, [rows[0].id])
     expect(kept).toEqual([{ discount_class: 'B' }])
-    const fellBack = (await inject('GET', `/admin/pricing/waterfall?brand_id=${houseId}&wholesale_rate=100&product_id=${rows[0].id}`)).json()
+    const fellBack = await resolveWaterfallInputs(pool, { brandId: houseId, productId: rows[0].id, purchase: true })
     expect(fellBack.inputs.discount_percent).toMatchObject({ value: 42, detail: { label: 'Wallpaper' } })
     await pool.query(`DELETE FROM colourways WHERE product_id = ANY($1::int[])`, [rows.map((row) => row.id)])
     await pool.query(`DELETE FROM products WHERE id = ANY($1::int[])`, [rows.map((row) => row.id)])
@@ -614,7 +620,7 @@ describe('/admin/pricing/houses', () => {
 
     // An empty set removes them all; the flat rate stays.
     const none = await put([])
-    expect(none.json().pricing.discount).toMatchObject({ percent: 30, shape: 'flat', classes: [] })
+    expect(none.json().pricing.discount).toMatchObject({ percent: 30, classes: [] })
   })
 
   it('refuses discount classes it cannot write, and writes nothing else', async () => {
@@ -674,21 +680,25 @@ describe('/admin/pricing/houses', () => {
       ])
     )
     expect(plan.reports.rangesWithoutBrand).toEqual([expect.objectContaining({ range: `${PREFIX} NOBODY` })])
-    expect(plan.reports.brandsWithoutSupplier).toEqual([expect.objectContaining({ brand: houseName('bare') })])
     // The dry run wrote nothing.
     expect(await getBrandParameters(pool, houseId)).toMatchObject({ clearance_percent: 12, trade_markup_percent: null })
     expect(await houseFreight(pool, houseName('house'))).toEqual([])
 
     const applied = await upload('apply', book)
     expect(applied.statusCode).toBe(200)
-    expect(applied.json()).toMatchObject({ dry_run: false, terms_inserted: 1, freight_inserted: 3 })
+    expect(applied.json()).toMatchObject({ dry_run: false, freight_inserted: 3 })
     expect(await getBrandParameters(pool, houseId)).toMatchObject({
       clearance_percent: 12,
       trade_markup_percent: 85,
       surcharge_min_qty: 5,
       surcharge_per_unit: 20,
     })
-    expect(await houseTerms(pool, houseId)).toMatchObject({ discount: 0.25 })
+    // Each house's discount lands on its own set — the bare house, which has no
+    // supplier, too — and the supplier's terms are never written.
+    expect(await houseTerms(pool, houseId)).toBe(null)
+    for (const [id, percent] of [[houseId, 25], [chainId, 10], [bareId, 5]]) {
+      expect((await resolveWaterfallInputs(pool, { brandId: id })).inputs.discount_percent).toMatchObject({ value: percent, source: 'house' })
+    }
     expect(await houseFreight(pool, houseName('house'))).toEqual([expect.objectContaining({ rate: 30 })])
     // The chain house kept its chain; every house got its freight — a house
     // with no price lines to take a unit from included (1 Oct 2026).

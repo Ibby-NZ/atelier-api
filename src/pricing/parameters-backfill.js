@@ -3,35 +3,35 @@
 // The client's parameter export (`legacy_tracking_options`, Range rows — or
 // the "Active Tracking Options" workbook uploaded from the CRM, which is the
 // same export read by the same rule) states, per range, the duty bands, the
-// clearance, the freight, the supplier discount, the trade markup and the
+// clearance, the freight, the discount, the trade markup and the
 // small-order surcharge Atelier prices with today. A range is a house —
 // `RUBELLI`, `LARSEN`, `JANE CHURCHILL` — so each row lands on that HOUSE, each
 // figure in its one home (see src/pricing/house-pricing.js):
 //
-//   duty A/B/C, clearance, trade markup, surcharge -> the house's override set
-//                                                     in supplier_pricing_parameters
-//   discount -> a flat rate on the house's terms
+//   duty A/B/C, clearance, trade markup, surcharge, discount
+//            -> the house's override set in supplier_pricing_parameters
 //   freight  -> a dated row on the freight ledger, scoped to the house's name
+//
+// The discount is the house's OWN — what it sells at — never the supplier's
+// terms, which price purchase orders only (1 Oct 2026: Armani Casa sold at its
+// supplier's 50% while Dynamics prices the range at 0%). So it needs no
+// supplier link, and a chain or tiers on the terms is no bar to it.
 //
 // FILL ONLY WHAT IS BLANK, unless told to replace. By default a value the
 // office already saved is not overwritten: a NULL column in a saved set is
-// filled, a house with no discount of its own gets a flat one (no terms, or
-// terms carrying only a markup), a house with no freight rate of its own gets
-// one. Every saved value the export DISAGREES with is
+// filled, a house with no freight rate of its own gets one. Every saved value
+// the export DISAGREES with is
 // reported as `kept`, line by line, so the dry run says exactly what a replace
 // would change. With `overwrite` those lines become `replace` and are written —
-// a parameter column is set, a flat discount is re-rated, and freight is a NEW
-// dated row (the ledger is append-only; the old rate stays as history).
+// a parameter column is set, and freight is a NEW dated row (the ledger is
+// append-only; the old rate stays as history).
 //
-// WHAT IS NEVER TOUCHED, EITHER WAY. A house on a compounded chain or discount
-// tiers keeps them — writing a flat rate over either is a different agreement,
-// not a replacement — and is reported. A BLANK in the export never clears a
-// saved value: a blank duty band is "no defined duty", blank freight is
-// UNKNOWN (never zero), and neither is an instruction to delete anything.
+// A BLANK IN THE EXPORT NEVER CLEARS A SAVED VALUE: a blank duty band is "no
+// defined duty", blank freight is UNKNOWN (never zero), and neither is an
+// instruction to delete anything.
 //
 // A BLANK DISCOUNT IS 0%. Verified on all 4,638 rows belonging to a blank-
-// discount range (export/wholesale ratio exactly 1.000). It is written as a
-// stated 0% flat discount, with the note saying where it came from.
+// discount range (export/wholesale ratio exactly 1.000).
 //
 // FREIGHT IS A FIGURE, NOT A FIGURE PER A UNIT (1 Oct 2026). It is per unit of
 // whatever the product is sold in, and the unit is the product's. Until then a
@@ -58,13 +58,8 @@
 
 import { slugify } from '../seed/slugify.js'
 import { nameKey } from '../suppliers/backfill-plan.js'
-import {
-  createSupplierBrandTerms,
-  listBrandTermsShapes,
-  updateSupplierBrandTerms,
-} from '../suppliers/supplier-terms.js'
 import { createFreightRate, currentRangeRates, today } from './freight-rates.js'
-import { fractionToPercent, percentToFraction, sameRate } from './house-pricing.js'
+import { sameRate } from './house-pricing.js'
 import { listRangeParameters, MAX_LIMIT } from './tracking-parameters.js'
 
 /** Parameter column <- the range row's field (src/pricing/tracking-parameters.js shape). */
@@ -76,6 +71,7 @@ const PARAMETER_FROM_RANGE = Object.freeze({
   trade_markup_percent: 'trade_markup_percent',
   surcharge_min_qty: 'min_qty_to_avoid_surcharge',
   surcharge_per_unit: 'surcharge_per_unit',
+  discount_percent: 'discount_percent',
 })
 
 // The retail markup is not in the ranges export — Dynamics' tracking option
@@ -92,8 +88,7 @@ const FILLABLE = Object.freeze([...Object.keys(PARAMETER_FROM_RANGE), RETAIL_MAR
 
 export const BACKFILL_NOTE = 'From the Dynamics parameter export'
 
-/** The two change-line fields that are not parameter columns. */
-export const DISCOUNT_FIELD = 'discount_percent'
+/** The change-line field that is not a parameter column. */
 export const FREIGHT_FIELD = 'freight'
 /** A freight class's change line: `freight_class_B`. */
 export const freightClassField = (letter) => `freight_class_${letter}`
@@ -126,8 +121,6 @@ const numeric = (value) => (value == null ? null : Number(value))
  * @param {object[]} input.parameters  Range rows (src/pricing/tracking-parameters.js shape)
  * @param {{id:number, name:string, slug:string, supplier_id:number|null}[]} input.brands
  * @param {object[]} input.existing    current brand-scoped parameter rows
- * @param {object[]} input.terms       every house's terms shape (listBrandTermsShapes);
- *                                     a row without shape fields is treated as not flat
  * @param {object[]} [input.freight]   each house's current catch-all rate (currentRangeRates)
  * @param {{range_name:string, ratio:number, rows:number}[]} [input.retailRatios]
  *                                     Dynamics' retail ÷ trade, counted per range
@@ -138,7 +131,7 @@ const numeric = (value) => (value == null ? null : Number(value))
  */
 export const planParametersBackfill = (
   {
-    parameters = [], brands = [], existing = [], terms = [], freight = [], retailRatios = [],
+    parameters = [], brands = [], existing = [], freight = [], retailRatios = [],
     letterFreights = [], classRates = [],
   },
   { overwrite = false, on = today() } = {}
@@ -146,8 +139,6 @@ export const planParametersBackfill = (
   const reports = {
     rangesWithoutBrand: [],
     brandsWithSeveralRanges: [],
-    brandsWithoutSupplier: [],
-    termsAlreadyOnFile: [],
     inactiveRanges: [],
     freightDatedToday: [],
     retailMarkupUnclear: [],
@@ -156,7 +147,6 @@ export const planParametersBackfill = (
   const brandByName = new Map(brands.map((b) => [nameKey(b.name), b]))
   const brandBySlug = new Map(brands.map((b) => [b.slug, b]))
   const existingByBrand = new Map(existing.map((row) => [row.brand_id, row]))
-  const termsByBrand = new Map(terms.map((row) => [row.brand_id, row]))
   const freightByHouse = new Map(freight.map((rate) => [nameKey(rate.range_name), rate]))
   const classRatesByHouse = new Map()
   for (const rate of classRates) {
@@ -229,8 +219,6 @@ export const planParametersBackfill = (
   const inserts = []
   const fills = []
   const overwrites = []
-  const termsInserts = []
-  const termsUpdates = []
   const freightInserts = []
   const changes = []
   const claimed = new Map() // brand id -> range that claimed it
@@ -291,47 +279,6 @@ export const planParametersBackfill = (
       }
       if (Object.keys(fill).length > 0) fills.push(Object.freeze({ ...where, ...fill }))
       if (Object.keys(replace).length > 0) overwrites.push(Object.freeze({ ...where, ...replace }))
-    }
-
-    // --- the discount: a flat rate on the house's terms ------------------------
-    const percent = Number(parameter.discount_percent ?? 0)
-    const discount = percentToFraction(percent)
-    const blankNote = parameter.discount_stated === true ? '' : ', blank discount read as 0%'
-    const terms = termsByBrand.get(brand.id)
-    if (!terms) {
-      if (brand.supplier_id == null) {
-        reports.brandsWithoutSupplier.push(Object.freeze({ brand: brand.name, range }))
-      } else {
-        termsInserts.push(
-          Object.freeze({
-            ...where,
-            supplier_id: brand.supplier_id,
-            discount,
-            discount_stated: parameter.discount_stated === true,
-            note: `${BACKFILL_NOTE} (range ${range}${blankNote})`,
-          })
-        )
-        change(DISCOUNT_FIELD, null, percent, CHANGE_KINDS.FILL)
-      }
-    } else if (!(terms.chain_length === 0 && terms.tier_count === 0)) {
-      // A chain or tiers — never merged into (see the header).
-      reports.termsAlreadyOnFile.push(Object.freeze({ brand: brand.name, range }))
-    } else if (terms.discount == null) {
-      // Terms with no discount at all — a row kept for its retail markup, say
-      // (the snapshot's Fabricut rows). The house has no discount of its own,
-      // exactly as if it had no terms: a blank, so it fills.
-      termsUpdates.push(
-        Object.freeze({ ...where, terms_id: terms.id, supplier_id: terms.supplier_id, discount, was: null })
-      )
-      change(DISCOUNT_FIELD, null, percent, CHANGE_KINDS.FILL)
-    } else if (!sameRate(terms.discount, discount)) {
-      const saved = fractionToPercent(terms.discount)
-      if (overwrite) {
-        termsUpdates.push(
-          Object.freeze({ ...where, terms_id: terms.id, supplier_id: terms.supplier_id, discount, was: terms.discount })
-        )
-      }
-      change(DISCOUNT_FIELD, saved, percent, overwrite ? CHANGE_KINDS.REPLACE : CHANGE_KINDS.KEPT)
     }
 
     // --- freight: a dated row on the ledger, under the house's name ------------
@@ -408,8 +355,6 @@ export const planParametersBackfill = (
     inserts: Object.freeze(inserts),
     fills: Object.freeze(fills),
     overwrites: Object.freeze(overwrites),
-    termsInserts: Object.freeze(termsInserts),
-    termsUpdates: Object.freeze(termsUpdates),
     freightInserts: Object.freeze(freightInserts),
     changes: Object.freeze(changes),
     reports: Object.freeze(
@@ -422,8 +367,6 @@ export const planParametersBackfill = (
       parameter_inserts: inserts.length,
       parameter_fills: fills.length,
       parameter_overwrites: overwrites.length,
-      terms_inserts: termsInserts.length,
-      terms_updates: termsUpdates.length,
       freight_inserts: freightInserts.length,
       ranges_without_brand: reports.rangesWithoutBrand.length,
       values_filled: count(CHANGE_KINDS.FILL),
@@ -444,7 +387,6 @@ const readSources = async (client, rangeParameters, on) => {
   const { rows: existing } = await client.query(
     `SELECT brand_id, ${FILLABLE.join(', ')} FROM supplier_pricing_parameters WHERE brand_id IS NOT NULL`
   )
-  const terms = await listBrandTermsShapes(client)
   const freight = await currentRangeRates(client, on)
   const { rows: classRates } = await client.query(
     `SELECT DISTINCT ON (lower(range_name), freight_class) range_name, freight_class, basis, rate::float8 AS rate,
@@ -495,7 +437,7 @@ const readSources = async (client, rangeParameters, on) => {
         AND upper(btrim(lp.freight_rate)) ~ '^[A-E]$'
       GROUP BY 1, 2, 3`
   )
-  return { parameters, brands, existing, terms, freight, retailRatios, letterFreights, classRates }
+  return { parameters, brands, existing, freight, retailRatios, letterFreights, classRates }
 }
 
 const applyInserts = async (client, inserts) => {
@@ -548,29 +490,6 @@ const applyOverwrites = async (client, overwrites) => {
   return count
 }
 
-// Through the owner module (src/suppliers/supplier-terms.js), never a direct
-// INSERT: the terms table has a shape rule and a chain check that live there.
-// The planner already excluded every house with terms, so a create cannot
-// collide within the transaction.
-const applyTerms = async (client, termsInserts) => {
-  for (const row of termsInserts) {
-    await createSupplierBrandTerms(client, row.supplier_id, {
-      brand_id: row.brand_id,
-      discount: row.discount,
-      note: row.note,
-    })
-  }
-  return termsInserts.length
-}
-
-// The flat rate only; the office's note on the row is theirs and stays.
-const applyTermsUpdates = async (client, termsUpdates) => {
-  for (const row of termsUpdates) {
-    await updateSupplierBrandTerms(client, row.supplier_id, row.terms_id, { discount: row.discount })
-  }
-  return termsUpdates.length
-}
-
 // Through createFreightRate, so the ledger's own rules (the house must exist,
 // one rate per scope per day) hold for an import as they do
 // for the form and the yearly sheet.
@@ -615,8 +534,6 @@ export const backfillPricingParameters = async (
     const inserted = await applyInserts(client, plan.inserts)
     const filled = await applyFills(client, plan.fills)
     const replaced = await applyOverwrites(client, plan.overwrites)
-    const terms = await applyTerms(client, plan.termsInserts)
-    const termsUpdated = await applyTermsUpdates(client, plan.termsUpdates)
     const freight = await applyFreight(client, plan.freightInserts)
     await client.query('COMMIT')
     return Object.freeze({
@@ -625,8 +542,6 @@ export const backfillPricingParameters = async (
       parameters_inserted: inserted,
       parameters_filled: filled,
       parameters_replaced: replaced,
-      terms_inserted: terms,
-      terms_updated: termsUpdated,
       freight_inserted: freight,
       changes: plan.changes,
       reports: plan.reports,

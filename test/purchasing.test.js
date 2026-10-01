@@ -16,6 +16,7 @@ import { buildApp } from '../src/app.js'
 import { LIFECYCLE_ENTITY_NAMES } from '../src/lifecycle/registry.js'
 import { PURCHASE_ORDER_STATUSES } from '../src/purchasing/po-states.js'
 import { generatePurchaseOrders } from '../src/purchasing/admin-purchase-orders.js'
+import { setHouseDiscount } from '../src/pricing/pricing-parameters.js'
 import { RESERVING_KINDS, HELD_STATUSES } from '../src/orders/order-states.js'
 
 const TEST_COOKIE_SECRET = 'test-cookie-secret-0123456789abcdef0123456789abcdef'
@@ -692,8 +693,10 @@ describe('W13 purchase orders', () => {
           WHERE id = (SELECT product_id FROM colourways WHERE id = $1)`,
         [fixtures.colourwayIds[SKU.alpha]]
       )
-      // A fraction off list on the supplier row: 40%.
+      // A fraction off list on the supplier row: 40%. The house SELLS at its own
+      // 0%; the purchase order still buys at the supplier's 40% (1 Oct 2026).
       await pool.query(`UPDATE suppliers SET default_discount = 0.4 WHERE id = $1`, [fixtures.supplierId])
+      await setHouseDiscount(pool, fixtures.brandIds.alpha, 0)
       await pool.query(
         `INSERT INTO supplier_freight_rates (supplier_id, basis, rate, effective_from)
          VALUES ($1, 'dollar', 3.25, '2026-01-01')`,

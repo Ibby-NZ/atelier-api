@@ -3,11 +3,16 @@
 //
 // WHERE EACH INPUT COMES FROM, IN ORDER. A house's override row, then its
 // supplier's default row, then "missing" — never zero. The retail markup is
-// read from the supplier terms; the DISCOUNT follows the same two-step as
-// everything else — the house's own terms (flat, multiplicative chain or
-// tiers, resolved by discount-chain.js), then `suppliers.default_discount`,
-// the one averaged rate a supplier gives on every house it invoices. The two
-// are never summed. Freight comes from the dated `supplier_freight_rates`
+// read from the supplier terms. The DISCOUNT depends on who is paying (1 Oct
+// 2026, the office: supplier discounts are ONLY for purchase orders):
+//   - a sale (trade and retail prices) takes the house's own discount, on its
+//     override row and nowhere else — Dynamics' range figure;
+//   - a purchase order (`purchase`) takes the supplier's: the house's terms
+//     (flat, multiplicative chain or tiers by class, resolved by
+//     discount-chain.js), then `suppliers.default_discount`, the one averaged
+//     rate a supplier gives on every house it invoices. The two are never
+//     summed.
+// Freight comes from the dated `supplier_freight_rates`
 // ledger, and the exchange rate
 // from `fx_rates` by the supplier's invoicing currency. Every resolved input
 // carries its SOURCE, so the screen can say "5% — supplier default" rather than
@@ -121,6 +126,34 @@ const toParameters = (row) => {
 
 // --- parameter rows ----------------------------------------------------------
 
+// The house's own discount (migration 1792963200000) sits on its override row
+// but outside PARAMETER_COLUMNS, so a PUT of the set — the house page, /pricing
+// — never clears it, and a supplier's row cannot carry one.
+
+/** @returns {Promise<number|null>} the percentage the house sells at, or null */
+export const getHouseDiscount = async (db, brandId) => {
+  const { rows } = await db.query(
+    `SELECT discount_percent FROM supplier_pricing_parameters WHERE brand_id = $1`,
+    [brandId]
+  )
+  return numeric(rows[0]?.discount_percent ?? null)
+}
+
+/** Set (a percentage, 5 is 5%) or clear (null) the house's own discount. */
+export const setHouseDiscount = async (db, brandId, percent) => {
+  try {
+    await db.query(
+      `INSERT INTO supplier_pricing_parameters (brand_id, discount_percent) VALUES ($1, $2)
+       ON CONFLICT (brand_id) WHERE brand_id IS NOT NULL
+       DO UPDATE SET discount_percent = EXCLUDED.discount_percent, updated_at = now()`,
+      [brandId, percent]
+    )
+  } catch (error) {
+    if (error.code === '23514') throw httpError(422, 'A discount is from 0 up to, not including, 100%.')
+    throw error
+  }
+}
+
 /** @returns {Promise<object|null>} the supplier's default set, or null */
 export const getSupplierParameters = async (db, supplierId) => {
   const { rows } = await db.query(`${SELECT_PARAMETERS} WHERE supplier_id = $1`, [supplierId])
@@ -178,13 +211,21 @@ export const deleteSupplierParameters = async (db, supplierId) => {
   return rowCount > 0
 }
 
-/** @returns {Promise<boolean>} whether a row was removed */
+/** @returns {Promise<boolean>} whether an override was removed */
 export const deleteBrandParameters = async (db, brandId) => {
-  const { rowCount } = await db.query(
-    `DELETE FROM supplier_pricing_parameters WHERE brand_id = $1`,
+  // The house's own discount is not one of the override's figures: a row that
+  // carries one keeps it and loses the rest.
+  const { rowCount: cleared } = await db.query(
+    `UPDATE supplier_pricing_parameters
+        SET ${PARAMETER_COLUMNS.map((column) => `${column} = NULL`).join(', ')}, updated_at = now()
+      WHERE brand_id = $1 AND discount_percent IS NOT NULL AND num_nonnulls(${PARAMETER_COLUMNS.join(', ')}) > 0`,
     [brandId]
   )
-  return rowCount > 0
+  const { rowCount: deleted } = await db.query(
+    `DELETE FROM supplier_pricing_parameters WHERE brand_id = $1 AND discount_percent IS NULL`,
+    [brandId]
+  )
+  return cleared + deleted > 0
 }
 
 // --- exchange rates ----------------------------------------------------------
@@ -267,11 +308,11 @@ const loadBrand = async (db, brandId) => {
   return rows[0]
 }
 
-// The house's negotiated terms first, then the supplier's own averaged rate —
-// the precedence every other parameter here follows, and the one the 9 Jul rule
-// describes: a supplier is rated by one averaged discount UNLESS it was
-// excluded and handled brand by brand. The two are never added together.
-const discountInput = (terms, category, supplierDefault, discountClass) => {
+// What a purchase order buys at: the house's negotiated terms first, then the
+// supplier's own averaged rate — the 9 Jul rule: a supplier is rated by one
+// averaged discount UNLESS it was excluded and handled brand by brand. The two
+// are never added together.
+const supplierDiscountInput = (terms, category, supplierDefault, discountClass) => {
   // The class a product or variation chose by letter; a letter no class of the
   // house answers to falls through to category matching and the default.
   const tierId = discountClass ? (terms?.tiers?.find((tier) => tier.discount_class === discountClass)?.id ?? null) : null
@@ -297,6 +338,10 @@ const discountInput = (terms, category, supplierDefault, discountClass) => {
   }
   return input(null, 'missing')
 }
+
+// What a sale is priced at: the house's own figure, else missing — never the
+// supplier's.
+const houseDiscountInput = (percent) => (percent != null ? input(percent, 'house') : input(null, 'missing'))
 
 const dutyInput = (dutyClass, house, supplierDefaults) => {
   const letter = typeof dutyClass === 'string' ? dutyClass.trim().toUpperCase() : ''
@@ -377,14 +422,17 @@ const freightInput = async (db, { supplierId, brandName, category, freightClass,
  * `supplierId` picks which of the house's suppliers to price through (main when
  * absent, 422 when it does not invoice the house). `discountClass` is the letter
  * of the house's discount class to price at; `freightClass` the freight letter,
- * whose rate wins over the house's every-class one. `productId` (and
+ * whose rate wins over the house's every-class one. `purchase` prices what
+ * Atelier BUYS (a purchase order) at the supplier's discount; anything else is
+ * a sale, at the house's own. `productId` (and
  * `colourwayId`) bring in the letters chosen on the product and the variation
  * (`productClasses`) where the caller states none (422 when the product is
  * another house's).
  *
  * @param {{ brandId: number, supplierId?: number|null, productId?: number|null,
  *           colourwayId?: number|null, category?: string|null, dutyClass?: string|null,
- *           discountClass?: string|null, freightClass?: string|null, on?: string|null }} query
+ *           discountClass?: string|null, freightClass?: string|null, on?: string|null,
+ *           purchase?: boolean }} query
  */
 export const resolveWaterfallInputs = async (
   db,
@@ -398,6 +446,7 @@ export const resolveWaterfallInputs = async (
     discountClass = null,
     freightClass = null,
     on = null,
+    purchase = false,
   }
 ) => {
   const brand = await loadBrand(db, brandId)
@@ -426,7 +475,9 @@ export const resolveWaterfallInputs = async (
   })
 
   const inputs = Object.freeze({
-    discount_percent: discountInput(terms, category, supplier?.default_discount ?? null, classes.discount_class),
+    discount_percent: purchase
+      ? supplierDiscountInput(terms, category, supplier?.default_discount ?? null, classes.discount_class)
+      : houseDiscountInput(await getHouseDiscount(db, brand.id)),
     fx_rate: fx
       ? input(fx.rate, 'fx', { currency, set_on: fx.set_on })
       : input(null, 'missing', { reason: currency ? `no rate set for ${currency}` : 'no currency on the house or its supplier' }),
@@ -482,7 +533,7 @@ const applyOverrides = (inputs, overrides = {}) => {
  * @param {{ brandId: number, wholesaleRate: number, supplierId?: number|null,
  *           productId?: number|null, category?: string|null,
  *           dutyClass?: string|null, freightClass?: string|null,
- *           on?: string|null, overrides?: object }} query
+ *           on?: string|null, overrides?: object, purchase?: boolean }} query
  */
 export const previewWaterfall = async (
   db,
@@ -498,6 +549,7 @@ export const previewWaterfall = async (
     freightClass = null,
     on = null,
     overrides = {},
+    purchase = false,
   }
 ) => {
   const resolved = await resolveWaterfallInputs(db, {
@@ -510,6 +562,7 @@ export const previewWaterfall = async (
     discountClass,
     freightClass,
     on,
+    purchase,
   })
   const inputs = applyOverrides(resolved.inputs, overrides)
   const waterfall = computeWaterfall({

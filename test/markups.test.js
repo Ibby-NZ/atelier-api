@@ -85,7 +85,9 @@ describe('the ranges import fills each house\'s retail markup', () => {
       { ...sources, existing: [{ brand_id: 1, [RETAIL_MARKUP]: null }, { brand_id: 2, [RETAIL_MARKUP]: '40' }] },
       { on: '2026-09-28' }
     )
-    expect(plan.fills).toEqual([expect.objectContaining({ brand_id: 1, [RETAIL_MARKUP]: 30 })])
+    expect(plan.fills.filter((row) => Object.hasOwn(row, RETAIL_MARKUP))).toEqual([
+      expect.objectContaining({ brand_id: 1, [RETAIL_MARKUP]: 30 }),
+    ])
     expect(plan.changes.find((line) => line.brand_id === 2 && line.field === RETAIL_MARKUP)).toMatchObject({ from: 40, to: 30, kind: 'kept' })
   })
 })

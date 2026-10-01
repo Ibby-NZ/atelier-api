@@ -7,7 +7,10 @@
 //   - `unit_price`, in the SUPPLIER's currency: the design's wholesale rate
 //     (`products.wholesale_rate`, filled by the wholesale import) less the
 //     supplier's discount for the house at the variation's discount class
-//     (its own, else its product's) — the waterfall's "export price" step;
+//     (its own, else its product's) — the waterfall's "export price" step.
+//     The supplier's discount, never the house's: supplier discounts are for
+//     purchase orders only, and a sale is priced at the house's own (1 Oct
+//     2026);
 //   - `freight_per_unit`, NZ$: the house's freight rate from the freight
 //     ledger at the variation's freight class (its own, else its product's) —
 //     the waterfall's "freight" step. A percentage rate needs the
@@ -53,6 +56,7 @@ export const priceLineFromCatalogue = async (db, { purchaseOrderId, colourwayId 
       colourwayId,
       category: row.category,
       wholesaleRate: row.wholesale_rate == null ? null : Number(row.wholesale_rate),
+      purchase: true,
     })
     return Object.freeze({
       unit_price: stepAmount(waterfall, 'export_price'),

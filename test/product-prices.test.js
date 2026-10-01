@@ -12,7 +12,7 @@ import runner from 'node-pg-migrate'
 import { loadConfig } from '../src/config.js'
 import { createPool } from '../src/db.js'
 import { buildApp } from '../src/app.js'
-import { upsertBrandParameters } from '../src/pricing/pricing-parameters.js'
+import { setHouseDiscount, upsertBrandParameters } from '../src/pricing/pricing-parameters.js'
 import { createProductPricer } from '../src/pricing/product-prices.js'
 import { withChangeContext } from '../src/pricing/price-history.js'
 import {
@@ -206,7 +206,7 @@ describe('/admin/product-prices', () => {
 
   // The client's worked example, as the house holds it after the ranges import:
   // MADEAUX — clearance 10, trade markup 87, duty 5 on every band, freight $50,
-  // discount 0 (flat, on the supplier's terms).
+  // discount 0 (the house's own; its supplier's terms say 30%, for purchase orders).
   const raiseMadeaux = async () => {
     const { rows: supplier } = await pool.query(
       `INSERT INTO suppliers (name, slug, currency) VALUES ($1, $2, 'GBP') RETURNING id`,
@@ -226,8 +226,10 @@ describe('/admin/product-prices', () => {
       surcharge_min_qty: 5,
       surcharge_per_unit: 20,
     })
+    await setHouseDiscount(pool, brand[0].id, 0)
+    // The supplier's own terms, which only purchase orders buy at.
     await pool.query(
-      `INSERT INTO supplier_brand_terms (supplier_id, brand_id, discount) VALUES ($1, $2, 0)`,
+      `INSERT INTO supplier_brand_terms (supplier_id, brand_id, discount) VALUES ($1, $2, 0.3)`,
       [supplier[0].id, brand[0].id]
     )
     await pool.query(
@@ -329,7 +331,7 @@ describe('/admin/product-prices', () => {
       expect(pricing.inputs.freight).toMatchObject({ value: 50, source: 'freight-ledger' })
       expect(pricing.inputs.clearance_percent).toMatchObject({ value: 10, source: 'house' })
       expect(pricing.inputs.trade_markup_percent).toMatchObject({ value: 87, source: 'house' })
-      expect(pricing.inputs.discount_percent).toMatchObject({ value: 0, source: 'terms' })
+      expect(pricing.inputs.discount_percent).toMatchObject({ value: 0, source: 'house' })
       // Not steps of the range formula, and it says so rather than going missing.
       expect(pricing.inputs.duty_percent).toMatchObject({ value: 0, source: 'none' })
       expect(pricing.inputs.fx_margin_percent).toMatchObject({ value: 0, source: 'none' })
@@ -916,15 +918,12 @@ describe('/admin/product-prices', () => {
         expect(filled).toMatchObject({ freight_class: 'B', discount_class: null, duty_class: null })
         near(filled.trade_price_cents, trade(47.6, 0, 3))
 
-        // A discount class re-prices the product, with the reason in its history.
+        // A discount class is the supplier's, for purchase orders: the sale
+        // price stays at the house's own 0% (1 Oct 2026).
         const discounted = await inject('PATCH', `/admin/products/${id}`, { payload: { discount_class: 'C' } })
         expect(discounted.statusCode).toBe(200)
-        expect(discounted.json().product.repricing).toMatchObject({ repriced: true })
-        near((await product()).trade_price_cents, trade(47.6, 0.1, 3))
-        const history = (await pool.query(
-          `SELECT reason FROM product_price_history WHERE product_id = $1 ORDER BY id DESC LIMIT 1`, [id]
-        )).rows[0]
-        expect(history.reason).toMatch(/Recalculated from discount class C/)
+        expect(discounted.json().product.repricing ?? null).toBe(null)
+        near((await product()).trade_price_cents, trade(47.6, 0, 3))
 
         // A variation with no letter of its own sells at the product's price.
         const { rows: made } = await pool.query(
@@ -936,22 +935,22 @@ describe('/admin/product-prices', () => {
         )).rows[0]
         expect(await variation()).toEqual({ trade_price_cents: null, retail_price_cents: null })
 
-        // Its own freight letter prices it there, keeping the product's discount class.
+        // Its own freight letter prices it there.
         const own = await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { freight_class: 'A' } })
         expect(own.statusCode).toBe(200)
         expect(own.json().colourway).toMatchObject({ freight_class: 'A', discount_class: null })
         const at = await variation()
-        near(at.trade_price_cents, trade(47.6, 0.1, 50))
-        near(at.retail_price_cents, trade(47.6, 0.1, 50) * 1.3)
+        near(at.trade_price_cents, trade(47.6, 0, 50))
+        near(at.retail_price_cents, trade(47.6, 0, 50) * 1.3)
 
         // Its own duty class (the house's band B, 12%) prices it at that band.
         await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { duty_class: 'B' } })
-        near((await variation()).trade_price_cents, trade(47.6, 0.1, 50, 0.12))
+        near((await variation()).trade_price_cents, trade(47.6, 0, 50, 0.12))
         await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { duty_class: null } })
 
         // The product's wholesale rate moving re-prices it too.
         await inject('PATCH', `/admin/products/${id}`, { payload: { wholesale_rate: 50 } })
-        near((await variation()).trade_price_cents, trade(50, 0.1, 50))
+        near((await variation()).trade_price_cents, trade(50, 0, 50))
 
         // Clearing its letter sends it back to the product's price.
         await inject('PATCH', `/admin/colourways/${variationId}`, { payload: { freight_class: null } })

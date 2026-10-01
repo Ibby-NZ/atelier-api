@@ -121,6 +121,7 @@ const cleanup = async (pool) => {
     [`${PREFIX}-%`]
   )
   await pool.query('DELETE FROM brands WHERE slug LIKE $1', [`${PREFIX}-%`])
+  await pool.query('DELETE FROM product_prices WHERE code LIKE $1', [`${PREFIX}-%`])
   await pool.query('DELETE FROM suppliers WHERE slug LIKE $1 OR name LIKE $2', [`${PREFIX}-%`, `${PREFIX} %`])
   await pool.query('DELETE FROM trade_accounts WHERE legacy_customer_name LIKE $1', [`${PREFIX} %`])
   await pool.query('DELETE FROM xero_connection')
@@ -209,6 +210,8 @@ describe('xero integration', () => {
       pool,
       config: XERO_CONFIG,
       http: fake,
+      // A 429 is waited out; the tests do not wait.
+      sleep: async () => {},
       // Every move Xero makes (push → pending_payment, pull → paid) hands the
       // fresh order here; server.js wires the status letter to it.
       notifyOrderTransition: async (order) => {
@@ -737,23 +740,117 @@ describe('xero integration', () => {
   })
 
   describe('POST /admin/xero/sync/items', () => {
-    it('upserts colourways as items by SKU and reports per-row failures', async () => {
+    // One Xero item per PRODUCT (user ruling 2026-10-01), keyed on the price
+    // row's code plus the product id: codes repeat across houses and run past
+    // Xero's 30 characters, the id keeps the key unique and stable.
+    const linkPriceRow = async (code) => {
+      const { rows: prices } = await pool.query(
+        `INSERT INTO product_prices (guid, code, range_name, currency, wholesale_rate)
+         VALUES (gen_random_uuid(), $1, 'Xero House', 'NZD', 10) RETURNING id`,
+        [code]
+      )
+      const { rows } = await pool.query(
+        `UPDATE products SET product_price_id = $1 WHERE slug = $2 RETURNING id`,
+        [prices[0].id, `${PREFIX}-fabric`]
+      )
+      return rows[0].id
+    }
+
+    // The sync runs in the background (the proxy in front of production cuts
+    // a request at ~100 s; the full catalogue takes minutes), so the tests
+    // start it and poll it like the CRM does.
+    const runSync = async () => {
+      const started = await inject('POST', '/admin/xero/sync/items', backofficeCookie, {})
+      expect(started.statusCode).toBe(202)
+      for (let i = 0; i < 100; i += 1) {
+        const polled = await inject('GET', '/admin/xero/sync/items', backofficeCookie)
+        expect(polled.statusCode).toBe(200)
+        if (!polled.json().job.running) return polled.json().job
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      throw new Error('item sync never finished')
+    }
+
+    it('pushes one item per product, coded <price-row code>-<product id>', async () => {
+      const productId = await linkPriceRow(`${PREFIX}-CODE`)
+      fake.on('POST', 'Items', ({ body }) => ({ Items: body.Items }))
+      const job = await runSync()
+      expect(job.error).toBeNull()
+      expect(job.pushed).toBeGreaterThanOrEqual(1)
+      const items = fake.calls
+        .filter((c) => c.method === 'POST' && c.path === 'Items')
+        .flatMap((c) => c.body.Items)
+      expect(items).toContainEqual(
+        expect.objectContaining({ Code: `${PREFIX}-CODE-${productId}`, Name: 'Xero Fabric' })
+      )
+      // Colourways are options under a product, never items of their own.
+      expect(items.some((i) => i.Code === `${PREFIX}-SKU-1`)).toBe(false)
+    })
+
+    it('reports per-row refusals without stopping', async () => {
+      const productId = await linkPriceRow(`${PREFIX}-REFUSED`)
       fake.on('POST', 'Items', ({ body }) => ({
         Items: body.Items.map((item) =>
-          item.Code === `${PREFIX}-SKU-1`
-            ? item
-            : { ...item, ValidationErrors: [{ Message: 'refused' }] }
+          item.Code === `${PREFIX}-REFUSED-${productId}`
+            ? { ...item, ValidationErrors: [{ Message: 'refused' }] }
+            : item
         ),
       }))
-      const response = await inject('POST', '/admin/xero/sync/items', backofficeCookie, {})
-      expect(response.statusCode).toBe(200)
-      const { pushed, failed } = response.json().result
-      expect(pushed).toBeGreaterThanOrEqual(1)
-      const posts = fake.calls.filter((c) => c.method === 'POST' && c.path === 'Items')
-      expect(
-        posts.some((post) => post.body.Items.some((i) => i.Code === `${PREFIX}-SKU-1`))
-      ).toBe(true)
-      expect(Array.isArray(failed)).toBe(true)
+      const job = await runSync()
+      expect(job.failed).toContainEqual({ code: `${PREFIX}-REFUSED-${productId}`, message: 'refused' })
+    })
+
+    it('waits out a per-minute 429 and retries the same batch', async () => {
+      await linkPriceRow(`${PREFIX}-SLOW`)
+      let refusals = 0
+      fake.on('POST', 'Items', ({ body }) => {
+        if (refusals === 0) {
+          refusals += 1
+          throw new XeroHttpError('Xero POST Items failed (429)', { status: 429, retryAfter: 5 })
+        }
+        return { Items: body.Items }
+      })
+      const job = await runSync()
+      expect(refusals).toBe(1)
+      expect(job.error).toBeNull()
+      expect(job.failed).toEqual([])
+    })
+
+    it("stops with a sentence on Xero's daily limit instead of failing every batch", async () => {
+      await linkPriceRow(`${PREFIX}-DAILY`)
+      fake.on('POST', 'Items', () => {
+        throw new XeroHttpError('Xero POST Items failed (429)', { status: 429, retryAfter: 40000 })
+      })
+      const job = await runSync()
+      expect(job.error).toMatch(/daily/i)
+    })
+
+    it('does not start a second sync while one runs', async () => {
+      await linkPriceRow(`${PREFIX}-ONCE`)
+      let release
+      const gate = new Promise((resolve) => { release = resolve })
+      fake.on('POST', 'Items', async ({ body }) => {
+        await gate
+        return { Items: body.Items }
+      })
+      const first = await inject('POST', '/admin/xero/sync/items', backofficeCookie, {})
+      const second = await inject('POST', '/admin/xero/sync/items', backofficeCookie, {})
+      expect(second.json().job.started_at).toBe(first.json().job.started_at)
+      release()
+      await runSync()
+    })
+  })
+
+  describe('Xero failing', () => {
+    // 503, not 502: production's proxy swaps an origin 502 for its own page
+    // with no CORS headers, and the CRM then says it "could not reach the API".
+    it('answers 503 with a sentence when Xero itself errors', async () => {
+      fake.on('GET', 'Contacts', () => {
+        throw new XeroHttpError('Xero GET Contacts failed (500)', { status: 500 })
+      })
+      const response = await inject('POST', '/admin/xero/pull/contacts', backofficeCookie, {})
+      expect(response.statusCode).toBe(503)
+      expect(response.json().message).toMatch(/Xero did not answer/)
     })
   })
 

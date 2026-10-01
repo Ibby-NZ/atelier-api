@@ -272,15 +272,22 @@ const xeroDate = (value) => {
 }
 
 /**
- * A colourway row (joined to its product) as a Xero Item. Code is the SKU —
- * POST /Items upserts on Code, which is what makes the item sync idempotent
- * with no directory fetch.
+ * A product as a Xero Item — one per product, colourways are options under it
+ * (user ruling 2026-10-01). Code is the price row's code plus the product id:
+ * the codes repeat across houses and run past Xero's 30 characters, and the
+ * id keeps the key unique and stable. POST /Items upserts on Code, which is
+ * what makes the item sync idempotent with no directory fetch.
  */
-export const itemForColourway = ({ sku, product_name, colourway_name }) => ({
-  Code: truncate(sku, 30),
-  Name: truncate(`${product_name} — ${colourway_name}`, 50),
-  IsSold: true,
-})
+export const itemForProduct = ({ id, code, name }) => {
+  const suffix = `-${id}`
+  const head = truncate(code, 30 - suffix.length)
+  return {
+    Code: head ? `${head}${suffix}` : `P${suffix}`,
+    Name: truncate(name, 50),
+    Description: truncate(name, 4000),
+    IsSold: true,
+  }
+}
 
 /** The created invoice's identifiers out of a POST /Invoices response body. */
 export const pickInvoice = (body) => {

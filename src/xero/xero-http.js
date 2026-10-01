@@ -22,11 +22,14 @@ export const XERO_API_BASE = 'https://api.xero.com'
  * `validationMessages` below for how callers read them).
  */
 export class XeroHttpError extends Error {
-  constructor(message, { status, body } = {}) {
+  constructor(message, { status, body, retryAfter = null } = {}) {
     super(message)
     this.name = 'XeroHttpError'
     this.status = status
     this.body = body
+    // Seconds, from a 429's Retry-After header: short for the per-minute
+    // limit, hours for the daily one.
+    this.retryAfter = retryAfter
   }
 }
 
@@ -136,7 +139,11 @@ export const createXeroHttp = ({ clientId, clientSecret, fetchImpl = fetch }) =>
       if (!response.ok) {
         throw new XeroHttpError(
           `Xero ${method} ${path} failed (${response.status}): ${validationMessages(parsed).join('; ') || 'no detail'}`,
-          { status: response.status, body: parsed }
+          {
+            status: response.status,
+            body: parsed,
+            retryAfter: Number(response.headers?.get?.('retry-after')) || null,
+          }
         )
       }
       return parsed

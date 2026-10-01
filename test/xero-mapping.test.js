@@ -9,7 +9,7 @@ import {
   contactForUser,
   lineItemForOrderLine,
   invoiceForOrder,
-  itemForColourway,
+  itemForProduct,
   pickInvoice,
   pickContact,
   matchContact,
@@ -159,16 +159,19 @@ describe('invoiceForOrder', () => {
   })
 })
 
-describe('itemForColourway', () => {
-  it('keys on the SKU and truncates to Xero limits', () => {
-    const item = itemForColourway({
-      sku: 'A'.repeat(40),
-      product_name: 'P'.repeat(40),
-      colourway_name: 'C'.repeat(40),
-    })
-    expect(item.Code).toHaveLength(30)
+describe('itemForProduct', () => {
+  it('codes the item <code>-<id> inside 30 characters and truncates the name to 50', () => {
+    const item = itemForProduct({ id: 12345, code: 'SHINE ORGANIC COTTON & SILK Hand towel 50x100', name: 'N'.repeat(60) })
+    expect(item.Code).toBe('SHINE ORGANIC COTTON & S-12345')
+    expect(item.Code.length).toBeLessThanOrEqual(30)
     expect(item.Name).toHaveLength(50)
+    expect(item.Description).toBe('N'.repeat(60))
     expect(item.IsSold).toBe(true)
+  })
+
+  it('keeps a short code whole and falls back to P-<id> without one', () => {
+    expect(itemForProduct({ id: 7, code: '10253', name: 'Tweed' }).Code).toBe('10253-7')
+    expect(itemForProduct({ id: 7, code: null, name: 'Tweed' }).Code).toBe('P-7')
   })
 })
 

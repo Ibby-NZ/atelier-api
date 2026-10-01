@@ -54,7 +54,7 @@ import {
   contactForUser,
   invoiceForOrder,
   isDeadInXero,
-  itemForColourway,
+  itemForProduct,
   paymentForInvoice,
   pickInvoice,
   pickContact,
@@ -98,6 +98,13 @@ export class XeroValidationError extends Error {
 const EXPIRY_SLACK_MS = 60_000
 const CONTACT_PAGE_SIZE = 100
 const UPSERT_BATCH_SIZE = 40
+// Xero allows 60 calls a minute and 5,000 a day per organisation; a 429 says
+// which with Retry-After. A wait up to this long is the minute limit and is
+// waited out; anything longer is the daily limit and stops the job.
+const MAX_RATE_LIMIT_WAIT_S = 120
+const RATE_LIMIT_RETRIES = 3
+const DAILY_LIMIT_MESSAGE =
+  "Xero's daily API limit is reached. Run the sync again tomorrow — it refreshes what is already there."
 
 // The statuses at which money has already changed hands, so a freshly pushed
 // invoice is recorded paid on the spot (card checkouts are born `paid`).
@@ -122,6 +129,7 @@ export const createXeroService = ({
   // asked to email an invoice: that letter goes from Xero to the client's
   // contact directly and cannot be redirected like the mailer's can.
   emailRedirectTo = null,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) => {
   // client_credentials keeps its short-lived token in memory only: it can be
   // re-minted at will, so persisting it buys nothing and staleness bugs.
@@ -194,7 +202,7 @@ export const createXeroService = ({
    * One authorised Accounting call, with a single forced-refresh retry on 401
    * (a token can be revoked or expire between our check and Xero's).
    */
-  const call = async (method, path, options) => {
+  const callOnce = async (method, path, options) => {
     const first = await access(false)
     try {
       return await http.accounting(first.accessToken, first.tenantId, method, path, options)
@@ -206,6 +214,25 @@ export const createXeroService = ({
       throw error
     }
   }
+
+  /**
+   * callOnce, waiting out Xero's per-minute rate limit (429 with a short
+   * Retry-After). The daily limit's long Retry-After is rethrown as is.
+   */
+  const call = async (method, path, options) => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await callOnce(method, path, options)
+      } catch (error) {
+        const waitS = error instanceof XeroHttpError && error.status === 429 ? error.retryAfter ?? 60 : null
+        if (waitS === null || waitS > MAX_RATE_LIMIT_WAIT_S || attempt >= RATE_LIMIT_RETRIES) throw error
+        await sleep(waitS * 1000)
+      }
+    }
+  }
+
+  const isDailyLimit = (error) =>
+    error instanceof XeroHttpError && error.status === 429 && (error.retryAfter ?? 0) > MAX_RATE_LIMIT_WAIT_S
 
   /** Translate a Xero 400 ValidationException into our 422-shaped error. */
   const rethrowValidation = (error) => {
@@ -716,41 +743,70 @@ export const createXeroService = ({
 
   // ---- items ----------------------------------------------------------------
 
-  const syncItems = async () => {
+  // One item per active product. Run in the background (startItemSync): the
+  // full catalogue is hundreds of calls at Xero's 60 a minute, far past the
+  // ~100 s the proxy in front of production holds a request open.
+  const syncItems = async (job) => {
     const { rows } = await pool.query(
-      `SELECT c.sku, c.name AS colourway_name, p.name AS product_name
-         FROM colourways c
-         JOIN products p ON p.id = c.product_id
-        WHERE c.archived_at IS NULL AND p.archived_at IS NULL
-        ORDER BY c.sku`
+      `SELECT p.id, p.name, pp.code
+         FROM products p
+         LEFT JOIN product_prices pp ON pp.id = p.product_price_id
+        WHERE p.archived_at IS NULL
+        ORDER BY p.id`
     )
-    let pushed = 0
-    const failed = []
+    job.total = rows.length
     for (let i = 0; i < rows.length; i += UPSERT_BATCH_SIZE) {
-      const batch = rows.slice(i, i + UPSERT_BATCH_SIZE)
+      const items = rows.slice(i, i + UPSERT_BATCH_SIZE).map(itemForProduct)
       let body
       try {
-        // POST /Items upserts on Code (= SKU), so re-running the sync is a
-        // refresh, never a duplicate.
-        body = await call('POST', 'Items', {
-          body: { Items: batch.map(itemForColourway) },
-          query: { summarizeErrors: 'false' },
-        })
+        // POST /Items upserts on Code, so re-running the sync is a refresh,
+        // never a duplicate.
+        body = await call('POST', 'Items', { body: { Items: items }, query: { summarizeErrors: 'false' } })
       } catch (error) {
+        if (isDailyLimit(error)) throw new Error(DAILY_LIMIT_MESSAGE)
         const messages = validationMessages(error instanceof XeroHttpError ? error.body : null)
-        for (const row of batch) {
-          failed.push({ sku: row.sku, message: messages.join('; ') || 'batch refused' })
+        for (const item of items) {
+          job.failed.push({ code: item.Code, message: messages.join('; ') || error.message || 'batch refused' })
         }
         continue
       }
       const answers = body?.Items ?? []
-      for (let j = 0; j < batch.length; j += 1) {
+      items.forEach((item, j) => {
         const errors = (answers[j]?.ValidationErrors ?? []).map((v) => v.Message).filter(Boolean)
-        if (errors.length === 0) pushed += 1
-        else failed.push({ sku: batch[j].sku, message: errors.join('; ') })
-      }
+        if (errors.length === 0) job.pushed += 1
+        else job.failed.push({ code: item.Code, message: errors.join('; ') })
+      })
     }
-    return { pushed, failed }
+  }
+
+  // ponytail: in-process job state — one API process under pm2. A restart
+  // mid-sync loses the progress; pressing Sync again redoes it (upsert).
+  let itemJob = null
+
+  const itemSyncStatus = () => (itemJob ? { ...itemJob, failed: [...itemJob.failed] } : null)
+
+  /** Start the item sync unless one is running; answers the job either way. */
+  const startItemSync = () => {
+    if (itemJob?.running) return itemSyncStatus()
+    const job = {
+      running: true,
+      total: null,
+      pushed: 0,
+      failed: [],
+      error: null,
+      started_at: new Date(now()).toISOString(),
+      finished_at: null,
+    }
+    itemJob = job
+    syncItems(job)
+      .catch((error) => {
+        job.error = error.message
+      })
+      .finally(() => {
+        job.running = false
+        job.finished_at = new Date(now()).toISOString()
+      })
+    return itemSyncStatus()
   }
 
   // ---- invoices -------------------------------------------------------------
@@ -1153,7 +1209,8 @@ export const createXeroService = ({
     disconnect,
     syncContacts,
     syncSuppliers,
-    syncItems,
+    startItemSync,
+    itemSyncStatus,
     ensureTradeAccountContact,
     setContactStatus,
     pushOrderInvoice,

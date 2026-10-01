@@ -79,10 +79,12 @@ export const adminXeroRoutes = async (app, { pool, xero, crmBaseUrl }) => {
       }
       if (error instanceof XeroHttpError) {
         // Xero itself failed (5xx, rate limit, network). Not the caller's
-        // fault and not ours — a gateway problem, said plainly.
+        // fault and not ours, said plainly. 503, not 502: the proxy in front
+        // of production swaps an origin 502 for its own page without CORS
+        // headers, and the CRM would say it "could not reach the API".
         app.log.error({ err: error }, 'xero call failed')
-        reply.code(502)
-        return { error: 'Bad Gateway', message: 'Xero did not answer that request — try again shortly.' }
+        reply.code(503)
+        return { error: 'Service Unavailable', message: 'Xero did not answer that request — try again shortly.' }
       }
       throw error
     }
@@ -132,9 +134,18 @@ export const adminXeroRoutes = async (app, { pool, xero, crmBaseUrl }) => {
     return answer(reply, async () => ({ result: await xero.syncSuppliers() }))
   })
 
+  // The catalogue sync runs in the background — minutes at Xero's rate limit,
+  // longer than the proxy holds a request. POST starts it (or answers the one
+  // already running); GET is the CRM's progress poll.
   app.post('/admin/xero/sync/items', { preHandler: backoffice }, async (request, reply) => {
     if (!xero) return unconfigured(reply)
-    return answer(reply, async () => ({ result: await xero.syncItems() }))
+    reply.code(202)
+    return { job: xero.startItemSync() }
+  })
+
+  app.get('/admin/xero/sync/items', { preHandler: backoffice }, async (request, reply) => {
+    if (!xero) return unconfigured(reply)
+    return { job: xero.itemSyncStatus() }
   })
 
   // The Xero → platform direction. Contacts (customers AND suppliers) land

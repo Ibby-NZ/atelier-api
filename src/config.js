@@ -32,11 +32,12 @@ const DEFAULT_EMAIL_REDIRECT_TO = 'ibrahim@verum.nz'
 const MIN_COOKIE_SECRET_LENGTH = 32
 // Xero defaults. The scopes are the code-flow set (offline_access is what
 // yields the refresh token); a custom connection ignores the scope PARAM and
-// uses the scopes configured on the Xero app itself. Account 200 is Xero's
+// uses the scopes configured on the Xero app itself. Granular scopes: apps
+// created from 2 Mar 2026 get invalid_scope for accounting.transactions. Account 200 is Xero's
 // stock "Sales" revenue account; NZ trade invoices are conventionally quoted
 // GST-exclusive, hence Exclusive.
 const DEFAULT_XERO_SCOPES =
-  'openid profile email offline_access accounting.transactions accounting.contacts accounting.settings'
+  'openid profile email offline_access accounting.invoices accounting.payments accounting.contacts accounting.settings'
 const DEFAULT_XERO_SALES_ACCOUNT_CODE = '200'
 const DEFAULT_XERO_LINE_AMOUNT_TYPES = 'Exclusive'
 const DEFAULT_XERO_INVOICE_STATUS = 'AUTHORISED'

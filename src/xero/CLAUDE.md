@@ -96,8 +96,27 @@ contact — `users`, `trade_accounts`, `suppliers` — each with its own
   clears in one statement, so a replayed callback matches nothing. The
   callback route answers with REDIRECTS to the CRM (`?connected=1/0`), never
   JSON — it is a browser navigation, not an API call.
-- **Item sync keys on SKU** (`POST /Items` upserts on Code) — re-running is a
-  refresh, never a duplicate. Code truncates to 30 chars, Name to 50.
+- **One Xero item per PRODUCT, never per colourway** (user ruling 1 Oct
+  2026). Code = the price row's code cut to fit + `-<product id>` (`P-<id>`
+  without one): codes repeat across houses and run past Xero's 30 chars, the
+  id keeps it unique and stable. `POST /Items` upserts on Code, so re-running
+  is a refresh, never a duplicate. Name truncates to 50; the full name rides
+  in Description.
+- **The item sync is a background job**: `POST /sync/items` answers 202 with
+  the job (or the one already running), `GET /sync/items` is the CRM's poll.
+  ~21k products is ~530 calls at Xero's 60/min — well past the ~100 s the
+  production proxy holds a request. State is in-process (one pm2 process); a
+  restart loses progress, Sync again redoes it.
+- **`call()` waits out Xero's per-minute 429** (Retry-After ≤ 120 s, three
+  tries). A longer Retry-After is the 5,000/day limit: rethrown, and the item
+  job stops with a sentence instead of failing every remaining batch.
+- **Xero failures answer 503, not 502.** The proxy in front of production
+  replaces an origin 502 with its own page without CORS headers, which the
+  CRM reports as "could not reach the API".
+- **Scopes are the granular set** (`accounting.invoices` + `accounting.payments`
+  replace `accounting.transactions`). Xero apps created on/after 2 Mar 2026
+  get `invalid_scope` for the broad one; older apps accept either until
+  Sep 2027.
 - **The invoice follows the order to PAID.** `recordOrderPayment(orderId)` PUTs
   a Payment against the pushed invoice for exactly Xero's own `AmountDue` (read
   back first, never recomputed from our cents — rounding between our totals and

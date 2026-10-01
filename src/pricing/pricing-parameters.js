@@ -7,11 +7,10 @@
 // 2026, the office: supplier discounts are ONLY for purchase orders):
 //   - a sale (trade and retail prices) takes the house's own discount, on its
 //     override row and nowhere else — Dynamics' range figure;
-//   - a purchase order (`purchase`) takes the supplier's: the house's terms
-//     (flat, multiplicative chain or tiers by class, resolved by
-//     discount-chain.js), then `suppliers.default_discount`, the one averaged
-//     rate a supplier gives on every house it invoices. The two are never
-//     summed.
+//   - a purchase order (`purchase`) takes the supplier's own rate,
+//     `suppliers.default_discount`, on every house it invoices. A house has no
+//     purchase-order discount of its own: its terms, chain and classes price
+//     nothing.
 // Freight comes from the dated `supplier_freight_rates`
 // ledger, and the exchange rate
 // from `fx_rates` by the supplier's invoicing currency. Every resolved input
@@ -30,7 +29,6 @@
 // them all. A PATCH would let a house override quietly keep a stale duty band
 // beside a fresh clearance, and the resolver would have no way to tell.
 
-import { chainMultiplier, resolveTermsChain } from '../suppliers/discount-chain.js'
 import { getBrandTerms } from '../suppliers/supplier-terms.js'
 import { supplierForBrand } from '../suppliers/brand-suppliers.js'
 import { resolveFreightRate } from './freight-rates.js'
@@ -308,36 +306,15 @@ const loadBrand = async (db, brandId) => {
   return rows[0]
 }
 
-// What a purchase order buys at: the house's negotiated terms first, then the
-// supplier's own averaged rate — the 9 Jul rule: a supplier is rated by one
-// averaged discount UNLESS it was excluded and handled brand by brand. The two
-// are never added together.
-const supplierDiscountInput = (terms, category, supplierDefault, discountClass) => {
-  // The class a product or variation chose by letter; a letter no class of the
-  // house answers to falls through to category matching and the default.
-  const tierId = discountClass ? (terms?.tiers?.find((tier) => tier.discount_class === discountClass)?.id ?? null) : null
-  const resolved = terms ? resolveTermsChain(terms, terms.tiers, category, tierId) : null
-  if (resolved && resolved.source !== 'none') {
-    // A chain is multiplicative; the waterfall takes the one net percentage.
-    const percent = round3((1 - chainMultiplier(resolved.chain)) * 100)
-    const tier = resolved.source === 'tier' ? terms.tiers.find((entry) => entry.label === resolved.label) : null
-    return input(percent, 'terms', {
-      shape: resolved.source, // 'chain' | 'tier' | 'flat'
-      label: resolved.label,
-      discount_class: tier?.discount_class ?? null,
-      chain: resolved.chain,
-    })
-  }
-  // A fraction off list on the supplier row, reported as the percentage the
-  // waterfall subtracts. 0 is a rate that was recorded (prices already net),
-  // which is why the test is against null and not falsiness.
-  if (supplierDefault != null) {
-    return input(round3(Number(supplierDefault) * 100), 'supplier', {
-      shape: 'supplier-default',
-    })
-  }
-  return input(null, 'missing')
-}
+// What a purchase order buys at: the supplier's own rate, for every house it
+// invoices. A house has no purchase-order discount of its own (1 Oct 2026, the
+// office) — its terms, chain and classes price nothing. The rate is a fraction
+// off list, reported as the percentage the waterfall subtracts; 0 is a rate
+// that was recorded (prices already net), hence the test against null.
+const supplierDiscountInput = (supplierRate) =>
+  supplierRate != null
+    ? input(round3(Number(supplierRate) * 100), 'supplier', { shape: 'supplier-default' })
+    : input(null, 'missing')
 
 // What a sale is priced at: the house's own figure, else missing — never the
 // supplier's.
@@ -476,7 +453,7 @@ export const resolveWaterfallInputs = async (
 
   const inputs = Object.freeze({
     discount_percent: purchase
-      ? supplierDiscountInput(terms, category, supplier?.default_discount ?? null, classes.discount_class)
+      ? supplierDiscountInput(supplier?.default_discount ?? null)
       : houseDiscountInput(await getHouseDiscount(db, brand.id)),
     fx_rate: fx
       ? input(fx.rate, 'fx', { currency, set_on: fx.set_on })

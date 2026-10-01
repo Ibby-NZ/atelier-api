@@ -6,11 +6,10 @@
 // steps so a purchase order and the Pricing screen can never disagree:
 //   - `unit_price`, in the SUPPLIER's currency: the design's wholesale rate
 //     (`products.wholesale_rate`, filled by the wholesale import) less the
-//     supplier's discount for the house at the variation's discount class
-//     (its own, else its product's) — the waterfall's "export price" step.
-//     The supplier's discount, never the house's: supplier discounts are for
-//     purchase orders only, and a sale is priced at the house's own (1 Oct
-//     2026);
+//     supplier's own discount (`suppliers.default_discount`, typed on the
+//     supplier page) — the waterfall's "export price" step. Every house the
+//     supplier invoices buys at it: a house has no purchase-order discount of
+//     its own, and its sale discount prices sales only (1 Oct 2026);
 //   - `freight_per_unit`, NZ$: the house's freight rate from the freight
 //     ledger at the variation's freight class (its own, else its product's) —
 //     the waterfall's "freight" step. A percentage rate needs the

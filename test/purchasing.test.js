@@ -697,6 +697,13 @@ describe('W13 purchase orders', () => {
       // 0%; the purchase order still buys at the supplier's 40% (1 Oct 2026).
       await pool.query(`UPDATE suppliers SET default_discount = 0.4 WHERE id = $1`, [fixtures.supplierId])
       await setHouseDiscount(pool, fixtures.brandIds.alpha, 0)
+      // Terms of the house's own say 10%; a house has no purchase-order
+      // discount of its own, so the supplier's 40% still buys it.
+      await pool.query(
+        `INSERT INTO supplier_brand_terms (supplier_id, brand_id, discount) VALUES ($1, $2, 0.1)
+         ON CONFLICT (brand_id) DO UPDATE SET discount = 0.1, discount_chain = '{}'`,
+        [fixtures.supplierId, fixtures.brandIds.alpha]
+      )
       await pool.query(
         `INSERT INTO supplier_freight_rates (supplier_id, basis, rate, effective_from)
          VALUES ($1, 'dollar', 3.25, '2026-01-01')`,

@@ -275,29 +275,23 @@ describe('pricing parameters — the module and the resolver', () => {
     await setHouseDiscount(pool, houseId, 0)
     const own = await resolveWaterfallInputs(pool, { brandId: houseId })
     expect(own.inputs.discount_percent).toMatchObject({ value: 0, source: 'house' })
-    // The purchase order still buys at the supplier's 25%.
+    // The purchase order still buys at the supplier's 5%.
     const bought = await resolveWaterfallInputs(pool, { brandId: houseId, purchase: true })
-    expect(bought.inputs.discount_percent).toMatchObject({ value: 25, source: 'terms', detail: { shape: 'flat' } })
+    expect(bought.inputs.discount_percent).toMatchObject({ value: 5, source: 'supplier' })
   })
 
-  it("buys at the supplier's terms, a chain netted multiplicatively, else its averaged rate", async () => {
+  // 1 Oct 2026, the office: a house has no purchase-order discount of its own;
+  // every house a supplier invoices buys at the supplier's rate.
+  it("buys every house at the supplier's rate — never a house's terms, chain or class", async () => {
     await setHouseDiscount(pool, bareId, 10)
-    // {0.4, 0.4} is x0.36 — a 64% discount, not 80%.
-    const chained = await resolveWaterfallInputs(pool, { brandId: bareId, purchase: true })
-    expect(chained.inputs.discount_percent).toMatchObject({ value: 64, source: 'terms', detail: { shape: 'chain' } })
-    expect(chained.inputs.retail_markup).toMatchObject({ value: null, source: 'missing' })
-
-    // The 9 Jul rule: one averaged rate for every house this supplier invoices,
-    // and never added to a house's own terms (25%, not 30%).
     await pool.query(`UPDATE suppliers SET default_discount = 0.05 WHERE id = $1`, [supplierId])
-    const averaged = await resolveWaterfallInputs(pool, { brandId: averagedId, purchase: true })
-    expect(averaged.inputs.discount_percent).toMatchObject({
-      value: 5,
-      source: 'supplier',
-      detail: { shape: 'supplier-default' },
-    })
-    const exception = await resolveWaterfallInputs(pool, { brandId: houseId, purchase: true })
-    expect(exception.inputs.discount_percent).toMatchObject({ value: 25, source: 'terms' })
+    for (const brandId of [houseId, bareId, averagedId]) {
+      const bought = await resolveWaterfallInputs(pool, { brandId, purchase: true, discountClass: 'A' })
+      expect(bought.inputs.discount_percent).toMatchObject({ value: 5, source: 'supplier' })
+    }
+    // The chain house's terms carry no markup.
+    const chained = await resolveWaterfallInputs(pool, { brandId: bareId, purchase: true })
+    expect(chained.inputs.retail_markup).toMatchObject({ value: null, source: 'missing' })
   })
 
   it('keeps a supplier rate of 0 distinct from none — already-net prices are an answer', async () => {

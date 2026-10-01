@@ -560,14 +560,13 @@ describe('/admin/pricing/houses', () => {
     ])
     const [wallpaper, others] = discount.classes
 
-    // A purchase order picks the class by the line's category, else the default
-    // class. A sale never does: it is priced at the house's own discount.
-    const discountFor = async (category) =>
-      (await resolveWaterfallInputs(pool, { brandId: houseId, category, purchase: true })).inputs.discount_percent
-    expect((await resolveWaterfallInputs(pool, { brandId: houseId, category: 'wallpaper' })).inputs.discount_percent)
-      .toMatchObject({ value: null, source: 'missing' })
-    expect(await discountFor('wallpaper')).toMatchObject({ value: 40, detail: { shape: 'tier', label: 'wallpaper' } })
-    expect(await discountFor('fabric')).toMatchObject({ value: 50, detail: { label: 'All other collections' } })
+    // Neither a sale nor a purchase order is priced at a house's class (1 Oct
+    // 2026): a sale takes the house's own discount, a purchase order the
+    // supplier's rate.
+    for (const purchase of [false, true]) {
+      expect((await resolveWaterfallInputs(pool, { brandId: houseId, category: 'wallpaper', purchase })).inputs.discount_percent)
+        .toMatchObject({ value: null, source: 'missing' })
+    }
 
     // A product and one variation of another chose class B by letter; the read
     // counts both. A variation with no letter of its own is not counted.
@@ -606,11 +605,9 @@ describe('/admin/pricing/houses', () => {
       ['Wallpaper', 42, true],
     ])
     // The removed class's product keeps its letter; no class answers to it, so
-    // the purchase order falls back to the default class.
+    // nothing prices by it either way.
     const { rows: kept } = await pool.query(`SELECT discount_class FROM products WHERE id = $1`, [rows[0].id])
     expect(kept).toEqual([{ discount_class: 'B' }])
-    const fellBack = await resolveWaterfallInputs(pool, { brandId: houseId, productId: rows[0].id, purchase: true })
-    expect(fellBack.inputs.discount_percent).toMatchObject({ value: 42, detail: { label: 'Wallpaper' } })
     await pool.query(`DELETE FROM colourways WHERE product_id = ANY($1::int[])`, [rows.map((row) => row.id)])
     await pool.query(`DELETE FROM products WHERE id = ANY($1::int[])`, [rows.map((row) => row.id)])
 

@@ -320,8 +320,10 @@ the wholesale rate less supplier discounts, with freight.
   every line it waits on has arrived.
 - **A goods line is priced from the catalogue** (`src/purchasing/po-pricing.js`) unless a price is
   typed: `unit_price` = the design's `products.wholesale_rate` (supplier currency; the coming
-  wholesale import fills it, the product page edits it) less the supplier's discount for the house
-  (terms chain, product tier, supplier default) — the waterfall's `export_price` step — and
+  wholesale import fills it, the product page edits it) less the SUPPLIER's own discount
+  (`suppliers.default_discount`, typed on the supplier page; 1 Oct 2026 — a house has no
+  purchase-order discount of its own, so no house terms, chain or class) — the waterfall's
+  `export_price` step — and
   `freight_per_unit` (NZ$, new column) = the house's freight rate — the `freight_amount` step.
   Blank is not zero: no wholesale rate or no discount stated leaves the line unpriced; a pricing
   refusal (4xx) leaves it unpriced rather than blocking the purchase order. Both are SNAPSHOTS at
